@@ -157,7 +157,7 @@ export default function AdminPage() {
       timeLimit: (state.config.timeLimit as number) ?? 180,
       pickSeconds: state.config.pickSeconds as number,
       deckbuildingSeconds: state.config.deckbuildingSeconds as number,
-      dropLeftover: (state.config.dropLeftover as boolean) !== false,
+      dropMode: (state.config.dropMode as string) ?? (state.config.dropLeftover === false ? 'use_all' : 'drop_leftover_exact'),
     });
     setEditing(true);
   };
@@ -178,7 +178,7 @@ export default function AdminPage() {
         timeLimit: Number(editForm.timeLimit),
         pickSeconds: Number(editForm.pickSeconds),
         deckbuildingSeconds: Number(editForm.deckbuildingSeconds),
-        dropLeftover: !!editForm.dropLeftover,
+        dropMode: String(editForm.dropMode === 'use_all' || editForm.dropMode === 'drop_leftover_exact' ? editForm.dropMode : 'drop_leftover'),
       };
       await adminFetch(`/admin/t/${state!.id}/config`, 'PUT', body);
       setMsg('参数已更新');
@@ -473,7 +473,13 @@ export default function AdminPage() {
               <label className="flex items-center gap-2">回合限时 <input type="number" min={60} max={999} className="w-16 rounded bg-felt-deep px-1 py-1" value={Number(editForm.timeLimit ?? 180)} onChange={(e) => setEditForm((f) => ({ ...f, timeLimit: Number(e.target.value) }))} /></label>
               <label className="flex items-center gap-2">选牌秒数 <input type="number" className="w-16 rounded bg-felt-deep px-1 py-1" value={Number(editForm.pickSeconds)} onChange={(e) => setEditForm((f) => ({ ...f, pickSeconds: Number(e.target.value) }))} /></label>
               <label className="flex items-center gap-2">构筑秒数 <input type="number" className="w-16 rounded bg-felt-deep px-1 py-1" value={Number(editForm.deckbuildingSeconds)} onChange={(e) => setEditForm((f) => ({ ...f, deckbuildingSeconds: Number(e.target.value) }))} /></label>
-              <label className="flex items-center gap-2"><input type="checkbox" checked={!!editForm.dropLeftover} onChange={(e) => setEditForm((f) => ({ ...f, dropLeftover: e.target.checked }))} /> 公开丢弃剩余卡</label>
+              <label className="flex items-center gap-2">剩余卡处理
+                <select className="rounded bg-felt-deep px-1 py-1" value={String(editForm.dropMode ?? 'drop_leftover')} onChange={(e) => setEditForm((f) => ({ ...f, dropMode: e.target.value }))}>
+                  <option value="use_all">使用所有卡牌</option>
+                  <option value="drop_leftover">公开丢弃无法整除的剩余卡牌</option>
+                  <option value="drop_leftover_exact">公开丢弃且要求牌堆数目是玩家整数倍</option>
+                </select>
+              </label>
             </div>
             <div className="mt-5 flex justify-end gap-3">
               <button onClick={() => setEditing(false)} className="rounded px-4 py-1.5 text-slate-300 hover:bg-felt-edge">取消</button>

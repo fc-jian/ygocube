@@ -6,6 +6,8 @@ import crypto from 'crypto';
 import { sha256 } from '../auth/auth.guard';
 import { PoolsService } from '../pools/pools.service';
 
+export type DropMode = 'use_all' | 'drop_leftover' | 'drop_leftover_exact';
+
 export interface CreateTournamentInput {
   name: string;
   maxPlayers: number;
@@ -19,6 +21,12 @@ export interface CreateTournamentInput {
   sideMax?: number;
   maxCopies?: number;
   timeLimit?: number; // per-turn seconds, forwarded to the duel host (srvpro TIME token; 999 ≈ unlimited)
+  // 剩余卡处理（dev_docs/05 §3）：
+  //  use_all            = 所有卡进牌堆，最后一堆可不满
+  //  drop_leftover      = 只丢弃无法整除的余数（默认，不要求牌堆数是玩家数倍数）
+  //  drop_leftover_exact= 丢弃余数且要求牌堆数是玩家数倍数
+  dropMode?: DropMode;
+  // 旧参数兼容：dropLeftover=true → drop_leftover_exact，false → use_all
   dropLeftover?: boolean;
   cardPool?: string;
 }
@@ -56,6 +64,13 @@ export class TournamentsService {
       pauseSeconds: defaults.pauseSeconds,
       deckbuildingSeconds: input.deckbuildingSeconds ?? defaults.deckbuildingSeconds,
       dropLeftover: input.dropLeftover !== false,
+      dropMode:
+        input.dropMode ??
+        (input.dropLeftover === undefined
+          ? 'drop_leftover'
+          : input.dropLeftover
+            ? 'drop_leftover_exact'
+            : 'use_all'),
       mainMin: input.mainMin ?? defaults.mainMin,
       mainMax: input.mainMax ?? defaults.mainMax,
       extraMax: input.extraMax ?? defaults.extraMax,

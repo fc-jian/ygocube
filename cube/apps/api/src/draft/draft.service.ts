@@ -70,17 +70,24 @@ export class DraftService implements OnModuleInit {
       [codes[i], codes[j]] = [codes[j], codes[i]];
     }
     const packSize = n * cfg.packSizeMultiple;
-    // dropLeftover=true（默认）：牌堆数与每堆张数都必须是玩家数倍数，剩余卡随机公开弃置。
-    // dropLeftover=false：不做整除要求，最后一堆可以不满（剩余卡直接进入最后一堆）。
+    // 剩余卡处理（dev_docs/05 §3，DropMode）：
+    //  use_all            = 所有卡进牌堆，最后一堆可以不满（不做整除要求）
+    //  drop_leftover      = 只丢弃无法整除的余数，不要求牌堆数是玩家数倍数
+    //  drop_leftover_exact= 丢弃余数且要求牌堆数是玩家数倍数（旧 dropLeftover=true 行为）
+    const dropMode =
+      cfg.dropMode === 'use_all' || cfg.dropMode === 'drop_leftover' || cfg.dropMode === 'drop_leftover_exact'
+        ? cfg.dropMode
+        : cfg.dropLeftover === false
+          ? 'use_all'
+          : 'drop_leftover_exact'; // 旧配置兼容
     let packCount: number;
-    let droppedCards: number[];
-    if (cfg.dropLeftover !== false) {
-      const rawCount = Math.floor(codes.length / packSize);
-      packCount = Math.max(1, rawCount - (rawCount % n));
-      droppedCards = codes.slice(packSize * packCount);
-    } else {
+    let droppedCards: number[] = [];
+    if (dropMode === 'use_all') {
       packCount = Math.max(1, Math.ceil(codes.length / packSize));
-      droppedCards = [];
+    } else {
+      const rawCount = Math.floor(codes.length / packSize);
+      packCount = Math.max(1, dropMode === 'drop_leftover_exact' ? rawCount - (rawCount % n) : rawCount);
+      droppedCards = codes.slice(packSize * packCount);
     }
     const packs = [];
     for (let k = 0; k < packCount; k++) {

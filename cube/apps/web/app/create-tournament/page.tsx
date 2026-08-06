@@ -23,7 +23,7 @@ export default function CreateTournamentPage() {
   const [timeLimit, setTimeLimit] = useState(999);
   const [pickSeconds, setPickSeconds] = useState(30);
   const [deckbuildingSeconds, setDeckbuildingSeconds] = useState(600);
-  const [dropLeftover, setDropLeftover] = useState(true);
+  const [dropMode, setDropMode] = useState('drop_leftover');
   const [createToken, setCreateToken] = useState('');
   const [created, setCreated] = useState<{ url: string; adminToken: string } | null>(null);
   const [error, setError] = useState('');
@@ -41,7 +41,7 @@ export default function CreateTournamentPage() {
     try {
       const r = await api<{ tid: number; url: string; admin_token: string }>('/tournaments', {
         method: 'POST',
-        body: { name, maxPlayers, mode, packSizeMultiple, cardPool, mainMin, mainMax, extraMax, sideMax, maxCopies, timeLimit, pickSeconds, deckbuildingSeconds, dropLeftover },
+        body: { name, maxPlayers, mode, packSizeMultiple, cardPool, mainMin, mainMax, extraMax, sideMax, maxCopies, timeLimit, pickSeconds, deckbuildingSeconds, dropMode },
         createToken,
       });
       setCreated({ url: r.url, adminToken: r.admin_token });
@@ -136,8 +136,12 @@ export default function CreateTournamentPage() {
               <input type="number" min={30} max={7200} className="w-20 rounded bg-felt-deep px-2 py-1" value={deckbuildingSeconds} onChange={(e) => setDeckbuildingSeconds(Number(e.target.value))} />
             </label>
             <label className="flex items-center gap-2">
-              <input type="checkbox" checked={dropLeftover} onChange={(e) => setDropLeftover(e.target.checked)} />
-              公开丢弃无法整除的剩余卡牌
+              剩余卡处理
+              <select className="rounded bg-felt-deep px-2 py-1" value={dropMode} onChange={(e) => setDropMode(e.target.value)}>
+                <option value="use_all">使用所有卡牌</option>
+                <option value="drop_leftover">公开丢弃无法整除的剩余卡牌</option>
+                <option value="drop_leftover_exact">公开丢弃且要求牌堆数目是玩家整数倍</option>
+              </select>
             </label>
           </div>
           <input

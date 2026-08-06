@@ -21,12 +21,22 @@ function setupDraft(n: number, pickSeconds = 30) {
 describe('draft engine', () => {
   beforeEach(() => useTestDb());
 
-  it('creates packs of size players*3 and exposes dropped cards', () => {
+  it('creates packs of size players*3 and exposes dropped cards (drop_leftover_exact)', () => {
     const { tid, cards } = setupDraft(4);
-    const state = loadState(tid);
+    const tournaments = makeTournaments();
+    const exactTid = tournaments.create({ name: 'dexact', maxPlayers: 4, pickSeconds: 30, cardPool: TEST_POOL, dropMode: 'drop_leftover_exact' }, 'test').tid;
+    const { draft } = (() => {
+      const cards2 = new CardsService();
+      const d = new DraftService(cards2, tournaments, new PoolsService(cards2), new MatchesService(fakeSrvpro as any));
+      for (let i = 0; i < 4; i++) tournaments.join(exactTid, `q${i}`, `Q${i}`);
+      d.startDraft(exactTid, 'test');
+      return { draft: d };
+    })();
+    void draft;
+    const state = loadState(exactTid);
     const cfg = JSON.parse(state.configJson);
     expect(state.packs.length).toBeGreaterThan(0);
-    expect(state.packs.length % 4).toBe(0); // pack count is a multiple of player count
+    expect(state.packs.length % 4).toBe(0); // exact mode keeps pack count a multiple of player count
     for (const p of state.packs) {
       expect(p.size).toBe(4 * cfg.packSizeMultiple);
       expect(p.order.length).toBe(p.size); // packs are full n*3 cards (no per-pack drop)

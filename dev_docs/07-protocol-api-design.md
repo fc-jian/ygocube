@@ -18,7 +18,7 @@
   - Header：`X-Tournament-Id / X-Player-Id / X-Token`；
   - 查询参数/表单字段：`tid / pid / token`（SSE、ydk 下载等场景）。
 - admin 端点用 `X-Admin-Token`：super token（config.yaml `admin.super_token`）或创建 tournament 时下发的 per-tournament `admin_token`（仅限该 tournament）。
-- `POST /tournaments` 需要 `X-Create-Token`（config.yaml `admin.create_token`；super token 亦可），响应返回 `admin_token`。
+- `POST /tournaments` 需要 `X-Create-Token`（config.yaml `admin.create_token`；super token 亦可），响应返回 `admin_token`。 参数含 `dropMode`（`use_all` / `drop_leftover` 默认 / `drop_leftover_exact`，见 dev_docs/05 §牌堆生成）。
 - **super token 兼作万能玩家 token**：`X-Token: <super_token>` 可进入任意 `playerId` 的玩家端点（同机调试）。
 - 公开信息 `GET /t/:tid` 返回 `authRequired`（false = 该 tournament 已关闭 token 鉴权，玩家端点仅需 tid+pid）。
 - 统一错误：`401 { code: "AUTH_REQUIRED", fields: [...] }`。
