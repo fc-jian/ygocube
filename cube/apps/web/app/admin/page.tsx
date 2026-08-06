@@ -17,7 +17,7 @@ interface AdminState {
   pendingPhase: string | null;
   pause: { pausedAt: string | null; proposer: string | null } | null;
   decks: Record<string, { main: number[]; extra: number[]; side: number[]; lockedAt: string | null }>;
-  matches: { id: number; round: number; playerA: string; playerB: string; tableNo: number; roomName: string | null; resultA: number | null; resultB: number | null }[];
+  matches: { id: number; round: number; playerA: string; playerB: string; tableNo: number; roomName: string | null; resultA: number | null; resultB: number | null; faultedAt: string | null }[];
   pickSummary: { playerId: string; seat: number; count: number }[];
 }
 
@@ -62,6 +62,9 @@ export default function AdminPage() {
   const [editing, setEditing] = useState(false);
   const [editForm, setEditForm] = useState<Record<string, string | number | boolean>>({});
   const loadSeq = useRef(0);
+  const [addPid, setAddPid] = useState('');
+  const [shownToken, setShownToken] = useState<{ pid: string; token: string } | null>(null);
+  const [matchInputs, setMatchInputs] = useState<Record<number, { a: string; b: string }>>({});
 
   useEffect(() => {
     setAdminToken(localStorage.getItem('yc_admin_token') ?? '');
@@ -302,13 +305,69 @@ export default function AdminPage() {
             <section className="rounded-lg border border-felt-edge bg-felt/60 p-3 text-xs">
               <h3 className="mb-2 font-semibold text-gold">玩家</h3>
               {state.players.map((p) => (
-                <div key={p.playerId} className="flex justify-between py-0.5">
+                <div key={p.playerId} className="flex items-center justify-between gap-2 py-0.5">
                   <span>{p.displayName} ({p.playerId})</span>
                   <span className="font-mono text-slate-400">
                     seat {p.seat} · {state.pickSummary.find((s) => s.playerId === p.playerId)?.count ?? 0} 选牌 · {state.decks[p.playerId]?.lockedAt ? '已锁定' : '构筑中'}
                   </span>
+                  <span className="flex shrink-0 gap-1">
+                    <button
+                      onClick={async () => {
+                        try {
+                          const d = await adminFetch(`/admin/t/${state.id}/players/${encodeURIComponent(p.playerId)}/token`, 'POST', {});
+                          setShownToken({ pid: p.playerId, token: d.token });
+                        } catch (e: any) {
+                          showMsg(e.message);
+                        }
+                      }}
+                      className="rounded bg-felt-edge px-1.5 py-0.5 text-gold hover:brightness-110"
+                      title="重置并显示玩家 token（每次点击生成新 token）"
+                    >
+                      token
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (!confirm(`删除玩家 ${p.playerId}？（将清除其选牌与卡组）`)) return;
+                        void act(`/admin/t/${state.id}/players/${encodeURIComponent(p.playerId)}`, {});
+                      }}
+                      className="rounded bg-red-900 px-1.5 py-0.5 text-red-100 hover:brightness-110"
+                      title="删除玩家（报名/选牌/构筑阶段可用）"
+                    >
+                      删除
+                    </button>
+                  </span>
                 </div>
               ))}
+              {shownToken && (
+                <p className="mt-1 rounded bg-felt-deep px-2 py-1 font-mono text-gold">
+                  {shownToken.pid} token: {shownToken.token}
+                  <button
+                    onClick={() => void navigator.clipboard.writeText(shownToken.token)}
+                    className="ml-2 rounded bg-felt-edge px-1.5 py-0.5 hover:brightness-110"
+                  >
+                    复制
+                  </button>
+                </p>
+              )}
+              <div className="mt-2 flex gap-1">
+                <input
+                  className="w-32 rounded bg-felt-deep px-2 py-1 outline-none ring-gold/50 focus:ring-2"
+                  placeholder="新玩家 ID"
+                  value={addPid}
+                  onChange={(e) => setAddPid(e.target.value)}
+                />
+                <button
+                  onClick={() => {
+                    const pid = addPid.trim();
+                    if (!pid) return;
+                    void act(`/admin/t/${state.id}/players`, { player_id: pid });
+                    setAddPid('');
+                  }}
+                  className="rounded bg-gold px-2 py-1 font-semibold text-felt-deep hover:brightness-110"
+                >
+                  添加玩家
+                </button>
+              </div>
             </section>
             <section className="rounded-lg border border-felt-edge bg-felt/60 p-3 text-xs">
               <h3 className="mb-2 font-semibold text-gold">当前选牌</h3>
@@ -329,11 +388,49 @@ export default function AdminPage() {
           <section className="mt-4 rounded-lg border border-felt-edge bg-felt/60 p-3 text-xs">
             <h3 className="mb-2 font-semibold text-gold">对阵</h3>
             {state.matches.map((m) => (
-              <div key={m.id} className="flex justify-between py-0.5 font-mono">
+              <div key={m.id} className="flex items-center justify-between gap-2 py-0.5 font-mono">
                 <span>r{m.round} t{m.tableNo ?? m.id}</span>
-                <span>{m.playerA} vs {m.playerB}</span>
-                <span>{m.roomName ?? '-'}</span>
+                <span className="truncate">{m.playerA} vs {m.playerB}</span>
+                <span className="truncate">{m.roomName ?? '-'}</span>
+                {m.faultedAt && m.resultA === null && (
+                  <span className="rounded bg-red-900 px-1.5 py-0.5 text-red-100" title={`房间故障退出（${new Date(m.faultedAt).toLocaleString()}），请手动补录结果`}>
+                    故障
+                  </span>
+                )}
                 <span>{m.resultA !== null ? `${m.resultA}:${m.resultB}` : '对局中'}</span>
+                <span className="flex shrink-0 gap-1">
+                  <input
+                    type="number"
+                    min={0}
+                    max={2}
+                    className="w-10 rounded bg-felt-deep px-1 py-0.5 text-center outline-none"
+                    placeholder="A"
+                    value={matchInputs[m.id]?.a ?? ''}
+                    onChange={(e) => setMatchInputs((s) => ({ ...s, [m.id]: { a: e.target.value, b: s[m.id]?.b ?? '' } }))}
+                  />
+                  :
+                  <input
+                    type="number"
+                    min={0}
+                    max={2}
+                    className="w-10 rounded bg-felt-deep px-1 py-0.5 text-center outline-none"
+                    placeholder="B"
+                    value={matchInputs[m.id]?.b ?? ''}
+                    onChange={(e) => setMatchInputs((s) => ({ ...s, [m.id]: { a: s[m.id]?.a ?? '', b: e.target.value } }))}
+                  />
+                  <button
+                    onClick={() => {
+                      const v = matchInputs[m.id];
+                      if (!v || v.a === '' || v.b === '') return;
+                      void act(`/admin/t/${state.id}/match/result`, { round: m.round, tableNo: m.tableNo, resultA: Number(v.a), resultB: Number(v.b) });
+                      setMatchInputs((s) => ({ ...s, [m.id]: { a: '', b: '' } }));
+                    }}
+                    className="rounded bg-gold px-1.5 py-0.5 font-semibold text-felt-deep hover:brightness-110"
+                    title="手动设置/修改该对局结果（立即更新积分与轮次推进）"
+                  >
+                    设结果
+                  </button>
+                </span>
               </div>
             ))}
             {state.matches.length === 0 && <p className="text-slate-500">暂无对阵</p>}
