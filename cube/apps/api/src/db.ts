@@ -137,6 +137,11 @@ function migrate(d: Database.Database): void {
   if (!cols.some((c) => c.name === 'frozen')) {
     d.exec('ALTER TABLE tournaments ADD COLUMN frozen INTEGER NOT NULL DEFAULT 0');
   }
+  const snapCols = d.prepare('PRAGMA table_info(tournament_snapshots)').all() as { name: string }[];
+  if (!snapCols.some((c) => c.name === 'event_seq')) {
+    // 快照记录全局事件 seq（旧行 seq 是相对计数，语义错配会导致重放翻倍，修复后忽略旧行）
+    d.exec('ALTER TABLE tournament_snapshots ADD COLUMN event_seq INTEGER');
+  }
   const matchCols = d.prepare('PRAGMA table_info(matches)').all() as { name: string }[];
   if (!matchCols.some((c) => c.name === 'player_a_pass')) {
     d.exec('ALTER TABLE matches ADD COLUMN player_a_pass TEXT');

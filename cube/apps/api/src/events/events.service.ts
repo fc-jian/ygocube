@@ -185,7 +185,7 @@ export function logEvent(tid: number, entity: string, action: string, payload: a
   const state = stateCache.get(tid);
   if (state) apply(state, action, payload);
   if (eventHook) eventHook(tid, action, payload);
-  maybeSnapshot(tid);
+  maybeSnapshot(tid, seq);
   return seq;
 }
 
@@ -199,13 +199,13 @@ export function loadState(tid: number): TournamentState {
   state.frozen = (row as TournamentRow & { frozen?: number }).frozen === 1;
   // replay from snapshot if present, else from scratch
   const snap = getDb()
-    .prepare('SELECT seq, state_json FROM tournament_snapshots WHERE tournament_id=? ORDER BY seq DESC LIMIT 1')
+    .prepare('SELECT seq, event_seq, state_json FROM tournament_snapshots WHERE tournament_id=? AND event_seq IS NOT NULL ORDER BY event_seq DESC LIMIT 1')
     .get(tid) as SnapRow | undefined;
   let startSeq = 0;
   if (snap) {
     const snapState = JSON.parse(snap.state_json) as TournamentState;
     Object.assign(state, snapState);
-    startSeq = snap.seq;
+    startSeq = snap.event_seq as number;
   }
   const rows = getDb()
     .prepare('SELECT seq, tournament_id, entity, action, payload_json, created_at, actor FROM events WHERE tournament_id=? AND seq>? ORDER BY seq')
@@ -246,6 +246,7 @@ interface EventRow {
 
 interface SnapRow {
   seq: number;
+  event_seq: number | null;
   state_json: string;
 }
 
@@ -259,14 +260,14 @@ function eventCount(tid: number): number {
   return (getDb().prepare('SELECT count(*) AS c FROM events WHERE tournament_id=?').get(tid) as CountRow).c;
 }
 
-function maybeSnapshot(tid: number): void {
+function maybeSnapshot(tid: number, globalSeq: number): void {
   const count = eventCount(tid);
   if (count % 100 === 0) {
     const s = stateCache.get(tid);
     if (s) {
       getDb()
-        .prepare('INSERT INTO tournament_snapshots (tournament_id, seq, state_json, created_at) VALUES (?,?,?,?)')
-        .run(tid, count, JSON.stringify(s), new Date().toISOString());
+        .prepare('INSERT INTO tournament_snapshots (tournament_id, seq, event_seq, state_json, created_at) VALUES (?,?,?,?,?)')
+        .run(tid, count, globalSeq, JSON.stringify(s), new Date().toISOString());
     }
   }
 }
@@ -275,9 +276,10 @@ export function snapshotNow(tid: number): void {
   const s = stateCache.get(tid);
   if (!s) return;
   const count = eventCount(tid);
+  const last = getDb().prepare('SELECT MAX(seq) m FROM events WHERE tournament_id=?').get(tid) as { m: number | null };
   getDb()
-    .prepare('INSERT INTO tournament_snapshots (tournament_id, seq, state_json, created_at) VALUES (?,?,?,?)')
-    .run(tid, count, JSON.stringify(s), new Date().toISOString());
+    .prepare('INSERT INTO tournament_snapshots (tournament_id, seq, event_seq, state_json, created_at) VALUES (?,?,?,?,?)')
+    .run(tid, count, last.m ?? count, JSON.stringify(s), new Date().toISOString());
 }
 
 // Admin time travel: rebuild state as of seq, freeze the tournament (dev_docs/05 §7).
@@ -285,12 +287,12 @@ export function revertTo(tid: number, seq: number): TournamentState {
   const row = tournamentRow(tid);
   const state = emptyState(row.id, row.name, row.config_json);
   const snap = getDb()
-    .prepare('SELECT seq, state_json FROM tournament_snapshots WHERE tournament_id=? AND seq<=? ORDER BY seq DESC LIMIT 1')
+    .prepare('SELECT seq, event_seq, state_json FROM tournament_snapshots WHERE tournament_id=? AND event_seq IS NOT NULL AND event_seq<=? ORDER BY event_seq DESC LIMIT 1')
     .get(tid, seq) as SnapRow | undefined;
   let startSeq = 0;
   if (snap) {
     Object.assign(state, JSON.parse(snap.state_json) as TournamentState);
-    startSeq = snap.seq;
+    startSeq = snap.event_seq as number;
   }
   const rows = getDb()
     .prepare('SELECT seq, tournament_id, entity, action, payload_json, created_at, actor FROM events WHERE tournament_id=? AND seq>? AND seq<=? ORDER BY seq')

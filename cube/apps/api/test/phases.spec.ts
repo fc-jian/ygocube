@@ -147,3 +147,45 @@ describe('player membership', () => {
     expect(() => tournaments.stateForPlayer(tid, 'stranger')).toThrow('PLAYER_NOT_FOUND');
   });
 });
+
+describe('snapshot replay with shared global event seq', () => {
+  beforeEach(() => useTestDb());
+
+  it('replaying after a snapshot does not duplicate players when other tournaments own earlier seqs', () => {
+    const tournaments = makeTournaments();
+    const { getDb } = require('../src/db');
+    // 另一个比赛先占用全局事件 seq（模拟生产环境多比赛共享全局自增）
+    const other = tournaments.create({ name: 'other', maxPlayers: 4, cardPool: TEST_POOL }, 'test').tid;
+    for (let i = 0; i < 55; i++) logEvent(other, 'tournament', 'config', { noise: i }, 'test');
+    // 目标比赛：写满 100+ 事件以触发快照（maybeSnapshot 每 100 事件一次）
+    const tid = tournaments.create({ name: 'snap', maxPlayers: 4, cardPool: TEST_POOL }, 'test').tid;
+    for (let i = 0; i < 4; i++) tournaments.join(tid, `p${i}`, `P${i}`);
+    const { logEvent: log } = require('../src/events/events.service');
+    // 触发快照：事件计数到 100（4 join + 96 条杂项）
+    for (let i = 0; i < 96; i++) log(tid, 'tournament', 'config', { noise: i }, 'test');
+    const snaps = getDb().prepare('SELECT seq, event_seq FROM tournament_snapshots WHERE tournament_id=?').all(tid);
+    expect(snaps.length).toBe(1);
+    expect(snaps[0].event_seq).toBeGreaterThan(snaps[0].seq); // 全局 seq 与相对计数不同
+    // 清除缓存强制从事件重放（模拟重启）
+    const { resetStateCache } = require('../src/events/events.service');
+    resetStateCache();
+    const state = loadState(tid);
+    expect(state.players.map((p) => p.playerId).sort()).toEqual(['p0', 'p1', 'p2', 'p3']);
+  });
+
+  it('legacy snapshots without event_seq are ignored (no double replay)', () => {
+    const tournaments = makeTournaments();
+    const { getDb } = require('../src/db');
+    const tid = tournaments.create({ name: 'legacy-snap', maxPlayers: 4, cardPool: TEST_POOL }, 'test').tid;
+    for (let i = 0; i < 4; i++) tournaments.join(tid, `p${i}`, `P${i}`);
+    // 手工插入一条旧格式快照（event_seq 为 NULL，seq 为相对计数）
+    const st = loadState(tid);
+    getDb()
+      .prepare('INSERT INTO tournament_snapshots (tournament_id, seq, event_seq, state_json, created_at) VALUES (?,?,?,?,?)')
+      .run(tid, 4, null, JSON.stringify(st), new Date().toISOString());
+    const { resetStateCache } = require('../src/events/events.service');
+    resetStateCache();
+    const state = loadState(tid);
+    expect(state.players.map((p) => p.playerId).sort()).toEqual(['p0', 'p1', 'p2', 'p3']);
+  });
+});
