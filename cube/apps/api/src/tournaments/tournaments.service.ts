@@ -117,6 +117,25 @@ export class TournamentsService {
     persistMeta(tid);
   }
 
+  // 管理台删除玩家：报名/选牌/构筑阶段可删（同时清理其选牌与卡组），对战开始后禁止
+  removePlayer(tid: number, playerId: string, actor: string): void {
+    const state = loadState(tid);
+    if (state.status === 'matches' || state.status === 'finished') throw new Error('WRONG_PHASE');
+    if (!state.players.some((p) => p.playerId === playerId)) throw new Error('PLAYER_NOT_FOUND');
+    getDb().prepare('DELETE FROM tournament_players WHERE tournament_id=? AND player_id=?').run(tid, playerId);
+    logEvent(tid, 'player', 'player_remove', playerId, actor);
+    persistMeta(tid);
+  }
+
+  // 管理台重置玩家 token（token 只存哈希无法回显，重置后返回新明文）
+  resetPlayerToken(tid: number, playerId: string): { token: string } {
+    const state = loadState(tid);
+    if (!state.players.some((p) => p.playerId === playerId)) throw new Error('PLAYER_NOT_FOUND');
+    const token = crypto.randomBytes(32).toString('hex');
+    getDb().prepare('UPDATE tournament_players SET token_hash=? WHERE tournament_id=? AND player_id=?').run(sha256(token), tid, playerId);
+    return { token };
+  }
+
   // 阶段迁移规则（dev_docs/05 §3.2）：
   // - registration 不能直接进入 deckbuilding（必须开始选牌）；
   // - drafting -> deckbuilding（手动）：若当前牌堆未选完，置 pendingPhase，等当前牌堆选完后进入（进度保留）；

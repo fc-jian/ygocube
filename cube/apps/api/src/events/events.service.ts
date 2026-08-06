@@ -48,6 +48,7 @@ export interface MatchState {
   resultA: number | null;
   resultB: number | null;
   source: string | null;
+  faultedAt: string | null;
   startedAt: string | null;
   finishedAt: string | null;
 }
@@ -129,6 +130,13 @@ export function apply(state: TournamentState, action: string, payload: any): voi
     case 'seat_assign': {
       const map: Record<string, number> = payload;
       for (const pl of state.players) if (map[pl.playerId] !== undefined) pl.seat = map[pl.playerId];
+      break;
+    }
+    case 'player_remove': {
+      const playerId: string = payload;
+      state.players = state.players.filter((p) => p.playerId !== playerId);
+      state.picks = state.picks.filter((p) => p.playerId !== playerId);
+      delete state.decks[playerId];
       break;
     }
     case 'packs_created': {

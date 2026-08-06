@@ -179,6 +179,42 @@ export class AdminController {
     return { ok: true };
   }
 
+  @Post('t/:tid/players')
+  addPlayer(@Req() req: AuthedRequest, @Body() body: Record<string, string>) {
+    const tid = Number(req.params.tid);
+    const playerId = String(body.player_id ?? '').trim();
+    const displayName = String(body.display_name ?? '').trim();
+    if (!playerId) throw new Error('BAD_PAYLOAD');
+    return this.tournaments.join(tid, playerId, displayName || playerId);
+  }
+
+  @Delete('t/:tid/players/:pid')
+  removePlayer(@Req() req: AuthedRequest) {
+    const tid = Number(req.params.tid);
+    this.tournaments.removePlayer(tid, String(req.params.pid), this.adminActor(req));
+    return { ok: true };
+  }
+
+  @Post('t/:tid/players/:pid/token')
+  resetPlayerToken(@Req() req: AuthedRequest) {
+    const tid = Number(req.params.tid);
+    return this.tournaments.resetPlayerToken(tid, String(req.params.pid));
+  }
+
+  @Post('t/:tid/match/result')
+  setMatchResult(@Req() req: AuthedRequest, @Body() body: Record<string, number>) {
+    const tid = Number(req.params.tid);
+    const round = Number(body.round);
+    const tableNo = Number(body.tableNo);
+    const resultA = Number(body.resultA);
+    const resultB = Number(body.resultB);
+    if (!Number.isInteger(round) || !Number.isInteger(tableNo) || !Number.isInteger(resultA) || !Number.isInteger(resultB)) {
+      throw new Error('BAD_PAYLOAD');
+    }
+    this.matches.setMatchResult(tid, round, tableNo, resultA, resultB);
+    return { ok: true };
+  }
+
   @Post('t/:tid/state')
   state(@Req() req: AuthedRequest) {
     return this.tournaments.adminState(Number(req.params.tid));
