@@ -48,6 +48,7 @@ class ApiExceptionFilter implements ExceptionFilter {
       code = exception.message;
       details = (exception as Error & { details?: unknown }).details;
       if (code === 'PLAYER_NOT_FOUND') status = 404;
+      else if (code === 'BAD_PLAYER_ID') status = 400;
       else if (code === 'DRAFT_NOT_STARTED') status = 409;
       else if (CONFLICT_CODES.has(code)) status = 409;
     }

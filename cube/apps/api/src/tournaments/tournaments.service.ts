@@ -94,6 +94,8 @@ export class TournamentsService {
   }
 
   join(tid: number, playerId: string, displayName: string): { token: string } {
+    // 进房昵称即玩家 ID：YGOPro 协议仅支持 ASCII 文本，非 ASCII 无法进入游戏（前端已拦截，这里兜底）
+    if (!/^[\x20-\x7E]+$/.test(playerId)) throw new Error('BAD_PLAYER_ID');
     const state = loadState(tid);
     if (state.status !== 'registration') throw new Error('WRONG_PHASE');
     if (state.players.length >= getConfig(state).maxPlayers) throw new Error('TOURNAMENT_FULL');

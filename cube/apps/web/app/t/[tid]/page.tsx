@@ -18,6 +18,11 @@ export default function 报名参加Page() {
   }, [tid]);
 
   const join = async () => {
+    // 进房昵称即玩家 ID（YGOPro 协议仅支持 ASCII 文本），非 ASCII 无法进入游戏，前端先行拦截
+    if (!/^[\x20-\x7E]+$/.test(playerId)) {
+      setError('玩家 ID 只能包含 ASCII 字符（字母/数字/符号），中文等字符将无法进入游戏');
+      return;
+    }
     try {
       const r = await api<{ token: string }>(`/t/${tid}/join`, { method: 'POST', body: { player_id: playerId, display_name: displayName || playerId } });
       setToken(r.token);
