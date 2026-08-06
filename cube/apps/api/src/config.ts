@@ -89,8 +89,8 @@ export const defaults = {
   deckbuildingSeconds: 600,
   mainMin: 40,
   mainMax: 60,
-  extraMax: 15,
-  sideMax: 15,
-  maxCopies: 3,
+  extraMax: 30,
+  sideMax: 30,
+  maxCopies: 1,
   timeLimit: 180,
 };

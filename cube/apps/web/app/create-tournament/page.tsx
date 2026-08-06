@@ -17,9 +17,9 @@ export default function CreateTournamentPage() {
   const [cardPool, setCardPool] = useState('');
   const [mainMin, setMainMin] = useState(40);
   const [mainMax, setMainMax] = useState(60);
-  const [extraMax, setExtraMax] = useState(15);
-  const [sideMax, setSideMax] = useState(15);
-  const [maxCopies, setMaxCopies] = useState(3);
+  const [extraMax, setExtraMax] = useState(30);
+  const [sideMax, setSideMax] = useState(30);
+  const [maxCopies, setMaxCopies] = useState(1);
   const [timeLimit, setTimeLimit] = useState(999);
   const [pickSeconds, setPickSeconds] = useState(30);
   const [deckbuildingSeconds, setDeckbuildingSeconds] = useState(600);
