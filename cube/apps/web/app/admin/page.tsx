@@ -142,6 +142,7 @@ export default function AdminPage() {
     if (!state) return;
     setEditForm({
       name: state.name,
+      mode: (state.config.mode as string) ?? 'match',
       maxPlayers: state.config.maxPlayers as number,
       packSizeMultiple: state.config.packSizeMultiple as number,
       cardPool: (state.config.cardPool as string) ?? '',
@@ -162,6 +163,7 @@ export default function AdminPage() {
     try {
       const body = {
         name: String(editForm.name),
+        mode: String(editForm.mode === 'single' ? 'single' : 'match'),
         maxPlayers: Number(editForm.maxPlayers),
         packSizeMultiple: Number(editForm.packSizeMultiple),
         cardPool: String(editForm.cardPool),
@@ -170,6 +172,7 @@ export default function AdminPage() {
         extraMax: Number(editForm.extraMax),
         sideMax: Number(editForm.sideMax),
         maxCopies: Number(editForm.maxCopies),
+        timeLimit: Number(editForm.timeLimit),
         pickSeconds: Number(editForm.pickSeconds),
         deckbuildingSeconds: Number(editForm.deckbuildingSeconds),
         dropLeftover: !!editForm.dropLeftover,
@@ -448,6 +451,12 @@ export default function AdminPage() {
                 <input className="flex-1 rounded bg-felt-deep px-2 py-1" value={String(editForm.name ?? '')} onChange={(e) => setEditForm((f) => ({ ...f, name: e.target.value }))} />
               </label>
               <label className="flex items-center gap-2">人数 <input type="number" min={2} max={64} className="w-16 rounded bg-felt-deep px-2 py-1" value={Number(editForm.maxPlayers) || 2} onChange={(e) => setEditForm((f) => ({ ...f, maxPlayers: Number(e.target.value) }))} /></label>
+              <label className="flex items-center gap-2">模式
+                <select className="rounded bg-felt-deep px-2 py-1" value={String(editForm.mode ?? 'match')} onChange={(e) => setEditForm((f) => ({ ...f, mode: e.target.value }))}>
+                  <option value="match">BO3 对战</option>
+                  <option value="single">单局</option>
+                </select>
+              </label>
               <label className="flex items-center gap-2">每堆倍数 <input type="number" min={1} max={10} className="w-14 rounded bg-felt-deep px-2 py-1" value={Number(editForm.packSizeMultiple) || 1} onChange={(e) => setEditForm((f) => ({ ...f, packSizeMultiple: Number(e.target.value) }))} /></label>
               <label className="flex items-center gap-2">卡池
                 <select className="rounded bg-felt-deep px-2 py-1" value={String(editForm.cardPool ?? '')} onChange={(e) => setEditForm((f) => ({ ...f, cardPool: e.target.value }))}>
