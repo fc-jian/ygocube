@@ -11,6 +11,7 @@ interface MatchInfo {
   id: number;
   round: number;
   tableNo: number;
+  playerA: string;
   opponent: string;
   roomName: string | null;
   resultA: number | null;
@@ -87,6 +88,25 @@ export default function MatchesPage() {
   if (!info) return <main className="p-8 text-slate-400">加载中...</main>;
 
   const myMatch = matches.find((m) => m.resultA === null && m.resultB === null);
+  const cfg = (info?.config ?? {}) as { mainMin?: number; mainMax?: number; extraMax?: number; sideMax?: number; timeLimit?: number };
+  const ruleText =
+    cfg.mainMin != null
+      ? `MAIN${cfg.mainMin}-${cfg.mainMax},EXTRA${cfg.extraMax},SIDE${cfg.sideMax},LP8000,TIME${cfg.timeLimit ?? 180}`
+      : '';
+
+  const resultCell = (m: MatchInfo) => {
+    if (m.resultA === null || m.resultB === null) return <span className="text-slate-400">对局中</span>;
+    const isA = m.playerA === pid;
+    const my = isA ? m.resultA : m.resultB;
+    const opp = isA ? m.resultB : m.resultA;
+    const cls = my > opp ? 'text-emerald-400' : my < opp ? 'text-red-400' : 'text-slate-300';
+    const badge = my > opp ? 'W' : my < opp ? 'L' : 'D';
+    return (
+      <span className={cls}>
+        {badge} {my} : {opp}
+      </span>
+    );
+  };
 
   return (
     <main className="mx-auto max-w-3xl p-6">
@@ -104,6 +124,7 @@ export default function MatchesPage() {
       <table className="w-full overflow-hidden rounded-lg border border-felt-edge text-sm">
         <thead className="bg-felt text-left text-xs text-slate-400">
           <tr>
+            <th className="px-3 py-2">Round</th>
             <th className="px-3 py-2">#</th>
             <th className="px-3 py-2">You</th>
             <th className="px-3 py-2">vs</th>
@@ -115,20 +136,19 @@ export default function MatchesPage() {
         <tbody className="bg-felt/60">
           {matches.length === 0 && (
             <tr>
-              <td colSpan={6} className="px-3 py-4 text-center text-slate-500">
+              <td colSpan={7} className="px-3 py-4 text-center text-slate-500">
                 暂无对阵安排
               </td>
             </tr>
           )}
           {matches.map((m) => (
             <tr key={m.id} className="border-t border-felt-edge">
+              <td className="px-3 py-2 font-mono text-xs text-slate-400">R{m.round}</td>
               <td className="px-3 py-2">{m.tableNo}</td>
               <td className="px-3 py-2 font-semibold text-gold">{pid}</td>
               <td className="px-3 py-2 text-slate-500">vs</td>
               <td className="px-3 py-2">{m.opponent}</td>
-              <td className="px-3 py-2 font-mono">
-                {m.resultA !== null ? `${m.resultA} : ${m.resultB}` : '对局中'}
-              </td>
+              <td className="px-3 py-2 font-mono">{resultCell(m)}</td>
               <td className="px-3 py-2 font-mono text-xs">{m.roomName ?? '-'}</td>
             </tr>
           ))}
@@ -151,7 +171,7 @@ export default function MatchesPage() {
             <button
               onClick={() => {
                 navigator.clipboard.writeText(
-                  `服务器:${server?.host ?? '127.0.0.1'}:${server?.port ?? 7911} 房间号:${myMatch.roomName ?? ''} 昵称:${pid}`,
+                  `服务器:${server?.host ?? '127.0.0.1'}:${server?.port ?? 7911} 房间号:${myMatch.roomName ?? ''} 昵称:${pid}${ruleText ? ` 规则:${ruleText}` : ''}`,
                 );
                 setCopied(true);
                 setTimeout(() => setCopied(false), 1500);
@@ -161,6 +181,13 @@ export default function MatchesPage() {
               {copied ? '已复制' : '复制加入信息'}
             </button>
           )}
+        </div>
+      )}
+
+      {ruleText && (
+        <div className="mt-4 rounded-lg border border-felt-edge bg-felt/60 p-3 text-xs text-slate-400">
+          房间规则：<code className="font-mono text-gold">{ruleText}</code>
+          <span className="ml-2">（进房时房间密码即上方房间号）</span>
         </div>
       )}
 

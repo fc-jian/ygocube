@@ -119,7 +119,7 @@ export function PackZone({ pack, cardMap, droppedCards, onPick }: {
         <div className="mt-2 max-h-80 space-y-1 overflow-y-auto">
           {filteredDropped.map((c) => (
             <div key={c} className="flex items-center gap-2 rounded bg-felt-deep/60 px-1.5 py-1">
-              <CardImage code={c} name={cardMap[c]?.name} className="h-10 w-8 shrink-0" />
+              <CardWithTooltip code={c} card={cardMap[c]} className="h-12 w-8 shrink-0" />
               <span className="flex-1 truncate text-xs">{cardMap[c]?.name ?? c}</span>
               <span className="font-mono text-[0.625rem] text-slate-500">{c}</span>
             </div>

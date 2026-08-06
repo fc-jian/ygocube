@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation';
 import { api, apiDownload, Identity, resolvePlayerIdentity } from '@/lib/api';
 import { useTournamentStream } from '@/lib/sse';
 import { DeckZone, DraftState, useNowTick } from '@/components/TopBar';
+import { CardWithTooltip } from '@/components/CardImage';
 import { CardSearch } from '@/components/CardSearch';
 import { closeCardPreview, setCardPreviewAction } from '@/components/CardPreview';
 import { TokenPrompt } from '@/components/TokenPrompt';
@@ -209,11 +210,9 @@ export default function DeckPage() {
                     e.dataTransfer.setData('application/x-card-source', 'pool');
                   }}
                   className="cursor-grab active:cursor-grabbing"
-                  title={cardMap[c]?.name ?? String(c)}
                 >
-                  <div className="aspect-[7/10] w-full rounded-sm border border-slate-700 bg-slate-800 p-1 text-[0.625rem] leading-tight">
-                    {cardMap[c]?.name ?? c}
-                  </div>
+                  {/* 卡图 + hover/点击详情（无本地图时仍可查看卡牌效果） */}
+                  <CardWithTooltip code={c} card={cardMap[c]} />
                 </div>
               ))}
             </div>
