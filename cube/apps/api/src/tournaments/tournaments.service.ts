@@ -1,0 +1,270 @@
+import { BadRequestException, Injectable } from '@nestjs/common';
+import { getDb } from '../db';
+import { config, defaults } from '../config';
+import { logEvent, loadState, persistMeta, getConfig, TournamentState } from '../events/events.service';
+import crypto from 'crypto';
+import { sha256 } from '../auth/auth.guard';
+import { PoolsService } from '../pools/pools.service';
+
+export interface CreateTournamentInput {
+  name: string;
+  maxPlayers: number;
+  mode?: 'single' | 'match';
+  packSizeMultiple?: number;
+  pickSeconds?: number;
+  deckbuildingSeconds?: number;
+  mainMin?: number;
+  mainMax?: number;
+  extraMax?: number;
+  sideMax?: number;
+  maxCopies?: number;
+  timeLimit?: number; // per-turn seconds, forwarded to the duel host (srvpro TIME token; 999 ≈ unlimited)
+  dropLeftover?: boolean;
+  cardPool?: string;
+}
+
+@Injectable()
+export class TournamentsService {
+  constructor(private pools: PoolsService) {}
+
+  // cardPool must name an existing pool; 'full' is rejected on write paths
+  // (PoolsService.resolve still understands legacy 'full' configs).
+  private assertCardPool(cardPool: unknown): string {
+    if (typeof cardPool !== 'string' || !cardPool.trim()) throw new BadRequestException({ code: 'BAD_PAYLOAD' });
+    const name = cardPool.trim();
+    if (name === 'full' || !this.pools.codesByName(name)) throw new Error('POOL_NOT_FOUND');
+    return name;
+  }
+
+  private poolsCodes(cfg: Record<string, unknown>): number {
+    const ref = cfg.cardPool as string | undefined;
+    if (ref && ref !== 'full') {
+      const codes = this.pools.codesByName(ref);
+      if (codes) return codes.length;
+    }
+    // full pool count from cards table
+    const { CardsService } = require('../cards/cards.service');
+    return new CardsService().poolCodes().length;
+  }
+
+  create(input: CreateTournamentInput, actor: string): { tid: number; url: string; admin_token: string } {
+    const cfg = {
+      maxPlayers: input.maxPlayers,
+      mode: input.mode ?? 'match',
+      packSizeMultiple: input.packSizeMultiple ?? defaults.packSizeMultiple,
+      pickSeconds: input.pickSeconds ?? defaults.pickSeconds,
+      pauseSeconds: defaults.pauseSeconds,
+      deckbuildingSeconds: input.deckbuildingSeconds ?? defaults.deckbuildingSeconds,
+      dropLeftover: input.dropLeftover !== false,
+      mainMin: input.mainMin ?? defaults.mainMin,
+      mainMax: input.mainMax ?? defaults.mainMax,
+      extraMax: input.extraMax ?? defaults.extraMax,
+      sideMax: input.sideMax ?? defaults.sideMax,
+      maxCopies: input.maxCopies ?? defaults.maxCopies,
+      timeLimit: input.timeLimit ?? defaults.timeLimit,
+      cardPool: this.assertCardPool(input.cardPool),
+    };
+    // per-tournament admin token (dev_docs/07 §5.1): manages this tournament only
+    const adminToken = crypto.randomBytes(24).toString('hex');
+    const now = new Date().toISOString();
+    const row = getDb()
+      .prepare(
+        'INSERT INTO tournaments (name, config_json, status, round, created_at, updated_at, admin_token_hash) VALUES (?,?,?,?,?,?,?)',
+      )
+      .run(input.name, JSON.stringify(cfg), 'registration', 0, now, now, sha256(adminToken));
+    const tid = Number(row.lastInsertRowid);
+    logEvent(tid, 'tournament', 'phase', { status: 'registration', round: 0 }, actor);
+    return { tid, url: `/t/${tid}`, admin_token: adminToken };
+  }
+
+  get(tid: number) {
+    const state = loadState(tid);
+    const row = getDb().prepare('SELECT auth_required FROM tournaments WHERE id=?').get(tid) as { auth_required: number } | undefined;
+    return {
+      id: state.id,
+      name: state.name,
+      config: getConfig(state),
+      status: state.status,
+      round: state.round,
+      players: state.players.map((p) => ({ playerId: p.playerId, displayName: p.displayName, seat: p.seat })),
+      playerCount: state.players.length,
+      frozen: state.frozen,
+      authRequired: row ? row.auth_required !== 0 : true,
+    };
+  }
+
+  join(tid: number, playerId: string, displayName: string): { token: string } {
+    const state = loadState(tid);
+    if (state.status !== 'registration') throw new Error('WRONG_PHASE');
+    if (state.players.length >= getConfig(state).maxPlayers) throw new Error('TOURNAMENT_FULL');
+    if (state.players.some((p) => p.playerId === playerId)) throw new Error('ALREADY_JOINED');
+    const token = crypto.randomBytes(32).toString('hex');
+    getDb()
+      .prepare('INSERT INTO tournament_players (tournament_id, player_id, display_name, token_hash, seat, joined_at) VALUES (?,?,?,?,?,?)')
+      .run(tid, playerId, displayName, sha256(token), null, new Date().toISOString());
+    logEvent(tid, 'player', 'player_join', { playerId, displayName, seat: -1, eliminated: false }, playerId);
+    return { token };
+  }
+
+  setSeats(tid: number, order: string[], actor: string): void {
+    const state = loadState(tid);
+    if (state.status !== 'registration') throw new Error('WRONG_PHASE');
+    const map: Record<string, number> = {};
+    order.forEach((pid, i) => (map[pid] = i));
+    logEvent(tid, 'player', 'seat_assign', map, actor);
+    persistMeta(tid);
+  }
+
+  // 阶段迁移规则（dev_docs/05 §3.2）：
+  // - registration 不能直接进入 deckbuilding（必须开始选牌）；
+  // - drafting -> deckbuilding（手动）：若当前牌堆未选完，置 pendingPhase，等当前牌堆选完后进入（进度保留）；
+  // - deckbuilding -> drafting（回退）：允许，选牌从保留的光标处继续。
+  setPhase(tid: number, status: string, round: number | undefined, actor: string): void {
+    const state = loadState(tid);
+    state.frozen = false;
+    if (status === 'deckbuilding') {
+      if (state.status === 'registration') throw new Error('DRAFT_NOT_STARTED');
+      if (state.status === 'drafting') {
+        if (state.pickCursor) {
+          logEvent(tid, 'draft', 'pending', 'deckbuilding', actor);
+          persistMeta(tid);
+          return; // 等待当前牌堆选完（advance 内完成切换）
+        }
+        this.enterDeckbuilding(tid, actor);
+        return;
+      }
+    }
+    if (status === 'drafting' && state.status === 'deckbuilding') {
+      // 回退：清掉构筑时限，恢复选牌（光标已保留在最后牌堆开头）
+      const s = loadState(tid);
+      const deadlineAt = null;
+      logEvent(tid, 'tournament', 'phase', { status: 'drafting', round: s.round, deadlineAt }, actor);
+      if (!s.pickCursor && s.packs.length) {
+        // 极端情况：选牌全部完成后回退 —— 从第一堆重新开始（没有未选完的堆）
+        const first = s.packs[0];
+        const playerId = s.players.slice().sort((a, b) => a.seat - b.seat)[0].playerId;
+        logEvent(tid, 'draft', 'cursor', { packIndex: 0, round: 0, playerId, deadlineAt: new Date(Date.now() + getConfig(s).pickSeconds * 1000).toISOString() }, actor);
+      }
+      persistMeta(tid);
+      return;
+    }
+    logEvent(tid, 'tournament', 'phase', { status, round: round ?? state.round }, actor);
+    persistMeta(tid);
+  }
+
+  enterDeckbuilding(tid: number, actor: string): void {
+    const state = loadState(tid);
+    const cfg = getConfig(state);
+    const deadlineAt = new Date(Date.now() + (cfg.deckbuildingSeconds as number) * 1000).toISOString();
+    logEvent(tid, 'tournament', 'phase', { status: 'deckbuilding', round: 0, deadlineAt }, actor);
+    persistMeta(tid);
+  }
+
+  // 开始选牌前可调整任何参数（含卡池），dev_docs/05 §2
+  updateConfig(tid: number, patch: Record<string, unknown>, actor: string): Record<string, unknown> {
+    const state = loadState(tid);
+    if (state.status !== 'registration') throw new Error('WRONG_PHASE');
+    if (patch.cardPool !== undefined) patch = { ...patch, cardPool: this.assertCardPool(patch.cardPool) };
+    const cfg = { ...getConfig(state), ...patch };
+    if (typeof cfg.maxPlayers === 'number' && cfg.maxPlayers < state.players.length) {
+      throw new Error('TOURNAMENT_FULL');
+    }
+    logEvent(tid, 'tournament', 'config', cfg, actor);
+    persistMeta(tid);
+    return cfg;
+  }
+
+  // per-tournament token-auth toggle (dev_docs/07 §5.3): off allows same-machine testing
+  setAuthRequired(tid: number, required: boolean, actor: string): void {
+    const state = loadState(tid);
+    const cfg = { ...getConfig(state), authRequired: required };
+    logEvent(tid, 'tournament', 'config', cfg, actor);
+    getDb().prepare('UPDATE tournaments SET auth_required=? WHERE id=?').run(required ? 1 : 0, tid);
+    persistMeta(tid);
+  }
+
+  list(): { id: number; name: string; status: string }[] {
+    return getDb()
+      .prepare('SELECT id, name, status FROM tournaments ORDER BY id DESC LIMIT 50')
+      .all() as { id: number; name: string; status: string }[];
+  }
+
+  stateForPlayer(tid: number, playerId: string) {
+    const state = loadState(tid);
+    // 未加入比赛的玩家 URL 应失效（前端据此跳回报名页）
+    if (!state.players.some((pl) => pl.playerId === playerId)) throw new Error('PLAYER_NOT_FOUND');
+    const cfg = getConfig(state);
+    const isCurrentPicker = state.pickCursor?.playerId === playerId;
+    const picks = state.picks.filter((p) => p.playerId === playerId);
+    const pack = state.pickCursor ? state.packs.find((p) => p.index === state.pickCursor!.packIndex) : null;
+    // info hiding: the current picker sees only the REMAINING cards of the pack —
+    // already-picked cards' codes are never sent (dev_docs/05 §3)
+    const remaining = pack
+      ? (() => {
+          const taken = new Set(state.picks.filter((p) => p.packIndex === pack.index).map((p) => p.card));
+          return pack.order.filter((c) => !taken.has(c));
+        })()
+      : [];
+    return {
+      id: state.id,
+      name: state.name,
+      status: state.status,
+      round: state.round,
+      frozen: state.frozen,
+      config: cfg,
+      players: state.players.map((p) => ({ playerId: p.playerId, displayName: p.displayName, seat: p.seat })),
+      pickedCards: picks.map((p) => p.card),
+      poolInfo: { name: String(cfg.cardPool ?? 'full'), count: this.poolsCodes(cfg) },
+      pack: pack
+        ? {
+            index: pack.index,
+            cardsLeft: remaining.length,
+            packsRemaining: state.packs.length - pack.index,
+            currentPicker: state.pickCursor!.playerId,
+            deadlineAt: state.pickCursor!.deadlineAt,
+            isMyTurn: isCurrentPicker,
+            cards: isCurrentPicker ? remaining : undefined,
+            droppedCard: pack.dropCard,
+          }
+        : null,
+      pause: state.pause,
+      droppedCards: state.droppedCards,
+      phaseDeadline: state.phaseDeadline,
+      pendingPhase: state.pendingPhase,
+      deck: state.decks[playerId],
+      matches: state.matches
+        .filter((m) => m.round === state.round && (m.playerA === playerId || m.playerB === playerId))
+        .map((m) => ({ ...m, opponent: m.playerA === playerId ? m.playerB : m.playerA })),
+    };
+  }
+
+  adminState(tid: number) {
+    const state = loadState(tid);
+    const cfg = getConfig(state);
+    const row = getDb().prepare('SELECT auth_required FROM tournaments WHERE id=?').get(tid) as { auth_required: number } | undefined;
+    return {
+      id: state.id,
+      name: state.name,
+      status: state.status,
+      round: state.round,
+      frozen: state.frozen,
+      authRequired: row ? row.auth_required !== 0 : true,
+      config: cfg,
+      players: state.players,
+      packs: state.packs.map((p) => ({ index: p.index, size: p.size, dropCard: p.dropCard, order: p.order })),
+      droppedCards: state.droppedCards,
+      phaseDeadline: state.phaseDeadline,
+      pendingPhase: state.pendingPhase,
+      picks: state.picks,
+      pickCursor: state.pickCursor,
+      pause: state.pause,
+      decks: state.decks,
+      matches: state.matches,
+      pickSummary: state.players.map((p) => ({
+        playerId: p.playerId,
+        seat: p.seat,
+        count: state.picks.filter((x) => x.playerId === p.playerId).length,
+      })),
+    };
+  }
+}

@@ -1,0 +1,46 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-felt-deep text-slate-100;
+  font-family: ui-sans-serif, system-ui, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+
+.card-grid {
+  @apply grid gap-1;
+  grid-template-columns: repeat(10, minmax(0, 1fr));
+}
+
+.card-grid-5 {
+  @apply grid gap-1;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+@keyframes pick-fly {
+  from { transform: scale(1.15); opacity: 0.6; }
+  to { transform: scale(1); opacity: 1; }
+}
+.animate-pick {
+  animation: pick-fly 0.25s ease-out;
+}
+
+@keyframes breath {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 0.7; }
+}
+.countdown-bg {
+  animation: breath 1.6s ease-in-out infinite;
+}
+
+@keyframes lock-flash {
+  0% { box-shadow: 0 0 0 0 rgba(212, 175, 55, 0.7); }
+  100% { box-shadow: 0 0 0 18px rgba(212, 175, 55, 0); }
+}
+.animate-lock {
+  animation: lock-flash 0.6s ease-out;
+}
