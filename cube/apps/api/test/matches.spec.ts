@@ -14,7 +14,8 @@ class FakeSrvpro {
   }
   async roomStatus(roomName: string) {
     const r = this.rooms[roomName];
-    return r ? { ok: true, finished: true, scores: r.scores } : { ok: false };
+    if (!r) throw Object.assign(new Error('room gone'), { response: { status: 404 } });
+    return { ok: true, finished: true, scores: r.scores };
   }
   async closeRoom() {
     return { ok: true };
@@ -186,5 +187,51 @@ describe('pairing engine', () => {
     // the srvpro request body captured decks & limits via createRoom arg
     expect(Object.keys(fake.rooms).length).toBe(1);
     expect(created.players.length).toBe(2);
+  });
+});
+
+describe('manual results & fault detection', () => {
+  beforeEach(() => useTestDb());
+
+  it('setMatchResult records score, advances to next round, closes room', async () => {
+    const { matches, tid } = setupMatches(4);
+    matches.startRound(tid, 1, 'test');
+    const m = loadState(tid).matches.find((x) => x.round === 1)!;
+    matches.setMatchResult(tid, 1, m.tableNo, 2, 0);
+    const s1 = loadState(tid);
+    expect(s1.matches.find((x) => x.id === m.id)!.resultA).toBe(2);
+    expect(s1.matches.find((x) => x.id === m.id)!.source).toBe('admin');
+    expect(s1.matches.find((x) => x.id === m.id)!.faultedAt).toBeNull();
+    // 4 人 round1 有两桌：只设一桌不会推进
+    expect(s1.matches.some((x) => x.round === 2)).toBe(false);
+    for (const m1 of loadState(tid).matches.filter((x) => x.round === 1)) {
+      matches.setMatchResult(tid, 1, m1.tableNo, m1.playerA === m1.playerA ? 2 : 0, 0);
+    }
+    // 两桌都完成后 round2 自动生成
+    expect(loadState(tid).matches.some((x) => x.round === 2)).toBe(true);
+  });
+
+  it('setMatchResult rejects invalid scores and unknown matches', () => {
+    const { matches, tid } = setupMatches(4);
+    matches.startRound(tid, 1, 'test');
+    const m = loadState(tid).matches.find((x) => x.round === 1)!;
+    expect(() => matches.setMatchResult(tid, 1, m.tableNo, 3, 0)).toThrow('BAD_RESULT');
+    expect(() => matches.setMatchResult(tid, 9, 1, 1, 0)).toThrow('MATCH_NOT_FOUND');
+  });
+
+  it('pollAll marks room-gone-without-result as faulted and stops polling it', async () => {
+    const { matches, tid, fake } = setupMatches(2);
+    matches.startRound(tid, 1, 'test');
+    await new Promise((r) => setTimeout(r, 300));
+    const m = loadState(tid).matches.find((x) => x.round === 1 && x.playerB !== '(bye)')!;
+    delete fake.rooms[m.roomName!]; // room vanished without a result
+    const poll = (matches as any).pollAll.bind(matches);
+    await poll();
+    const s1 = loadState(tid);
+    expect(s1.matches.find((x) => x.id === m.id)!.faultedAt).toBeTruthy();
+    const faultedAt = s1.matches.find((x) => x.id === m.id)!.faultedAt;
+    // 再次轮询：faulted 对局被排除，不会重复标记（时间戳不变）
+    await poll();
+    expect(loadState(tid).matches.find((x) => x.id === m.id)!.faultedAt).toBe(faultedAt);
   });
 });

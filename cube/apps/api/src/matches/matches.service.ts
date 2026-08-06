@@ -170,11 +170,12 @@ export class MatchesService implements OnModuleInit {
       resultA: null,
       resultB: null,
       source: null,
+      faultedAt: null,
       startedAt: null,
       finishedAt: null,
     }));
     if (bye && n % 2 === 1) {
-      matches.push({ id: 0, round, playerA: bye, playerB: '(bye)', tableNo: matches.length + 1, roomName: null, playerAPass: null, playerBPass: null, resultA: 2, resultB: 0, source: 'bye', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString() });
+      matches.push({ id: 0, round, playerA: bye, playerB: '(bye)', tableNo: matches.length + 1, roomName: null, playerAPass: null, playerBPass: null, resultA: 2, resultB: 0, source: 'bye', faultedAt: null, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString() });
     }
     return matches;
   }
@@ -322,7 +323,7 @@ export class MatchesService implements OnModuleInit {
     const matches: MatchState[] = [];
     for (let i = 0; i < ids.length; i += 2) {
       if (i + 1 >= ids.length) break;
-      matches.push({ id: 0, round, playerA: ids[i], playerB: ids[i + 1], tableNo: i / 2 + 1, roomName: null, playerAPass: null, playerBPass: null, resultA: null, resultB: null, source: null, startedAt: null, finishedAt: null });
+      matches.push({ id: 0, round, playerA: ids[i], playerB: ids[i + 1], tableNo: i / 2 + 1, roomName: null, playerAPass: null, playerBPass: null, resultA: null, resultB: null, source: null, faultedAt: null, startedAt: null, finishedAt: null });
     }
     const now = new Date().toISOString();
     const insert = getDb().prepare(
@@ -358,7 +359,7 @@ export class MatchesService implements OnModuleInit {
       } catch {
         continue; // 比赛已被删除
       }
-      for (const m of state.matches.filter((x) => x.roomName && x.resultA === null && x.playerB !== '(bye)')) {
+      for (const m of state.matches.filter((x) => x.roomName && x.resultA === null && !x.faultedAt && x.playerB !== '(bye)')) {
         try {
           const st = await this.srvpro.roomStatus(m.roomName!);
           if (st.ok && st.finished) {
@@ -369,7 +370,11 @@ export class MatchesService implements OnModuleInit {
             this.maybeAdvance(r.tournament_id, m.round);
           }
         } catch (e) {
-          // srvpro down: try again next tick
+          // 房间已消失（404）但无结果 = 建房后故障退出：标记故障停止轮询，由管理员手动补录结果
+          if ((e as { response?: { status?: number } }).response?.status === 404) {
+            this.patchMatch(r.tournament_id, m.id, { faultedAt: new Date().toISOString() });
+          }
+          // 其余错误（srvpro 整体不可用等）：下次 tick 重试
         }
       }
     }
@@ -397,6 +402,18 @@ export class MatchesService implements OnModuleInit {
     } catch (e) {
       console.error('close srvpro room failed', roomName, (e as Error).message);
     }
+  }
+
+  // 管理台手动设置/修改对战结果（含故障房间补录）；触发轮次推进与实时积分更新
+  setMatchResult(tid: number, round: number, tableNo: number, resultA: number, resultB: number): void {
+    const state = loadState(tid);
+    const m = state.matches.find((x) => x.round === round && x.tableNo === tableNo);
+    if (!m) throw new Error('MATCH_NOT_FOUND');
+    if (![0, 1, 2].includes(resultA) || ![0, 1, 2].includes(resultB)) throw new Error('BAD_RESULT');
+    const room = m.roomName;
+    this.patchMatch(tid, m.id, { resultA, resultB, source: 'admin', faultedAt: null, finishedAt: new Date().toISOString() });
+    this.maybeAdvance(tid, round);
+    if (room) void this.closeSrvproRoom(room);
   }
 
   // 实时积分榜（dev_docs/07 §2.4）：胜 3 分、平 1 分、负 0 分，OMW% 破同分
