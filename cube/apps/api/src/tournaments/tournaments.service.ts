@@ -274,6 +274,32 @@ export class TournamentsService {
     };
   }
 
+  // 管理台事件时间线：完整事件列表（全局 seq + 可读摘要），供回溯选择
+  events(tid: number): { seq: number; entity: string; action: string; summary: string; createdAt: string }[] {
+    const rows = getDb()
+      .prepare('SELECT seq, entity, action, payload_json, created_at FROM events WHERE tournament_id=? ORDER BY seq')
+      .all(tid) as { seq: number; entity: string; action: string; payload_json: string; created_at: string }[];
+    return rows.map((e) => {
+      let payload: Record<string, unknown> = {};
+      try { payload = JSON.parse(e.payload_json); } catch { /* ignore */ }
+      const p = payload as Record<string, any>;
+      let summary = e.action;
+      if (e.entity === 'player' && e.action === 'player_join') summary = `报名 ${p.playerId}`;
+      else if (e.entity === 'player' && e.action === 'player_remove') summary = `删除玩家 ${p}`;
+      else if (e.entity === 'player' && e.action === 'seat_assign') summary = '座位分配';
+      else if (e.entity === 'draft' && e.action === 'packs_created') summary = `牌堆生成（${(p.packs ?? []).length} 堆${p.droppedCards?.length ? `，弃置 ${p.droppedCards.length} 张` : ''}）`;
+      else if (e.entity === 'draft' && e.action === 'cursor') summary = p ? `牌堆 ${p.packIndex} → ${p.playerId}` : '选牌结束';
+      else if (e.entity === 'draft' && e.action === 'pick') summary = `选牌 ${p.playerId} #${p.card}${p.auto ? '（超时自动）' : ''}`;
+      else if (e.entity === 'draft' && e.action === 'pause') summary = p?.pausedAt ? '暂停' : '恢复';
+      else if (e.entity === 'tournament' && e.action === 'phase') summary = `阶段 → ${p.status} r${p.round ?? ''}`;
+      else if (e.entity === 'tournament' && e.action === 'config') summary = '参数修改';
+      else if (e.entity === 'tournament' && e.action === 'frozen') summary = !p ? '解冻' : '冻结';
+      else if (e.entity === 'deck' && e.action === 'deck') summary = `卡组 ${p.playerId}`;
+      else if (e.entity === 'match' && e.action === 'match') summary = `对局 r${p.round}t${p.tableNo}${p.resultA !== null ? ` ${p.resultA}:${p.resultB}` : '（安排）'}`;
+      return { seq: e.seq, entity: e.entity, action: e.action, summary, createdAt: e.created_at };
+    });
+  }
+
   adminState(tid: number) {
     const state = loadState(tid);
     const cfg = getConfig(state);

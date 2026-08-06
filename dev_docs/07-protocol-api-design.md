@@ -52,6 +52,7 @@
 | `DELETE /admin/t/:tid/players/:pid` | 删除玩家（报名/选牌/构筑阶段；同时清理其选牌与卡组；对战开始后 409） |
 | `POST /admin/t/:tid/players/:pid/token` | 重置玩家 token 并返回新明文（token 仅存哈希，不可回显旧值） |
 | `POST /admin/t/:tid/match/result` | 手动设置/修改对局结果 `{round, tableNo, resultA, resultB}`（0-2 整数）；触发轮次推进与积分即时更新，并关闭对应 srvpro 房间 |
+| `GET /admin/t/:tid/events` | 完整事件时间线（全局 seq + 可读摘要 + 时间），供回溯选择 |
 | `POST /admin/t/:tid/revert` | body `{ seq }` 回溯到历史事件序号 |
 
 ### 2.3 SSE 事件（`GET /t/:tid/stream?tid=&pid=&token=`）

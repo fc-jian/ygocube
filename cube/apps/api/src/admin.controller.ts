@@ -215,6 +215,11 @@ export class AdminController {
     return { ok: true };
   }
 
+  @Get('t/:tid/events')
+  events(@Req() req: AuthedRequest) {
+    return this.tournaments.events(Number(req.params.tid));
+  }
+
   @Post('t/:tid/state')
   state(@Req() req: AuthedRequest) {
     return this.tournaments.adminState(Number(req.params.tid));

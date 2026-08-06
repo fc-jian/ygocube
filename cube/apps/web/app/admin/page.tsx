@@ -65,6 +65,8 @@ export default function AdminPage() {
   const [addPid, setAddPid] = useState('');
   const [shownToken, setShownToken] = useState<{ pid: string; token: string } | null>(null);
   const [matchInputs, setMatchInputs] = useState<Record<number, { a: string; b: string }>>({});
+  const [events, setEvents] = useState<{ seq: number; entity: string; action: string; summary: string; createdAt: string }[]>([]);
+  const [selectedSeq, setSelectedSeq] = useState<number | null>(null);
 
   useEffect(() => {
     setAdminToken(localStorage.getItem('yc_admin_token') ?? '');
@@ -108,6 +110,14 @@ export default function AdminPage() {
       if (seq === loadSeq.current) setTournaments(t);
     } catch {
       if (seq === loadSeq.current) setTournaments([]);
+    }
+    if (tid) {
+      try {
+        const ev = await adminFetch(`/admin/t/${tid}/events`);
+        if (seq === loadSeq.current) setEvents(ev);
+      } catch {
+        if (seq === loadSeq.current) setEvents([]);
+      }
     }
   }, [adminFetch, tid]);
   // act 等异步回调完成后要刷新的是"当前最新 tid"的数据，而非发起时刻的闭包
@@ -389,6 +399,40 @@ export default function AdminPage() {
                 <p className="mt-1 text-red-300">暂停：{state.pause.pausedAt ? '已暂停' : '投票中'}（发起人 {state.pause.proposer}）</p>
               )}
               {state.pendingPhase === 'deckbuilding' && <p className="mt-1 text-amber-300">等待当前牌堆选完后进入构筑（进度将保留）</p>}
+            </section>
+            <section className="rounded-lg border border-felt-edge bg-felt/60 p-3 text-xs">
+              <h3 className="mb-2 font-semibold text-gold">事件时间线（点击选择回溯点）</h3>
+              <div className="max-h-72 space-y-0.5 overflow-y-auto">
+                {events.map((e) => (
+                  <div
+                    key={e.seq}
+                    onClick={() => setSelectedSeq(e.seq)}
+                    className={`flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 hover:bg-felt-deep ${
+                      selectedSeq === e.seq ? 'bg-gold/20 ring-1 ring-gold' : ''
+                    }`}
+                    title={`${e.action}（${e.entity}）`}
+                  >
+                    <span className="w-14 shrink-0 font-mono text-slate-400">{e.seq}</span>
+                    <span className="w-16 shrink-0 font-mono text-slate-500">{new Date(e.createdAt).toLocaleTimeString()}</span>
+                    <span className="truncate">{e.summary}</span>
+                  </div>
+                ))}
+                {events.length === 0 && <p className="py-2 text-center text-slate-500">暂无事件</p>}
+              </div>
+              <div className="mt-2 flex items-center gap-2">
+                <span className="font-mono text-gold">{selectedSeq !== null ? `seq ${selectedSeq}` : '未选择'}</span>
+                <button
+                  onClick={() => {
+                    if (selectedSeq === null) return;
+                    if (!confirm(`回溯到事件 ${selectedSeq}？比赛将冻结，之后的进度全部回退`)) return;
+                    void act(`/admin/t/${state.id}/revert`, { seq: selectedSeq });
+                  }}
+                  disabled={selectedSeq === null}
+                  className="rounded bg-gold px-2 py-1 font-semibold text-felt-deep hover:brightness-110 disabled:opacity-40"
+                >
+                  回溯到此
+                </button>
+              </div>
             </section>
           </div>
           <section className="mt-4 rounded-lg border border-felt-edge bg-felt/60 p-3 text-xs">
