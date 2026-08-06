@@ -214,7 +214,7 @@ export class MatchesService implements OnModuleInit {
           hostinfo: {
             mode: cfg.mode === 'match' ? 1 : 0,
             rule: 5,
-            lflist: 0,
+            lflist: -1,
             duel_rule: 3,
             start_lp: 8000,
             start_hand: 5,
