@@ -61,6 +61,7 @@ export default function AdminPage() {
   const [tournaments, setTournaments] = useState<TournamentBrief[]>([]);
   const [editing, setEditing] = useState(false);
   const [editForm, setEditForm] = useState<Record<string, string | number | boolean>>({});
+  const loadSeq = useRef(0);
 
   useEffect(() => {
     setAdminToken(localStorage.getItem('yc_admin_token') ?? '');
@@ -81,23 +82,29 @@ export default function AdminPage() {
 
   const load = useCallback(async () => {
     saveToken();
+    // 竞态守卫：快速切换 tid 或轮询重叠时，旧请求的迟到响应不得覆盖新数据
+    const seq = ++loadSeq.current;
     if (tid) {
       try {
-        setState(await adminFetch(`/admin/t/${tid}/state`, 'POST'));
+        const s = await adminFetch(`/admin/t/${tid}/state`, 'POST');
+        if (seq === loadSeq.current) setState(s);
       } catch (e: any) {
+        if (seq !== loadSeq.current) return;
         setMsg(e.message === 'AUTH_REQUIRED' ? '管理令牌缺失或无权管理该比赛' : e.message);
         setState(null);
       }
     }
     try {
-      setPools(await adminFetch('/admin/pools'));
+      const p = await adminFetch('/admin/pools');
+      if (seq === loadSeq.current) setPools(p);
     } catch {
-      setPools([]);
+      if (seq === loadSeq.current) setPools([]);
     }
     try {
-      setTournaments(await adminFetch('/admin/tournaments'));
+      const t = await adminFetch('/admin/tournaments');
+      if (seq === loadSeq.current) setTournaments(t);
     } catch {
-      setTournaments([]);
+      if (seq === loadSeq.current) setTournaments([]);
     }
   }, [adminFetch, tid]);
 
@@ -105,6 +112,11 @@ export default function AdminPage() {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [adminToken, tid]);
+
+  // 切换比赛时关闭编辑态，避免上一场比赛的表单残留
+  useEffect(() => {
+    setEditing(false);
+  }, [tid]);
 
   // 控制台轮询刷新（dev_docs/06 §6）
   useEffect(() => {
