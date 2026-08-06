@@ -1,0 +1,21 @@
+# YGO Cube unified configuration (dev_docs/05 §9)
+# Copy to the repo root as config.yaml (or set CONFIG_FILE to another path).
+admin:
+  # super admin: can view/manage all tournaments and card pools
+  super_token: "change-me-super-token"
+  # required to create tournaments; creation returns a per-tournament admin token
+  create_token: "change-me-create-token"
+srvpro:
+  url: "http://127.0.0.1:7922"
+  api_key: "cube-test-key"
+server:
+  port: 3001
+  db_path: "data/cube.sqlite"
+  cards_cdb: "srvpro/ygopro/cards.cdb"
+pics:
+  # 服务端本地卡图根目录（可选，真实场景留空）：卡图只存在于玩家本地，由前端
+  # showDirectoryPicker 显式授权后直接读取；留空则服务端代理 404、前端回退空白卡。
+  ygopro_root: ""
+  # 低清 avif 缩略图目录（服务端保存，GET /pics/:code.avif）：本地绑定失败时前端
+  # 先回退到这里，再尝试 ygopro_root 原图代理，最后才是空白卡。
+  avif_dir: "assets/pics_avif"

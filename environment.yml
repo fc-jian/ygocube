@@ -1,0 +1,33 @@
+# YGO Cube 可复现开发环境（conda/mamba）
+# 创建：mamba env create -p ./envs/ygocube -f environment.yml
+# 激活：mamba activate ./envs/ygocube
+#
+# 说明：
+# - C 库（sqlite/libevent/xz/zlib）供 ygopro server 分支构建使用（premake 通过
+#   --*-include-dir/--*-lib-dir 指向 $CONDA_PREFIX，见 dev_docs/08 与 scripts/build-ygopro.sh）。
+# - lua 需 C++ 编译（ocgcore 要求），conda 的 lua 为 C 编译不可用 → 由 premake 从源码构建
+#   （源码放 ygopro/lua/，与 CI 一致）。
+# - premake5 无 conda 包 → 下载 CI 同版本二进制到 ./envs/tools/premake5（见 scripts/fetch-tools.sh）。
+# - C++ 编译器使用系统 gcc（Ubuntu 22.04 gcc-11，与官方 CI ubuntu-22 一致），不在 conda 内
+#   混装 gcc，避免 libstdc++ 与 conda 库 ABI 冲突。
+name: ygocube
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  # JS 工具链（cube 前端/后端 + srvpro）
+  - nodejs >=22
+  - pnpm
+  # Python（脚本/测试工具）
+  - python >=3.12
+  # ygopro server 构建依赖（premake --*-include-dir 指向本环境）
+  - sqlite
+  - libevent
+  - xz
+  - zlib
+  # premake5 源码构建需要（Bootstrap.sh 链接 -luuid，见 scripts/fetch-tools.sh）
+  - libuuid
+  # 构建辅助
+  - pkg-config
+  - make
+  - git

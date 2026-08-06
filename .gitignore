@@ -1,0 +1,26 @@
+# YGO Cube workspace root: runtime / environment artifacts never committed
+
+# runtime state
+config.yaml
+data/
+cube/apps/api/data/
+envs/
+test_tournaments/
+test_deck.ydk
+*.log
+
+# tooling dirs
+.omo/
+.agents/
+.DS_Store
+
+# node
+node_modules/
+
+# build output
+cube/apps/api/dist/
+cube/apps/web/.next/
+cube/apps/web/out/
+
+# generated card images (regenerate with vips; original pics are symlinks)
+assets/pics_avif/
