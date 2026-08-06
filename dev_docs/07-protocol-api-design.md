@@ -44,7 +44,7 @@
 | `GET /t/:tid/deck.ydk` | 当前玩家卡组导出；Content-Disposition 文件名 `deck-<tid>-<pid>-<timestamp>.ydk` |
 | `GET /t/:tid/matches` | 该玩家全部轮次的历史对局与房间信息：`{id, round, tableNo, playerA, opponent, roomName, resultA, resultB, startedAt, finishedAt}`（按轮次/桌号排序；房间名含随机词防进错；无独立密码，进房昵称 = playerId） |
 | `GET /t/:tid/ranking` | 实时积分榜（胜 3/平 1/负 0，OMW% 破同分；不含卡牌信息） |
-| `GET /meta` (public) | 对局服务器连接信息：`{ srvpro: { host, gamePort } }`（config.yaml `srvpro.game_port`） |
+| `GET /meta` (public) | 对局服务器连接信息：`{ srvpro: { host, gamePort } }`（config.yaml `srvpro.host` + `srvpro.game_port`） |
 | `POST /admin/t/:tid/security` | body `{ require_token: false }` 关闭/开启该 tournament 的 token 鉴权 |
 | `GET/POST /admin/pools`、`POST /admin/pools/random`、`DELETE /admin/pools/:id` | 卡池维护（super 专属；random 从全卡表采样 size 张，默认 1000） |
 | `POST /admin/t/:tid/start_draft` 等 | 管理员阶段控制（super 或 per-tournament token） |

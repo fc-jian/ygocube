@@ -7,6 +7,8 @@ admin:
   create_token: "change-me-create-token"
 srvpro:
   url: "http://127.0.0.1:7922"
+  # 玩家端显示的对局服务器地址（公网部署填公网 IP，如 "39.96.220.91"）
+  host: "127.0.0.1"
   api_key: "cube-test-key"
 server:
   port: 3001

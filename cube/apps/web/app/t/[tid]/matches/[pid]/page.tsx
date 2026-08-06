@@ -91,7 +91,7 @@ export default function MatchesPage() {
   const cfg = (info?.config ?? {}) as { mainMin?: number; mainMax?: number; extraMax?: number; sideMax?: number; timeLimit?: number };
   const ruleText =
     cfg.mainMin != null
-      ? `MAIN${cfg.mainMin}-${cfg.mainMax},EXTRA${cfg.extraMax},SIDE${cfg.sideMax},LP8000,TIME${cfg.timeLimit ?? 180}`
+      ? `主卡组 ${cfg.mainMin}-${cfg.mainMax} 张、额外卡组 ${cfg.extraMax} 张、副卡组 ${cfg.sideMax} 张、基本分 8000、每回合 ${cfg.timeLimit ?? 180} 秒`
       : '';
 
   const resultCell = (m: MatchInfo) => {
@@ -162,7 +162,7 @@ export default function MatchesPage() {
             对手： <b>{myMatch.opponent}</b>
           </p>
           <p className="mt-2 text-xs text-slate-400">
-            打开 YGOPro 客户端，连接服务器{' '}
+            打开修改版 YGOPro-Cube 客户端，连接服务器{' '}
             <code className="font-mono text-gold">{server ? `${server.host}:${server.port}` : '读取中...'}</code>
             ，加入房间 <code className="font-mono text-gold">{myMatch.roomName ?? '等待创建房间...'}</code>
             ，昵称填写 <code className="font-mono text-gold">{pid}</code>。

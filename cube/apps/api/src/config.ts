@@ -12,6 +12,7 @@ export interface AppConfig {
   srvpro: {
     url: string;
     apiKey: string;
+    host: string;
     gamePort: number;
   };
   server: {
@@ -65,6 +66,7 @@ function loadConfig(): AppConfig {
     srvpro: {
       url: String(srvpro.url ?? process.env.SRVPRO_URL ?? 'http://127.0.0.1:7922'),
       apiKey: String(srvpro.api_key ?? process.env.SRVPRO_API_KEY ?? ''),
+      host: String(srvpro.host ?? process.env.SRVPRO_HOST ?? '127.0.0.1'),
       gamePort: Number(srvpro.game_port ?? process.env.SRVPRO_GAME_PORT ?? 7911),
     },
     server: {

@@ -251,7 +251,7 @@ export class ApiController {
   @Public()
   @Get('meta')
   meta() {
-    return { srvpro: { host: '127.0.0.1', gamePort: config.srvpro.gamePort } };
+    return { srvpro: { host: config.srvpro.host, gamePort: config.srvpro.gamePort } };
   }
 
   @Public()
