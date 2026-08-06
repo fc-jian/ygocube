@@ -110,6 +110,9 @@ export default function AdminPage() {
       if (seq === loadSeq.current) setTournaments([]);
     }
   }, [adminFetch, tid]);
+  // act 等异步回调完成后要刷新的是"当前最新 tid"的数据，而非发起时刻的闭包
+  const loadRef = useRef(load);
+  loadRef.current = load;
 
   useEffect(() => {
     void load();
@@ -132,7 +135,7 @@ export default function AdminPage() {
     try {
       const d = await adminFetch(path, 'POST', body ?? {});
       showMsg(`${path} ok ${JSON.stringify(d).slice(0, 100)}（${Math.round(performance.now() - t0)} ms）`);
-      await load();
+      await loadRef.current();
     } catch (e: any) {
       showMsg(`${path} -> ${e.message}（${Math.round(performance.now() - t0)} ms）`);
     }
@@ -331,7 +334,7 @@ export default function AdminPage() {
                     <button
                       onClick={() => {
                         if (!confirm(`删除玩家 ${p.playerId}？（将清除其选牌与卡组）`)) return;
-                        void act(`/admin/t/${state.id}/players/${encodeURIComponent(p.playerId)}`, {});
+                        void adminFetch(`/admin/t/${state.id}/players/${encodeURIComponent(p.playerId)}`, 'DELETE').then(() => loadRef.current()).catch((e: any) => showMsg(`删除失败: ${e.message}`));
                       }}
                       className="rounded bg-red-900 px-1.5 py-0.5 text-red-100 hover:brightness-110"
                       title="删除玩家（报名/选牌/构筑阶段可用）"
@@ -490,7 +493,7 @@ export default function AdminPage() {
               </span>
               <span className="flex items-center gap-2">
                 <button
-                  onClick={() => { setTid(String(t.id)); void load(); }}
+                  onClick={() => { setTid(String(t.id)); }}
                   className="rounded bg-felt-edge px-2 py-0.5 hover:brightness-110"
                 >
                   打开
