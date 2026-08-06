@@ -48,6 +48,10 @@
 | `POST /admin/t/:tid/security` | body `{ require_token: false }` 关闭/开启该 tournament 的 token 鉴权 |
 | `GET/POST /admin/pools`、`POST /admin/pools/random`、`DELETE /admin/pools/:id` | 卡池维护（super 专属；random 从全卡表采样 size 张，默认 1000） |
 | `POST /admin/t/:tid/start_draft` 等 | 管理员阶段控制（super 或 per-tournament token） |
+| `POST /admin/t/:tid/players` | 添加玩家 `{player_id, display_name}`（报名阶段，ASCII 校验；返回 `{token}`） |
+| `DELETE /admin/t/:tid/players/:pid` | 删除玩家（报名/选牌/构筑阶段；同时清理其选牌与卡组；对战开始后 409） |
+| `POST /admin/t/:tid/players/:pid/token` | 重置玩家 token 并返回新明文（token 仅存哈希，不可回显旧值） |
+| `POST /admin/t/:tid/match/result` | 手动设置/修改对局结果 `{round, tableNo, resultA, resultB}`（0-2 整数）；触发轮次推进与积分即时更新，并关闭对应 srvpro 房间 |
 | `POST /admin/t/:tid/revert` | body `{ seq }` 回溯到历史事件序号 |
 
 ### 2.3 SSE 事件（`GET /t/:tid/stream?tid=&pid=&token=`）
