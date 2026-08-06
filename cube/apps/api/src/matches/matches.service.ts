@@ -214,7 +214,7 @@ export class MatchesService implements OnModuleInit {
           hostinfo: {
             mode: cfg.mode === 'match' ? 1 : 0,
             rule: 5,
-            lflist: -1,
+            lflist: 0,
             duel_rule: 3,
             start_lp: 8000,
             start_hand: 5,
@@ -454,12 +454,15 @@ export class MatchesService implements OnModuleInit {
 
   roomInfo(tid: number, playerId: string) {
     const state = loadState(tid);
+    // 返回该玩家全部轮次的历史对局（不只当前轮），按轮次/桌号排序
     return state.matches
-      .filter((m) => m.round === state.round && (m.playerA === playerId || m.playerB === playerId))
+      .filter((m) => m.playerA === playerId || m.playerB === playerId)
+      .sort((a, b) => a.round - b.round || a.tableNo - b.tableNo)
       .map((m) => ({
         id: m.id,
         round: m.round,
         tableNo: m.tableNo,
+        playerA: m.playerA,
         opponent: m.playerA === playerId ? m.playerB : m.playerA,
         roomName: m.roomName,
         resultA: m.resultA,

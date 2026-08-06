@@ -42,7 +42,7 @@
 | `POST /t/:tid/deck/move` | body `{ card_code, from, to, index }`（构筑期移动/换序；`to` 可为 `pool` = 移出构筑；`from=pool` 必须属于本人已选卡，否则 409 CARD_NOT_IN_POOL） |
 | `POST /t/:tid/deck/lock` / `POST /t/:tid/deck/unlock` | 锁定/解锁 |
 | `GET /t/:tid/deck.ydk` | 当前玩家卡组导出；Content-Disposition 文件名 `deck-<tid>-<pid>-<timestamp>.ydk` |
-| `GET /t/:tid/matches` | 当前轮对阵与房间信息（房间名含随机词防进错；无独立密码，进房昵称 = playerId） |
+| `GET /t/:tid/matches` | 该玩家全部轮次的历史对局与房间信息：`{id, round, tableNo, playerA, opponent, roomName, resultA, resultB, startedAt, finishedAt}`（按轮次/桌号排序；房间名含随机词防进错；无独立密码，进房昵称 = playerId） |
 | `GET /t/:tid/ranking` | 实时积分榜（胜 3/平 1/负 0，OMW% 破同分；不含卡牌信息） |
 | `GET /meta` (public) | 对局服务器连接信息：`{ srvpro: { host, gamePort } }`（config.yaml `srvpro.game_port`） |
 | `POST /admin/t/:tid/security` | body `{ require_token: false }` 关闭/开启该 tournament 的 token 鉴权 |
@@ -75,11 +75,12 @@
   "password": null,
   "hostinfo": {
     "mode": 1,
-    "rule": 0, "lflist": -1, "duel_rule": 3,
+    "rule": 0, "lflist": 0, "duel_rule": 3,
     "start_lp": 8000, "start_hand": 5, "draw_count": 1,
     "time_limit": 180,
     "no_check_deck": true, "no_shuffle_deck": false
     // time_limit 来自 tournament 配置 timeLimit（默认 180；999 ≈ 不限时，对应规则 token TIME999）
+    // lflist: 0 = 应用 OCG 当前禁限表（lflist.conf 第一个日期区块）；-1 = 不应用（老组合默认）
   },
   "deck_size": { "main_min": 40, "main_max": 60, "extra_max": 15, "side_max": 15 },
   "players": [
