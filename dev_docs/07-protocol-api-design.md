@@ -75,12 +75,13 @@
   "password": null,
   "hostinfo": {
     "mode": 1,
-    "rule": 0, "lflist": -1, "duel_rule": 3,
+    "rule": 0, "lflist": -1, "duel_rule": 5,
     "start_lp": 8000, "start_hand": 5, "draw_count": 1,
     "time_limit": 180,
     "no_check_deck": true, "no_shuffle_deck": false
     // time_limit 来自 tournament 配置 timeLimit（默认 180；999 ≈ 不限时，对应规则 token TIME999）
     // lflist 恒为 -1：cube 与直接建房一律不应用禁限卡表（轮抽由卡池自行约束）
+    // duel_rule 恒为 5：一律使用新大师规则2020（≥4 时客户端按 2020 布局渲染）
   },
   "deck_size": { "main_min": 40, "main_max": 60, "extra_max": 15, "side_max": 15 },
   "players": [
