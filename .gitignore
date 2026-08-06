@@ -21,6 +21,7 @@ node_modules/
 cube/apps/api/dist/
 cube/apps/web/.next/
 cube/apps/web/out/
+*.tsbuildinfo
 
 # generated card images (regenerate with vips; original pics are symlinks)
 assets/pics_avif/
