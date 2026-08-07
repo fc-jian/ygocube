@@ -34,7 +34,7 @@ registration → drafting → deckbuilding → matches → finished
 
 ## 3. 选牌引擎（DraftModule）
 
-- **牌堆生成**：卡池（管理员选定的 cards.cdb 全量或自定义池）随机洗牌 → 顺序切成 N 个牌堆，每堆 size = `packSize`（任意正整数，默认 12，不再要求是人数整数倍；旧配置 `packSizeMultiple` 仍兼容 = 人数 × 倍数）。剩余卡处理由 `dropMode` 决定（默认 `drop_leftover`）：`use_all` 所有卡进牌堆（最后一堆可不满）；`drop_leftover` 只丢弃无法整除的余数（不要求牌堆数是玩家数倍数）；`drop_leftover_exact` 丢弃余数且要求牌堆数是玩家数倍数。丢弃的卡牌列表**预先公开**（配置项）。 牌堆构成由 `packStrategy` 决定（默认 `stratify`）：`stratify` 主卡/额外卡按整体比例均匀分布到每一堆；`random` 全卡池随机切堆；`main_then_extra` 先排完全部主卡再排额外卡。
+- **牌堆生成**：卡池（管理员选定的 cards.cdb 全量或自定义池）随机洗牌 → 顺序切成 N 个牌堆，每堆 size = `packSize`（任意正整数，默认 12，不再要求是人数整数倍；旧配置 `packSizeMultiple` 仍兼容 = 人数 × 倍数）。剩余卡处理由 `dropMode` 决定（默认 `drop_leftover`）：`use_all` 所有卡进牌堆（最后一堆可不满）；`drop_leftover` 只丢弃无法整除的余数（不要求牌堆数是玩家数倍数）；`drop_leftover_exact` 丢弃余数且要求牌堆数是玩家数倍数。丢弃的卡牌是否公开由 `dropPublic` 独立配置（默认公开；false 时只移除不展示）。牌堆总数（轮数）可由 `packCount` 显式设置（上限 = floor(池卡数 / 每堆卡数)，设置时可小于该值，剩余卡全部随机丢弃）；缺省按 dropMode 自动决定。 牌堆构成由 `packStrategy` 决定（默认 `stratify`）：`stratify` 主卡/额外卡按整体比例均匀分布到每一堆；`random` 全卡池随机切堆；`main_then_extra` 先排完全部主卡再排额外卡。
 - **圆桌轮转**：玩家座位按随机分配，从 1 号玩家开始顺时针选第一堆牌。选完后，最后选的玩家立刻连续选下一堆第一张牌，仍然顺时针进行。由于牌堆数（轮数）是玩家数的整数倍，每个玩家得到每个选牌次序的数目是相同的。
 - **计时**：默认 30s/选；计时器只在轮到自己时启动；超时服务器**随机选牌**（从堆内未选牌中随机），事件日志记录 `auto_pick`。
 - **信息隐藏**：非自己的轮次不返回牌堆内容，只返回剩余数量（与 UI 约定见 06）。

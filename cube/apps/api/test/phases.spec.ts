@@ -279,3 +279,44 @@ describe('pack strategy', () => {
     expect(state.packs[0].order.length).toBe(9);
     expect(state.packs[0].order.length).not.toBe(12); // 不是新默认 12
   });
+
+  it('packCount fixes the number of packs; remainder is dropped', () => {
+    const tournaments = makeTournaments();
+    const cards = new CardsService();
+    const draft = new DraftService(cards, tournaments, new PoolsService(cards), new MatchesService(fakeSrvpro as any));
+    const p = new PoolsService(cards);
+    p.create('pk', cards.poolCodes().slice(0, 40));
+    const tid = tournaments.create({ name: 'pk', maxPlayers: 3, cardPool: 'pk', packSize: 9, packCount: 3 }, 'test').tid;
+    for (let i = 0; i < 3; i++) tournaments.join(tid, `p${i}`, `P${i}`);
+    draft.startDraft(tid, 'test');
+    const state = loadState(tid);
+    expect(state.packs.length).toBe(3); // 27 张进堆
+    expect(state.packs[0].order.length).toBe(9);
+    expect(state.droppedCards.length).toBe(40 - 27); // 剩余 13 张全部随机丢弃
+  });
+
+  it('packCount above the pool limit is clamped to the maximum', () => {
+    const tournaments = makeTournaments();
+    const cards = new CardsService();
+    const draft = new DraftService(cards, tournaments, new PoolsService(cards), new MatchesService(fakeSrvpro as any));
+    const p = new PoolsService(cards);
+    p.create('pk2', cards.poolCodes().slice(0, 40));
+    const tid = tournaments.create({ name: 'pk2', maxPlayers: 3, cardPool: 'pk2', packSize: 9, packCount: 99 }, 'test').tid;
+    for (let i = 0; i < 3; i++) tournaments.join(tid, `p${i}`, `P${i}`);
+    draft.startDraft(tid, 'test');
+    expect(loadState(tid).packs.length).toBe(4); // floor(40/9)
+  });
+
+  it('dropPublic=false removes dropped cards without exposing them', () => {
+    const tournaments = makeTournaments();
+    const cards = new CardsService();
+    const draft = new DraftService(cards, tournaments, new PoolsService(cards), new MatchesService(fakeSrvpro as any));
+    const p = new PoolsService(cards);
+    p.create('priv', cards.poolCodes().slice(0, 31));
+    const tid = tournaments.create({ name: 'priv', maxPlayers: 3, cardPool: 'priv', packSize: 9, dropMode: 'drop_leftover', dropPublic: false }, 'test').tid;
+    for (let i = 0; i < 3; i++) tournaments.join(tid, `p${i}`, `P${i}`);
+    draft.startDraft(tid, 'test');
+    const state = loadState(tid);
+    expect(state.packs.length).toBe(3);
+    expect(state.droppedCards.length).toBe(0); // 丢弃 4 张但不公开
+  });

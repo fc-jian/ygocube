@@ -66,6 +66,8 @@ export default function AdminPage() {
   const [shownToken, setShownToken] = useState<{ pid: string; token: string } | null>(null);
   const [matchInputs, setMatchInputs] = useState<Record<number, { a: string; b: string }>>({});
   const [events, setEvents] = useState<{ seq: number; entity: string; action: string; summary: string; createdAt: string }[]>([]);
+  const [packCount, setPackCount] = useState<number | ''>('');
+  const [dropPublic, setDropPublic] = useState(true);
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null);
 
   useEffect(() => {
@@ -170,6 +172,8 @@ export default function AdminPage() {
       dropMode: (state.config.dropMode as string) ?? (state.config.dropLeftover === false ? 'use_all' : 'drop_leftover_exact'),
       packStrategy: (state.config.packStrategy as string) ?? 'stratify',
     });
+    setPackCount((state.config.packCount as number | undefined) ?? '');
+    setDropPublic((state.config.dropPublic as boolean | undefined) !== false);
     setEditing(true);
   };
 
@@ -191,6 +195,8 @@ export default function AdminPage() {
         deckbuildingSeconds: Number(editForm.deckbuildingSeconds),
         dropMode: String(editForm.dropMode === 'use_all' || editForm.dropMode === 'drop_leftover_exact' ? editForm.dropMode : 'drop_leftover'),
         packStrategy: String(editForm.packStrategy === 'random' || editForm.packStrategy === 'main_then_extra' ? editForm.packStrategy : 'stratify'),
+        packCount: packCount === '' ? undefined : Number(packCount),
+        dropPublic,
       };
       await adminFetch(`/admin/t/${state!.id}/config`, 'PUT', body);
       setMsg('参数已更新');
@@ -507,6 +513,10 @@ export default function AdminPage() {
                 </select>
               </label>
               <label className="flex items-center gap-2">每堆卡数 <input type="number" min={1} max={60} className="w-14 rounded bg-felt-deep px-2 py-1" value={Number(editForm.packSize) || 12} onChange={(e) => setEditForm((f) => ({ ...f, packSize: Number(e.target.value) }))} /></label>
+              <label className="flex items-center gap-2">牌堆总数（轮数）
+                <input type="number" min={1} className="w-14 rounded bg-felt-deep px-2 py-1" placeholder="自动" value={packCount} onChange={(e) => setPackCount(e.target.value === '' ? '' : Math.max(1, Number(e.target.value)))} />
+              </label>
+              <label className="flex items-center gap-2"><input type="checkbox" checked={dropPublic} onChange={(e) => setDropPublic(e.target.checked)} /> 公开被丢弃的卡牌</label>
               <label className="flex items-center gap-2">卡池
                 <select className="rounded bg-felt-deep px-2 py-1" value={String(editForm.cardPool ?? '')} onChange={(e) => setEditForm((f) => ({ ...f, cardPool: e.target.value }))}>
                   {pools.map((p) => <option key={p.name} value={p.name}>{p.name} ({p.count})</option>)}
@@ -522,7 +532,7 @@ export default function AdminPage() {
               <label className="flex items-center gap-2">剩余卡处理
                 <select className="rounded bg-felt-deep px-1 py-1" value={String(editForm.dropMode ?? 'drop_leftover')} onChange={(e) => setEditForm((f) => ({ ...f, dropMode: e.target.value }))}>
                   <option value="use_all">使用所有卡牌</option>
-                  <option value="drop_leftover">公开丢弃无法整除的剩余卡牌</option>
+                  <option value="drop_leftover">丢弃无法整除的剩余卡牌</option>
                   <option value="drop_leftover_exact">公开丢弃且要求牌堆数目是玩家整数倍</option>
                 </select>
               </label>

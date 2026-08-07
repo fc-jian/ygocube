@@ -114,7 +114,7 @@ export class AdminController {
   updateTournamentConfig(@Req() req: AuthedRequest, @Body() body: Record<string, unknown>) {
     const tid = Number(req.params.tid);
     const patch: Record<string, unknown> = {};
-    for (const key of ['name', 'maxPlayers', 'mode', 'packSize', 'packSizeMultiple', 'cardPool', 'mainMin', 'mainMax', 'extraMax', 'sideMax', 'maxCopies', 'timeLimit', 'pickSeconds', 'deckbuildingSeconds', 'dropMode', 'packStrategy']) {
+    for (const key of ['name', 'maxPlayers', 'mode', 'packSize', 'packSizeMultiple', 'cardPool', 'mainMin', 'mainMax', 'extraMax', 'sideMax', 'maxCopies', 'timeLimit', 'pickSeconds', 'deckbuildingSeconds', 'dropMode', 'packStrategy', 'packCount', 'dropPublic']) {
       if (body[key] !== undefined) patch[key] = body[key];
     }
     if (Object.keys(patch).length === 0) throw new Error('BAD_PAYLOAD');

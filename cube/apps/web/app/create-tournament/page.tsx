@@ -12,6 +12,9 @@ export default function CreateTournamentPage() {
   const [name, setName] = useState('');
   const [maxPlayers, setMaxPlayers] = useState(4);
   const [packSize, setPackSize] = useState(12);
+  const [packTouched, setPackTouched] = useState(false);
+  const [packCount, setPackCount] = useState<number | ''>('');
+  const [dropPublic, setDropPublic] = useState(true);
   const [mode, setMode] = useState<'single' | 'match'>('match');
   const [pools, setPools] = useState<PoolInfo[]>([]);
   const [cardPool, setCardPool] = useState('');
@@ -42,7 +45,7 @@ export default function CreateTournamentPage() {
     try {
       const r = await api<{ tid: number; url: string; admin_token: string }>('/tournaments', {
         method: 'POST',
-        body: { name, maxPlayers, mode, packSize, cardPool, mainMin, mainMax, extraMax, sideMax, maxCopies, timeLimit, pickSeconds, deckbuildingSeconds, dropMode, packStrategy },
+        body: { name, maxPlayers, mode, packSize, cardPool, mainMin, mainMax, extraMax, sideMax, maxCopies, timeLimit, pickSeconds, deckbuildingSeconds, dropMode, packStrategy, packCount: packCount === '' ? undefined : Number(packCount), dropPublic },
         createToken,
       });
       setCreated({ url: r.url, adminToken: r.admin_token });
@@ -80,7 +83,18 @@ export default function CreateTournamentPage() {
           <div className="flex flex-wrap gap-4 text-sm">
             <label className="flex items-center gap-2">
               人数
-              <input type="number" min={2} max={64} className="w-16 rounded bg-felt-deep px-2 py-1" value={maxPlayers} onChange={(e) => setMaxPlayers(Number(e.target.value))} />
+              <input
+                type="number"
+                min={2}
+                max={64}
+                className="w-16 rounded bg-felt-deep px-2 py-1"
+                value={maxPlayers}
+                onChange={(e) => {
+                  const n = Number(e.target.value);
+                  setMaxPlayers(n);
+                  if (!packTouched) setPackSize(Math.max(1, n * 3));
+                }}
+              />
             </label>
             <label className="flex items-center gap-2">
               模式
@@ -90,8 +104,15 @@ export default function CreateTournamentPage() {
               </select>
             </label>
             <label className="flex items-center gap-2">
-              每堆 = 人数 ×
-              <input type="number" min={1} max={60} className="w-16 rounded bg-felt-deep px-2 py-1" value={packSize} onChange={(e) => setPackSize(Math.max(1, Number(e.target.value)))} />
+              每堆卡数（建议 {maxPlayers * 3}）
+              <input
+                type="number"
+                min={1}
+                max={60}
+                className="w-16 rounded bg-felt-deep px-2 py-1"
+                value={packSize}
+                onChange={(e) => { setPackTouched(true); setPackSize(Math.max(1, Number(e.target.value))); }}
+              />
             </label>
             <label className="flex items-center gap-2">
               卡池
@@ -140,9 +161,34 @@ export default function CreateTournamentPage() {
               剩余卡处理
               <select className="rounded bg-felt-deep px-2 py-1" value={dropMode} onChange={(e) => setDropMode(e.target.value)}>
                 <option value="use_all">使用所有卡牌</option>
-                <option value="drop_leftover">公开丢弃无法整除的剩余卡牌</option>
-                <option value="drop_leftover_exact">公开丢弃且要求牌堆数目是玩家整数倍</option>
+                <option value="drop_leftover">丢弃无法整除的剩余卡牌</option>
+                <option value="drop_leftover_exact">丢弃且要求牌堆数目是玩家整数倍</option>
               </select>
+            </label>
+            <label className="flex items-center gap-2">
+              牌堆总数（轮数）
+              <input
+                type="number"
+                min={1}
+                max={Math.max(1, Math.floor((pools.find((p) => p.name === cardPool)?.count ?? 0) / Math.max(1, packSize)))}
+                className="w-16 rounded bg-felt-deep px-2 py-1"
+                placeholder="自动"
+                value={packCount}
+                onChange={(e) => setPackCount(e.target.value === '' ? '' : Math.max(1, Number(e.target.value)))}
+              />
+              {cardPool ? (
+                <span className="text-xs text-slate-400">
+                  上限 {Math.max(1, Math.floor((pools.find((p) => p.name === cardPool)?.count ?? 0) / Math.max(1, packSize)))} 堆 · 使用{' '}
+                  {(packCount === '' ? Math.floor((pools.find((p) => p.name === cardPool)?.count ?? 0) / Math.max(1, packSize)) : Number(packCount)) * packSize} 张 · 剩余{' '}
+                  {Math.max(0, (pools.find((p) => p.name === cardPool)?.count ?? 0) - (packCount === '' ? Math.floor((pools.find((p) => p.name === cardPool)?.count ?? 0) / Math.max(1, packSize)) : Number(packCount)) * packSize)} 张随机丢弃
+                </span>
+              ) : (
+                <span className="text-xs text-slate-500">请先选择卡池</span>
+              )}
+            </label>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={dropPublic} onChange={(e) => setDropPublic(e.target.checked)} />
+              公开被丢弃的卡牌
             </label>
             <label className="flex items-center gap-2">
               卡堆组成

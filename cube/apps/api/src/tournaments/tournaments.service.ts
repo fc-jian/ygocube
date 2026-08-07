@@ -50,6 +50,10 @@ export interface CreateTournamentInput {
   dropLeftover?: boolean;
   // 牌堆构成策略：stratify（默认，主/额外按比例均匀每堆）| random | main_then_extra
   packStrategy?: 'stratify' | 'random' | 'main_then_extra';
+  // 牌堆总数（轮数）：显式设置时固定堆数，剩余卡全部随机丢弃；缺省按 dropMode 自动
+  packCount?: number;
+  // 丢弃的卡牌是否公开（默认公开；false 时只移除不展示）
+  dropPublic?: boolean;
   cardPool?: string;
 }
 
@@ -95,6 +99,8 @@ export class TournamentsService {
             ? 'drop_leftover_exact'
             : 'use_all'),
       packStrategy: input.packStrategy ?? 'stratify',
+      packCount: input.packCount,
+      dropPublic: input.dropPublic !== false,
       mainMin: input.mainMin ?? defaults.mainMin,
       mainMax: input.mainMax ?? defaults.mainMax,
       extraMax: input.extraMax ?? defaults.extraMax,
