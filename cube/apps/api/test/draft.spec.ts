@@ -58,7 +58,7 @@ describe('draft engine', () => {
     const pool = cards.poolCodes().slice(0, 27);
     const p = new PoolsService(cards);
     p.create('eq', pool);
-    const tid = tournaments.create({ name: 'eq', maxPlayers: 3, cardPool: 'eq' }, 'test').tid;
+    const tid = tournaments.create({ name: 'eq', maxPlayers: 3, cardPool: 'eq', packSize: 9 }, 'test').tid;
     for (let i = 0; i < 3; i++) tournaments.join(tid, `p${i}`, `P${i}`);
     draft.startDraft(tid, 'test');
     // play the whole draft: pick the first remaining card on each turn
@@ -82,7 +82,14 @@ describe('draft engine', () => {
   });
 
   it('clockwise rotation: orders are 1-2-3, 3-1-2, 2-3-1, 1-2-3 ...', () => {
-    const { draft, tid } = setupDraft(3);
+    const tournaments = makeTournaments();
+    const cards = new CardsService();
+    const draft = new DraftService(cards, tournaments, new PoolsService(cards), new MatchesService(fakeSrvpro as any));
+    const p = new PoolsService(cards);
+    p.create('rotpool', cards.poolCodes().slice(0, 27));
+    const tid = tournaments.create({ name: 'rotpool', maxPlayers: 3, cardPool: 'rotpool', packSize: 9 }, 'test').tid;
+    for (let i = 0; i < 3; i++) tournaments.join(tid, `p${i}`, `P${i}`);
+    draft.startDraft(tid, 'test');
     const state0 = loadState(tid);
     const seats = state0.players.slice().sort((a, b) => a.seat - b.seat).map((p) => p.playerId);
     // pack 0 round 0 -> seat 0 (1-2-3)

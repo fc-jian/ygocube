@@ -66,7 +66,7 @@ describe('phase rules', () => {
     const pool = cards.poolCodes().slice(0, 29);
     const p = new PoolsService(cards);
     p.create('nodrop', pool);
-    const tid = tournaments.create({ name: 'nodrop', maxPlayers: 3, cardPool: 'nodrop', dropMode: 'use_all' }, 'test').tid;
+    const tid = tournaments.create({ name: 'nodrop', maxPlayers: 3, cardPool: 'nodrop', dropMode: 'use_all', packSize: 9 }, 'test').tid;
     for (let i = 0; i < 3; i++) tournaments.join(tid, `p${i}`, `P${i}`);
     draft.startDraft(tid, 'test');
     const state = loadState(tid);
@@ -84,7 +84,7 @@ describe('phase rules', () => {
     const pool = cards.poolCodes().slice(0, 31);
     const p = new PoolsService(cards);
     p.create('dropleft', pool);
-    const tid = tournaments.create({ name: 'dropleft', maxPlayers: 3, cardPool: 'dropleft', dropMode: 'drop_leftover' }, 'test').tid;
+    const tid = tournaments.create({ name: 'dropleft', maxPlayers: 3, cardPool: 'dropleft', dropMode: 'drop_leftover', packSize: 9 }, 'test').tid;
     for (let i = 0; i < 3; i++) tournaments.join(tid, `p${i}`, `P${i}`);
     draft.startDraft(tid, 'test');
     const state = loadState(tid);
@@ -99,7 +99,7 @@ describe('phase rules', () => {
     const pool = cards.poolCodes().slice(0, 35); // floor(35/9)=3, 3%3=0 -> 3 packs (27), 8 dropped
     const p = new PoolsService(cards);
     p.create('dropexact', pool);
-    const tid = tournaments.create({ name: 'dropexact', maxPlayers: 3, cardPool: 'dropexact', dropMode: 'drop_leftover_exact' }, 'test').tid;
+    const tid = tournaments.create({ name: 'dropexact', maxPlayers: 3, cardPool: 'dropexact', dropMode: 'drop_leftover_exact', packSize: 9 }, 'test').tid;
     for (let i = 0; i < 3; i++) tournaments.join(tid, `p${i}`, `P${i}`);
     draft.startDraft(tid, 'test');
     const state = loadState(tid);
@@ -108,7 +108,7 @@ describe('phase rules', () => {
     // 32 cards: floor(32/9)=3, 3%3=0 -> still 3 packs; 34 cards: floor=3, 3%3=0
     // 用 38 张验证 trim：floor(38/9)=4, 4%3=1 -> 3 packs (27), 11 dropped
     p.create('dropexact2', cards.poolCodes().slice(0, 38));
-    const tid2 = tournaments.create({ name: 'dropexact2', maxPlayers: 3, cardPool: 'dropexact2', dropMode: 'drop_leftover_exact' }, 'test').tid;
+    const tid2 = tournaments.create({ name: 'dropexact2', maxPlayers: 3, cardPool: 'dropexact2', dropMode: 'drop_leftover_exact', packSize: 9 }, 'test').tid;
     for (let i = 0; i < 3; i++) tournaments.join(tid2, `p${i}`, `P${i}`);
     draft.startDraft(tid2, 'test');
     const s2 = loadState(tid2);
@@ -246,3 +246,36 @@ describe('pack strategy', () => {
     }
   });
 });
+
+  it('packSize accepts any number (no multiple-of-players requirement)', () => {
+    const tournaments = makeTournaments();
+    const cards = new CardsService();
+    const draft = new DraftService(cards, tournaments, new PoolsService(cards), new MatchesService(fakeSrvpro as any));
+    // 3 人，每堆 10 张（非 3 的倍数）：31 张卡 use_all -> ceil(31/10)=4 堆（10,10,10,1）
+    const p = new PoolsService(cards);
+    p.create('anypack', cards.poolCodes().slice(0, 31));
+    const tid = tournaments.create({ name: 'anypack', maxPlayers: 3, cardPool: 'anypack', dropMode: 'use_all', packSize: 10 }, 'test').tid;
+    for (let i = 0; i < 3; i++) tournaments.join(tid, `p${i}`, `P${i}`);
+    draft.startDraft(tid, 'test');
+    const state = loadState(tid);
+    expect(state.packs.length).toBe(4);
+    expect(state.packs[0].order.length).toBe(10);
+    expect(state.packs[2].order.length).toBe(10);
+    expect(state.packs[3].order.length).toBe(1);
+    expect(state.droppedCards.length).toBe(0);
+  });
+
+  it('legacy packSizeMultiple still yields n*multiple packs', () => {
+    const tournaments = makeTournaments();
+    const cards = new CardsService();
+    const draft = new DraftService(cards, tournaments, new PoolsService(cards), new MatchesService(fakeSrvpro as any));
+    const p = new PoolsService(cards);
+    p.create('legacypack', cards.poolCodes().slice(0, 40));
+    // 3 人 × 3 = 9/堆（旧语义，不传 packSize）
+    const tid = tournaments.create({ name: 'legacypack', maxPlayers: 3, cardPool: 'legacypack', dropMode: 'use_all', packSizeMultiple: 3 }, 'test').tid;
+    for (let i = 0; i < 3; i++) tournaments.join(tid, `p${i}`, `P${i}`);
+    draft.startDraft(tid, 'test');
+    const state = loadState(tid);
+    expect(state.packs[0].order.length).toBe(9);
+    expect(state.packs[0].order.length).not.toBe(12); // 不是新默认 12
+  });

@@ -85,7 +85,8 @@ function loadConfig(): AppConfig {
 export const config = loadConfig();
 
 export const defaults = {
-  packSizeMultiple: 3,
+  packSize: 12, // 每堆卡牌数（任意正整数，不再要求是人数整数倍）
+  packSizeMultiple: 3, // 旧配置兼容（packSize 缺失时每堆 = 人数 × 该倍数）
   pickSeconds: 30,
   pauseSeconds: 300,
   deckbuildingSeconds: 600,

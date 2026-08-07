@@ -31,6 +31,7 @@ export interface CreateTournamentInput {
   name: string;
   maxPlayers: number;
   mode?: 'single' | 'match';
+  packSize?: number; // 每堆卡牌数（任意正整数）；旧参数 packSizeMultiple=每堆为 人数×倍数 的兼容字段
   packSizeMultiple?: number;
   pickSeconds?: number;
   deckbuildingSeconds?: number;
@@ -80,6 +81,7 @@ export class TournamentsService {
     const cfg = {
       maxPlayers: input.maxPlayers,
       mode: input.mode ?? 'match',
+      packSize: input.packSize ?? (input.packSizeMultiple === undefined ? defaults.packSize : undefined),
       packSizeMultiple: input.packSizeMultiple ?? defaults.packSizeMultiple,
       pickSeconds: input.pickSeconds ?? defaults.pickSeconds,
       pauseSeconds: defaults.pauseSeconds,

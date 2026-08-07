@@ -157,7 +157,7 @@ export default function AdminPage() {
       name: state.name,
       mode: (state.config.mode as string) ?? 'match',
       maxPlayers: state.config.maxPlayers as number,
-      packSizeMultiple: state.config.packSizeMultiple as number,
+      packSize: (state.config.packSize as number) ?? ((state.config.packSizeMultiple as number) ?? 3) * (state.players.length || 2),
       cardPool: (state.config.cardPool as string) ?? '',
       mainMin: state.config.mainMin as number,
       mainMax: state.config.mainMax as number,
@@ -179,7 +179,7 @@ export default function AdminPage() {
         name: String(editForm.name),
         mode: String(editForm.mode === 'single' ? 'single' : 'match'),
         maxPlayers: Number(editForm.maxPlayers),
-        packSizeMultiple: Number(editForm.packSizeMultiple),
+        packSize: Number(editForm.packSize),
         cardPool: String(editForm.cardPool),
         mainMin: Number(editForm.mainMin),
         mainMax: Number(editForm.mainMax),
@@ -506,7 +506,7 @@ export default function AdminPage() {
                   <option value="single">单局</option>
                 </select>
               </label>
-              <label className="flex items-center gap-2">每堆倍数 <input type="number" min={1} max={10} className="w-14 rounded bg-felt-deep px-2 py-1" value={Number(editForm.packSizeMultiple) || 1} onChange={(e) => setEditForm((f) => ({ ...f, packSizeMultiple: Number(e.target.value) }))} /></label>
+              <label className="flex items-center gap-2">每堆卡数 <input type="number" min={1} max={60} className="w-14 rounded bg-felt-deep px-2 py-1" value={Number(editForm.packSize) || 12} onChange={(e) => setEditForm((f) => ({ ...f, packSize: Number(e.target.value) }))} /></label>
               <label className="flex items-center gap-2">卡池
                 <select className="rounded bg-felt-deep px-2 py-1" value={String(editForm.cardPool ?? '')} onChange={(e) => setEditForm((f) => ({ ...f, cardPool: e.target.value }))}>
                   {pools.map((p) => <option key={p.name} value={p.name}>{p.name} ({p.count})</option>)}

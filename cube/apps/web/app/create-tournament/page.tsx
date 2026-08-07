@@ -11,7 +11,7 @@ interface PoolInfo {
 export default function CreateTournamentPage() {
   const [name, setName] = useState('');
   const [maxPlayers, setMaxPlayers] = useState(4);
-  const [packSizeMultiple, setPackSizeMultiple] = useState(3);
+  const [packSize, setPackSize] = useState(12);
   const [mode, setMode] = useState<'single' | 'match'>('match');
   const [pools, setPools] = useState<PoolInfo[]>([]);
   const [cardPool, setCardPool] = useState('');
@@ -42,7 +42,7 @@ export default function CreateTournamentPage() {
     try {
       const r = await api<{ tid: number; url: string; admin_token: string }>('/tournaments', {
         method: 'POST',
-        body: { name, maxPlayers, mode, packSizeMultiple, cardPool, mainMin, mainMax, extraMax, sideMax, maxCopies, timeLimit, pickSeconds, deckbuildingSeconds, dropMode, packStrategy },
+        body: { name, maxPlayers, mode, packSize, cardPool, mainMin, mainMax, extraMax, sideMax, maxCopies, timeLimit, pickSeconds, deckbuildingSeconds, dropMode, packStrategy },
         createToken,
       });
       setCreated({ url: r.url, adminToken: r.admin_token });
@@ -91,7 +91,7 @@ export default function CreateTournamentPage() {
             </label>
             <label className="flex items-center gap-2">
               每堆 = 人数 ×
-              <input type="number" min={1} max={10} className="w-16 rounded bg-felt-deep px-2 py-1" value={packSizeMultiple} onChange={(e) => setPackSizeMultiple(Math.max(1, Number(e.target.value)))} />
+              <input type="number" min={1} max={60} className="w-16 rounded bg-felt-deep px-2 py-1" value={packSize} onChange={(e) => setPackSize(Math.max(1, Number(e.target.value)))} />
             </label>
             <label className="flex items-center gap-2">
               卡池

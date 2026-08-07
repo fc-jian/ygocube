@@ -49,6 +49,7 @@ export class DraftService implements OnModuleInit {
     const state = loadState(tid);
     if (state.status !== 'registration') throw new Error('WRONG_PHASE');
     const cfg = getConfig(state);
+    const rawCfg = JSON.parse(state.configJson) as Record<string, unknown>;
     const n = state.players.length;
     if (n < 2) throw new Error('NOT_ENOUGH_PLAYERS');
     // seats: join order unless admin assigned
@@ -88,7 +89,7 @@ export class DraftService implements OnModuleInit {
         codes = [...main, ...extra];
       } else {
         // stratify: 逐堆按剩余 main:extra 比例动态取卡（两池已各自洗牌），堆外剩余追加为弃置
-        const packSize = n * cfg.packSizeMultiple;
+        const packSize = (rawCfg.packSize as number | undefined) ?? n * ((rawCfg.packSizeMultiple as number | undefined) ?? 3);
         const dropMode0 =
           cfg.dropMode === 'use_all' || cfg.dropMode === 'drop_leftover' || cfg.dropMode === 'drop_leftover_exact'
             ? cfg.dropMode
@@ -114,7 +115,7 @@ export class DraftService implements OnModuleInit {
         codes = [...per.flat(), ...main.slice(mi), ...extra.slice(ei)];
       }
     }
-    const packSize = n * cfg.packSizeMultiple;
+    const packSize = (rawCfg.packSize as number | undefined) ?? n * ((rawCfg.packSizeMultiple as number | undefined) ?? 3);
     // 剩余卡处理（dev_docs/05 §3，DropMode）：
     //  use_all            = 所有卡进牌堆，最后一堆可以不满（不做整除要求）
     //  drop_leftover      = 只丢弃无法整除的余数，不要求牌堆数是玩家数倍数
