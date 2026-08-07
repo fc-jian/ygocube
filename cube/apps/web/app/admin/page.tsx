@@ -168,6 +168,7 @@ export default function AdminPage() {
       pickSeconds: state.config.pickSeconds as number,
       deckbuildingSeconds: state.config.deckbuildingSeconds as number,
       dropMode: (state.config.dropMode as string) ?? (state.config.dropLeftover === false ? 'use_all' : 'drop_leftover_exact'),
+      packStrategy: (state.config.packStrategy as string) ?? 'stratify',
     });
     setEditing(true);
   };
@@ -189,6 +190,7 @@ export default function AdminPage() {
         pickSeconds: Number(editForm.pickSeconds),
         deckbuildingSeconds: Number(editForm.deckbuildingSeconds),
         dropMode: String(editForm.dropMode === 'use_all' || editForm.dropMode === 'drop_leftover_exact' ? editForm.dropMode : 'drop_leftover'),
+        packStrategy: String(editForm.packStrategy === 'random' || editForm.packStrategy === 'main_then_extra' ? editForm.packStrategy : 'stratify'),
       };
       await adminFetch(`/admin/t/${state!.id}/config`, 'PUT', body);
       setMsg('参数已更新');
@@ -522,6 +524,13 @@ export default function AdminPage() {
                   <option value="use_all">使用所有卡牌</option>
                   <option value="drop_leftover">公开丢弃无法整除的剩余卡牌</option>
                   <option value="drop_leftover_exact">公开丢弃且要求牌堆数目是玩家整数倍</option>
+                </select>
+              </label>
+              <label className="flex items-center gap-2">卡堆组成
+                <select className="rounded bg-felt-deep px-1 py-1" value={String(editForm.packStrategy ?? 'stratify')} onChange={(e) => setEditForm((f) => ({ ...f, packStrategy: e.target.value }))}>
+                  <option value="stratify">主卡/额外卡按比例均匀每堆</option>
+                  <option value="random">全随机</option>
+                  <option value="main_then_extra">先全主卡再全额外</option>
                 </select>
               </label>
             </div>

@@ -8,6 +8,25 @@ import { PoolsService } from '../pools/pools.service';
 
 export type DropMode = 'use_all' | 'drop_leftover' | 'drop_leftover_exact';
 
+// 玩家 token 词表：3 个单词用 '-' 连接，方便口述与记忆（如 "ember-frost-nova"）
+const TOKEN_WORDS = [
+  'ember', 'frost', 'gale', 'haze', 'iron', 'jade', 'kite', 'lark', 'mist', 'nova',
+  'onyx', 'pearl', 'quartz', 'raven', 'slate', 'tide', 'umbra', 'vale', 'wisp', 'yew',
+  'amber', 'briar', 'cedar', 'dusk', 'elm', 'fern', 'grove', 'holly', 'iris', 'juniper',
+  'acorn', 'bloom', 'cinder', 'dove', 'echo', 'flint', 'glade', 'heron', 'ivy', 'lynx',
+  'maple', 'oak', 'pine', 'reed', 'snow', 'thorn', 'willow', 'zephyr', 'basil', 'clover',
+  'drift', 'ember', 'falcon', 'gnome', 'harbor', 'indigo', 'jasmine', 'kestrel', 'lotus',
+  'meadow', 'nettle', 'orchid', 'poppy', 'quill', 'robin', 'saffron', 'thistle', 'violet',
+  'wren', 'yarrow', 'boulder', 'coral', 'denim', 'falcon', 'garnet', 'hazel', 'iris',
+  'juniper', 'knot', 'lagoon', 'moss', 'nutmeg', 'opal', 'pumice', 'quince', 'raven',
+  'sable', 'tangerine', 'umber', 'verbena', 'walnut', 'xenon', 'yonder', 'zinnia',
+];
+
+export function randomToken(): string {
+  const pick = () => TOKEN_WORDS[Math.floor(Math.random() * TOKEN_WORDS.length)];
+  return `${pick()}-${pick()}-${pick()}`;
+}
+
 export interface CreateTournamentInput {
   name: string;
   maxPlayers: number;
@@ -28,6 +47,8 @@ export interface CreateTournamentInput {
   dropMode?: DropMode;
   // 旧参数兼容：dropLeftover=true → drop_leftover_exact，false → use_all
   dropLeftover?: boolean;
+  // 牌堆构成策略：stratify（默认，主/额外按比例均匀每堆）| random | main_then_extra
+  packStrategy?: 'stratify' | 'random' | 'main_then_extra';
   cardPool?: string;
 }
 
@@ -71,6 +92,7 @@ export class TournamentsService {
           : input.dropLeftover
             ? 'drop_leftover_exact'
             : 'use_all'),
+      packStrategy: input.packStrategy ?? 'stratify',
       mainMin: input.mainMin ?? defaults.mainMin,
       mainMax: input.mainMax ?? defaults.mainMax,
       extraMax: input.extraMax ?? defaults.extraMax,
@@ -115,7 +137,7 @@ export class TournamentsService {
     if (state.status !== 'registration') throw new Error('WRONG_PHASE');
     if (state.players.length >= getConfig(state).maxPlayers) throw new Error('TOURNAMENT_FULL');
     if (state.players.some((p) => p.playerId === playerId)) throw new Error('ALREADY_JOINED');
-    const token = crypto.randomBytes(32).toString('hex');
+    const token = randomToken();
     getDb()
       .prepare('INSERT INTO tournament_players (tournament_id, player_id, display_name, token_hash, seat, joined_at) VALUES (?,?,?,?,?,?)')
       .run(tid, playerId, displayName, sha256(token), null, new Date().toISOString());
@@ -146,7 +168,7 @@ export class TournamentsService {
   resetPlayerToken(tid: number, playerId: string): { token: string } {
     const state = loadState(tid);
     if (!state.players.some((p) => p.playerId === playerId)) throw new Error('PLAYER_NOT_FOUND');
-    const token = crypto.randomBytes(32).toString('hex');
+    const token = randomToken();
     getDb().prepare('UPDATE tournament_players SET token_hash=? WHERE tournament_id=? AND player_id=?').run(sha256(token), tid, playerId);
     return { token };
   }

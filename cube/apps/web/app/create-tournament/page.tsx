@@ -24,6 +24,7 @@ export default function CreateTournamentPage() {
   const [pickSeconds, setPickSeconds] = useState(30);
   const [deckbuildingSeconds, setDeckbuildingSeconds] = useState(600);
   const [dropMode, setDropMode] = useState('drop_leftover');
+  const [packStrategy, setPackStrategy] = useState('stratify');
   const [createToken, setCreateToken] = useState('');
   const [created, setCreated] = useState<{ url: string; adminToken: string } | null>(null);
   const [error, setError] = useState('');
@@ -41,7 +42,7 @@ export default function CreateTournamentPage() {
     try {
       const r = await api<{ tid: number; url: string; admin_token: string }>('/tournaments', {
         method: 'POST',
-        body: { name, maxPlayers, mode, packSizeMultiple, cardPool, mainMin, mainMax, extraMax, sideMax, maxCopies, timeLimit, pickSeconds, deckbuildingSeconds, dropMode },
+        body: { name, maxPlayers, mode, packSizeMultiple, cardPool, mainMin, mainMax, extraMax, sideMax, maxCopies, timeLimit, pickSeconds, deckbuildingSeconds, dropMode, packStrategy },
         createToken,
       });
       setCreated({ url: r.url, adminToken: r.admin_token });
@@ -141,6 +142,14 @@ export default function CreateTournamentPage() {
                 <option value="use_all">使用所有卡牌</option>
                 <option value="drop_leftover">公开丢弃无法整除的剩余卡牌</option>
                 <option value="drop_leftover_exact">公开丢弃且要求牌堆数目是玩家整数倍</option>
+              </select>
+            </label>
+            <label className="flex items-center gap-2">
+              卡堆组成
+              <select className="rounded bg-felt-deep px-2 py-1" value={packStrategy} onChange={(e) => setPackStrategy(e.target.value)}>
+                <option value="stratify">主卡/额外卡按比例均匀每堆</option>
+                <option value="random">全随机</option>
+                <option value="main_then_extra">先全主卡再全额外</option>
               </select>
             </label>
           </div>

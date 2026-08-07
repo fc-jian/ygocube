@@ -64,10 +64,55 @@ export class DraftService implements OnModuleInit {
     const seatMap: Record<string, number> = {};
     state.players.forEach((p) => (seatMap[p.playerId] = order.indexOf(p.playerId)));
     // packs: shuffled pool (card pool or full card table), pack size = n * multiple, drop last (public)
-    const codes = this.pools.resolve(cfg.cardPool as string | undefined).slice();
-    for (let i = codes.length - 1; i > 0; i--) {
+    const poolCodes = this.pools.resolve(cfg.cardPool as string | undefined).slice();
+    for (let i = poolCodes.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
-      [codes[i], codes[j]] = [codes[j], codes[i]];
+      [poolCodes[i], poolCodes[j]] = [poolCodes[j], poolCodes[i]];
+    }
+    // 牌堆构成策略（packStrategy）：
+    //  stratify（默认）   = 主卡/额外卡按整体比例均匀分布到每一堆（各池先洗牌再按比例取）
+    //  random             = 全卡池随机洗牌后顺序切堆
+    //  main_then_extra    = 先排完全部主卡（跨堆），再接额外卡
+    const strategy = cfg.packStrategy === 'random' || cfg.packStrategy === 'main_then_extra' ? cfg.packStrategy : 'stratify';
+    let codes: number[];
+    if (strategy === 'random') {
+      codes = poolCodes;
+    } else {
+      const main: number[] = [];
+      const extra: number[] = [];
+      for (const c of poolCodes) {
+        const info = this.cards.get(c);
+        ((info && info.type & 0x4802040) ? extra : main).push(c);
+      }
+      if (strategy === 'main_then_extra') {
+        codes = [...main, ...extra];
+      } else {
+        // stratify: 逐堆按剩余 main:extra 比例动态取卡（两池已各自洗牌），堆外剩余追加为弃置
+        const packSize = n * cfg.packSizeMultiple;
+        const dropMode0 =
+          cfg.dropMode === 'use_all' || cfg.dropMode === 'drop_leftover' || cfg.dropMode === 'drop_leftover_exact'
+            ? cfg.dropMode
+            : cfg.dropLeftover === false
+              ? 'use_all'
+              : 'drop_leftover_exact';
+        const packCount0 = dropMode0 === 'use_all'
+          ? Math.max(1, Math.ceil(poolCodes.length / packSize))
+          : Math.max(1, Math.floor(poolCodes.length / packSize) - (dropMode0 === 'drop_leftover_exact' ? Math.floor(poolCodes.length / packSize) % n : 0));
+        let mi = 0;
+        let ei = 0;
+        const per: number[][] = [];
+        for (let k = 0; k < packCount0; k++) {
+          const size = dropMode0 === 'use_all' ? Math.min(packSize, poolCodes.length - k * packSize) : packSize;
+          const remMain = main.length - mi;
+          const remExtra = extra.length - ei;
+          const m = Math.min(remMain, Math.round(size * (remMain / Math.max(1, remMain + remExtra))));
+          const e = Math.min(remExtra, size - m);
+          per.push([...main.slice(mi, mi + m), ...extra.slice(ei, ei + e)]);
+          mi += m;
+          ei += e;
+        }
+        codes = [...per.flat(), ...main.slice(mi), ...extra.slice(ei)];
+      }
     }
     const packSize = n * cfg.packSizeMultiple;
     // 剩余卡处理（dev_docs/05 §3，DropMode）：

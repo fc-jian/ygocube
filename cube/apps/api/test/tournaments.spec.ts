@@ -78,7 +78,7 @@ describe('admin player management', () => {
     const tid = tournaments.create({ name: 'x', maxPlayers: 4, cardPool: TEST_POOL }, 'test').tid;
     tournaments.join(tid, 'p1', 'P1');
     const { token } = tournaments.resetPlayerToken(tid, 'p1');
-    expect(token).toMatch(/^[0-9a-f]{64}$/);
+    expect(token).toMatch(/^[a-z]+(-[a-z]+){2}$/);
     const row = require('../src/db').getDb()
       .prepare('SELECT token_hash FROM tournament_players WHERE tournament_id=? AND player_id=?')
       .get(tid, 'p1');

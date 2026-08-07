@@ -189,3 +189,60 @@ describe('snapshot replay with shared global event seq', () => {
     expect(state.players.map((p) => p.playerId).sort()).toEqual(['p0', 'p1', 'p2', 'p3']);
   });
 });
+
+describe('pack strategy', () => {
+  beforeEach(() => useTestDb());
+
+  function setupPool(codes: number[]): string {
+    const cards = new CardsService();
+    const p = new PoolsService(cards);
+    p.create('stratpool', codes);
+    return 'stratpool';
+  }
+
+  it('main_then_extra: all main cards precede all extra cards across packs', () => {
+    const cards = new CardsService();
+    const all = cards.poolCodes();
+    // 取 10 张主卡 + 4 张额外卡
+    const mainCodes = all.filter((c) => (cards.get(c)!.type & 0x4802040) === 0).slice(0, 10);
+    const extraCodes = all.filter((c) => (cards.get(c)!.type & 0x4802040) !== 0).slice(0, 4);
+    const pool = [...mainCodes, ...extraCodes];
+    const tournaments = makeTournaments();
+    const p = new PoolsService(cards);
+    p.create('mte', pool);
+    const draft = new DraftService(cards, tournaments, new PoolsService(cards), new MatchesService(fakeSrvpro as any));
+    const tid = tournaments.create({ name: 'mte', maxPlayers: 3, cardPool: 'mte', dropMode: 'use_all', packStrategy: 'main_then_extra' }, 'test').tid;
+    for (let i = 0; i < 3; i++) tournaments.join(tid, `p${i}`, `P${i}`);
+    draft.startDraft(tid, 'test');
+    const state = loadState(tid);
+    const flat = state.packs.flatMap((pk) => pk.order);
+    expect(flat.length).toBe(14);
+    // 前 10 张全部是主卡，后 4 张全部是额外卡
+    for (const c of flat.slice(0, 10)) expect(cards.get(c)!.type & 0x4802040).toBe(0);
+    for (const c of flat.slice(10)) expect(cards.get(c)!.type & 0x4802040).not.toBe(0);
+  });
+
+  it('stratify: every pack contains both main and extra cards in proportion', () => {
+    const cards = new CardsService();
+    const all = cards.poolCodes();
+    const mainCodes = all.filter((c) => (cards.get(c)!.type & 0x4802040) === 0).slice(0, 60);
+    const extraCodes = all.filter((c) => (cards.get(c)!.type & 0x4802040) !== 0).slice(0, 30);
+    const tournaments = makeTournaments();
+    const p = new PoolsService(cards);
+    p.create('str', [...mainCodes, ...extraCodes]);
+    const draft = new DraftService(cards, tournaments, new PoolsService(cards), new MatchesService(fakeSrvpro as any));
+    const tid = tournaments.create({ name: 'str', maxPlayers: 3, cardPool: 'str', dropMode: 'use_all', packStrategy: 'stratify' }, 'test').tid;
+    for (let i = 0; i < 3; i++) tournaments.join(tid, `p${i}`, `P${i}`);
+    draft.startDraft(tid, 'test');
+    const state = loadState(tid);
+    const packs = state.packs;
+    expect(packs.length).toBeGreaterThanOrEqual(4); // 90 卡 / 9 = 10 堆
+    for (const pk of packs) {
+      const extraCount = pk.order.filter((c) => (cards.get(c)!.type & 0x4802040) !== 0).length;
+      // 整体 extra 占比 1/3：每堆 extra 占比应接近 1/3（容忍 ±25%）
+      const frac = extraCount / pk.order.length;
+      expect(frac).toBeGreaterThan(0.08);
+      expect(frac).toBeLessThan(0.58);
+    }
+  });
+});
