@@ -157,9 +157,9 @@ export default function DraftPage() {
     }
   };
 
-  const move = async (code: number, from: string, to: string) => {
+  const move = async (code: number, from: string, to: string, index?: number) => {
     try {
-      await api(`/t/${tid}/deck/move`, { method: 'POST', body: { card_code: code, from, to }, identity });
+      await api(`/t/${tid}/deck/move`, { method: 'POST', body: { card_code: code, from, to, ...(index !== undefined ? { index } : {}) }, identity });
       await load();
     } catch (e: any) {
       setError(e.code === 'WRONG_ZONE' ? '该类型卡不能放入此区域' : (e.code ?? String(e)));
