@@ -78,18 +78,48 @@ function pkt(type, payload) {
   b.copy(o, 2);
   return o;
 }
-function updateDeckPkt() {
-  // content is irrelevant: srvpro overrides it with the locked cube deck
-  const p = Buffer.alloc(20);
-  p.writeUInt32LE(3, 0);
-  p.writeUInt32LE(0, 4);
-  p.writeUInt32LE(8964, 8);
-  p.writeUInt32LE(8964, 12);
-  p.writeUInt32LE(8964, 16);
+function deckPkt(mainCodes, sideCodes) {
+  // UPDATE_DECK: mainc（含 extra 合并）, sidec, codes[main…,side…]
+  const p = Buffer.alloc(8 + (mainCodes.length + sideCodes.length) * 4);
+  p.writeUInt32LE(mainCodes.length, 0);
+  p.writeUInt32LE(sideCodes.length, 4);
+  let off = 8;
+  for (const c of [...mainCodes, ...sideCodes]) {
+    p.writeUInt32LE(c, off);
+    off += 4;
+  }
   return pkt(0x2, p);
 }
+function garbageDeckPkt() {
+  // 与 cube 卡组无关的垃圾卡组：BEGIN 阶段 srvpro 整包覆盖；siding 阶段回退覆盖（兼容路径）
+  return deckPkt([8964, 8964, 8964], []);
+}
 
-function runBot(pid, roomName, isLoser, blog) {
+const EXTRA_TYPE_MASK = 0x4802040;
+
+async function runBot(tid, pid, roomName, isLoser, blog, garbageSide = false) {
+  // 取本人 cube 卡组与卡类型（siding 时做合法的 main↔side 互换，验证换 side 真正生效）
+  let myMain = null;
+  let mySide = [];
+  try {
+    const st = await apiCall('GET', `/t/${tid}/state`, { player: { tid, pid } });
+    const deck = st.deck ?? { main: [], extra: [], side: [] };
+    const codes = [...deck.main, ...deck.extra, ...deck.side];
+    const infos = codes.length ? await apiCall('GET', `/t/${tid}/cards?codes=${codes.join(',')}`, { player: { tid, pid } }) : [];
+    const typeOf = {};
+    for (const c of infos) typeOf[c.code] = c.type;
+    const isExtra = (c) => (typeOf[c] & EXTRA_TYPE_MASK) !== 0;
+    // UPDATE_DECK 布局：extra 合并在 main 段，宿主/srvpro 按类型分拣
+    myMain = [...deck.main, ...deck.extra];
+    mySide = [...deck.side];
+    // siding 互换只允许非额外卡（保持各区数量一致）
+    var swappableMain = myMain.filter((c) => !isExtra(c));
+    var swappableSide = mySide.filter((c) => !isExtra(c));
+  } catch (e) {
+    blog(`${pid} failed to load cube deck: ${e.message}; falling back to garbage deck`);
+  }
+  const sideMode = garbageSide ? 'garbage' : 'valid';
+  blog(`${pid} deck loaded: main=${myMain?.length ?? '?'} side=${mySide.length}, sideMode=${sideMode}`);
   return new Promise((resolve) => {
     const sock = net.connect(SRVPRO_GAME_PORT, SRVPRO_HOST);
     let buf = Buffer.alloc(0);
@@ -117,7 +147,7 @@ function runBot(pid, roomName, isLoser, blog) {
         jg.write(roomName, 8, 'utf16le');
         sock.write(pkt(0x12, jg)); // CTOS_JOIN_GAME
       }, 100);
-      setTimeout(() => sock.write(updateDeckPkt()), 400);
+      setTimeout(() => sock.write(myMain ? deckPkt(myMain, mySide) : garbageDeckPkt()), 400);
       setTimeout(() => sock.write(pkt(0x22, Buffer.alloc(0))), 600); // CTOS_HS_READY
       // someone has to start the duel: CTOS_HS_START (ignored for the non-host player);
       // retry until the duel actually begins
@@ -149,10 +179,26 @@ function runBot(pid, roomName, isLoser, blog) {
           // STOC_SELECT_TP -> random first/second
           sock.write(pkt(0x4, Buffer.from([rnd(2)])));
         } else if (type === 0x7) {
-          // STOC_CHANGE_SIDE -> resend deck (overridden by srvpro) and ready again
+          // STOC_CHANGE_SIDE -> 提交换 side 后的卡组（valid：cube 卡组内随机 main↔side 互换；
+          // garbage：非法卡组，验证 srvpro 回退覆盖兼容路径）
           setTimeout(() => {
             try {
-              sock.write(updateDeckPkt());
+              if (garbageSide || !myMain) {
+                sock.write(garbageDeckPkt());
+                blog(`${pid} siding: submitted garbage deck (expect srvpro fallback override)`);
+              } else {
+                const k = Math.min(swappableMain.length, swappableSide.length, 1 + rnd(3));
+                const main = [...myMain];
+                const side = [...mySide];
+                for (let i = 0; i < k; i++) {
+                  const mi = main.indexOf(swappableMain[rnd(swappableMain.length)]);
+                  const si = side.indexOf(swappableSide[rnd(swappableSide.length)]);
+                  if (mi < 0 || si < 0) continue;
+                  [main[mi], side[si]] = [side[si], main[mi]];
+                }
+                sock.write(deckPkt(main, side));
+                blog(`${pid} siding: submitted valid sided deck (swapped ${k})`);
+              }
               sock.write(pkt(0x22, Buffer.alloc(0)));
             } catch {}
           }, 300);
@@ -202,6 +248,22 @@ async function runDraft(tid) {
       log(`draft over (status=${observer.status}), driver picks=${picks}`);
       return observer.status;
     }
+    if (observer.queueLengths) {
+      // passing 模式：所有玩家并发选牌——轮询每人状态，有队首堆即随机选 1 张
+      let acted = false;
+      for (const pid of PLAYERS) {
+        const st = await apiCall('GET', `/t/${tid}/state`, { player: { tid, pid } });
+        if (st.status !== 'drafting') break;
+        if (!st.pack?.isMyTurn || !st.pack.cards?.length) continue;
+        await apiCall('POST', `/t/${tid}/pick`, { player: { tid, pid }, body: { card_code: pick1(st.pack.cards) } });
+        picks++;
+        acted = true;
+        if (picks % 50 === 0) log(`draft progress: ${picks} picks`);
+      }
+      if (!acted) await sleep(300);
+      continue;
+    }
+    // serial 模式：单光标驱动
     const cur = observer.pack?.currentPicker;
     if (!cur) {
       await sleep(300);
@@ -331,13 +393,14 @@ async function playMatches(tid, outDir) {
     }
     log(`round ${round}: ${pending.length} matches to play`);
     const bots = [];
-    for (const m of pending) {
+    for (const [mi, m] of pending.entries()) {
       const loserIsA = rnd(2) === 0;
       const ml = mlog(m.id);
       matchLogs[m.id] = ml;
       ml(`table ${m.tableNo}: ${m.playerA} vs ${m.playerB}, room=${m.roomName}, loser=${loserIsA ? m.playerA : m.playerB}`);
-      bots.push(runBot(m.playerA, m.roomName, loserIsA, ml));
-      bots.push(runBot(m.playerB, m.roomName, !loserIsA, ml));
+      bots.push(runBot(tid, m.playerA, m.roomName, loserIsA, ml));
+      // 每轮第一桌的 playerB 用垃圾卡组换 side：覆盖 srvpro siding 回退兼容路径
+      bots.push(runBot(tid, m.playerB, m.roomName, !loserIsA, ml, mi === 0));
     }
     // wait until all matches of this round have results (webhook or poller)
     await waitFor(

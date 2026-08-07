@@ -27,6 +27,10 @@ dependencies:
   - zlib
   # premake5 源码构建需要（Bootstrap.sh 链接 -luuid，见 scripts/fetch-tools.sh）
   - libuuid
+  # ygopro client 构建需要（GUI：irrlicht 链接 GL/X11；libjpeg-turbo SIMD 用 nasm）
+  - nasm
+  - xorg-libx11
+  - libgl-devel
   # 构建辅助
   - pkg-config
   - make
