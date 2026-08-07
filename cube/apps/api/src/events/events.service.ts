@@ -16,6 +16,8 @@ export interface PackState {
   index: number;
   size: number;
   dropCard: number | null;
+  // 每堆起始玩家偏移：packSize 是人数倍数时用蛇形偏移；否则每堆随机（非倍数选牌公平）
+  startOffset: number;
   order: number[];
 }
 

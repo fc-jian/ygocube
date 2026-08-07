@@ -498,7 +498,7 @@ export default function AdminPage() {
 
       {editing && state && (
         <div className="fixed inset-0 z-[900] flex items-center justify-center bg-black/60" onClick={() => setEditing(false)}>
-          <div className="w-[560px] max-w-[94vw] rounded-lg border border-felt-edge bg-felt p-5" onClick={(e) => e.stopPropagation()}>
+          <div className="w-[780px] max-w-[94vw] rounded-lg border border-felt-edge bg-felt p-5" onClick={(e) => e.stopPropagation()}>
             <h3 className="mb-3 text-lg font-semibold text-gold">编辑比赛参数（仅报名阶段）</h3>
             <div className="grid grid-cols-3 gap-3 text-sm">
               <label className="col-span-3 flex items-center gap-2">
@@ -512,7 +512,7 @@ export default function AdminPage() {
                   <option value="single">单局</option>
                 </select>
               </label>
-              <label className="flex items-center gap-2">每堆卡数 <input type="number" min={1} max={60} className="w-14 rounded bg-felt-deep px-2 py-1" value={Number(editForm.packSize) || 12} onChange={(e) => setEditForm((f) => ({ ...f, packSize: Number(e.target.value) }))} /></label>
+              <label className="flex items-center gap-2">每堆卡数 <input type="number" min={1} max={60} className="w-14 rounded bg-felt-deep px-2 py-1" value={Number(editForm.packSize) || 12} onChange={(e) => setEditForm((f) => ({ ...f, packSize: Number(e.target.value) }))} />{Number(editForm.packSize) % (Number(editForm.maxPlayers) || 2) !== 0 && <span className="text-amber-300">非人数整数倍：每堆随机起始玩家</span>}</label>
               <label className="flex items-center gap-2">牌堆总数（轮数）
                 <input type="number" min={1} className="w-14 rounded bg-felt-deep px-2 py-1" placeholder="自动" value={packCount} onChange={(e) => setPackCount(e.target.value === '' ? '' : Math.max(1, Number(e.target.value)))} />
               </label>

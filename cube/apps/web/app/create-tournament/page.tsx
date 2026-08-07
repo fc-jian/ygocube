@@ -113,6 +113,9 @@ export default function CreateTournamentPage() {
                 value={packSize}
                 onChange={(e) => { setPackTouched(true); setPackSize(Math.max(1, Number(e.target.value))); }}
               />
+              {packSize % maxPlayers !== 0 && (
+                <span className="text-xs text-amber-300">非人数整数倍：选牌时每堆将随机起始玩家</span>
+              )}
             </label>
             <label className="flex items-center gap-2">
               卡池

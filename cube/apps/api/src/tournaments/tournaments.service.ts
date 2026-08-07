@@ -146,8 +146,9 @@ export class TournamentsService {
     if (state.players.length >= getConfig(state).maxPlayers) throw new Error('TOURNAMENT_FULL');
     if (state.players.some((p) => p.playerId === playerId)) throw new Error('ALREADY_JOINED');
     const token = randomToken();
+    // OR REPLACE：管理台回溯到报名前之后重新报名同名玩家时，DB 行可能残留（revert 只回滚事件状态）
     getDb()
-      .prepare('INSERT INTO tournament_players (tournament_id, player_id, display_name, token_hash, seat, joined_at) VALUES (?,?,?,?,?,?)')
+      .prepare('INSERT OR REPLACE INTO tournament_players (tournament_id, player_id, display_name, token_hash, seat, joined_at) VALUES (?,?,?,?,?,?)')
       .run(tid, playerId, displayName, sha256(token), null, new Date().toISOString());
     logEvent(tid, 'player', 'player_join', { playerId, displayName, seat: -1, eliminated: false }, playerId);
     return { token };

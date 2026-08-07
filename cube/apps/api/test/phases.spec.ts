@@ -320,3 +320,27 @@ describe('pack strategy', () => {
     expect(state.packs.length).toBe(3);
     expect(state.droppedCards.length).toBe(0); // 丢弃 4 张但不公开
   });
+
+  it('startOffset: snake offsets when packSize is a multiple of players; random otherwise', () => {
+    const tournaments = makeTournaments();
+    const cards = new CardsService();
+    const draft = new DraftService(cards, tournaments, new PoolsService(cards), new MatchesService(fakeSrvpro as any));
+    // 倍数场景：3 人 packSize 9 -> 每堆蛇形偏移 (n-(k%n))%n
+    const p = new PoolsService(cards);
+    p.create('off1', cards.poolCodes().slice(0, 40));
+    const t1 = tournaments.create({ name: 'off1', maxPlayers: 3, cardPool: 'off1', packSize: 9 }, 'test').tid;
+    for (let i = 0; i < 3; i++) tournaments.join(t1, `p${i}`, `P${i}`);
+    draft.startDraft(t1, 'test');
+    const s1 = loadState(t1);
+    for (const pk of s1.packs) expect(pk.startOffset).toBe((3 - (pk.index % 3)) % 3);
+    // 非倍数场景：3 人 packSize 10 -> 偏移在 [0,3) 且不全是蛇形值（随机性弱断言：至少出现两个不同值）
+    p.create('off2', cards.poolCodes().slice(0, 60));
+    const t2 = tournaments.create({ name: 'off2', maxPlayers: 3, cardPool: 'off2', packSize: 10 }, 'test').tid;
+    for (let i = 0; i < 3; i++) tournaments.join(t2, `p${i}`, `P${i}`);
+    draft.startDraft(t2, 'test');
+    const s2 = loadState(t2);
+    for (const pk of s2.packs) {
+      expect(pk.startOffset).toBeGreaterThanOrEqual(0);
+      expect(pk.startOffset).toBeLessThan(3);
+    }
+  });

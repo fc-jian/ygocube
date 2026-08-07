@@ -134,7 +134,9 @@ export class DraftService implements OnModuleInit {
     const packs = [];
     for (let k = 0; k < packCount; k++) {
       const orderList = codes.slice(k * packSize, Math.min((k + 1) * packSize, codes.length));
-      packs.push({ index: k, size: orderList.length, dropCard: null, order: orderList });
+      // 每堆起始偏移：packSize 为人数倍数时沿用蛇形偏移；否则每堆随机起始玩家（前后端均有提示）
+      const startOffset = packSize % n === 0 ? (n - (k % n)) % n : Math.floor(Math.random() * n);
+      packs.push({ index: k, size: orderList.length, dropCard: null, startOffset, order: orderList });
     }
     // leftover pool cards (drop 模式): randomly dropped, list made public before the draft starts
     for (let i = droppedCards.length - 1; i > 0; i--) {
@@ -156,7 +158,10 @@ export class DraftService implements OnModuleInit {
   private pickerAt(state: TournamentState, packIndex: number, round: number): string {
     const n = state.players.length;
     const seats = state.players.slice().sort((a, b) => a.seat - b.seat);
-    const pos = (round + (n - (packIndex % n)) % n) % n;
+    // 非倍数堆的每堆随机起始已在 packs 创建时定下；旧数据无 startOffset 时回退蛇形偏移
+    const pack = state.packs.find((p) => p.index === packIndex);
+    const startOffset = pack?.startOffset ?? (n - (packIndex % n)) % n;
+    const pos = (round + startOffset) % n;
     return seats[pos].playerId;
   }
 
