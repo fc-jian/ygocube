@@ -155,9 +155,9 @@ export default function PoolEditorPage() {
   }
 
   return (
-    <main className="flex h-screen flex-col">
-      <header className="flex items-center justify-between border-b border-felt-edge bg-felt px-4 py-2 text-sm text-slate-200">
-        <span className="flex items-center gap-3">
+    <main className="flex min-h-screen flex-col md:h-screen">
+      <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b border-felt-edge bg-felt px-4 py-2 text-sm text-slate-200">
+        <span className="flex flex-wrap items-center gap-3">
           <a href="/admin" className="rounded bg-felt-edge px-2 py-0.5 text-xs hover:brightness-110">
             返回管理台
           </a>
@@ -180,8 +180,8 @@ export default function PoolEditorPage() {
           </button>
         </span>
       </header>
-      <div className="flex flex-1 gap-3 overflow-hidden p-3">
-        <div className="flex w-3/5 flex-col gap-2 overflow-y-auto pr-1">
+      <div className="flex flex-1 flex-col gap-3 p-3 md:flex-row md:overflow-hidden">
+        <div className="flex w-full flex-col gap-2 md:w-3/5 md:overflow-y-auto md:pr-1">
           {(['main', 'extra'] as const).map((zone) => {
             const list = zone === 'main' ? main : extra;
             return (
@@ -209,7 +209,7 @@ export default function PoolEditorPage() {
                       <CardWithTooltip code={c} card={cardMap[c]} />
                       <button
                         onClick={() => removeCode(c)}
-                        className="absolute right-0.5 top-0.5 hidden h-4 w-4 items-center justify-center rounded-full bg-red-900 text-[9px] text-red-100 group-hover:flex"
+                        className="absolute right-0.5 top-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-red-900 text-[10px] text-red-100 md:hidden md:group-hover:flex"
                         title="从卡池移除"
                       >
                         ×
@@ -224,7 +224,7 @@ export default function PoolEditorPage() {
             );
           })}
         </div>
-        <aside className="flex flex-1 flex-col gap-2 overflow-y-auto">
+        <aside className="flex flex-1 flex-col gap-2 md:overflow-y-auto">
           <div className="rounded-lg border border-felt-edge bg-felt/60 p-2">
             <header className="mb-1 text-xs font-semibold text-slate-300">搜索全部卡牌（点击或拖入左侧加入）</header>
             <div className="flex gap-2">

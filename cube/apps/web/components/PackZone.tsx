@@ -12,6 +12,8 @@ export function PackZone({ pack, cardMap, droppedCards, onPick }: {
   pack: {
     cardsLeft: number;
     isMyTurn: boolean;
+    queueLength?: number; // passing 模式：本人牌堆队列长度
+    reserveMs?: number; // passing 模式：本人剩余保留时间（ms）
     cards?: number[];
     deadlineAt: string;
   } | null;
@@ -36,11 +38,15 @@ export function PackZone({ pack, cardMap, droppedCards, onPick }: {
   }, [droppedList, cardMap, dropFilter]);
 
   const secondsLeft = pack?.deadlineAt ? Math.max(0, Math.ceil((new Date(pack.deadlineAt).getTime() - now) / 1000)) : null;
+  // passing 保留时间：base 期显示基础倒计时，reserve 期红色提示正在消耗保留时间
+  const reserveMs = pack?.reserveMs ?? 0;
+  const baseLeft = pack?.deadlineAt ? Math.max(0, Math.ceil((new Date(pack.deadlineAt).getTime() - reserveMs - now) / 1000)) : null;
+  const inReserve = baseLeft !== null && baseLeft <= 0 && secondsLeft !== null && secondsLeft > 0;
 
   if (!pack) {
     return (
       <aside className="flex h-full min-h-[300px] items-center justify-center rounded-lg border border-felt-edge bg-felt/40 text-slate-500">
-        暂无牌堆
+        暂无可选择的牌堆（等待传堆）
       </aside>
     );
   }
@@ -57,12 +63,15 @@ export function PackZone({ pack, cardMap, droppedCards, onPick }: {
           }}
         />
       )}
-      <header className="z-10 flex items-center justify-between px-3 py-2 text-xs text-slate-200">
+      <header className="z-10 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-3 py-2 text-xs text-slate-200">
         <span>
           {pack.isMyTurn ? '轮到你选牌' : '等待其他玩家'} · 剩余 {pack.cardsLeft} 张
+          {pack.queueLength !== undefined && ` · 队列 ${pack.queueLength} 堆`}
         </span>
         {secondsLeft !== null && (
-          <span className={`font-mono ${secondsLeft <= 5 ? 'text-red-300' : 'text-gold'}`}>{secondsLeft} 秒</span>
+          <span className={`font-mono ${inReserve || (baseLeft ?? 1) <= 5 ? 'text-red-300' : 'text-gold'}`}>
+            {inReserve ? `保留时间 ${secondsLeft} 秒` : `${baseLeft ?? secondsLeft} 秒`}
+          </span>
         )}
       </header>
       <div className="z-10 flex-1 overflow-y-auto p-2">

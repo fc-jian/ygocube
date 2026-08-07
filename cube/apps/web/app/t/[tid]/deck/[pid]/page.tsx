@@ -10,6 +10,8 @@ import { CardSearch } from '@/components/CardSearch';
 import { closeCardPreview, setCardPreviewAction } from '@/components/CardPreview';
 import { TokenPrompt } from '@/components/TokenPrompt';
 import { CardInfo } from '@/lib/types';
+import { isExtraDeckType } from '@/lib/cardInfo';
+import { flipIds, useFlip } from '@/lib/useFlip';
 
 export default function DeckPage() {
   const params = useParams<{ tid: string; pid: string }>();
@@ -22,6 +24,7 @@ export default function DeckPage() {
   const [cardMap, setCardMap] = useState<Record<number, CardInfo>>({});
   const [error, setError] = useState('');
   const [discard, setDiscard] = useState<number[]>([]);
+  const flip = useFlip<HTMLDivElement>();
 
   useEffect(() => {
     let cancelled = false;
@@ -83,9 +86,14 @@ export default function DeckPage() {
   useTournamentStream(tid, identity, useCallback(() => void load(), [load]));
   const now = useNowTick(true);
 
-  const move = async (card: number, from: string, to: string) => {
+  const move = async (card: number, from: string, to: string, index?: number) => {
     try {
-      await api(`/t/${tid}/deck/move`, { method: 'POST', body: { card_code: card, from, to }, identity });
+      flip.snapshot(); // FLIP: capture positions before the post-move re-render
+      await api(`/t/${tid}/deck/move`, {
+        method: 'POST',
+        body: { card_code: card, from, to, ...(index !== undefined ? { index } : {}) },
+        identity,
+      });
       await load();
     } catch (e: any) {
       setError(e.code === 'WRONG_ZONE' ? '该类型卡不能放入此区域' : (e.code ?? String(e)));
@@ -101,7 +109,7 @@ export default function DeckPage() {
     }
   };
 
-  // 固定预览的快捷操作：主/额外 <-> 副卡组、移出构筑（回到未使用区）；
+  // 固定预览的快捷操作：主/额外 <-> 副卡组、移出构筑（回到未使用区）、未使用卡移回卡组；
   // 操作执行后立即关闭详情窗口（dev_docs/06 §4）
   useEffect(() => {
     if (!state || !identity) return;
@@ -120,7 +128,13 @@ export default function DeckPage() {
           run: () => act(card.code, inExtra ? 'extra' : 'main', 'side'),
           secondary: { label: '移出构筑', run: () => act(card.code, inExtra ? 'extra' : 'main', 'pool') },
         };
-      return null;
+      // 未使用卡池：按卡牌类型决定主按钮去向（额外类型回额外，其余回主卡组）
+      const extra = isExtraDeckType(card.type);
+      return {
+        label: extra ? '移回额外卡组' : '移回主卡组',
+        run: () => act(card.code, 'pool', extra ? 'extra' : 'main'),
+        secondary: { label: '移回副卡组', run: () => act(card.code, 'pool', 'side') },
+      };
     });
     return () => setCardPreviewAction(null);
   }, [state, identity, tid, move]);
@@ -150,10 +164,11 @@ export default function DeckPage() {
   const locked = !!deck.lockedAt;
   const cfg = state.config;
   const buildSecondsLeft = state.phaseDeadline ? Math.max(0, Math.ceil((new Date(state.phaseDeadline).getTime() - now) / 1000)) : null;
+  const poolIds = flipIds('pool', discard);
 
   return (
-    <main className="flex h-screen flex-col">
-      <header className="flex items-center justify-between border-b border-felt-edge bg-felt px-4 py-2 text-sm text-slate-200">
+    <main className="flex min-h-screen flex-col md:h-screen">
+      <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b border-felt-edge bg-felt px-4 py-2 text-sm text-slate-200">
         <span>
           构筑卡组 — {state.players.find((p) => p.playerId === pid)?.displayName ?? pid}
           {locked && <span className="ml-3 rounded bg-gold px-2 py-0.5 text-xs text-felt-deep">已锁定</span>}
@@ -174,14 +189,14 @@ export default function DeckPage() {
           )}
         </span>
       </header>
-      <div className="flex flex-1 gap-3 overflow-hidden p-3">
-        <div className="flex w-3/5 flex-col gap-2 overflow-y-auto pr-1">
+      <div ref={flip.ref} className="flex flex-1 flex-col gap-3 p-3 md:flex-row md:overflow-hidden">
+        <div className="flex w-full flex-col gap-2 md:w-3/5 md:overflow-y-auto md:pr-1">
           <DeckZone title="主卡组" zone="main" codes={deck.main} limit={`${cfg.mainMin}-${cfg.mainMax}`} cardMap={cardMap} onCardMove={(c, f) => move(c, f, 'main')} />
           <DeckZone title="额外卡组" zone="extra" codes={deck.extra} limit={String(cfg.extraMax)} cardMap={cardMap} onCardMove={(c, f) => move(c, f, 'extra')} />
           <DeckZone title="副卡组" zone="side" codes={deck.side} limit={String(cfg.sideMax)} cardMap={cardMap} onCardMove={(c, f) => move(c, f, 'side')} />
         </div>
         <aside
-          className="flex flex-1 flex-col gap-2 overflow-y-auto"
+          className="flex flex-1 flex-col gap-2 md:overflow-y-auto"
           onDragOver={(e) => e.preventDefault()}
           onDrop={(e) => {
             e.preventDefault();
@@ -202,14 +217,15 @@ export default function DeckPage() {
             <div className="card-grid-5">
               {discard.map((c, i) => (
                 <div
-                  key={i}
+                  key={poolIds[i]}
+                  data-flip-id={poolIds[i]}
                   draggable
                   onDragStart={(e) => {
                     e.dataTransfer.setData('text/plain', String(c));
                     e.dataTransfer.setData('application/x-card-zone', 'deck');
                     e.dataTransfer.setData('application/x-card-source', 'pool');
                   }}
-                  className="cursor-grab active:cursor-grabbing"
+                  className="animate-card-in cursor-grab active:cursor-grabbing"
                 >
                   {/* 卡图 + hover/点击详情（无本地图时仍可查看卡牌效果） */}
                   <CardWithTooltip code={c} card={cardMap[c]} />

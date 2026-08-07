@@ -11,14 +11,24 @@ body {
   font-family: ui-sans-serif, system-ui, 'PingFang SC', 'Microsoft YaHei', sans-serif;
 }
 
+/* fewer columns on phones so cards stay tappable; full density from md up */
 .card-grid {
   @apply grid gap-1;
-  grid-template-columns: repeat(10, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
 .card-grid-5 {
   @apply grid gap-1;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+@media (min-width: 768px) {
+  .card-grid {
+    grid-template-columns: repeat(10, minmax(0, 1fr));
+  }
+  .card-grid-5 {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
 }
 
 @keyframes pick-fly {
@@ -43,4 +53,13 @@ body {
 }
 .animate-lock {
   animation: lock-flash 0.6s ease-out;
+}
+
+/* cards that appear in a zone after a move fade in (position shifts use FLIP) */
+@keyframes card-in {
+  from { opacity: 0; transform: scale(0.92); }
+  to { opacity: 1; transform: scale(1); }
+}
+.animate-card-in {
+  animation: card-in 0.18s ease-out;
 }

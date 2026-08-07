@@ -14,7 +14,7 @@ export function ConfirmModal({ open, title, children, onConfirm, onCancel, confi
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onCancel}>
-      <div className="w-[26rem] max-w-[92vw] rounded-lg border border-felt-edge bg-felt p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+      <div className="mx-4 max-h-[90vh] w-[26rem] max-w-[92vw] overflow-y-auto rounded-lg border border-felt-edge bg-felt p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
         <h3 className="mb-3 text-lg font-semibold text-gold">{title}</h3>
         {children}
         <div className="mt-5 flex justify-end gap-3">

@@ -68,6 +68,7 @@ export default function AdminPage() {
   const [events, setEvents] = useState<{ seq: number; entity: string; action: string; summary: string; createdAt: string }[]>([]);
   const [packCount, setPackCount] = useState<number | ''>('');
   const [dropPublic, setDropPublic] = useState(true);
+  const [evenPackCount, setEvenPackCount] = useState(true);
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null);
 
   useEffect(() => {
@@ -168,12 +169,14 @@ export default function AdminPage() {
       maxCopies: (state.config.maxCopies as number) ?? 3,
       timeLimit: (state.config.timeLimit as number) ?? 180,
       pickSeconds: state.config.pickSeconds as number,
+      reserveSeconds: (state.config.reserveSeconds as number) ?? 300,
       deckbuildingSeconds: state.config.deckbuildingSeconds as number,
       dropMode: (state.config.dropMode as string) ?? (state.config.dropLeftover === false ? 'use_all' : 'drop_leftover_exact'),
       packStrategy: (state.config.packStrategy as string) ?? 'stratify',
     });
     setPackCount((state.config.packCount as number | undefined) ?? '');
     setDropPublic((state.config.dropPublic as boolean | undefined) !== false);
+    setEvenPackCount((state.config.evenPackCount as boolean | undefined) !== false);
     setEditing(true);
   };
 
@@ -192,11 +195,13 @@ export default function AdminPage() {
         maxCopies: Number(editForm.maxCopies),
         timeLimit: Number(editForm.timeLimit),
         pickSeconds: Number(editForm.pickSeconds),
+        reserveSeconds: Number(editForm.reserveSeconds ?? 300),
         deckbuildingSeconds: Number(editForm.deckbuildingSeconds),
         dropMode: String(editForm.dropMode === 'use_all' || editForm.dropMode === 'drop_leftover_exact' ? editForm.dropMode : 'drop_leftover'),
         packStrategy: String(editForm.packStrategy === 'random' || editForm.packStrategy === 'main_then_extra' ? editForm.packStrategy : 'stratify'),
-        packCount: packCount === '' ? undefined : Number(packCount),
+        packCount: packCount === '' ? null : Number(packCount), // null = 恢复自动（后端删除该键语义）
         dropPublic,
+        evenPackCount,
       };
       await adminFetch(`/admin/t/${state!.id}/config`, 'PUT', body);
       setMsg('参数已更新');
@@ -234,11 +239,11 @@ export default function AdminPage() {
   };
 
   return (
-    <main className="mx-auto max-w-4xl p-6">
+    <main className="mx-auto max-w-4xl p-4 sm:p-6">
       <h1 className="mb-4 text-xl font-bold text-gold">管理控制台</h1>
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <input
-          className="w-72 rounded bg-felt px-3 py-1.5 font-mono text-xs outline-none"
+          className="w-full rounded bg-felt px-3 py-1.5 font-mono text-xs outline-none sm:w-72"
           placeholder="管理令牌"
           type="password"
           value={adminToken}
@@ -250,7 +255,7 @@ export default function AdminPage() {
         </button>
       </div>
       {msg && (
-        <div key={msgKey} className="fixed right-4 top-4 z-50 max-w-sm rounded-lg border border-felt-edge bg-felt px-3 py-2 text-xs text-slate-300 shadow-2xl">
+        <div key={msgKey} className="fixed left-4 right-4 top-4 z-50 rounded-lg border border-felt-edge bg-felt px-3 py-2 text-xs text-slate-300 shadow-2xl sm:left-auto sm:max-w-sm">
           {msg}
         </div>
       )}
@@ -269,7 +274,11 @@ export default function AdminPage() {
               <button onClick={() => void act(`/admin/t/${state.id}/start_draft`)} className="rounded bg-gold px-3 py-1 text-xs font-semibold text-felt-deep hover:brightness-110">
                 开始选牌
               </button>
-              <button onClick={() => void act(`/admin/t/${state.id}/phase`, { status: 'deckbuilding' })} className="rounded bg-felt-edge px-3 py-1 text-xs hover:brightness-110">
+              <button
+                onClick={() => void act(`/admin/t/${state.id}/phase`, { status: 'deckbuilding' })}
+                disabled={state.pendingPhase === 'deckbuilding'}
+                className="rounded bg-felt-edge px-3 py-1 text-xs hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+              >
                 进入构筑
               </button>
               {state.status === 'deckbuilding' && (
@@ -325,11 +334,11 @@ export default function AdminPage() {
               </label>
             </div>
           </div>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <section className="rounded-lg border border-felt-edge bg-felt/60 p-3 text-xs">
               <h3 className="mb-2 font-semibold text-gold">玩家</h3>
               {state.players.map((p) => (
-                <div key={p.playerId} className="flex items-center justify-between gap-2 py-0.5">
+                <div key={p.playerId} className="flex flex-wrap items-center justify-between gap-2 py-0.5">
                   <span>{p.displayName} ({p.playerId})</span>
                   <span className="font-mono text-slate-400">
                     seat {p.seat} · {state.pickSummary.find((s) => s.playerId === p.playerId)?.count ?? 0} 选牌 · {state.decks[p.playerId]?.lockedAt ? '已锁定' : '构筑中'}
@@ -406,7 +415,7 @@ export default function AdminPage() {
               {state.pause && (
                 <p className="mt-1 text-red-300">暂停：{state.pause.pausedAt ? '已暂停' : '投票中'}（发起人 {state.pause.proposer}）</p>
               )}
-              {state.pendingPhase === 'deckbuilding' && <p className="mt-1 text-amber-300">等待当前牌堆选完后进入构筑（进度将保留）</p>}
+              {state.pendingPhase === 'deckbuilding' && <p className="mt-1 text-amber-300">已请求进入构筑：等待当前轮结束（进度将保留）</p>}
             </section>
             <section className="rounded-lg border border-felt-edge bg-felt/60 p-3 text-xs">
               <h3 className="mb-2 font-semibold text-gold">事件时间线（点击选择回溯点）</h3>
@@ -446,7 +455,7 @@ export default function AdminPage() {
           <section className="mt-4 rounded-lg border border-felt-edge bg-felt/60 p-3 text-xs">
             <h3 className="mb-2 font-semibold text-gold">对阵</h3>
             {state.matches.map((m) => (
-              <div key={m.id} className="flex items-center justify-between gap-2 py-0.5 font-mono">
+              <div key={m.id} className="flex flex-wrap items-center justify-between gap-2 py-0.5 font-mono">
                 <span>r{m.round} t{m.tableNo ?? m.id}</span>
                 <span className="truncate">{m.playerA} vs {m.playerB}</span>
                 <span className="truncate">{m.roomName ?? '-'}</span>
@@ -498,10 +507,10 @@ export default function AdminPage() {
 
       {editing && state && (
         <div className="fixed inset-0 z-[900] flex items-center justify-center bg-black/60" onClick={() => setEditing(false)}>
-          <div className="w-[780px] max-w-[94vw] rounded-lg border border-felt-edge bg-felt p-5" onClick={(e) => e.stopPropagation()}>
+          <div className="mx-4 max-h-[90vh] w-[780px] max-w-[94vw] overflow-y-auto rounded-lg border border-felt-edge bg-felt p-5" onClick={(e) => e.stopPropagation()}>
             <h3 className="mb-3 text-lg font-semibold text-gold">编辑比赛参数（仅报名阶段）</h3>
-            <div className="grid grid-cols-3 gap-3 text-sm">
-              <label className="col-span-3 flex items-center gap-2">
+            <div className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
+              <label className="col-span-full flex items-center gap-2">
                 名称
                 <input className="flex-1 rounded bg-felt-deep px-2 py-1" value={String(editForm.name ?? '')} onChange={(e) => setEditForm((f) => ({ ...f, name: e.target.value }))} />
               </label>
@@ -512,10 +521,13 @@ export default function AdminPage() {
                   <option value="single">单局</option>
                 </select>
               </label>
-              <label className="flex items-center gap-2">每堆卡数 <input type="number" min={1} max={60} className="w-14 rounded bg-felt-deep px-2 py-1" value={Number(editForm.packSize) || 12} onChange={(e) => setEditForm((f) => ({ ...f, packSize: Number(e.target.value) }))} />{Number(editForm.packSize) % (Number(editForm.maxPlayers) || 2) !== 0 && <span className="text-amber-300">非人数整数倍：每堆随机起始玩家</span>}</label>
+              <label className="flex items-center gap-2">每堆卡数 <input type="number" min={1} max={60} className="w-14 rounded bg-felt-deep px-2 py-1" value={Number(editForm.packSize) || 12} onChange={(e) => setEditForm((f) => ({ ...f, packSize: Number(e.target.value) }))} />{Number(editForm.packSize) % (Number(editForm.maxPlayers) || 2) !== 0 && <span className="text-amber-300">非人数整数倍：各玩家从每堆选牌次数可能不同</span>}</label>
               <label className="flex items-center gap-2">牌堆总数（轮数）
                 <input type="number" min={1} className="w-14 rounded bg-felt-deep px-2 py-1" placeholder="自动" value={packCount} onChange={(e) => setPackCount(e.target.value === '' ? '' : Math.max(1, Number(e.target.value)))} />
+                {evenPackCount && packCount !== '' && Number(packCount) % (Number(editForm.maxPlayers) || 2) !== 0 && <span className="text-red-300">须为人数整数倍</span>}
               </label>
+              <label className="flex items-center gap-2"><input type="checkbox" checked={evenPackCount} onChange={(e) => setEvenPackCount(e.target.checked)} /> 牌堆数为人数整数倍</label>
+              <label className="flex items-center gap-2">保留时间（秒） <input type="number" min={0} max={3600} className="w-16 rounded bg-felt-deep px-2 py-1" value={Number(editForm.reserveSeconds) ?? 300} onChange={(e) => setEditForm((f) => ({ ...f, reserveSeconds: Math.max(0, Number(e.target.value)) }))} /></label>
               <label className="flex items-center gap-2"><input type="checkbox" checked={dropPublic} onChange={(e) => setDropPublic(e.target.checked)} /> 公开被丢弃的卡牌</label>
               <label className="flex items-center gap-2">卡池
                 <select className="rounded bg-felt-deep px-2 py-1" value={String(editForm.cardPool ?? '')} onChange={(e) => setEditForm((f) => ({ ...f, cardPool: e.target.value }))}>
@@ -556,7 +568,7 @@ export default function AdminPage() {
         <h2 className="mb-2 text-sm font-semibold text-gold">比赛列表</h2>
         <ul className="space-y-1 text-xs">
           {tournaments.map((t) => (
-            <li key={t.id} className="flex items-center justify-between rounded bg-felt-deep/50 px-2 py-1">
+            <li key={t.id} className="flex flex-wrap items-center justify-between gap-2 rounded bg-felt-deep/50 px-2 py-1">
               <span>
                 <b>{t.name}</b> · {t.status} r{t.round} · {t.player_count} 人{t.frozen ? ' · 已暂停' : ''}
               </span>
@@ -616,7 +628,7 @@ export default function AdminPage() {
         </div>
         <ul className="space-y-1 text-xs">
           {pools.map((p) => (
-            <li key={p.id} className="flex items-center justify-between rounded bg-felt-deep/50 px-2 py-1">
+            <li key={p.id} className="flex flex-wrap items-center justify-between gap-2 rounded bg-felt-deep/50 px-2 py-1">
               <span>
                 <b>{p.name}</b> · {p.count} 张卡 · {p.createdAt.slice(0, 10)}
               </span>

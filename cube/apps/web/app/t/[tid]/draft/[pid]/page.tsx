@@ -153,7 +153,7 @@ export default function DraftPage() {
       await api(`/t/${tid}/pick`, { method: 'POST', body: { card_code: code, ...(targetZone ? { target_zone: targetZone } : {}) }, identity });
       await load();
     } catch (e: any) {
-      setError(e.code === 'NOT_YOUR_TURN' ? '还没轮到你选牌' : (e.code === 'CARD_NOT_AVAILABLE' ? '该卡已被选走' : (e.code ?? String(e))));
+      setError(e.code === 'NOT_YOUR_TURN' ? '当前没有可选择的牌堆（等待传递）' : (e.code === 'CARD_NOT_AVAILABLE' ? '该卡已被选走' : (e.code ?? String(e))));
     }
   };
 
@@ -208,11 +208,11 @@ export default function DraftPage() {
     !q ? codes : codes.filter((c) => (cardMap[c]?.name ?? '').toLowerCase().includes(q) || String(c).includes(q));
 
   return (
-    <main className="flex h-screen flex-col">
+    <main className="flex min-h-screen flex-col md:h-screen">
       <TopBar state={state} pid={pid} token={identity.token || '(已关闭鉴权)'} tid={tid} />
       {state.status === 'drafting' && (
-        <div className="flex flex-1 gap-3 overflow-hidden p-3">
-          <div className="flex w-3/5 flex-col gap-2 overflow-y-auto pr-1">
+        <div className="flex flex-1 flex-col gap-3 p-3 md:flex-row md:overflow-hidden">
+          <div className="flex w-full flex-col gap-2 md:w-3/5 md:overflow-y-auto md:pr-1">
             <input
               className="rounded bg-felt-deep px-3 py-1.5 text-xs outline-none ring-gold/50 focus:ring-2"
               placeholder="搜索已选卡牌（名称、编号或效果文本）"
@@ -224,14 +224,14 @@ export default function DraftPage() {
             <DeckZone title="副卡组" zone="side" codes={filterCodes(deck.side)} limit={String(state.config.sideMax)} cardMap={cardMap} onCardPick={pick} onCardMove={move} />
             <CardSearchAll tid={tid} identity={identity} />
           </div>
-          <div className="flex-1">
+          <div className="order-first md:order-none md:flex-1">
             <PackZone pack={state.pack} cardMap={cardMap} droppedCards={state.droppedCards} onPick={pick} />
           </div>
         </div>
       )}
       {state.status === 'registration' && (
-        <div className="flex flex-1 gap-3 overflow-hidden p-3">
-          <div className="flex w-3/5 flex-col gap-2 overflow-y-auto pr-1">
+        <div className="flex flex-1 flex-col gap-3 p-3 md:flex-row md:overflow-hidden">
+          <div className="flex w-full flex-col gap-2 md:w-3/5 md:overflow-y-auto md:pr-1">
             <header className="mb-2 text-xs text-slate-400">
               卡池预览（drop 前，共 {poolCodes.length} 张）—— 选牌尚未开始，等待管理员启动
             </header>
@@ -297,7 +297,7 @@ export default function DraftPage() {
         </button>
       </footer>
       {state.pause && (
-        <div className="mx-3 mb-2 flex items-center gap-3 rounded border border-felt-edge bg-felt px-3 py-2 text-xs">
+        <div className="mx-3 mb-2 flex flex-wrap items-center gap-3 rounded border border-felt-edge bg-felt px-3 py-2 text-xs">
           {state.pause.pausedAt ? (
             <span className="text-red-300">已暂停（发起人：{state.pause.proposer}）</span>
           ) : (

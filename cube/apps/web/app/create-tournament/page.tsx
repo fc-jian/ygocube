@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
+import { ConfirmModal } from '@/components/ConfirmModal';
 
 interface PoolInfo {
   name: string;
@@ -26,8 +27,10 @@ export default function CreateTournamentPage() {
   const [timeLimit, setTimeLimit] = useState(999);
   const [pickSeconds, setPickSeconds] = useState(30);
   const [deckbuildingSeconds, setDeckbuildingSeconds] = useState(600);
-  const [dropMode, setDropMode] = useState('drop_leftover');
   const [packStrategy, setPackStrategy] = useState('stratify');
+  const [evenPackCount, setEvenPackCount] = useState(true);
+  const [reserveSeconds, setReserveSeconds] = useState(300);
+  const [confirmFairness, setConfirmFairness] = useState(false);
   const [createToken, setCreateToken] = useState('');
   const [created, setCreated] = useState<{ url: string; adminToken: string } | null>(null);
   const [error, setError] = useState('');
@@ -41,22 +44,51 @@ export default function CreateTournamentPage() {
       .catch(() => setPools([]));
   }, []);
 
-  const create = async () => {
+  // 牌堆数上限/估算（与后端 startDraft 逻辑一致；evenPackCount 开时向下取整到人数倍数）
+  // 留空 = 自动（maxPacks）；超过整除上限时：evenPackCount 关 = 用尽卡池（末堆可能不满），开 = 向下取整到人数倍数
+  const poolCount = pools.find((p) => p.name === cardPool)?.count ?? 0;
+  const rawMaxPacks = Math.max(1, Math.floor(poolCount / Math.max(1, packSize)));
+  const roundedMax = rawMaxPacks - (rawMaxPacks % maxPlayers);
+  const maxPacks = evenPackCount ? (roundedMax >= maxPlayers ? roundedMax : rawMaxPacks) : rawMaxPacks;
+  const autoEstimate = maxPacks;
+  const overLimit = packCount !== '' && Number(packCount) > rawMaxPacks;
+  // 超过整除上限时与后端一致：先用尽卡池（ceil），evenPackCount 开再向下取整到人数倍数（>= 人数才取整）
+  const ceilPacks = Math.max(1, Math.ceil(poolCount / Math.max(1, packSize)));
+  const ceilRounded = ceilPacks - (ceilPacks % maxPlayers);
+  const overLimitEffective = evenPackCount && ceilRounded >= maxPlayers ? ceilRounded : ceilPacks;
+  const effectivePacks = packCount === '' ? autoEstimate : overLimit ? overLimitEffective : Number(packCount);
+  const overLimitDrop = Math.max(0, poolCount - overLimitEffective * packSize);
+  const packCountInvalid = packCount !== '' && evenPackCount && Number(packCount) % maxPlayers !== 0;
+  // 公平性警告：每堆卡数或牌堆数非人数整数倍（各玩家选牌次数可能不等）
+  const unfair =
+    packSize % maxPlayers !== 0 ||
+    (packCount !== '' && Number(packCount) % maxPlayers !== 0) ||
+    (!evenPackCount && packCount === '' && autoEstimate % maxPlayers !== 0);
+
+  const doCreate = async () => {
     try {
       const r = await api<{ tid: number; url: string; admin_token: string }>('/tournaments', {
         method: 'POST',
-        body: { name, maxPlayers, mode, packSize, cardPool, mainMin, mainMax, extraMax, sideMax, maxCopies, timeLimit, pickSeconds, deckbuildingSeconds, dropMode, packStrategy, packCount: packCount === '' ? undefined : Number(packCount), dropPublic },
+        body: { name, maxPlayers, mode, packSize, cardPool, mainMin, mainMax, extraMax, sideMax, maxCopies, timeLimit, pickSeconds, deckbuildingSeconds, packStrategy, packCount: packCount === '' ? undefined : Number(packCount), dropPublic, evenPackCount, reserveSeconds },
         createToken,
       });
       setCreated({ url: r.url, adminToken: r.admin_token });
       setError('');
     } catch (e: any) {
-      setError(e.code === 'AUTH_REQUIRED' ? '缺少创建令牌' : (e.code ?? String(e)));
+      setError(e.code === 'AUTH_REQUIRED' ? '缺少创建令牌' : (e.code === 'PACKCOUNT_NOT_MULTIPLE' ? '牌堆总数必须是人数的整数倍' : (e.code ?? String(e))));
     }
   };
 
+  const create = () => {
+    if (unfair) {
+      setConfirmFairness(true);
+      return;
+    }
+    void doCreate();
+  };
+
   return (
-    <main className="mx-auto max-w-2xl p-8">
+    <main className="mx-auto max-w-2xl p-4 sm:p-8">
       <h1 className="mb-6 text-3xl font-bold text-gold">创建比赛</h1>
       {created ? (
         <div className="space-y-3 rounded-lg border border-felt-edge bg-felt p-4">
@@ -114,7 +146,7 @@ export default function CreateTournamentPage() {
                 onChange={(e) => { setPackTouched(true); setPackSize(Math.max(1, Number(e.target.value))); }}
               />
               {packSize % maxPlayers !== 0 && (
-                <span className="text-xs text-amber-300">非人数整数倍：选牌时每堆将随机起始玩家</span>
+                <span className="text-xs text-amber-300">非人数整数倍：各玩家从每堆选牌的次数可能不同</span>
               )}
             </label>
             <label className="flex items-center gap-2">
@@ -161,33 +193,43 @@ export default function CreateTournamentPage() {
               <input type="number" min={30} max={7200} className="w-20 rounded bg-felt-deep px-2 py-1" value={deckbuildingSeconds} onChange={(e) => setDeckbuildingSeconds(Number(e.target.value))} />
             </label>
             <label className="flex items-center gap-2">
-              剩余卡处理
-              <select className="rounded bg-felt-deep px-2 py-1" value={dropMode} onChange={(e) => setDropMode(e.target.value)}>
-                <option value="use_all">使用所有卡牌</option>
-                <option value="drop_leftover">丢弃无法整除的剩余卡牌</option>
-                <option value="drop_leftover_exact">丢弃且要求牌堆数目是玩家整数倍</option>
-              </select>
+              保留时间（秒）
+              <input type="number" min={0} max={3600} className="w-16 rounded bg-felt-deep px-2 py-1" value={reserveSeconds} onChange={(e) => setReserveSeconds(Math.max(0, Number(e.target.value)))} />
             </label>
             <label className="flex items-center gap-2">
               牌堆总数（轮数）
               <input
                 type="number"
                 min={1}
-                max={Math.max(1, Math.floor((pools.find((p) => p.name === cardPool)?.count ?? 0) / Math.max(1, packSize)))}
                 className="w-16 rounded bg-felt-deep px-2 py-1"
                 placeholder="自动"
                 value={packCount}
                 onChange={(e) => setPackCount(e.target.value === '' ? '' : Math.max(1, Number(e.target.value)))}
               />
               {cardPool ? (
-                <span className="text-xs text-slate-400">
-                  上限 {Math.max(1, Math.floor((pools.find((p) => p.name === cardPool)?.count ?? 0) / Math.max(1, packSize)))} 堆 · 使用{' '}
-                  {(packCount === '' ? Math.floor((pools.find((p) => p.name === cardPool)?.count ?? 0) / Math.max(1, packSize)) : Number(packCount)) * packSize} 张 · 剩余{' '}
-                  {Math.max(0, (pools.find((p) => p.name === cardPool)?.count ?? 0) - (packCount === '' ? Math.floor((pools.find((p) => p.name === cardPool)?.count ?? 0) / Math.max(1, packSize)) : Number(packCount)) * packSize)} 张随机丢弃
-                </span>
+                overLimit && !evenPackCount ? (
+                  <span className="text-xs text-amber-300">
+                    超过整除上限（{rawMaxPacks} 堆）：将使用全部 {poolCount} 张卡牌，不丢弃（最后一堆可能不满）
+                  </span>
+                ) : overLimit && evenPackCount ? (
+                  <span className="text-xs text-amber-300">
+                    超过整除上限（{rawMaxPacks} 堆）：将取整到 {effectivePacks} 堆（{maxPlayers} 的倍数）
+                    {overLimitDrop > 0 ? `，必然丢弃 ${overLimitDrop} 张卡牌` : '，恰好用尽卡池不丢弃'}
+                  </span>
+                ) : (
+                  <span className="text-xs text-slate-400">
+                    上限 {maxPacks} 堆{evenPackCount ? `（${maxPlayers} 的倍数）` : ''} · 使用 {effectivePacks * packSize} 张 · 剩余{' '}
+                    {Math.max(0, poolCount - effectivePacks * packSize)} 张随机丢弃
+                  </span>
+                )
               ) : (
                 <span className="text-xs text-slate-500">请先选择卡池</span>
               )}
+              {packCountInvalid && <span className="text-xs text-red-300">牌堆总数必须是人数（{maxPlayers}）的整数倍</span>}
+            </label>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={evenPackCount} onChange={(e) => setEvenPackCount(e.target.checked)} />
+              牌堆数为人数整数倍
             </label>
             <label className="flex items-center gap-2">
               <input type="checkbox" checked={dropPublic} onChange={(e) => setDropPublic(e.target.checked)} />
@@ -210,9 +252,23 @@ export default function CreateTournamentPage() {
             onChange={(e) => setCreateToken(e.target.value)}
           />
           {error && <p className="text-xs text-red-300">{error}</p>}
-          <button onClick={create} disabled={!cardPool} className="rounded bg-gold px-6 py-2 font-semibold text-felt-deep transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40">
+          <button onClick={create} disabled={!cardPool || packCountInvalid} className="rounded bg-gold px-6 py-2 font-semibold text-felt-deep transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40">
             创建比赛
           </button>
+          <ConfirmModal
+            open={confirmFairness}
+            title="可能不公平，确认创建？"
+            onCancel={() => setConfirmFairness(false)}
+            onConfirm={() => {
+              setConfirmFairness(false);
+              void doCreate();
+            }}
+            confirmText="仍然创建"
+          >
+            <p className="text-xs leading-relaxed text-slate-300">
+              每堆卡数或牌堆总数不是人数（{maxPlayers}）的整数倍：传递式轮抽中各玩家的选牌次数可能不相等。建议调整每堆卡数/牌堆总数为 {maxPlayers} 的整数倍。
+            </p>
+          </ConfirmModal>
         </div>
       )}
     </main>

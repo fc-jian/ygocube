@@ -93,7 +93,7 @@ export function CardPreviewHost() {
       >
         <div
           data-card-preview
-          className="w-[420px] max-w-[92vw] rounded-lg border border-gold/50 bg-felt-deep p-4 shadow-2xl select-text"
+          className="mx-4 max-h-[90vh] w-[420px] max-w-[92vw] overflow-y-auto rounded-lg border border-gold/50 bg-felt-deep p-4 shadow-2xl select-text"
           onClick={(e) => e.stopPropagation()}
         >
           <div className="flex gap-4">
@@ -113,7 +113,7 @@ export function CardPreviewHost() {
           {previewAction && (() => {
             const a = previewAction(card);
             return a ? (
-              <div className="mt-3 flex gap-2">
+              <div className="mt-3 flex flex-wrap gap-2">
                 <button
                   onClick={(e) => {
                     e.stopPropagation();

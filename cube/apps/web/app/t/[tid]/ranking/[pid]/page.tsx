@@ -80,14 +80,15 @@ export default function RankingPage() {
   if (needToken) return <TokenPrompt tid={tid} pid={pid} onToken={(t) => { setNeedToken(false); setIdentity({ tid, pid, token: t }); }} />;
 
   return (
-    <main className="mx-auto max-w-3xl p-6">
-      <div className="mb-4 flex items-center justify-between">
+    <main className="mx-auto max-w-3xl p-4 sm:p-6">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-xl font-bold text-gold">积分榜单 <span className="text-sm font-normal text-slate-400">（{pid}）</span></h1>
         <a href={`/t/${tid}/matches/${encodeURIComponent(pid)}`} className="rounded bg-felt-edge px-3 py-1.5 text-sm text-gold hover:brightness-110">
           返回对战页
         </a>
       </div>
-      <table className="w-full overflow-hidden rounded-lg border border-felt-edge text-sm">
+      <div className="overflow-x-auto rounded-lg border border-felt-edge">
+        <table className="w-full min-w-[32rem] text-sm">
         <thead className="bg-felt text-left text-xs text-slate-400">
           <tr>
             <th className="px-3 py-2">排名</th>
@@ -120,6 +121,7 @@ export default function RankingPage() {
           ))}
         </tbody>
       </table>
+      </div>
       <p className="mt-3 text-xs text-slate-500">计分：胜 3 分、平 1 分、负 0 分；同分按净胜局 → 对手胜率（OMW%）→ 对手积分排序。榜单随对局结果实时更新。</p>
     </main>
   );

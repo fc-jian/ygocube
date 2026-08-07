@@ -33,7 +33,7 @@ export function FontSizeSetting() {
         <button
           key={k}
           onClick={() => setSize(k)}
-          className={`rounded px-1.5 py-0.5 ${current === k ? 'bg-gold text-felt-deep font-semibold' : 'bg-felt-edge hover:brightness-110'}`}
+          className={`rounded px-2 py-1 ${current === k ? 'bg-gold text-felt-deep font-semibold' : 'bg-felt-edge hover:brightness-110'}`}
         >
           {k === 'small' ? '小' : k === 'medium' ? '中' : '大'}
         </button>

@@ -109,8 +109,8 @@ export default function MatchesPage() {
   };
 
   return (
-    <main className="mx-auto max-w-3xl p-6">
-      <div className="mb-4 flex items-center justify-between">
+    <main className="mx-auto max-w-3xl p-4 sm:p-6">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-xl font-bold text-gold">
           对战 — 第 {info.round} <span className="text-sm font-normal text-slate-400">（{pid}）</span>
         </h1>
@@ -121,7 +121,8 @@ export default function MatchesPage() {
           查看积分榜单
         </a>
       </div>
-      <table className="w-full overflow-hidden rounded-lg border border-felt-edge text-sm">
+      <div className="overflow-x-auto rounded-lg border border-felt-edge">
+        <table className="w-full min-w-[34rem] text-sm">
         <thead className="bg-felt text-left text-xs text-slate-400">
           <tr>
             <th className="px-3 py-2">Round</th>
@@ -154,6 +155,7 @@ export default function MatchesPage() {
           ))}
         </tbody>
       </table>
+      </div>
 
       {myMatch && (
         <div className="mt-6 rounded-lg border border-gold/40 bg-felt p-4">

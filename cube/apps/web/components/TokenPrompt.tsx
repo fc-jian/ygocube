@@ -19,7 +19,7 @@ export function TokenPrompt({ tid, pid, onToken }: { tid: string; pid: string; o
   };
 
   return (
-    <main className="mx-auto mt-24 max-w-md">
+    <main className="mx-auto mt-24 max-w-md px-4">
       <div className="rounded-lg border border-felt-edge bg-felt p-6 shadow-2xl">
         <h1 className="mb-1 text-lg font-bold text-gold">请输入令牌</h1>
         <p className="mb-4 text-xs leading-relaxed text-slate-400">

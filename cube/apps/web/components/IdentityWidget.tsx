@@ -25,19 +25,19 @@ export function IdentityWidget({ tid, pid, token }: { tid?: string; pid?: string
   }
 
   return (
-    <div className="flex items-center gap-3 text-xs text-slate-300">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-300">
       <span>
         玩家：<span className="font-mono text-slate-100">{pid ?? '-'}</span>
       </span>
       {token ? (
-        <button onClick={() => setShowToken((v) => !v)} className="rounded bg-felt px-2 py-0.5 hover:bg-felt-edge" title="显示/隐藏令牌">
+        <button onClick={() => setShowToken((v) => !v)} className="rounded bg-felt px-2 py-1 hover:bg-felt-edge" title="显示/隐藏令牌">
           令牌：<span className="font-mono">{showToken ? token : '••••••••'}</span>
         </button>
       ) : (
         <span className="text-slate-500">无身份信息</span>
       )}
       <span className="text-slate-500">比赛 {tid ?? '-'}</span>
-      <button onClick={logout} className="rounded bg-felt-edge px-2 py-0.5 hover:bg-red-900 hover:text-red-100" title="退出登录（清除令牌）">
+      <button onClick={logout} className="rounded bg-felt-edge px-2 py-1 hover:bg-red-900 hover:text-red-100" title="退出登录（清除令牌）">
         退出登录
       </button>
     </div>

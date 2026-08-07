@@ -35,7 +35,7 @@ export default function 报名参加Page() {
   const existing = readIdentity(tid);
 
   return (
-    <main className="mx-auto mt-16 max-w-md">
+    <main className="mx-auto mt-16 max-w-md px-4">
       <div className="rounded-lg border border-felt-edge bg-felt p-6">
         <h1 className="mb-1 text-xl font-bold text-gold">{info?.name ?? '比赛'}</h1>
         <p className="mb-4 text-xs text-slate-400">
