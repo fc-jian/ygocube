@@ -108,3 +108,11 @@ cube 模式（`room.cube_mode`）下，UPDATE_DECK 处理改为：
 | `data/default_config.json` | modules.cube 配置段 |
 | `data/proto_structs.json` | 无改动（协议结构不变；如 03-2.3 未来扩展再同步） |
 | `README.md` / `config/settings.json.example` | cube 部署说明 |
+
+## 2.8 STOC_CUBE_DECK 注入与 siding 分流
+
+> 协议见 dev_docs/07 §4.0。根因：UPDATE_DECK 的 cube 覆盖分支（ygopro-server.coffee:3638-3653）原先不区分 duel_stage，局间 side 调整被整包还原。
+
+- **注入**：cube 房间向 client 转发 STOC_JOIN_GAME 后，立即 `stoc_send` 一条 STOC_CUBE_DECK 原始 buffer（数据 = `room.cube_decks[cube_player_id_by_name[client.name_vpass]]`，main 含 extra 合并，客户端自行分拣）。
+- **siding 分流**：`duel_stage == BEGIN` → 整包覆盖（现状）；siding 阶段 → 校验客户端提交与 cube 卡组"并集多重集相同 + 各区数量一致"，通过则**原样转发**并更新 `client.main/client.side`；失败回退整包覆盖（未打补丁客户端兼容：side 无效但不卡死）。
+- `data/constants.json` / `data/proto_structs.json`：补 STOC_CUBE_DECK 登记条目（仅名字映射，不做 struct 改写）。

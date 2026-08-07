@@ -58,8 +58,18 @@ export class AppModule {
             deadlineAt: payload?.deadlineAt ?? null,
           });
           break;
-        case 'pick':
-          realtime.emitPick(tid, { playerId: payload.playerId, auto: payload.auto });
+        case 'pick': {
+          // passing 模式 pick 事件携带 queues 快照：广播各玩家队列长度（仅数量）
+          const queues = payload.queues
+            ? Object.fromEntries(Object.entries(payload.queues as Record<string, number[]>).map(([pid, q]) => [pid, q.length]))
+            : undefined;
+          realtime.emitPick(tid, { playerId: payload.playerId, auto: payload.auto, queues });
+          break;
+        }
+        case 'deadlines':
+        case 'deal':
+          // passing 模式计时重设（暂停/恢复/冻结/解冻）/ 新一轮发堆：通知客户端 refetch
+          realtime.emitPack(tid, { deadlines: true });
           break;
         case 'pause':
           realtime.emitPause(tid, payload);

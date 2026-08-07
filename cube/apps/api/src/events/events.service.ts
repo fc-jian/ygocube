@@ -16,8 +16,9 @@ export interface PackState {
   index: number;
   size: number;
   dropCard: number | null;
-  // 每堆起始玩家偏移：packSize 是人数倍数时用蛇形偏移；否则每堆随机（非倍数选牌公平）
-  startOffset: number;
+  // 每堆起始玩家偏移（仅 serial 模式）：packSize 是人数倍数时用蛇形偏移；否则每堆随机。
+  // 可选：旧事件/快照无此字段；passing 模式不使用。
+  startOffset?: number;
   order: number[];
 }
 
@@ -60,6 +61,8 @@ export interface PauseState {
   votes: Record<string, boolean>;
   proposer: string | null;
   pausedAt: string | null;
+  // passing 模式暂停时冻结的各玩家剩余选牌时间（恢复时按此重设 deadline）
+  pausedDeadlines?: Record<string, number>;
 }
 
 export interface TournamentState {
@@ -74,6 +77,13 @@ export interface TournamentState {
   droppedCards: number[];
   picks: PickState[];
   pickCursor: { packIndex: number; round: number; playerId: string; deadlineAt: string | null } | null;
+  // passing 模式（packs_created 事件带 queues 即启用）：每玩家 FIFO 牌堆队列 + 各自选牌 deadline
+  packQueues: Record<string, number[]>;
+  pickDeadlines: Record<string, string | null>;
+  // passing：已发堆数（按轮发堆，一轮全空才发下一轮）；旧事件无 dealt 字段时回退 packs.length
+  packsDealt: number;
+  // passing：每玩家保留时间余额（ms，不刷新；单选超时先扣 reserve，耗尽才自动选）
+  pickReserves: Record<string, number>;
   pause: PauseState | null;
   decks: Record<string, DeckState>;
   matches: MatchState[];
@@ -99,6 +109,7 @@ function emptyState(id: number, name: string, configJson: string): TournamentSta
   return {
     id, name, configJson, status: 'registration', round: 0, frozen: false,
     players: [], packs: [], droppedCards: [], picks: [], pickCursor: null, pause: null, decks: {}, matches: [],
+    packQueues: {}, pickDeadlines: {}, packsDealt: 0, pickReserves: {},
     phaseDeadline: null, pendingPhase: null,
   };
 }
@@ -139,16 +150,50 @@ export function apply(state: TournamentState, action: string, payload: any): voi
       state.players = state.players.filter((p) => p.playerId !== playerId);
       state.picks = state.picks.filter((p) => p.playerId !== playerId);
       delete state.decks[playerId];
+      delete state.packQueues[playerId];
+      delete state.pickDeadlines[playerId];
+      delete state.pickReserves[playerId];
       break;
     }
     case 'packs_created': {
       state.packs = (payload.packs as PackState[]).map(clone);
       if (Array.isArray(payload.droppedCards)) state.droppedCards = payload.droppedCards;
+      // passing 模式：初始队列与各玩家 deadline 随事件下发（无 queues 字段 = 旧串行模式）
+      if (payload.queues) {
+        state.packQueues = clone(payload.queues);
+        // 旧 passing 事件无 dealt 字段（全部堆一次入队）：回退为 packs.length，回放行为不变
+        state.packsDealt = payload.dealt ?? state.packs.length;
+      }
+      if (payload.deadlines) state.pickDeadlines = clone(payload.deadlines);
+      if (payload.reserves) state.pickReserves = clone(payload.reserves);
+      break;
+    }
+    case 'deal': {
+      // passing 模式：一轮全部选空后发下一轮（payload 为发堆后的全量快照）
+      if (payload.queues) state.packQueues = clone(payload.queues);
+      if (payload.deadlines) state.pickDeadlines = clone(payload.deadlines);
+      if (payload.reserves) state.pickReserves = clone(payload.reserves);
+      if (payload.dealt !== undefined) state.packsDealt = payload.dealt;
       break;
     }
     case 'pick': {
       const p: PickState = payload;
       state.picks.push(p);
+      // passing 模式：pick 事件携带选后队列/deadline/reserve 快照，回放与实时一致
+      if (payload.queues) state.packQueues = clone(payload.queues);
+      if (payload.deadlines) state.pickDeadlines = clone(payload.deadlines);
+      if (payload.reserves) state.pickReserves = clone(payload.reserves);
+      break;
+    }
+    case 'deadlines': {
+      // passing 模式：全量重设各玩家 deadline（暂停/恢复/冻结/解冻）。
+      // payload 两种形态：{deadlines, reserves?}（新）或直接是 deadline map（旧）
+      if (payload && payload.deadlines) {
+        state.pickDeadlines = clone(payload.deadlines);
+        if (payload.reserves) state.pickReserves = clone(payload.reserves);
+      } else {
+        state.pickDeadlines = payload ? clone(payload) : {};
+      }
       break;
     }
     case 'cursor': {

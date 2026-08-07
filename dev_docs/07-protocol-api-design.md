@@ -18,7 +18,7 @@
   - Header：`X-Tournament-Id / X-Player-Id / X-Token`；
   - 查询参数/表单字段：`tid / pid / token`（SSE、ydk 下载等场景）。
 - admin 端点用 `X-Admin-Token`：super token（config.yaml `admin.super_token`）或创建 tournament 时下发的 per-tournament `admin_token`（仅限该 tournament）。
-- `POST /tournaments` 需要 `X-Create-Token`（config.yaml `admin.create_token`；super token 亦可），响应返回 `admin_token`。 参数含 `dropMode`（`use_all` / `drop_leftover` 默认 / `drop_leftover_exact`，见 dev_docs/05 §牌堆生成）。 另有 `packStrategy`（`stratify` 默认 / `random` / `main_then_extra`）、`packSize`（每堆卡数，任意正整数）、`packCount`（显式牌堆总数，缺省自动）、`dropPublic`（弃置卡是否公开，默认 true）、`draftMode`（`passing` 默认 / `serial` 旧串行模式，见 dev_docs/05 §3）、`evenPackCount`（默认 true：牌堆数须为人数整数倍，显式 packCount 非倍数拒绝 PACKCOUNT_NOT_MULTIPLE，自动计算向下取整到倍数）、`reserveSeconds`（passing 模式每玩家保留时间，默认 300；单选超时先扣保留时间，耗尽才自动选）。
+- `POST /tournaments` 需要 `X-Create-Token`（config.yaml `admin.create_token`；super token 亦可），响应返回 `admin_token`。 参数含 `dropMode`（`use_all` / `drop_leftover` 默认 / `drop_leftover_exact`，见 dev_docs/05 §牌堆生成；**legacy**：仅未显式设置 `packCount` 时生效，保留用于旧比赛回放兼容）。 另有 `packStrategy`（`stratify` 默认 / `random` / `main_then_extra`）、`packSize`（每堆卡数，任意正整数）、`packCount`（显式牌堆总数：≤ floor(池卡数/packSize) = 固定堆数、剩余卡随机丢弃；**> 该上限 = 推断为用尽全部卡池**，堆数 = ceil(池卡数/packSize)、末堆可不满、不丢弃；缺省按 dropMode 自动）、`dropPublic`（弃置卡是否公开，默认 true）、`draftMode`（`passing` 默认 / `serial` 旧串行模式，见 dev_docs/05 §3）、`evenPackCount`（默认 true：牌堆数须为人数整数倍，显式 packCount 非倍数拒绝 PACKCOUNT_NOT_MULTIPLE，计算结果向下取整到倍数）、`reserveSeconds`（passing 模式每玩家保留时间，默认 300；单选超时先扣保留时间，耗尽才自动选）。
 - **super token 兼作万能玩家 token**：`X-Token: <super_token>` 可进入任意 `playerId` 的玩家端点（同机调试）。
 - 公开信息 `GET /t/:tid` 返回 `authRequired`（false = 该 tournament 已关闭 token 鉴权，玩家端点仅需 tid+pid）。
 - 统一错误：`401 { code: "AUTH_REQUIRED", fields: [...] }`。

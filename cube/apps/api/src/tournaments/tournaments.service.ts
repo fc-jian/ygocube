@@ -41,7 +41,7 @@ export interface CreateTournamentInput {
   sideMax?: number;
   maxCopies?: number;
   timeLimit?: number; // per-turn seconds, forwarded to the duel host (srvpro TIME token; 999 ≈ unlimited)
-  // 剩余卡处理（dev_docs/05 §3）：
+  // 剩余卡处理（dev_docs/05 §3）—— legacy：仅未显式设置 packCount 时生效（旧比赛回放兼容）：
   //  use_all            = 所有卡进牌堆，最后一堆可不满
   //  drop_leftover      = 只丢弃无法整除的余数（默认，不要求牌堆数是玩家数倍数）
   //  drop_leftover_exact= 丢弃余数且要求牌堆数是玩家数倍数
@@ -50,10 +50,17 @@ export interface CreateTournamentInput {
   dropLeftover?: boolean;
   // 牌堆构成策略：stratify（默认，主/额外按比例均匀每堆）| random | main_then_extra
   packStrategy?: 'stratify' | 'random' | 'main_then_extra';
-  // 牌堆总数（轮数）：显式设置时固定堆数，剩余卡全部随机丢弃；缺省按 dropMode 自动
+  // 牌堆总数（轮数）：≤ floor(池卡数/packSize) = 固定堆数，剩余卡全部随机丢弃；
+  // > 该上限 = 推断为"用全部卡池"（堆数 = ceil(池卡数/packSize)，末堆可不满，不丢弃）；缺省按 dropMode 自动
   packCount?: number;
   // 丢弃的卡牌是否公开（默认公开；false 时只移除不展示）
   dropPublic?: boolean;
+  // 选牌模式：passing（默认，每玩家牌堆队列传递式）| serial（旧全局串行，兼容用）
+  draftMode?: 'passing' | 'serial';
+  // 牌堆数须为人数整数倍（默认开；显式 packCount 非倍数在 startDraft 拒绝 PACKCOUNT_NOT_MULTIPLE）
+  evenPackCount?: boolean;
+  // passing 模式每玩家保留时间（秒，默认 300）：单选超时先扣 reserve，耗尽才自动选
+  reserveSeconds?: number;
   cardPool?: string;
 }
 
@@ -101,6 +108,10 @@ export class TournamentsService {
       packStrategy: input.packStrategy ?? 'stratify',
       packCount: input.packCount,
       dropPublic: input.dropPublic !== false,
+      // 仅 serial 需要落配置（缺省 passing 由 defaults 提供；startDraft 只认 rawCfg.draftMode==='serial'）
+      draftMode: input.draftMode === 'serial' ? 'serial' : undefined,
+      evenPackCount: input.evenPackCount !== false,
+      reserveSeconds: input.reserveSeconds ?? defaults.reserveSeconds,
       mainMin: input.mainMin ?? defaults.mainMin,
       mainMax: input.mainMax ?? defaults.mainMax,
       extraMax: input.extraMax ?? defaults.extraMax,
@@ -184,7 +195,8 @@ export class TournamentsService {
 
   // 阶段迁移规则（dev_docs/05 §3.2）：
   // - registration 不能直接进入 deckbuilding（必须开始选牌）；
-  // - drafting -> deckbuilding（手动）：若当前牌堆未选完，置 pendingPhase，等当前牌堆选完后进入（进度保留）；
+  // - drafting -> deckbuilding（手动）：serial 若当前牌堆未选完 / passing 若本轮队列未空，置 pendingPhase，
+  //   等当前牌堆/本轮选完后进入（进度保留）；
   // - deckbuilding -> drafting（回退）：允许，选牌从保留的光标处继续。
   setPhase(tid: number, status: string, round: number | undefined, actor: string): void {
     const state = loadState(tid);
@@ -197,16 +209,25 @@ export class TournamentsService {
           persistMeta(tid);
           return; // 等待当前牌堆选完（advance 内完成切换）
         }
+        // passing 模式：任一玩家队列非空 = 本轮未选完，同样置 pendingPhase 等本轮结束（doPassPick 内完成切换）
+        const passing = Object.keys(state.packQueues ?? {}).length > 0;
+        if (passing && state.players.some((p) => (state.packQueues[p.playerId]?.length ?? 0) > 0)) {
+          logEvent(tid, 'draft', 'pending', 'deckbuilding', actor);
+          persistMeta(tid);
+          return;
+        }
         this.enterDeckbuilding(tid, actor);
         return;
       }
     }
     if (status === 'drafting' && state.status === 'deckbuilding') {
-      // 回退：清掉构筑时限，恢复选牌（光标已保留在最后牌堆开头）
+      // 回退：清掉构筑时限，恢复选牌（serial 光标保留在最后牌堆开头；passing 队列/ deadline 原样保留，
+      // 定时器由 admin 阶段端点的 resumePickTimer 重新武装，过期 deadline 会恢复为完整时长）
       const s = loadState(tid);
       const deadlineAt = null;
       logEvent(tid, 'tournament', 'phase', { status: 'drafting', round: s.round, deadlineAt }, actor);
-      if (!s.pickCursor && s.packs.length) {
+      const passing = Object.keys(s.packQueues ?? {}).length > 0;
+      if (!passing && !s.pickCursor && s.packs.length) {
         // 极端情况：选牌全部完成后回退 —— 从第一堆重新开始（没有未选完的堆）
         const first = s.packs[0];
         const playerId = s.players.slice().sort((a, b) => a.seat - b.seat)[0].playerId;
@@ -261,17 +282,58 @@ export class TournamentsService {
     // 未加入比赛的玩家 URL 应失效（前端据此跳回报名页）
     if (!state.players.some((pl) => pl.playerId === playerId)) throw new Error('PLAYER_NOT_FOUND');
     const cfg = getConfig(state);
-    const isCurrentPicker = state.pickCursor?.playerId === playerId;
     const picks = state.picks.filter((p) => p.playerId === playerId);
-    const pack = state.pickCursor ? state.packs.find((p) => p.index === state.pickCursor!.packIndex) : null;
-    // info hiding: the current picker sees only the REMAINING cards of the pack —
-    // already-picked cards' codes are never sent (dev_docs/05 §3)
-    const remaining = pack
-      ? (() => {
-          const taken = new Set(state.picks.filter((p) => p.packIndex === pack.index).map((p) => p.card));
-          return pack.order.filter((c) => !taken.has(c));
-        })()
-      : [];
+    const remainingOf = (packIndex: number): number[] => {
+      const pk = state.packs.find((p) => p.index === packIndex);
+      if (!pk) return [];
+      const taken = new Set(state.picks.filter((p) => p.packIndex === packIndex).map((p) => p.card));
+      return pk.order.filter((c) => !taken.has(c));
+    };
+    const passing = Object.keys(state.packQueues ?? {}).length > 0;
+    let pack: Record<string, unknown> | null = null;
+    let queueLengths: { playerId: string; length: number }[] | undefined;
+    if (passing) {
+      // passing：所有人可见各玩家队列长度（仅数量）；本人队首堆内容仅本人可见
+      queueLengths = state.players.map((p) => ({ playerId: p.playerId, length: state.packQueues[p.playerId]?.length ?? 0 }));
+      if (state.status === 'drafting') {
+        const queue = state.packQueues[playerId] ?? [];
+        const head = queue.length ? state.packs.find((p) => p.index === queue[0]) : null;
+        if (head) {
+          const remaining = remainingOf(head.index);
+          pack = {
+            index: head.index,
+            cardsLeft: remaining.length,
+            packsRemaining: queue.length,
+            queueLength: queue.length,
+            currentPicker: playerId,
+            deadlineAt: state.pickDeadlines[playerId] ?? null,
+            isMyTurn: true, // passing：队列非空即可选
+            // 本人剩余保留时间（ms）：deadlineAt - reserveMs = 基础时间用尽时刻
+            reserveMs: state.pickReserves[playerId] ?? cfg.reserveSeconds * 1000,
+            cards: remaining,
+            droppedCard: head.dropCard,
+          };
+        }
+      }
+    } else {
+      const isCurrentPicker = state.pickCursor?.playerId === playerId;
+      const cur = state.pickCursor ? state.packs.find((p) => p.index === state.pickCursor!.packIndex) : null;
+      // info hiding: the current picker sees only the REMAINING cards of the pack —
+      // already-picked cards' codes are never sent (dev_docs/05 §3)
+      const remaining = cur ? remainingOf(cur.index) : [];
+      pack = cur
+        ? {
+            index: cur.index,
+            cardsLeft: remaining.length,
+            packsRemaining: state.packs.length - cur.index,
+            currentPicker: state.pickCursor!.playerId,
+            deadlineAt: state.pickCursor!.deadlineAt,
+            isMyTurn: isCurrentPicker,
+            cards: isCurrentPicker ? remaining : undefined,
+            droppedCard: cur.dropCard,
+          }
+        : null;
+    }
     return {
       id: state.id,
       name: state.name,
@@ -282,18 +344,8 @@ export class TournamentsService {
       players: state.players.map((p) => ({ playerId: p.playerId, displayName: p.displayName, seat: p.seat })),
       pickedCards: picks.map((p) => p.card),
       poolInfo: { name: String(cfg.cardPool ?? 'full'), count: this.poolsCodes(cfg) },
-      pack: pack
-        ? {
-            index: pack.index,
-            cardsLeft: remaining.length,
-            packsRemaining: state.packs.length - pack.index,
-            currentPicker: state.pickCursor!.playerId,
-            deadlineAt: state.pickCursor!.deadlineAt,
-            isMyTurn: isCurrentPicker,
-            cards: isCurrentPicker ? remaining : undefined,
-            droppedCard: pack.dropCard,
-          }
-        : null,
+      pack,
+      queueLengths,
       pause: state.pause,
       droppedCards: state.droppedCards,
       phaseDeadline: state.phaseDeadline,
@@ -318,7 +370,8 @@ export class TournamentsService {
       if (e.entity === 'player' && e.action === 'player_join') summary = `报名 ${p.playerId}`;
       else if (e.entity === 'player' && e.action === 'player_remove') summary = `删除玩家 ${p}`;
       else if (e.entity === 'player' && e.action === 'seat_assign') summary = '座位分配';
-      else if (e.entity === 'draft' && e.action === 'packs_created') summary = `牌堆生成（${(p.packs ?? []).length} 堆${p.droppedCards?.length ? `，弃置 ${p.droppedCards.length} 张` : ''}）`;
+      else if (e.entity === 'pack' && e.action === 'packs_created') summary = `牌堆生成（${(p.packs ?? []).length} 堆${p.droppedCards?.length ? `，弃置 ${p.droppedCards.length} 张` : ''}${p.queues ? '，传递式' : ''}）`;
+      else if (e.entity === 'draft' && e.action === 'deadlines') summary = '选牌计时重设';
       else if (e.entity === 'draft' && e.action === 'cursor') summary = p ? `牌堆 ${p.packIndex} → ${p.playerId}` : '选牌结束';
       else if (e.entity === 'draft' && e.action === 'pick') summary = `选牌 ${p.playerId} #${p.card}${p.auto ? '（超时自动）' : ''}`;
       else if (e.entity === 'draft' && e.action === 'pause') summary = p?.pausedAt ? '暂停' : '恢复';
@@ -350,6 +403,10 @@ export class TournamentsService {
       pendingPhase: state.pendingPhase,
       picks: state.picks,
       pickCursor: state.pickCursor,
+      packQueues: state.packQueues,
+      pickDeadlines: state.pickDeadlines,
+      packsDealt: state.packsDealt,
+      pickReserves: state.pickReserves,
       pause: state.pause,
       decks: state.decks,
       matches: state.matches,

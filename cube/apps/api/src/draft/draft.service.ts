@@ -6,11 +6,16 @@ import { PoolsService } from '../pools/pools.service';
 import { MatchesService } from '../matches/matches.service';
 import { DecksService } from '../decks/decks.service';
 
-// Draft engine: pack generation, snake rotation, pick timer with server-side
-// auto-pick, pause voting, deckbuilding deadline (dev_docs/05 §3).
+// Draft engine: pack generation, pick timers with server-side auto-pick,
+// pause voting, deckbuilding deadline (dev_docs/05 §3).
+// 两种模式：
+//  - passing（默认）：每玩家 FIFO 牌堆队列，队首堆选 1 张后顺时针传递，各自独立计时；
+//  - serial（旧兼容）：全局单光标蛇形轮转。运行时按状态形状分派
+//    （packs_created 事件带 queues 即 passing），旧比赛回放/进行中行为不变。
 @Injectable()
 export class DraftService implements OnModuleInit {
   private timers = new Map<number, NodeJS.Timeout>();
+  private passTimers = new Map<string, NodeJS.Timeout>(); // passing 模式：key = `${tid}:${playerId}`
   private deckbuildingTimers = new Map<number, NodeJS.Timeout>();
   private pauseTimers = new Map<number, NodeJS.Timeout>();
 
@@ -21,6 +26,11 @@ export class DraftService implements OnModuleInit {
     private matches: MatchesService,
   ) {}
 
+  // passing 模式判定：packs_created 事件携带 queues 即启用（与配置无关，回放安全）
+  private isPassing(state: TournamentState): boolean {
+    return Object.keys(state.packQueues ?? {}).length > 0;
+  }
+
   onModuleInit(): void {
     // re-arm timers after restart (all state server-side; deadlines persisted)
     const db = require('../db').getDb();
@@ -28,7 +38,11 @@ export class DraftService implements OnModuleInit {
     for (const r of rows) {
       try {
         const state = loadState(r.id);
-        if (state.pickCursor?.deadlineAt && !state.pause?.pausedAt) {
+        if (this.isPassing(state)) {
+          if (!state.pause?.pausedAt) {
+            for (const p of state.players) this.armPassTimer(r.id, p.playerId);
+          }
+        } else if (state.pickCursor?.deadlineAt && !state.pause?.pausedAt) {
           this.armTimer(state);
         }
       } catch (e) {
@@ -63,7 +77,12 @@ export class DraftService implements OnModuleInit {
       }
     }
     const seatMap: Record<string, number> = {};
-    state.players.forEach((p) => (seatMap[p.playerId] = order.indexOf(p.playerId)));
+    // 注意：order 只含未分配座位的玩家；管理员预分配 seat>=0 的玩家不在其中，
+    // 不得用 indexOf（会得到 -1 覆盖其座位）——只为 order 内的玩家写 seatMap
+    state.players.forEach((p) => {
+      const idx = order.indexOf(p.playerId);
+      if (idx >= 0) seatMap[p.playerId] = idx;
+    });
     // packs: shuffled pool (card pool or full card table), pack size = n * multiple, drop last (public)
     const poolCodes = this.pools.resolve(cfg.cardPool as string | undefined).slice();
     for (let i = poolCodes.length - 1; i > 0; i--) {
@@ -74,7 +93,8 @@ export class DraftService implements OnModuleInit {
     //  use_all            = 所有卡进牌堆，最后一堆可以不满（不做整除要求）
     //  drop_leftover      = 只丢弃无法整除的余数，不要求牌堆数是玩家数倍数
     //  drop_leftover_exact= 丢弃余数且要求牌堆数是玩家数倍数（旧 dropLeftover=true 行为）
-    //  packCount 显式设置时优先：固定牌堆总数，剩余卡全部随机丢弃
+    //  packCount 显式设置时优先：≤ 整除上限 floor(池卡数/packSize) = 固定牌堆总数，剩余卡全部随机丢弃；
+    //  > 上限 = 不丢弃——用全部卡池，堆数 = ceil(池卡数/packSize)（末堆可不满）
     //  dropPublic=false 时丢弃卡牌不公开（只从卡池移除，不进入公开列表）
     const packSize = (rawCfg.packSize as number | undefined) ?? n * ((rawCfg.packSizeMultiple as number | undefined) ?? 3);
     const dropMode =
@@ -85,14 +105,25 @@ export class DraftService implements OnModuleInit {
           : 'drop_leftover_exact'; // 旧配置兼容
     const dropPublic = (rawCfg.dropPublic as boolean | undefined) !== false;
     const explicitPacks = (rawCfg.packCount as number | undefined) ?? 0;
+    // evenPackCount（默认开）：牌堆数须为人数整数倍——显式 packCount 非倍数直接拒绝；
+    // 自动/钳制结果向下取整到最大倍数（余数按 dropPublic 规则处理）；不足一整轮时兜底不取整
+    const evenPackCount = (rawCfg.evenPackCount as boolean | undefined) !== false;
     let packCount: number;
     if (explicitPacks >= 1) {
-      packCount = Math.max(1, Math.min(Math.floor(explicitPacks), Math.floor(poolCodes.length / packSize)));
+      const want = Math.floor(explicitPacks);
+      if (evenPackCount && want % n !== 0) throw new Error('PACKCOUNT_NOT_MULTIPLE');
+      // 超过整除上限：推断为"用全部卡池"（末堆可不满），不丢弃；之后 evenPackCount 取整块仍可能产生弃置
+      const maxFull = Math.floor(poolCodes.length / packSize);
+      packCount = want <= maxFull ? want : Math.max(1, Math.ceil(poolCodes.length / packSize));
     } else if (dropMode === 'use_all') {
       packCount = Math.max(1, Math.ceil(poolCodes.length / packSize));
     } else {
       const rawCount = Math.floor(poolCodes.length / packSize);
       packCount = Math.max(1, dropMode === 'drop_leftover_exact' ? rawCount - (rawCount % n) : rawCount);
+    }
+    if (evenPackCount && packCount % n !== 0) {
+      const m = packCount - (packCount % n);
+      if (m >= n) packCount = m;
     }
     // 牌堆构成策略（packStrategy）：
     //  stratify（默认）   = 主卡/额外卡按整体比例均匀分布到每一堆（各池先洗牌再按比例取）
@@ -131,11 +162,13 @@ export class DraftService implements OnModuleInit {
     }
     let droppedCards: number[] = codes.slice(packSize * packCount);
     if (!dropPublic) droppedCards = [];
+    const draftMode = (rawCfg.draftMode as string | undefined) === 'serial' ? 'serial' : 'passing';
     const packs = [];
     for (let k = 0; k < packCount; k++) {
       const orderList = codes.slice(k * packSize, Math.min((k + 1) * packSize, codes.length));
-      // 每堆起始偏移：packSize 为人数倍数时沿用蛇形偏移；否则每堆随机起始玩家（前后端均有提示）
-      const startOffset = packSize % n === 0 ? (n - (k % n)) % n : Math.floor(Math.random() * n);
+      // serial：每堆起始偏移（packSize 为人数倍数时蛇形偏移；否则每堆随机起始玩家）；passing 不使用
+      const startOffset =
+        draftMode === 'serial' ? (packSize % n === 0 ? (n - (k % n)) % n : Math.floor(Math.random() * n)) : undefined;
       packs.push({ index: k, size: orderList.length, dropCard: null, startOffset, order: orderList });
     }
     // leftover pool cards (drop 模式): randomly dropped, list made public before the draft starts
@@ -145,9 +178,28 @@ export class DraftService implements OnModuleInit {
     }
     logEvent(tid, 'tournament', 'phase', { status: 'drafting', round: 0 }, actor);
     logEvent(tid, 'player', 'seat_assign', seatMap, actor);
-    logEvent(tid, 'pack', 'packs_created', { packs, droppedCards }, actor);
-    // snake cursor: pack 0 starts with seat 0; each pack alternates direction
-    this.advance(tid, actor, true);
+    if (draftMode === 'serial') {
+      logEvent(tid, 'pack', 'packs_created', { packs, droppedCards }, actor);
+      // snake cursor: pack 0 starts with seat 0; each pack alternates direction
+      this.advance(tid, actor, true);
+    } else {
+      // passing 按轮发堆：开局只发第 0 轮（堆 k → 座位 k）；一轮全空后由 dealRound 发下一轮
+      const seatsArr = state.players.slice().sort((a, b) => a.seat - b.seat);
+      const queues: Record<string, number[]> = {};
+      const reserves: Record<string, number> = {};
+      for (const p of seatsArr) {
+        queues[p.playerId] = [];
+        reserves[p.playerId] = cfg.reserveSeconds * 1000;
+      }
+      const dealt = Math.min(n, packCount);
+      for (let k = 0; k < dealt; k++) queues[seatsArr[k].playerId].push(k);
+      // deadline = 基础选牌时间 + 保留时间（超时先扣 reserve，耗尽才自动选）
+      const deadlineAt = new Date(Date.now() + (cfg.pickSeconds + cfg.reserveSeconds) * 1000).toISOString();
+      const deadlines: Record<string, string | null> = {};
+      for (const p of seatsArr) deadlines[p.playerId] = queues[p.playerId].length ? deadlineAt : null;
+      logEvent(tid, 'pack', 'packs_created', { packs, droppedCards, queues, deadlines, reserves, dealt }, actor);
+      for (const p of seatsArr) this.armPassTimer(tid, p.playerId);
+    }
     persistMeta(tid);
   }
 
@@ -155,6 +207,7 @@ export class DraftService implements OnModuleInit {
   // on (dev_docs/05 §3): orders are 1-2-3, 3-1-2, 2-3-1, 1-2-3, ... so the last picker
   // of a pack picks first in the next pack (consecutive double pick), and with a pack
   // count that is a multiple of n every player occupies every position equally.
+  // （仅 serial 模式使用）
   private pickerAt(state: TournamentState, packIndex: number, round: number): string {
     const n = state.players.length;
     const seats = state.players.slice().sort((a, b) => a.seat - b.seat);
@@ -176,6 +229,8 @@ export class DraftService implements OnModuleInit {
     const pack = state.packs.find((p) => p.index === packIndex);
     return pack ? state.picks.filter((p) => p.packIndex === packIndex).length >= pack.order.length : true;
   }
+
+  // ---------- serial 模式（旧兼容） ----------
 
   private advance(tid: number, actor: string, initial: boolean): void {
     const state = loadState(tid);
@@ -298,11 +353,35 @@ export class DraftService implements OnModuleInit {
   // 管理员冻结（暂停）期间：选牌定时器挂起，解冻后重新计时（dev_docs/05 §3）
   haltPickTimer(tid: number): void {
     this.clearTimer(tid);
+    this.clearPassTimers(tid);
   }
 
   resumePickTimer(tid: number): void {
     const s = loadState(tid);
-    if (s.status !== 'drafting' || !s.pickCursor?.deadlineAt) return;
+    if (s.status !== 'drafting' || s.pause?.pausedAt) return;
+    if (this.isPassing(s)) {
+      // 冻结期间 deadline 可能已过期：过期/缺失的一律恢复为完整选牌时长 + 剩余 reserve（与 serial 语义一致）
+      const cfg = getConfig(s);
+      const now = Date.now();
+      const deadlines: Record<string, string | null> = { ...s.pickDeadlines };
+      const reserves: Record<string, number> = { ...s.pickReserves };
+      let changed = false;
+      for (const p of s.players) {
+        const hasPack = (s.packQueues[p.playerId]?.length ?? 0) > 0;
+        const dl = deadlines[p.playerId];
+        if (hasPack && (!dl || new Date(dl).getTime() <= now)) {
+          deadlines[p.playerId] = new Date(now + cfg.pickSeconds * 1000 + (reserves[p.playerId] ?? cfg.reserveSeconds * 1000)).toISOString();
+          changed = true;
+        }
+      }
+      if (changed) {
+        logEvent(tid, 'draft', 'deadlines', { deadlines, reserves }, 'system');
+        persistMeta(tid);
+      }
+      for (const p of s.players) this.armPassTimer(tid, p.playerId);
+      return;
+    }
+    if (!s.pickCursor?.deadlineAt) return;
     // 冻结期间 deadline 已过期：把剩余时限恢复为完整选牌时长（与暂停恢复语义一致）
     if (new Date(s.pickCursor.deadlineAt).getTime() <= Date.now()) {
       const cfg = getConfig(s);
@@ -352,26 +431,30 @@ export class DraftService implements OnModuleInit {
   pick(tid: number, playerId: string, card: number, targetZone?: 'main' | 'extra' | 'side'): void {
     const state = loadState(tid);
     if (state.status !== 'drafting') throw new Error('WRONG_PHASE');
-    if (!state.pickCursor || state.pickCursor.playerId !== playerId) throw new Error('NOT_YOUR_TURN');
     if (state.pause?.pausedAt) throw new Error('PAUSED');
+    // 拖拽目标区类型校验在落 pick 事件之前做（避免事件已记录但卡组/光标未推进的不一致）
+    if (targetZone) {
+      const isExtra = this.cards.isExtraDeck(card);
+      if (targetZone === 'main' && isExtra) throw new Error('WRONG_ZONE');
+      if (targetZone === 'extra' && !isExtra) throw new Error('WRONG_ZONE');
+    }
+    if (this.isPassing(state)) {
+      const queue = state.packQueues[playerId] ?? [];
+      if (!queue.length) throw new Error('NOT_YOUR_TURN'); // passing：当前没有可选择的牌堆
+      const remaining = this.remainingInPack(state, queue[0]);
+      if (!remaining.includes(card)) throw new Error('CARD_NOT_AVAILABLE');
+      this.doPassPick(tid, playerId, card, false, playerId, targetZone);
+      return;
+    }
+    if (!state.pickCursor || state.pickCursor.playerId !== playerId) throw new Error('NOT_YOUR_TURN');
     const remaining = this.remainingInPack(state, state.pickCursor.packIndex);
     if (!remaining.includes(card)) throw new Error('CARD_NOT_AVAILABLE');
     this.doPick(tid, playerId, card, false, playerId, targetZone);
   }
 
-  private doPick(tid: number, playerId: string, card: number, auto: boolean, actor: string, targetZone?: 'main' | 'extra' | 'side'): void {
+  // 选中的卡立即进入左侧对应区域：拖拽目标区优先，否则按卡类型进 main/extra（dev_docs/06 §2）
+  private applyPickToDeck(tid: number, playerId: string, card: number, actor: string, targetZone?: 'main' | 'extra' | 'side'): void {
     const state = loadState(tid);
-    const pick: PickState = {
-      playerId,
-      packIndex: state.pickCursor!.packIndex,
-      round: state.pickCursor!.round,
-      card,
-      auto,
-      at: new Date().toISOString(),
-    };
-    logEvent(tid, 'pick', 'pick', pick, actor);
-    // picked cards join the left zones immediately; 拖拽目标区优先（类型不符拒绝），
-    // 否则按卡类型进 main/extra（dev_docs/06 §2）
     const deck = state.decks[playerId] ?? { main: [], extra: [], side: [], lockedAt: null, status: 'building' as const };
     const isExtra = this.cards.isExtraDeck(card);
     if (targetZone === 'main' && isExtra) throw new Error('WRONG_ZONE');
@@ -386,6 +469,20 @@ export class DraftService implements OnModuleInit {
       deck.main.push(card);
     }
     logEvent(tid, 'deck', 'deck', { playerId, deck }, actor);
+  }
+
+  private doPick(tid: number, playerId: string, card: number, auto: boolean, actor: string, targetZone?: 'main' | 'extra' | 'side'): void {
+    const state = loadState(tid);
+    const pick: PickState = {
+      playerId,
+      packIndex: state.pickCursor!.packIndex,
+      round: state.pickCursor!.round,
+      card,
+      auto,
+      at: new Date().toISOString(),
+    };
+    logEvent(tid, 'pick', 'pick', pick, actor);
+    this.applyPickToDeck(tid, playerId, card, actor, targetZone);
     const pausePending = !!state.pause && !state.pause.pausedAt;
     this.advance(tid, actor, false);
     // pause activates after the current picker finishes their pick
@@ -395,6 +492,170 @@ export class DraftService implements OnModuleInit {
         this.pauseNow(tid);
       }
     }
+  }
+
+  // ---------- passing 模式 ----------
+
+  private armPassTimer(tid: number, playerId: string): void {
+    const key = `${tid}:${playerId}`;
+    const old = this.passTimers.get(key);
+    if (old) clearTimeout(old);
+    this.passTimers.delete(key);
+    let state: TournamentState;
+    try {
+      state = loadState(tid);
+    } catch {
+      return; // 比赛已被删除
+    }
+    if (state.status !== 'drafting') return;
+    const deadline = state.pickDeadlines?.[playerId];
+    if (!deadline) return;
+    const ms = new Date(deadline).getTime() - Date.now();
+    if (ms <= 0) {
+      this.passAutoPick(tid, playerId);
+      return;
+    }
+    const t = setTimeout(() => this.passAutoPick(tid, playerId), ms);
+    t.unref();
+    this.passTimers.set(key, t);
+  }
+
+  private clearPassTimers(tid: number): void {
+    const prefix = `${tid}:`;
+    for (const [key, t] of [...this.passTimers]) {
+      if (key.startsWith(prefix)) {
+        clearTimeout(t);
+        this.passTimers.delete(key);
+      }
+    }
+  }
+
+  private passAutoPick(tid: number, playerId: string): void {
+    try {
+      this.doPassAutoPick(tid, playerId);
+    } catch (e) {
+      // 定时器回调异常不可冒泡（会杀进程）：记录并继续
+      console.error('passAutoPick failed', tid, playerId, (e as Error).message);
+    }
+  }
+
+  private doPassAutoPick(tid: number, playerId: string): void {
+    let state: TournamentState;
+    try {
+      state = loadState(tid);
+    } catch {
+      return; // 比赛已被删除
+    }
+    if (state.status !== 'drafting' || !this.isPassing(state)) return;
+    if (state.frozen) {
+      // 暂停中：不推进选牌，5 秒后再检查（解冻后 resumePickTimer 会重新计时）
+      const t = setTimeout(() => this.passAutoPick(tid, playerId), 5000);
+      t.unref();
+      this.passTimers.set(`${tid}:${playerId}`, t);
+      return;
+    }
+    if (state.pause?.pausedAt) return;
+    const queue = state.packQueues[playerId] ?? [];
+    if (!queue.length) return;
+    const remaining = this.remainingInPack(state, queue[0]);
+    if (!remaining.length) return; // 队首堆已空属异常状态（正常流程空堆即消亡），不推进
+    const card = remaining[Math.floor(Math.random() * remaining.length)];
+    this.doPassPick(tid, playerId, card, true, 'system');
+  }
+
+  private doPassPick(tid: number, playerId: string, card: number, auto: boolean, actor: string, targetZone?: 'main' | 'extra' | 'side'): void {
+    const state = loadState(tid);
+    const cfg = getConfig(state);
+    const queue = state.packQueues[playerId] ?? [];
+    if (!queue.length) return; // 竞态兜底（理论上入口已校验）
+    const packIndex = queue[0];
+    const pack = state.packs.find((p) => p.index === packIndex);
+    if (!pack) return;
+    const round = state.picks.filter((p) => p.packIndex === packIndex).length;
+    const pick: PickState = { playerId, packIndex, round, card, auto, at: new Date().toISOString() };
+    // 队列/deadline/reserve 变更随 pick 事件落日志，回放与实时一致
+    const queues: Record<string, number[]> = {};
+    for (const [pid, q] of Object.entries(state.packQueues)) queues[pid] = q.slice();
+    queues[playerId] = queue.slice(1);
+    const deadlines: Record<string, string | null> = { ...state.pickDeadlines };
+    const reserves: Record<string, number> = { ...state.pickReserves };
+    const now = Date.now();
+    // 保留时间结算：本次选牌超出基础时间的部分从 reserve 扣除（不刷新）。
+    // deadline = 选牌开始 + pickSeconds + 当时 reserve → base 时刻 = deadline - reserve
+    const prevDeadline = state.pickDeadlines[playerId] ? new Date(state.pickDeadlines[playerId]!).getTime() : null;
+    const prevReserve = reserves[playerId] ?? cfg.reserveSeconds * 1000;
+    if (prevDeadline !== null) {
+      const consumed = Math.max(0, now - (prevDeadline - prevReserve));
+      reserves[playerId] = Math.max(0, prevReserve - consumed);
+    }
+    const deadlineFor = (pid: string) => new Date(now + cfg.pickSeconds * 1000 + (reserves[pid] ?? 0)).toISOString();
+    let receiver: string | null = null;
+    if (this.remainingInPack(state, packIndex).length > 1) {
+      // 堆未空：传给顺时针下一座位玩家的队尾
+      const seatsArr = state.players.slice().sort((a, b) => a.seat - b.seat);
+      const idx = seatsArr.findIndex((p) => p.playerId === playerId);
+      receiver = seatsArr[(idx + 1) % seatsArr.length].playerId;
+      if (!queues[receiver]) queues[receiver] = [];
+      if (queues[receiver].length === 0) deadlines[receiver] = deadlineFor(receiver); // 空队列接到堆：开始计时
+      queues[receiver].push(packIndex);
+    }
+    // 空堆直接消亡（不移交）
+    deadlines[playerId] = queues[playerId].length ? deadlineFor(playerId) : null;
+    logEvent(tid, 'pick', 'pick', { ...pick, queues, deadlines, reserves }, actor);
+    this.applyPickToDeck(tid, playerId, card, actor, targetZone);
+    this.armPassTimer(tid, playerId);
+    if (receiver) this.armPassTimer(tid, receiver);
+    // 一轮全部选空：pendingPhase 优先（管理台提前进构筑，不发下一轮）；
+    // 否则还有未发堆 → 发下一轮；全部发完 → 进入构筑
+    const s = loadState(tid);
+    if (s.status === 'drafting' && s.players.every((p) => !(s.packQueues[p.playerId]?.length))) {
+      if (s.pendingPhase === 'deckbuilding') {
+        logEvent(tid, 'draft', 'pending', null, actor);
+        this.tournaments.enterDeckbuilding(tid, actor);
+        this.armDeckbuildingTimer(tid);
+      } else if (s.packsDealt < s.packs.length) {
+        this.dealRound(tid, actor);
+      } else {
+        this.tournaments.enterDeckbuilding(tid, actor);
+        this.armDeckbuildingTimer(tid);
+      }
+    }
+    persistMeta(tid);
+  }
+
+  // passing：一轮全部选空后发下一轮。整轮按座位顺序入队；残轮（evenPackCount 关闭时才出现）
+  // 随机分给 r 名互斥玩家。调用前提：所有玩家队列均为空。
+  private dealRound(tid: number, actor: string): void {
+    const state = loadState(tid);
+    const cfg = getConfig(state);
+    const n = state.players.length;
+    const remaining = state.packs.length - state.packsDealt;
+    if (remaining <= 0) return;
+    const count = Math.min(n, remaining);
+    const seatsArr = state.players.slice().sort((a, b) => a.seat - b.seat);
+    const recipients = seatsArr.slice();
+    if (count < n) {
+      // 残轮：随机互斥分配
+      for (let i = recipients.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [recipients[i], recipients[j]] = [recipients[j], recipients[i]];
+      }
+    }
+    const queues: Record<string, number[]> = {};
+    for (const [pid, q] of Object.entries(state.packQueues)) queues[pid] = q.slice();
+    const deadlines: Record<string, string | null> = { ...state.pickDeadlines };
+    const reserves: Record<string, number> = { ...state.pickReserves };
+    const now = Date.now();
+    for (let k = 0; k < count; k++) {
+      const pid = recipients[k].playerId;
+      if (!queues[pid]) queues[pid] = [];
+      queues[pid].push(state.packsDealt + k);
+      deadlines[pid] = new Date(now + cfg.pickSeconds * 1000 + (reserves[pid] ?? cfg.reserveSeconds * 1000)).toISOString();
+    }
+    const dealt = state.packsDealt + count;
+    logEvent(tid, 'draft', 'deal', { queues, deadlines, reserves, dealt }, actor);
+    for (let k = 0; k < count; k++) this.armPassTimer(tid, recipients[k].playerId);
+    persistMeta(tid);
   }
 
   // ---------- pause voting (dev_docs/05 §3) ----------
@@ -428,6 +689,11 @@ export class DraftService implements OnModuleInit {
     const n = state.players.length;
     const yes = Object.values(state.pause.votes).filter(Boolean).length;
     if (yes > n / 2) {
+      if (this.isPassing(state)) {
+        // passing：无"当前选牌者"，多数通过即冻结所有人的剩余选牌时间
+        this.pauseNow(tid);
+        return;
+      }
       // majority reached: pause once current picker finishes their pick
       logEvent(tid, 'pause', 'pause', { ...state.pause, votes: state.pause.votes }, 'system');
     }
@@ -436,6 +702,20 @@ export class DraftService implements OnModuleInit {
   private pauseNow(tid: number): void {
     const state = loadState(tid);
     if (!state.pause) return;
+    if (this.isPassing(state)) {
+      this.clearPassTimers(tid);
+      // 冻结各玩家剩余选牌时间，恢复时按此重设 deadline
+      const now = Date.now();
+      const pausedDeadlines: Record<string, number> = {};
+      for (const [pid, dl] of Object.entries(state.pickDeadlines)) {
+        if (dl) pausedDeadlines[pid] = Math.max(0, new Date(dl).getTime() - now);
+      }
+      logEvent(tid, 'pause', 'pause', { ...state.pause, pausedDeadlines, pausedAt: new Date().toISOString() }, 'system');
+      persistMeta(tid);
+      // 暂停时长上限（默认 5 分钟）：到期自动恢复（dev_docs/05 §3）
+      this.armPauseTimer(tid, state.pause.remainingMs);
+      return;
+    }
     this.clearTimer(tid);
     // freeze remaining pick time into pause
     let remainingMs = state.pause.remainingMs;
@@ -475,15 +755,33 @@ export class DraftService implements OnModuleInit {
     const state = loadState(tid);
     if (!state.pause?.pausedAt) throw new Error('NOT_PAUSED');
     if (playerId !== state.pause.proposer) throw new Error('FORBIDDEN');
+    const old = this.pauseTimers.get(tid);
+    if (old) clearTimeout(old);
+    this.pauseTimers.delete(tid);
+    if (this.isPassing(state)) {
+      // 恢复：给完整基础时长 + 剩余 reserve（与 resumePickTimer 语义一致，reserve 余额不变）
+      const cfg = getConfig(state);
+      const reserves: Record<string, number> = { ...state.pickReserves };
+      const now = Date.now();
+      const deadlines: Record<string, string | null> = {};
+      for (const p of state.players) {
+        const hasPack = (state.packQueues[p.playerId]?.length ?? 0) > 0;
+        deadlines[p.playerId] = hasPack
+          ? new Date(now + cfg.pickSeconds * 1000 + (reserves[p.playerId] ?? cfg.reserveSeconds * 1000)).toISOString()
+          : null;
+      }
+      logEvent(tid, 'pause', 'pause', null, playerId);
+      logEvent(tid, 'draft', 'deadlines', { deadlines, reserves }, playerId);
+      for (const p of state.players) this.armPassTimer(tid, p.playerId);
+      persistMeta(tid);
+      return;
+    }
     const s = loadState(tid);
     // restore deadline: now + remaining pick time (paused budget consumed)
     const cfg = getConfig(s);
     const pickLeft = s.pickCursor?.deadlineAt
       ? Math.max(0, new Date(s.pickCursor.deadlineAt).getTime() - Date.now() + (s.pause?.remainingMs ?? 0) - cfg.pickSeconds * 1000)
       : cfg.pickSeconds * 1000;
-    const old = this.pauseTimers.get(tid);
-    if (old) clearTimeout(old);
-    this.pauseTimers.delete(tid);
     logEvent(tid, 'pause', 'pause', null, playerId);
     if (s.pickCursor) {
       const deadlineAt = new Date(Date.now() + Math.max(0, pickLeft || cfg.pickSeconds * 1000)).toISOString();

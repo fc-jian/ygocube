@@ -11,7 +11,8 @@ function setup(n: number) {
   const tournaments = makeTournaments();
   const cards = new CardsService();
   const draft = new DraftService(cards, tournaments, new PoolsService(cards), new MatchesService(fakeSrvpro as any));
-  const tid = tournaments.create({ name: 'ph', maxPlayers: n, pickSeconds: 30, cardPool: TEST_POOL }, 'test').tid;
+  // serial 模式：本文件部分用例依赖 pickCursor 语义（passing 见 passing.spec.ts）
+  const tid = tournaments.create({ name: 'ph', maxPlayers: n, pickSeconds: 30, cardPool: TEST_POOL, draftMode: 'serial' }, 'test').tid;
   for (let i = 0; i < n; i++) tournaments.join(tid, `p${i}`, `P${i}`);
   return { tournaments, draft, tid };
 }
@@ -66,7 +67,7 @@ describe('phase rules', () => {
     const pool = cards.poolCodes().slice(0, 29);
     const p = new PoolsService(cards);
     p.create('nodrop', pool);
-    const tid = tournaments.create({ name: 'nodrop', maxPlayers: 3, cardPool: 'nodrop', dropMode: 'use_all', packSize: 9 }, 'test').tid;
+    const tid = tournaments.create({ name: 'nodrop', maxPlayers: 3, cardPool: 'nodrop', dropMode: 'use_all', packSize: 9, evenPackCount: false }, 'test').tid;
     for (let i = 0; i < 3; i++) tournaments.join(tid, `p${i}`, `P${i}`);
     draft.startDraft(tid, 'test');
     const state = loadState(tid);
@@ -254,7 +255,7 @@ describe('pack strategy', () => {
     // 3 人，每堆 10 张（非 3 的倍数）：31 张卡 use_all -> ceil(31/10)=4 堆（10,10,10,1）
     const p = new PoolsService(cards);
     p.create('anypack', cards.poolCodes().slice(0, 31));
-    const tid = tournaments.create({ name: 'anypack', maxPlayers: 3, cardPool: 'anypack', dropMode: 'use_all', packSize: 10 }, 'test').tid;
+    const tid = tournaments.create({ name: 'anypack', maxPlayers: 3, cardPool: 'anypack', dropMode: 'use_all', packSize: 10, evenPackCount: false }, 'test').tid;
     for (let i = 0; i < 3; i++) tournaments.join(tid, `p${i}`, `P${i}`);
     draft.startDraft(tid, 'test');
     const state = loadState(tid);
@@ -295,16 +296,20 @@ describe('pack strategy', () => {
     expect(state.droppedCards.length).toBe(40 - 27); // 剩余 13 张全部随机丢弃
   });
 
-  it('packCount above the pool limit is clamped to the maximum', () => {
+  it('packCount above the pool limit switches to use-all (no discard, last pack may be short)', () => {
     const tournaments = makeTournaments();
     const cards = new CardsService();
     const draft = new DraftService(cards, tournaments, new PoolsService(cards), new MatchesService(fakeSrvpro as any));
     const p = new PoolsService(cards);
     p.create('pk2', cards.poolCodes().slice(0, 40));
-    const tid = tournaments.create({ name: 'pk2', maxPlayers: 3, cardPool: 'pk2', packSize: 9, packCount: 99 }, 'test').tid;
+    const tid = tournaments.create({ name: 'pk2', maxPlayers: 3, cardPool: 'pk2', packSize: 9, packCount: 99, evenPackCount: false }, 'test').tid;
     for (let i = 0; i < 3; i++) tournaments.join(tid, `p${i}`, `P${i}`);
     draft.startDraft(tid, 'test');
-    expect(loadState(tid).packs.length).toBe(4); // floor(40/9)
+    const state = loadState(tid);
+    // 显式 99 > maxFull floor(40/9)=4 → 推断为用尽卡池：ceil(40/9)=5 堆，末堆 4 张，不弃置
+    expect(state.packs.length).toBe(5);
+    expect(state.packs[4].order.length).toBe(4);
+    expect(state.droppedCards.length).toBe(0);
   });
 
   it('dropPublic=false removes dropped cards without exposing them', () => {
@@ -321,21 +326,21 @@ describe('pack strategy', () => {
     expect(state.droppedCards.length).toBe(0); // 丢弃 4 张但不公开
   });
 
-  it('startOffset: snake offsets when packSize is a multiple of players; random otherwise', () => {
+  it('startOffset: snake offsets when packSize is a multiple of players; random otherwise (serial)', () => {
     const tournaments = makeTournaments();
     const cards = new CardsService();
     const draft = new DraftService(cards, tournaments, new PoolsService(cards), new MatchesService(fakeSrvpro as any));
     // 倍数场景：3 人 packSize 9 -> 每堆蛇形偏移 (n-(k%n))%n
     const p = new PoolsService(cards);
     p.create('off1', cards.poolCodes().slice(0, 40));
-    const t1 = tournaments.create({ name: 'off1', maxPlayers: 3, cardPool: 'off1', packSize: 9 }, 'test').tid;
+    const t1 = tournaments.create({ name: 'off1', maxPlayers: 3, cardPool: 'off1', packSize: 9, draftMode: 'serial' }, 'test').tid;
     for (let i = 0; i < 3; i++) tournaments.join(t1, `p${i}`, `P${i}`);
     draft.startDraft(t1, 'test');
     const s1 = loadState(t1);
     for (const pk of s1.packs) expect(pk.startOffset).toBe((3 - (pk.index % 3)) % 3);
-    // 非倍数场景：3 人 packSize 10 -> 偏移在 [0,3) 且不全是蛇形值（随机性弱断言：至少出现两个不同值）
+    // 非倍数场景：3 人 packSize 10 -> 每堆随机起始，偏移只需落在 [0,3) 内
     p.create('off2', cards.poolCodes().slice(0, 60));
-    const t2 = tournaments.create({ name: 'off2', maxPlayers: 3, cardPool: 'off2', packSize: 10 }, 'test').tid;
+    const t2 = tournaments.create({ name: 'off2', maxPlayers: 3, cardPool: 'off2', packSize: 10, draftMode: 'serial' }, 'test').tid;
     for (let i = 0; i < 3; i++) tournaments.join(t2, `p${i}`, `P${i}`);
     draft.startDraft(t2, 'test');
     const s2 = loadState(t2);

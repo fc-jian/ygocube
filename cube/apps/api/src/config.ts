@@ -87,6 +87,9 @@ export const config = loadConfig();
 export const defaults = {
   packSize: 12, // 每堆卡牌数（任意正整数，不再要求是人数整数倍）
   packSizeMultiple: 3, // 旧配置兼容（packSize 缺失时每堆 = 人数 × 该倍数）
+  draftMode: 'passing', // passing=每玩家牌堆队列传递式；serial=旧全局串行（仅 raw config 可设）
+  evenPackCount: true, // 牌堆数须为人数整数倍（显式 packCount 非倍数拒绝；自动计算向下取整）
+  reserveSeconds: 300, // passing 模式每玩家保留时间（单选超时先扣 reserve，耗尽才自动选）
   pickSeconds: 30,
   pauseSeconds: 300,
   deckbuildingSeconds: 600,

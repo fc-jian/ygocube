@@ -31,7 +31,8 @@ ygocube/
 - **所有状态在服务器**：cube 变更先写 append-only 事件日志再执行；支持快照恢复与管理员时间回溯（`POST /admin/t/:id/revert`）。
 - **协议兼容**：ygopro 消息结构只增不改；宿主新增参数追加在 spawn 参数尾部；老组合必须行为不变。
 - **接口契约**：三侧接口以 `dev_docs/07-protocol-api-design.md` + `cube/packages/shared` 为准，改任何一侧先更新契约。
-- **选牌信息隐藏**：非当前选牌者，后端响应与前端请求都不得包含牌堆卡牌内容，只有数量；**SSE 广播事件一律不含卡牌/卡组内容与其他对局的房间名**（客户端 refetch 本人状态）。
+- **选牌信息隐藏**：玩家只能看到自己当前可选牌堆的卡牌内容，其余只有数量；**SSE 广播事件一律不含卡牌/卡组内容与其他对局的房间名**（客户端 refetch 本人状态）。
+- **选牌模式（draftMode）**：默认 `passing`（每玩家 FIFO 牌堆队列，**按轮发堆**：一轮全空才发下一轮；队首堆选 1 张顺时针传递；各自独立计时 + 每玩家保留时间 `reserveSeconds` 默认 300s，超时先扣 reserve 耗尽才自动选；`evenPackCount` 默认开 = 堆数须为人数整数倍）；`serial` 为旧全局串行（仅 raw config 可设）。运行时按 `packs_created` 事件是否带 `queues` 分派，旧比赛回放行为不变。
 - **每玩家独立 URL**：玩家页路由为 `/t/:tid/{draft,deck,matches}/:pid`；token 按 `localStorage yc_token_<tid>_<pid>` 存储；缺失弹输入框；super token 可作万能玩家 token；tournament 关闭鉴权（`/admin/t/:tid/security`）则不校验。
 - **超时自动处理**：选牌超时 = 服务器随机选（记 `auto_picked`）；构筑超时 = 随机补/删至合法（记日志）。
 
@@ -41,9 +42,10 @@ ygocube/
 |---|---|
 | ygopro 宿主参数解析 | `ygopro/gframe/gframe.cpp`（server 分支 main，argc>=17 解析扩展参数） |
 | ygopro deck 校验 | `ygopro/gframe/deck_manager.cpp` CheckDeck/LoadDeck；常量在 deck_manager.h |
-| ygopro 协议 | `ygopro/gframe/network.h` |
+| ygopro 协议 | `ygopro/gframe/network.h`（含 cube 自定义 STOC_CUBE_DECK=0xA，卡组推送） |
+| ygopro 客户端卡组锁定 | `ygopro/gframe/duelclient.cpp`（STOC_CUBE_DECK case）、`menu_handler.cpp`/`deck_con.cpp`（锁定与 siding 自检） |
 | srvpro 房间/规则解析 | `srvpro/ygopro-server.coffee` class Room (1289)，规则段 1333-1436，spawn 1454 |
-| srvpro 卡组处理 | `ygopro-server.coffee` UPDATE_DECK handler (3487)，room.delete 上报 (1510) |
+| srvpro 卡组处理 | `ygopro-server.coffee` UPDATE_DECK handler（cube 覆盖按 duel_stage 分流：BEGIN 整包覆盖 / siding 校验后原样转发），STOC_CUBE_DECK 注入在 stoc_follow JOIN_GAME，room.delete 上报 (1510) |
 | srvpro 配置 | `srvpro/data/default_config.json` → `config/settings.json`；模块开关 `settings.modules.*` |
 | cube 后端 | `cube/apps/api/src/`（auth/tournaments/draft/decks/matches/events/realtime/admin） |
 | cube 前端 | `cube/apps/web/`（draft/deck/matches 三页 + CardImage 本地卡图） |
@@ -53,7 +55,9 @@ ygocube/
 
 ```bash
 # ygopro（cube-server 分支，Linux）
-premake5 gmake2 && make config=release   # 产物 bin/release/YGOPro → 改名 ygopro 放 srvpro/ygopro/
+bash scripts/build-ygopro.sh            # 无头宿主：产物 ygopro/bin/release/ygopro → 放 srvpro/ygopro/
+bash scripts/build-ygopro.sh --client --no-audio --build-freetype --build-png --build-jpeg --max-extra=30 --max-side=30
+                                        # GUI 客户端：产物 ygopro/bin/release/YGOPro（GUI 依赖源码需按 .github/workflows/build.yml 下载到 ygopro/{irrlicht,freetype,png,jpeg}）
 
 # srvpro（cube 分支）
 npm install && npx coffee -c ygopro-server.coffee cube.coffee   # 编译；node ygopro-server.js 启动

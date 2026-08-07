@@ -12,7 +12,8 @@ function setupDraft(n: number, pickSeconds = 30) {
   const tournaments = makeTournaments();
   const cards = new CardsService();
   const draft = new DraftService(cards, tournaments, new PoolsService(cards), new MatchesService(fakeSrvpro as any));
-  const tid = tournaments.create({ name: 'd', maxPlayers: n, pickSeconds, cardPool: TEST_POOL }, 'test').tid;
+  // 本文件用例均验证 serial（旧串行）模式行为；passing 模式见 passing.spec.ts
+  const tid = tournaments.create({ name: 'd', maxPlayers: n, pickSeconds, cardPool: TEST_POOL, draftMode: 'serial' }, 'test').tid;
   for (let i = 0; i < n; i++) tournaments.join(tid, `p${i}`, `P${i}`);
   draft.startDraft(tid, 'test');
   return { tournaments, cards, draft, tid };
@@ -58,7 +59,7 @@ describe('draft engine', () => {
     const pool = cards.poolCodes().slice(0, 27);
     const p = new PoolsService(cards);
     p.create('eq', pool);
-    const tid = tournaments.create({ name: 'eq', maxPlayers: 3, cardPool: 'eq', packSize: 9 }, 'test').tid;
+    const tid = tournaments.create({ name: 'eq', maxPlayers: 3, cardPool: 'eq', packSize: 9, draftMode: 'serial' }, 'test').tid;
     for (let i = 0; i < 3; i++) tournaments.join(tid, `p${i}`, `P${i}`);
     draft.startDraft(tid, 'test');
     // play the whole draft: pick the first remaining card on each turn
@@ -87,7 +88,7 @@ describe('draft engine', () => {
     const draft = new DraftService(cards, tournaments, new PoolsService(cards), new MatchesService(fakeSrvpro as any));
     const p = new PoolsService(cards);
     p.create('rotpool', cards.poolCodes().slice(0, 27));
-    const tid = tournaments.create({ name: 'rotpool', maxPlayers: 3, cardPool: 'rotpool', packSize: 9 }, 'test').tid;
+    const tid = tournaments.create({ name: 'rotpool', maxPlayers: 3, cardPool: 'rotpool', packSize: 9, draftMode: 'serial' }, 'test').tid;
     for (let i = 0; i < 3; i++) tournaments.join(tid, `p${i}`, `P${i}`);
     draft.startDraft(tid, 'test');
     const state0 = loadState(tid);

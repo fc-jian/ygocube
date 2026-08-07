@@ -7,7 +7,10 @@ export type DuelStage = 'begin' | 'dueling' | 'siding' | 'end';
 export interface TournamentConfig {
   maxPlayers: number;
   mode: 'single' | 'match'; // BO1 / BO3 with side
-  packSizeMultiple: number; // default 3 (pack size = players * multiple)
+  packSize?: number; // cards per pack (any positive integer, default 12)
+  packSizeMultiple: number; // legacy: pack size = players * multiple (used when packSize absent)
+  packCount?: number; // explicit total pack count; <= floor(pool/packSize) = fixed count, rest discarded; > that = use ALL pool cards (count = ceil(pool/packSize), last pack may be partial); absent = auto by legacy dropMode
+  dropPublic?: boolean; // whether dropped cards are exposed (default true)
   dropLast: boolean; // public dropped card list per pack
   pickSeconds: number; // default 30
   pauseSeconds: number; // default 300 (5 min)
@@ -17,6 +20,9 @@ export interface TournamentConfig {
   sideMax: number;
   cardPool: string; // must be an existing card_pools name ('full' is rejected on write paths; legacy configs may still contain it)
   timeLimit?: number; // per-turn seconds for the duel host (default 180; 999 ≈ unlimited)
+  draftMode?: 'passing' | 'serial'; // default 'passing' (per-player pack queues); 'serial' = legacy one-pack-at-a-time
+  evenPackCount?: boolean; // default true: pack count must be a multiple of player count (explicit packCount rejected otherwise; computed counts round down)
+  reserveSeconds?: number; // passing mode: per-player reserve time bank (default 300); pick overrun deducts from it, auto-pick only when exhausted
 }
 
 export interface DeckPayload {

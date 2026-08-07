@@ -143,8 +143,10 @@ export class ApiController {
     const pool = this.pools.resolve(cfg.cardPool as string | undefined);
     const dropped = new Set(state.droppedCards);
     const myPicks = new Set(state.picks.filter((p) => p.playerId === id.playerId).map((p) => p.card));
-    // 玩家"见过"的牌堆 = 参与过选牌的牌堆
+    // 玩家"见过"的牌堆 = 参与过选牌的牌堆（passing 模式再加上当前队首堆——它正对本人可见）
     const seenPacks = new Set(state.picks.filter((p) => p.playerId === id.playerId).map((p) => p.packIndex));
+    const myQueue = state.packQueues?.[id.playerId];
+    if (myQueue?.length) seenPacks.add(myQueue[0]);
     const codesList = codes.split(',').map(Number).filter(Number.isInteger);
     return codesList.map((c) => {
       const canonical = this.cards.canonicalCode(c);
