@@ -18,7 +18,7 @@
   - Header：`X-Tournament-Id / X-Player-Id / X-Token`；
   - 查询参数/表单字段：`tid / pid / token`（SSE、ydk 下载等场景）。
 - admin 端点用 `X-Admin-Token`：super token（config.yaml `admin.super_token`）或创建 tournament 时下发的 per-tournament `admin_token`（仅限该 tournament）。
-- `POST /tournaments` 需要 `X-Create-Token`（config.yaml `admin.create_token`；super token 亦可），响应返回 `admin_token`。 参数含 `dropMode`（`use_all` / `drop_leftover` 默认 / `drop_leftover_exact`，见 dev_docs/05 §牌堆生成）。 另有 `packStrategy`（`stratify` 默认 / `random` / `main_then_extra`）。
+- `POST /tournaments` 需要 `X-Create-Token`（config.yaml `admin.create_token`；super token 亦可），响应返回 `admin_token`。 参数含 `dropMode`（`use_all` / `drop_leftover` 默认 / `drop_leftover_exact`，见 dev_docs/05 §牌堆生成）。 另有 `packStrategy`（`stratify` 默认 / `random` / `main_then_extra`）、`packSize`（每堆卡数，任意正整数）、`packCount`（显式牌堆总数，缺省自动）、`dropPublic`（弃置卡是否公开，默认 true）、`draftMode`（`passing` 默认 / `serial` 旧串行模式，见 dev_docs/05 §3）、`evenPackCount`（默认 true：牌堆数须为人数整数倍，显式 packCount 非倍数拒绝 PACKCOUNT_NOT_MULTIPLE，自动计算向下取整到倍数）、`reserveSeconds`（passing 模式每玩家保留时间，默认 300；单选超时先扣保留时间，耗尽才自动选）。
 - **super token 兼作万能玩家 token**：`X-Token: <super_token>` 可进入任意 `playerId` 的玩家端点（同机调试）。
 - 公开信息 `GET /t/:tid` 返回 `authRequired`（false = 该 tournament 已关闭 token 鉴权，玩家端点仅需 tid+pid）。
 - 统一错误：`401 { code: "AUTH_REQUIRED", fields: [...] }`。
@@ -30,7 +30,7 @@
 | `POST /tournaments` (X-Create-Token) | 创建比赛（人数/卡池/模式/选牌参数/排表规则；`cardPool` 必须为已存在的卡池名，`'full'`/缺省/不存在均拒绝）→ 返回 `tid` + 报名 URL + `admin_token` |
 | `GET /t/:tid` | 比赛公开信息（阶段、人数、配置摘要） |
 | `POST /t/:tid/join` | 报名：body `{ player_id, display_name }` → 返回 `token`（明文仅此一次） |
-| `GET /t/:tid/state` | 当前玩家全量状态（阶段、牌堆信息、已选牌、构筑、对局信息） |
+| `GET /t/:tid/state` | 当前玩家全量状态（阶段、牌堆信息、已选牌、构筑、对局信息）。passing 模式下 `pack` = 本人队首堆（`index/cardsLeft/cards/deadlineAt(=base+reserve 的最终自动选时刻)/isMyTurn(=队列非空)/queueLength/reserveMs(本人剩余保留时间)`），另含 `queueLengths: [{playerId, length}]`（所有玩家队列长度，仅数量；只含当前已发轮次的堆） |
 | `GET /t/:tid/cards?q=` | 卡牌全文本搜索（名称/效果文本/code；不含图片） |
 | `GET /t/:tid/cards?codes=a,b,c` | 按 code 批量取卡牌元数据 |
 | `GET /t/:tid/cards/status?codes=` | 玩家视角卡牌状态标注（not_in_pool/dropped/picked/seen/unknown） |
@@ -62,7 +62,7 @@
 | 事件 | 载荷要点 |
 |---|---|
 | `phase` | 当前阶段/子阶段 |
-| `pack` | pack_index、剩余数、剩余堆数、当前选牌者、deadline_at（秒级 timer 由前端算） |
+| `pack` | serial：pack_index、剩余数、剩余堆数、当前选牌者、deadline_at；passing：各玩家队列长度（`{queues: {playerId: length}}`，仅数量；秒级 timer 由前端算）或 `{deadlines: true}`（计时重设/新一轮发堆 `deal`，客户端 refetch） |
 | `pick` | `{playerId, auto}`（不含卡 code） |
 | `pause` | paused 状态、剩余暂停秒、投票统计 |
 | `deck` | `{playerId}`（内容由客户端 refetch） |
@@ -126,6 +126,7 @@ srvpro 在 `room.delete()` 时 POST 到 `settings.modules.cube.webhook_url`：
 ```
 - cube 必须响应 `200 { "ack": true }`；srvpro 未收到 ack 则按 `utility.retry`（10 次）重试。
 - 错误码：`400 BAD_PAYLOAD` / `409 ALREADY_ACKED`（幂等）。
+- `score` 语义：0/1/2 为获胜局数；**`-9` = 断线标记**（srvpro 在非 BEGIN 阶段断线时设置）。cube 侧归一化：断线方一律记 `0:2` 负；双方均断线记 `0:0`（无人胜出，swiss 各 1 分）；缺失 score 时按 `-5` 兜底记录，由管理员人工补录。
 
 ### 3.5 鉴权与错误
 
@@ -133,6 +134,14 @@ srvpro 在 `room.delete()` 时 POST 到 `settings.modules.cube.webhook_url`：
 - 幂等：create_room 对相同 room_name 重复调用返回既有房间；result 重复投递返回 409。
 
 ## 4. srvpro ↔ ygopro 宿主（spawn 参数）
+
+### 4.0 STOC_CUBE_DECK（srvpro → 客户端，cube 房间卡组推送）
+
+- 新增 STOC id `0xA`（`ygopro/gframe/network.h`，只增不改，**不 bump PRO_VERSION**；旧客户端 switch default 忽略未知 STOC，向下兼容）。
+- 触发：cube 房间中 srvpro 向玩家转发 STOC_JOIN_GAME 后立即注入一条；数据来自 `room.cube_decks[player_id]`。
+- payload 布局同 CTOS_UPDATE_DECK 体：`int32 mainc(含 extra), int32 sidec, int32 codes[main…, side…]`（客户端按卡类型自行分拣 extra）。
+- 打补丁的客户端：写 `./deck/cube-current.ydk` → 填入 `current_deck` 并选中 → 锁定卡组选择下拉（进房即锁定，离房复位）；siding 时客户端自检"三区并集多重集 == 开局快照"。
+- **siding 服务端语义**：`CTOS_UPDATE_DECK` 的 cube 覆盖分支按 `duel_stage` 分流——`BEGIN` 整包覆盖（现状）；siding 阶段校验客户端提交与 cube 卡组"并集多重集相同 + 各区数量一致"（宿主 `LoadSide` 同样强制）→ 通过则**原样转发**（换 side 生效），失败则回退整包覆盖（未打补丁客户端行为同旧版，不卡死）。
 
 ### 4.1 参数布局（必须与 ygopro cube-server 分支解析一致）
 

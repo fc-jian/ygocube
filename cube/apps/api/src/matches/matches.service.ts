@@ -262,6 +262,16 @@ export class MatchesService implements OnModuleInit {
     persistMeta(tid);
   }
 
+  // srvpro 断线标记 -9 → 断线方一律 0:2 判负；双方均断线 → 0:0（无人胜出，swiss 各 1 分）；正常比分原样透传
+  private static normalizeDisconnect(a: number | undefined, b: number | undefined): [number, number] {
+    const ra = a ?? -5;
+    const rb = b ?? -5;
+    if (ra === -9 || rb === -9) {
+      return [ra === -9 ? 0 : 2, rb === -9 ? 0 : 2];
+    }
+    return [ra, rb];
+  }
+
   // srvpro webhook receiver (dev_docs/07 §3.4)
   onWebhook(body: any): { ack: boolean } {
     const roomName: string = body.room_name;
@@ -279,8 +289,7 @@ export class MatchesService implements OnModuleInit {
     const a = byId[match.playerA];
     const b = byId[match.playerB];
     if (!a || !b) return { ack: false };
-    const resultA = a.score ?? -5;
-    const resultB = b.score ?? -5;
+    const [resultA, resultB] = MatchesService.normalizeDisconnect(a.score, b.score);
     this.patchMatch(tid, match.id, { resultA, resultB, source: 'webhook', finishedAt: body.end ?? new Date().toISOString() });
     this.maybeAdvance(tid, round);
     return { ack: true };
@@ -366,7 +375,8 @@ export class MatchesService implements OnModuleInit {
             const scores = st.scores ?? {};
             const a = scores[state.players.find((p) => p.playerId === m.playerA)?.playerId ?? ''];
             const b = scores[state.players.find((p) => p.playerId === m.playerB)?.playerId ?? ''];
-            this.patchMatch(r.tournament_id, m.id, { resultA: a ?? -5, resultB: b ?? -5, source: 'poll', finishedAt: new Date().toISOString() });
+            const [resultA, resultB] = MatchesService.normalizeDisconnect(a, b);
+            this.patchMatch(r.tournament_id, m.id, { resultA, resultB, source: 'poll', finishedAt: new Date().toISOString() });
             this.maybeAdvance(r.tournament_id, m.round);
           }
         } catch (e) {

@@ -235,3 +235,36 @@ describe('manual results & fault detection', () => {
     expect(loadState(tid).matches.find((x) => x.id === m.id)!.faultedAt).toBe(faultedAt);
   });
 });
+
+  it('disconnected player (-9) is recorded as a 0:2 loss', () => {
+    const { matches, tid } = setupMatches(7);
+    matches.startRound(tid, 1, 'test');
+    const ms = loadState(tid).matches.filter((x) => x.round === 1 && x.playerB !== '(bye)');
+    // A 断线：A 记 0，B 记 2
+    const m = ms[0];
+    matches.onWebhook({ room_name: m.roomName ?? `CUBE-${tid}-1-${m.tableNo}-ember`, players: [{ player_id: m.playerA, score: -9 }, { player_id: m.playerB, score: 1 }] });
+    let mm = loadState(tid).matches.find((x) => x.id === m.id)!;
+    expect([mm.resultA, mm.resultB]).toEqual([0, 2]);
+    // B 断线：B 记 0，A 记 2
+    const m2 = ms[1];
+    matches.onWebhook({ room_name: m2.roomName ?? `CUBE-${tid}-1-${m2.tableNo}-ember`, players: [{ player_id: m2.playerA, score: 0 }, { player_id: m2.playerB, score: -9 }] });
+    mm = loadState(tid).matches.find((x) => x.id === m2.id)!;
+    expect([mm.resultA, mm.resultB]).toEqual([2, 0]);
+    // 双方均断线：0:0（无人胜出）
+    const m4 = ms[2];
+    matches.onWebhook({ room_name: m4.roomName ?? `CUBE-${tid}-1-${m4.tableNo}-ember`, players: [{ player_id: m4.playerA, score: -9 }, { player_id: m4.playerB, score: -9 }] });
+    mm = loadState(tid).matches.find((x) => x.id === m4.id)!;
+    expect([mm.resultA, mm.resultB]).toEqual([0, 0]);
+  });
+
+  it('poll fallback also normalizes -9 disconnect scores', async () => {
+    const { matches, tid } = setupMatches(4);
+    matches.startRound(tid, 1, 'test');
+    await new Promise((r) => setTimeout(r, 5)); // 等 createRoomsForRound 异步建房完成
+    const m = loadState(tid).matches.find((x) => x.round === 1 && x.playerB !== '(bye)')!;
+    const fake = (matches as any).srvpro as FakeSrvpro;
+    fake.rooms[m.roomName!].scores = { [m.playerA]: -9, [m.playerB]: 0 };
+    await (matches as any).doPollAll();
+    const mm = loadState(tid).matches.find((x) => x.id === m.id)!;
+    expect([mm.resultA, mm.resultB]).toEqual([0, 2]);
+  });
