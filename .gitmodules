@@ -1,8 +1,8 @@
 [submodule "ygopro"]
 	path = ygopro
-	url = https://github.com/mycard/ygopro
+	url = https://github.com/fc-jian/ygopro
 	branch = cube-server
 [submodule "srvpro"]
 	path = srvpro
-	url = https://github.com/mycard/srvpro
+	url = https://github.com/fc-jian/srvpro
 	branch = cube
