@@ -102,7 +102,7 @@ export function extractIdentity(req: AuthedRequest): Identity | null {
     return { tournamentId, playerId: pid, isAdmin: false, isSuper: true };
   }
   const row = getDb()
-    .prepare('SELECT 1 AS found FROM tournament_players WHERE tournament_id=? AND player_id=? AND token_hash=?')
+    .prepare('SELECT 1 AS found FROM tournament_players WHERE tournament_id=? AND player_id=? AND token_hash=? AND active=1')
     .get(tournamentId, pid, sha256(token)) as PlayerRow | undefined;
   if (!row) return null;
   return { tournamentId, playerId: pid, isAdmin: false, isSuper: false };

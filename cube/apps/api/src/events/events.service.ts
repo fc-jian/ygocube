@@ -1,5 +1,6 @@
 import { getDb } from '../db';
 import { config, defaults } from '../config';
+import crypto from 'crypto';
 
 // Append-only event log + in-memory state with snapshot/replay (dev_docs/05 §7).
 // Every mutation is: logEvent(...) then apply(state, action, payload) — the same
@@ -10,6 +11,7 @@ export interface PlayerState {
   displayName: string;
   seat: number;
   eliminated: boolean;
+  withdrawn?: boolean;
 }
 
 export interface PackState {
@@ -54,6 +56,17 @@ export interface MatchState {
   faultedAt: string | null;
   startedAt: string | null;
   finishedAt: string | null;
+  stage?: 'round_robin' | 'swiss' | 'playoff' | 'winners' | 'losers' | 'grand_final';
+  bracketRound?: number;
+  bracketMatchId?: string;
+}
+
+export interface CompetitionState {
+  format: 'round_robin' | 'swiss' | 'double_elimination';
+  seeds: string[];
+  roundRobinSchedule?: [string, string | null][][];
+  losses?: Record<string, number>;
+  playoffStarted?: boolean;
 }
 
 export interface PauseState {
@@ -63,6 +76,14 @@ export interface PauseState {
   pausedAt: string | null;
   // passing 模式暂停时冻结的各玩家剩余选牌时间（恢复时按此重设 deadline）
   pausedDeadlines?: Record<string, number>;
+  // serial 模式暂停时冻结的当前选牌剩余时间
+  pausedPickRemainingMs?: number;
+}
+
+export interface FrozenTimerState {
+  passing?: Record<string, number>;
+  serial?: number;
+  deckbuilding?: number;
 }
 
 export interface TournamentState {
@@ -89,6 +110,9 @@ export interface TournamentState {
   matches: MatchState[];
   phaseDeadline: string | null;
   pendingPhase: string | null;
+  // 管理员冻结时持久化各阶段计时器的剩余时间；解冻后原样恢复。
+  frozenTimers?: FrozenTimerState | null;
+  competition?: CompetitionState | null;
 }
 
 const stateCache = new Map<number, TournamentState>();
@@ -110,7 +134,7 @@ function emptyState(id: number, name: string, configJson: string): TournamentSta
     id, name, configJson, status: 'registration', round: 0, frozen: false,
     players: [], packs: [], droppedCards: [], picks: [], pickCursor: null, pause: null, decks: {}, matches: [],
     packQueues: {}, pickDeadlines: {}, packsDealt: 0, pickReserves: {},
-    phaseDeadline: null, pendingPhase: null,
+    phaseDeadline: null, pendingPhase: null, frozenTimers: null, competition: null,
   };
 }
 
@@ -128,6 +152,10 @@ export function apply(state: TournamentState, action: string, payload: any): voi
     }
     case 'pending': {
       state.pendingPhase = payload;
+      break;
+    }
+    case 'round_complete': {
+      // 对局轮次全部有结果，等待管理员确认推进（无状态变化，仅通知）
       break;
     }
     case 'config': {
@@ -153,6 +181,26 @@ export function apply(state: TournamentState, action: string, payload: any): voi
       delete state.packQueues[playerId];
       delete state.pickDeadlines[playerId];
       delete state.pickReserves[playerId];
+      break;
+    }
+    case 'player_dsq': {
+      const playerId: string = payload.playerId ?? payload;
+      const player = state.players.find((p) => p.playerId === playerId);
+      if (player) player.eliminated = true;
+      break;
+    }
+    case 'player_withdraw': {
+      const player = state.players.find((p) => p.playerId === (payload.playerId ?? payload));
+      if (player) player.withdrawn = true;
+      break;
+    }
+    case 'player_restore': {
+      const player = state.players.find((p) => p.playerId === (payload.playerId ?? payload));
+      if (player) player.withdrawn = false;
+      break;
+    }
+    case 'competition': {
+      state.competition = clone(payload);
       break;
     }
     case 'packs_created': {
@@ -217,6 +265,10 @@ export function apply(state: TournamentState, action: string, payload: any): voi
     }
     case 'frozen': {
       state.frozen = payload;
+      break;
+    }
+    case 'timer_freeze': {
+      state.frozenTimers = payload ? clone(payload) : null;
       break;
     }
     default:
@@ -329,9 +381,10 @@ export function snapshotNow(tid: number): void {
     .run(tid, count, last.m ?? count, JSON.stringify(s), new Date().toISOString());
 }
 
-// Admin time travel: rebuild state as of seq, freeze the tournament (dev_docs/05 §7).
-export function revertTo(tid: number, seq: number): TournamentState {
+function stateAt(tid: number, seq: number): TournamentState {
   const row = tournamentRow(tid);
+  const target = getDb().prepare('SELECT seq FROM events WHERE tournament_id=? AND seq=?').get(tid, seq);
+  if (!target) throw new Error('REVERT_EVENT_NOT_FOUND');
   const state = emptyState(row.id, row.name, row.config_json);
   const snap = getDb()
     .prepare('SELECT seq, event_seq, state_json FROM tournament_snapshots WHERE tournament_id=? AND event_seq IS NOT NULL AND event_seq<=? ORDER BY event_seq DESC LIMIT 1')
@@ -345,11 +398,126 @@ export function revertTo(tid: number, seq: number): TournamentState {
     .prepare('SELECT seq, tournament_id, entity, action, payload_json, created_at, actor FROM events WHERE tournament_id=? AND seq>? AND seq<=? ORDER BY seq')
     .all(tid, startSeq, seq) as EventRow[];
   for (const e of rows) apply(state, e.action, JSON.parse(e.payload_json));
-  state.frozen = true;
-  stateCache.set(tid, state);
-  persistMeta(tid);
-  getDb().prepare('UPDATE tournaments SET frozen=1 WHERE id=?').run(tid);
   return state;
+}
+
+export interface RevertPreview {
+  seq: number;
+  tournamentName: string;
+  targetStatus: string;
+  targetRound: number;
+  deleteEvents: number;
+  deletePicks: number;
+  deleteMatches: number;
+  closeRooms: string[];
+}
+
+export function previewRevert(tid: number, seq: number): RevertPreview {
+  if (!Number.isInteger(seq) || seq <= 0) throw new Error('BAD_PAYLOAD');
+  const state = stateAt(tid, seq);
+  const row = tournamentRow(tid);
+  const future = getDb().prepare('SELECT count(*) AS c FROM events WHERE tournament_id=? AND seq>?').get(tid, seq) as CountRow;
+  const current = loadState(tid);
+  const closeRooms = [...new Set(current.matches
+    .filter((m) => m.roomName && m.resultA === null && m.playerB !== '(bye)')
+    .map((m) => m.roomName!))];
+  return {
+    seq,
+    tournamentName: row.name,
+    targetStatus: state.status,
+    targetRound: state.round,
+    deleteEvents: future.c,
+    deletePicks: Math.max(0, current.picks.length - state.picks.length),
+    deleteMatches: Math.max(0, current.matches.length - state.matches.length),
+    closeRooms,
+  };
+}
+
+export interface HardRevertResult {
+  state: TournamentState;
+  deletedEvents: number;
+  replacementTokens: Record<string, string>;
+}
+
+// Destructive admin time travel: discard the future event branch and rebuild every
+// queryable projection from the target state.  The tournament remains frozen until
+// an explicit unfreeze, so no timer/webhook can mutate the newly restored branch.
+export function hardRevertTo(tid: number, seq: number, actor: string): HardRevertResult {
+  const preview = previewRevert(tid, seq);
+  const state = stateAt(tid, seq);
+  state.frozen = true;
+  // Rooms are external resources and cannot be resurrected. Completed matches keep
+  // their historical room label; unresolved matches are recreated after unfreeze.
+  for (const match of state.matches) {
+    if (match.resultA === null) {
+      match.roomName = null;
+      match.playerAPass = null;
+      match.playerBPass = null;
+      match.source = 'revert';
+      match.faultedAt = null;
+      match.startedAt = null;
+      match.finishedAt = null;
+    }
+  }
+
+  const db = getDb();
+  const replacementTokens: Record<string, string> = {};
+  const now = new Date().toISOString();
+  db.transaction(() => {
+    db.prepare('DELETE FROM events WHERE tournament_id=? AND seq>?').run(tid, seq);
+    db.prepare('DELETE FROM tournament_snapshots WHERE tournament_id=?').run(tid);
+    db.prepare('UPDATE tournaments SET config_json=?, status=?, round=?, frozen=1, updated_at=? WHERE id=?')
+      .run(state.configJson, state.status, state.round, now, tid);
+
+    db.prepare('UPDATE tournament_players SET active=0 WHERE tournament_id=?').run(tid);
+    const findPlayer = db.prepare('SELECT id FROM tournament_players WHERE tournament_id=? AND player_id=?');
+    const updatePlayer = db.prepare('UPDATE tournament_players SET display_name=?, seat=?, eliminated=?, withdrawn=?, active=1 WHERE tournament_id=? AND player_id=?');
+    const insertPlayer = db.prepare('INSERT INTO tournament_players (tournament_id, player_id, display_name, token_hash, seat, joined_at, eliminated, withdrawn, active) VALUES (?,?,?,?,?,?,?,?,1)');
+    for (const player of state.players) {
+      if (findPlayer.get(tid, player.playerId)) {
+        updatePlayer.run(player.displayName, player.seat, player.eliminated ? 1 : 0, player.withdrawn ? 1 : 0, tid, player.playerId);
+      } else {
+        const token = crypto.randomBytes(24).toString('base64url');
+        replacementTokens[player.playerId] = token;
+        const hash = crypto.createHash('sha256').update(token).digest('hex');
+        insertPlayer.run(tid, player.playerId, player.displayName, hash, player.seat, now, player.eliminated ? 1 : 0, player.withdrawn ? 1 : 0);
+      }
+    }
+
+    db.prepare('DELETE FROM packs WHERE tournament_id=?').run(tid);
+    const insertPack = db.prepare('INSERT INTO packs (tournament_id, "index", size, drop_card_code, order_json) VALUES (?,?,?,?,?)');
+    for (const pack of state.packs) insertPack.run(tid, pack.index, pack.size, pack.dropCard, JSON.stringify(pack.order));
+
+    db.prepare('DELETE FROM picks WHERE tournament_id=?').run(tid);
+    const insertPick = db.prepare('INSERT INTO picks (tournament_id, player_id, pack_index, pick_round, card_code, auto_picked, picked_at) VALUES (?,?,?,?,?,?,?)');
+    for (const pick of state.picks) insertPick.run(tid, pick.playerId, pick.packIndex, pick.round, pick.card, pick.auto ? 1 : 0, pick.at);
+
+    db.prepare('DELETE FROM decks WHERE tournament_id=?').run(tid);
+    const insertDeck = db.prepare('INSERT INTO decks (tournament_id, player_id, main_json, extra_json, side_json, locked_at, status) VALUES (?,?,?,?,?,?,?)');
+    for (const [playerId, deck] of Object.entries(state.decks)) {
+      insertDeck.run(tid, playerId, JSON.stringify(deck.main), JSON.stringify(deck.extra), JSON.stringify(deck.side), deck.lockedAt, deck.status);
+    }
+
+    db.prepare('DELETE FROM matches WHERE tournament_id=?').run(tid);
+    const insertMatch = db.prepare('INSERT INTO matches (id, tournament_id, round, player_a, player_b, table_no, room_name, player_a_pass, player_b_pass, result_a, result_b, source, faulted_at, started_at, finished_at, stage, bracket_round, bracket_match_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+    for (const match of state.matches) {
+      insertMatch.run(match.id, tid, match.round, match.playerA, match.playerB, match.tableNo, match.roomName, match.playerAPass, match.playerBPass, match.resultA, match.resultB, match.source, match.faultedAt, match.startedAt, match.finishedAt, match.stage ?? null, match.bracketRound ?? null, match.bracketMatchId ?? null);
+    }
+
+    const count = eventCount(tid);
+    db.prepare('INSERT INTO tournament_snapshots (tournament_id, seq, event_seq, state_json, created_at) VALUES (?,?,?,?,?)')
+      .run(tid, count, seq, JSON.stringify(state), now);
+    db.prepare('INSERT INTO admin_actions (tournament_id, actor, action, detail_json, created_at) VALUES (?,?,?,?,?)')
+      .run(tid, actor, 'hard_revert', JSON.stringify({ seq, deletedEvents: preview.deleteEvents }), now);
+  })();
+  stateCache.set(tid, state);
+  return { state, deletedEvents: preview.deleteEvents, replacementTokens };
+}
+
+// Kept for callers/tests compiled against the old helper. New controller code uses
+// hardRevertTo directly so the actor is never a credential.
+export function revertTo(tid: number, seq: number): TournamentState {
+  return hardRevertTo(tid, seq, 'admin').state;
 }
 
 // 删除 tournament 的进程内状态（配合管理台删除）

@@ -8,23 +8,9 @@ import { PoolsService } from '../pools/pools.service';
 
 export type DropMode = 'use_all' | 'drop_leftover' | 'drop_leftover_exact';
 
-// 玩家 token 词表：3 个单词用 '-' 连接，方便口述与记忆（如 "ember-frost-nova"）
-const TOKEN_WORDS = [
-  'ember', 'frost', 'gale', 'haze', 'iron', 'jade', 'kite', 'lark', 'mist', 'nova',
-  'onyx', 'pearl', 'quartz', 'raven', 'slate', 'tide', 'umbra', 'vale', 'wisp', 'yew',
-  'amber', 'briar', 'cedar', 'dusk', 'elm', 'fern', 'grove', 'holly', 'iris', 'juniper',
-  'acorn', 'bloom', 'cinder', 'dove', 'echo', 'flint', 'glade', 'heron', 'ivy', 'lynx',
-  'maple', 'oak', 'pine', 'reed', 'snow', 'thorn', 'willow', 'zephyr', 'basil', 'clover',
-  'drift', 'ember', 'falcon', 'gnome', 'harbor', 'indigo', 'jasmine', 'kestrel', 'lotus',
-  'meadow', 'nettle', 'orchid', 'poppy', 'quill', 'robin', 'saffron', 'thistle', 'violet',
-  'wren', 'yarrow', 'boulder', 'coral', 'denim', 'falcon', 'garnet', 'hazel', 'iris',
-  'juniper', 'knot', 'lagoon', 'moss', 'nutmeg', 'opal', 'pumice', 'quince', 'raven',
-  'sable', 'tangerine', 'umber', 'verbena', 'walnut', 'xenon', 'yonder', 'zinnia',
-];
-
 export function randomToken(): string {
-  const pick = () => TOKEN_WORDS[Math.floor(Math.random() * TOKEN_WORDS.length)];
-  return `${pick()}-${pick()}-${pick()}`;
+  // 192 bits; legacy word tokens remain valid because only their hashes are stored.
+  return crypto.randomBytes(24).toString('base64url');
 }
 
 export interface CreateTournamentInput {
@@ -34,7 +20,7 @@ export interface CreateTournamentInput {
   packSize?: number; // 每堆卡牌数（任意正整数）；旧参数 packSizeMultiple=每堆为 人数×倍数 的兼容字段
   packSizeMultiple?: number;
   pickSeconds?: number;
-  deckbuildingSeconds?: number;
+  deckbuildingSeconds?: number | null;
   mainMin?: number;
   mainMax?: number;
   extraMax?: number;
@@ -58,10 +44,37 @@ export interface CreateTournamentInput {
   // 选牌模式：passing（默认，每玩家牌堆队列传递式）| serial（旧全局串行，兼容用）
   draftMode?: 'passing' | 'serial';
   // 牌堆数须为人数整数倍（默认开；显式 packCount 非倍数在 startDraft 拒绝 PACKCOUNT_NOT_MULTIPLE）
+  // passing 每轮结束后随机重排玩家座位（默认开）
+  reseatEachRound?: boolean;
   evenPackCount?: boolean;
   // passing 模式每玩家保留时间（秒，默认 300）：单选超时先扣 reserve，耗尽才自动选
   reserveSeconds?: number;
   cardPool?: string;
+  matchFormat?: 'round_robin' | 'swiss' | 'double_elimination';
+  swissRoundCount?: number;
+  playoffSize?: number;
+}
+
+export function recommendedMatchFormat(n: number): { matchFormat: 'round_robin' | 'swiss'; swissRoundCount?: number; playoffSize?: number } {
+  if (n <= 5) return { matchFormat: 'round_robin' };
+  if (n <= 8) return { matchFormat: 'swiss', swissRoundCount: 4, playoffSize: 0 };
+  if (n <= 16) return { matchFormat: 'swiss', swissRoundCount: 4, playoffSize: 4 };
+  return { matchFormat: 'swiss', swissRoundCount: Math.ceil(Math.log2(n)) + 1, playoffSize: 8 };
+}
+
+export function validateMatchFormat(input: Record<string, unknown>, playerCount?: number): void {
+  const format = input.matchFormat;
+  if (!['round_robin', 'swiss', 'double_elimination'].includes(String(format))) throw new Error('BAD_MATCH_FORMAT');
+  if (format !== 'swiss') return;
+  const rounds = Number(input.swissRoundCount);
+  const playoff = Number(input.playoffSize ?? 0);
+  if (!Number.isInteger(rounds) || rounds < 1) throw new Error('BAD_SWISS_ROUNDS');
+  if (!Number.isInteger(playoff) || playoff < 0 || (playoff !== 0 && (playoff < 2 || (playoff & (playoff - 1)) !== 0))) throw new Error('BAD_PLAYOFF_SIZE');
+  if (playerCount !== undefined) {
+    const maxRounds = playerCount % 2 === 0 ? playerCount - 1 : playerCount;
+    if (rounds > maxRounds) throw new Error('BAD_SWISS_ROUNDS');
+    if (playoff > playerCount) throw new Error('FORMAT_PLAYER_COUNT');
+  }
 }
 
 @Injectable()
@@ -89,6 +102,13 @@ export class TournamentsService {
   }
 
   create(input: CreateTournamentInput, actor: string): { tid: number; url: string; admin_token: string } {
+    const recommended = recommendedMatchFormat(input.maxPlayers);
+    const match = {
+      matchFormat: input.matchFormat ?? recommended.matchFormat,
+      swissRoundCount: input.swissRoundCount ?? recommended.swissRoundCount,
+      playoffSize: input.playoffSize ?? recommended.playoffSize,
+    };
+    validateMatchFormat(match, input.maxPlayers);
     const cfg = {
       maxPlayers: input.maxPlayers,
       mode: input.mode ?? 'match',
@@ -96,7 +116,7 @@ export class TournamentsService {
       packSizeMultiple: input.packSizeMultiple ?? defaults.packSizeMultiple,
       pickSeconds: input.pickSeconds ?? defaults.pickSeconds,
       pauseSeconds: defaults.pauseSeconds,
-      deckbuildingSeconds: input.deckbuildingSeconds ?? defaults.deckbuildingSeconds,
+      deckbuildingSeconds: input.deckbuildingSeconds === undefined ? defaults.deckbuildingSeconds : input.deckbuildingSeconds,
       dropLeftover: input.dropLeftover !== false,
       dropMode:
         input.dropMode ??
@@ -107,10 +127,11 @@ export class TournamentsService {
             : 'use_all'),
       packStrategy: input.packStrategy ?? 'stratify',
       packCount: input.packCount,
-      dropPublic: input.dropPublic !== false,
+      dropPublic: input.dropPublic === true, // 默认不公开丢弃列表
       // 仅 serial 需要落配置（缺省 passing 由 defaults 提供；startDraft 只认 rawCfg.draftMode==='serial'）
       draftMode: input.draftMode === 'serial' ? 'serial' : undefined,
       evenPackCount: input.evenPackCount !== false,
+      reseatEachRound: input.reseatEachRound !== false,
       reserveSeconds: input.reserveSeconds ?? defaults.reserveSeconds,
       mainMin: input.mainMin ?? defaults.mainMin,
       mainMax: input.mainMax ?? defaults.mainMax,
@@ -119,6 +140,7 @@ export class TournamentsService {
       maxCopies: input.maxCopies ?? defaults.maxCopies,
       timeLimit: input.timeLimit ?? defaults.timeLimit,
       cardPool: this.assertCardPool(input.cardPool),
+      ...match,
     };
     // per-tournament admin token (dev_docs/07 §5.1): manages this tournament only
     const adminToken = crypto.randomBytes(24).toString('hex');
@@ -142,7 +164,7 @@ export class TournamentsService {
       config: getConfig(state),
       status: state.status,
       round: state.round,
-      players: state.players.map((p) => ({ playerId: p.playerId, displayName: p.displayName, seat: p.seat })),
+      players: state.players.map((p) => ({ playerId: p.playerId, displayName: p.displayName, seat: p.seat, eliminated: p.eliminated, withdrawn: p.withdrawn === true })),
       playerCount: state.players.length,
       frozen: state.frozen,
       authRequired: row ? row.auth_required !== 0 : true,
@@ -153,20 +175,26 @@ export class TournamentsService {
     // 进房昵称即玩家 ID：YGOPro 协议仅支持 ASCII 文本，非 ASCII 无法进入游戏（前端已拦截，这里兜底）
     if (!/^[\x20-\x7E]+$/.test(playerId)) throw new Error('BAD_PLAYER_ID');
     const state = loadState(tid);
+    if (state.frozen) throw new Error('FROZEN');
     if (state.status !== 'registration') throw new Error('WRONG_PHASE');
     if (state.players.length >= getConfig(state).maxPlayers) throw new Error('TOURNAMENT_FULL');
     if (state.players.some((p) => p.playerId === playerId)) throw new Error('ALREADY_JOINED');
     const token = randomToken();
-    // OR REPLACE：管理台回溯到报名前之后重新报名同名玩家时，DB 行可能残留（revert 只回滚事件状态）
+    // Historical rows are retained inactive so a hard revert can preserve credentials.
     getDb()
-      .prepare('INSERT OR REPLACE INTO tournament_players (tournament_id, player_id, display_name, token_hash, seat, joined_at) VALUES (?,?,?,?,?,?)')
+      .prepare(`INSERT INTO tournament_players (tournament_id, player_id, display_name, token_hash, seat, joined_at, active)
+                VALUES (?,?,?,?,?,?,1)
+                ON CONFLICT(tournament_id, player_id) DO UPDATE SET
+                  display_name=excluded.display_name, token_hash=excluded.token_hash, seat=NULL,
+                  joined_at=excluded.joined_at, eliminated=0, active=1`)
       .run(tid, playerId, displayName, sha256(token), null, new Date().toISOString());
-    logEvent(tid, 'player', 'player_join', { playerId, displayName, seat: -1, eliminated: false }, playerId);
+    logEvent(tid, 'player', 'player_join', { playerId, displayName, seat: -1, eliminated: false, withdrawn: false }, playerId);
     return { token };
   }
 
   setSeats(tid: number, order: string[], actor: string): void {
     const state = loadState(tid);
+    if (state.frozen) throw new Error('FROZEN');
     if (state.status !== 'registration') throw new Error('WRONG_PHASE');
     const map: Record<string, number> = {};
     order.forEach((pid, i) => (map[pid] = i));
@@ -177,9 +205,10 @@ export class TournamentsService {
   // 管理台删除玩家：报名/选牌/构筑阶段可删（同时清理其选牌与卡组），对战开始后禁止
   removePlayer(tid: number, playerId: string, actor: string): void {
     const state = loadState(tid);
+    if (state.frozen) throw new Error('FROZEN');
     if (state.status === 'matches' || state.status === 'finished') throw new Error('WRONG_PHASE');
     if (!state.players.some((p) => p.playerId === playerId)) throw new Error('PLAYER_NOT_FOUND');
-    getDb().prepare('DELETE FROM tournament_players WHERE tournament_id=? AND player_id=?').run(tid, playerId);
+    getDb().prepare('UPDATE tournament_players SET active=0 WHERE tournament_id=? AND player_id=?').run(tid, playerId);
     logEvent(tid, 'player', 'player_remove', playerId, actor);
     persistMeta(tid);
   }
@@ -187,10 +216,53 @@ export class TournamentsService {
   // 管理台重置玩家 token（token 只存哈希无法回显，重置后返回新明文）
   resetPlayerToken(tid: number, playerId: string): { token: string } {
     const state = loadState(tid);
+    if (state.frozen) throw new Error('FROZEN');
     if (!state.players.some((p) => p.playerId === playerId)) throw new Error('PLAYER_NOT_FOUND');
     const token = randomToken();
     getDb().prepare('UPDATE tournament_players SET token_hash=? WHERE tournament_id=? AND player_id=?').run(sha256(token), tid, playerId);
     return { token };
+  }
+
+  resetAdminToken(tid: number): { admin_token: string } {
+    const state = loadState(tid);
+    if (state.frozen) throw new Error('FROZEN');
+    const token = randomToken();
+    getDb().prepare('UPDATE tournaments SET admin_token_hash=?, updated_at=? WHERE id=?')
+      .run(sha256(token), new Date().toISOString(), tid);
+    return { admin_token: token };
+  }
+
+  updateMatchFormat(tid: number, patch: Record<string, unknown>, actor: string): Record<string, unknown> {
+    const state = loadState(tid);
+    if (state.frozen) throw new Error('FROZEN');
+    if (state.matches.length > 0) throw new Error('FORMAT_LOCKED');
+    const cfg = { ...getConfig(state), ...patch };
+    validateMatchFormat(cfg);
+    logEvent(tid, 'tournament', 'config', cfg, actor);
+    persistMeta(tid);
+    return cfg;
+  }
+
+  withdrawPlayer(tid: number, playerId: string, actor: string): void {
+    const state = loadState(tid);
+    if (state.frozen) throw new Error('FROZEN');
+    const player = state.players.find((p) => p.playerId === playerId);
+    if (!player) throw new Error('PLAYER_NOT_FOUND');
+    if (player.withdrawn) return;
+    getDb().prepare('UPDATE tournament_players SET withdrawn=1 WHERE tournament_id=? AND player_id=?').run(tid, playerId);
+    logEvent(tid, 'player', 'player_withdraw', { playerId }, actor);
+    persistMeta(tid);
+  }
+
+  restorePlayer(tid: number, playerId: string, actor: string): void {
+    const state = loadState(tid);
+    if (state.frozen) throw new Error('FROZEN');
+    if (state.matches.length > 0) throw new Error('FORMAT_LOCKED');
+    const player = state.players.find((p) => p.playerId === playerId);
+    if (!player) throw new Error('PLAYER_NOT_FOUND');
+    getDb().prepare('UPDATE tournament_players SET withdrawn=0 WHERE tournament_id=? AND player_id=?').run(tid, playerId);
+    logEvent(tid, 'player', 'player_restore', { playerId }, actor);
+    persistMeta(tid);
   }
 
   // 阶段迁移规则（dev_docs/05 §3.2）：
@@ -200,7 +272,7 @@ export class TournamentsService {
   // - deckbuilding -> drafting（回退）：允许，选牌从保留的光标处继续。
   setPhase(tid: number, status: string, round: number | undefined, actor: string): void {
     const state = loadState(tid);
-    state.frozen = false;
+    if (state.frozen) throw new Error('FROZEN');
     if (status === 'deckbuilding') {
       if (state.status === 'registration') throw new Error('DRAFT_NOT_STARTED');
       if (state.status === 'drafting') {
@@ -243,7 +315,32 @@ export class TournamentsService {
   enterDeckbuilding(tid: number, actor: string): void {
     const state = loadState(tid);
     const cfg = getConfig(state);
-    const deadlineAt = new Date(Date.now() + (cfg.deckbuildingSeconds as number) * 1000).toISOString();
+    const seconds = cfg.deckbuildingSeconds;
+    const deadlineAt = typeof seconds === 'number' && Number.isFinite(seconds) && seconds > 0
+      ? new Date(Date.now() + seconds * 1000).toISOString()
+      : null;
+    // Legacy/imported drafts may contain picks that never received a matching
+    // deck event. Material picked copies that are still unused enter their
+    // natural zone before construction starts (main for normal cards, extra
+    // for extra-deck monsters). Licensed virtual copies from maxCopies are not
+    // invented here.
+    for (const player of state.players) {
+      const deck = state.decks[player.playerId] ?? { main: [], extra: [], side: [], lockedAt: null, status: 'building' as const };
+      const next = { ...deck, main: [...deck.main], extra: [...deck.extra], side: [...deck.side] };
+      const used = new Map<number, number>();
+      for (const code of [...next.main, ...next.extra, ...next.side]) used.set(code, (used.get(code) ?? 0) + 1);
+      let changed = false;
+      for (const pick of state.picks.filter((entry) => entry.playerId === player.playerId)) {
+        const count = used.get(pick.card) ?? 0;
+        if (count > 0) {
+          used.set(pick.card, count - 1);
+          continue;
+        }
+        (this.pools.isExtraDeck(pick.card) ? next.extra : next.main).push(pick.card);
+        changed = true;
+      }
+      if (changed) logEvent(tid, 'deck', 'deck', { playerId: player.playerId, deck: next }, actor);
+    }
     logEvent(tid, 'tournament', 'phase', { status: 'deckbuilding', round: 0, deadlineAt }, actor);
     persistMeta(tid);
   }
@@ -251,6 +348,7 @@ export class TournamentsService {
   // 开始选牌前可调整任何参数（含卡池），dev_docs/05 §2
   updateConfig(tid: number, patch: Record<string, unknown>, actor: string): Record<string, unknown> {
     const state = loadState(tid);
+    if (state.frozen) throw new Error('FROZEN');
     if (state.status !== 'registration') throw new Error('WRONG_PHASE');
     if (patch.cardPool !== undefined) patch = { ...patch, cardPool: this.assertCardPool(patch.cardPool) };
     const cfg = { ...getConfig(state), ...patch };
@@ -264,6 +362,7 @@ export class TournamentsService {
 
   // per-tournament token-auth toggle (dev_docs/07 §5.3): off allows same-machine testing
   setAuthRequired(tid: number, required: boolean, actor: string): void {
+    if (loadState(tid).frozen) throw new Error('FROZEN');
     const state = loadState(tid);
     const cfg = { ...getConfig(state), authRequired: required };
     logEvent(tid, 'tournament', 'config', cfg, actor);
@@ -283,30 +382,43 @@ export class TournamentsService {
     if (!state.players.some((pl) => pl.playerId === playerId)) throw new Error('PLAYER_NOT_FOUND');
     const cfg = getConfig(state);
     const picks = state.picks.filter((p) => p.playerId === playerId);
+    const orderedPlayers = state.players.slice().sort((a, b) => a.seat - b.seat);
     const remainingOf = (packIndex: number): number[] => {
       const pk = state.packs.find((p) => p.index === packIndex);
       if (!pk) return [];
-      const taken = new Set(state.picks.filter((p) => p.packIndex === packIndex).map((p) => p.card));
-      return pk.order.filter((c) => !taken.has(c));
+      const taken = new Map<number, number>();
+      for (const p of state.picks.filter((p) => p.packIndex === packIndex)) taken.set(p.card, (taken.get(p.card) ?? 0) + 1);
+      return pk.order.filter((c) => {
+        const n = taken.get(c) ?? 0;
+        if (n <= 0) return true;
+        taken.set(c, n - 1);
+        return false;
+      });
     };
     const passing = Object.keys(state.packQueues ?? {}).length > 0;
     let pack: Record<string, unknown> | null = null;
     let queueLengths: { playerId: string; length: number }[] | undefined;
     if (passing) {
       // passing：所有人可见各玩家队列长度（仅数量）；本人队首堆内容仅本人可见
-      queueLengths = state.players.map((p) => ({ playerId: p.playerId, length: state.packQueues[p.playerId]?.length ?? 0 }));
+      queueLengths = orderedPlayers.map((p) => ({ playerId: p.playerId, length: state.packQueues[p.playerId]?.length ?? 0 }));
       if (state.status === 'drafting') {
         const queue = state.packQueues[playerId] ?? [];
         const head = queue.length ? state.packs.find((p) => p.index === queue[0]) : null;
         if (head) {
           const remaining = remainingOf(head.index);
+          const pausedRemainingMs = state.pause?.pausedAt
+            ? state.pause.pausedDeadlines?.[playerId]
+            : state.frozen
+              ? state.frozenTimers?.passing?.[playerId]
+              : undefined;
           pack = {
             index: head.index,
             cardsLeft: remaining.length,
             packsRemaining: queue.length,
             queueLength: queue.length,
             currentPicker: playerId,
-            deadlineAt: state.pickDeadlines[playerId] ?? null,
+            deadlineAt: pausedRemainingMs === undefined ? (state.pickDeadlines[playerId] ?? null) : null,
+            pausedRemainingMs,
             isMyTurn: true, // passing：队列非空即可选
             // 本人剩余保留时间（ms）：deadlineAt - reserveMs = 基础时间用尽时刻
             reserveMs: state.pickReserves[playerId] ?? cfg.reserveSeconds * 1000,
@@ -321,19 +433,38 @@ export class TournamentsService {
       // info hiding: the current picker sees only the REMAINING cards of the pack —
       // already-picked cards' codes are never sent (dev_docs/05 §3)
       const remaining = cur ? remainingOf(cur.index) : [];
+      const pausedRemainingMs = state.pause?.pausedAt
+        ? state.pause.pausedPickRemainingMs
+        : state.frozen
+          ? state.frozenTimers?.serial
+          : undefined;
       pack = cur
         ? {
             index: cur.index,
             cardsLeft: remaining.length,
             packsRemaining: state.packs.length - cur.index,
             currentPicker: state.pickCursor!.playerId,
-            deadlineAt: state.pickCursor!.deadlineAt,
+            deadlineAt: pausedRemainingMs === undefined ? state.pickCursor!.deadlineAt : null,
+            pausedRemainingMs,
             isMyTurn: isCurrentPicker,
             cards: isCurrentPicker ? remaining : undefined,
             droppedCard: cur.dropCard,
           }
         : null;
     }
+    // 完整 passing 轮中，每轮 n 个同尺寸牌堆，每名玩家必得该尺寸张数；
+    // 因而可精确显示本人到结束还能获得多少张，与异步选牌进度无关。
+    const n = orderedPlayers.length;
+    const fullFairRounds = passing && n > 0 && state.packs.length % n === 0 && state.packs.every((pack, index, packs) => {
+      const roundStart = Math.floor(index / n) * n;
+      return pack.size === packs[roundStart].size;
+    });
+    const fairRoundCount = state.pendingPhase === 'deckbuilding'
+      ? Math.ceil(state.packsDealt / Math.max(1, n))
+      : state.packs.length / Math.max(1, n);
+    const targetCards = fullFairRounds
+      ? Array.from({ length: fairRoundCount }, (_, round) => state.packs[round * n].size).reduce((a, b) => a + b, 0)
+      : Math.ceil(state.packs.reduce((sum, p) => sum + p.size, 0) / Math.max(1, n));
     return {
       id: state.id,
       name: state.name,
@@ -341,14 +472,19 @@ export class TournamentsService {
       round: state.round,
       frozen: state.frozen,
       config: cfg,
-      players: state.players.map((p) => ({ playerId: p.playerId, displayName: p.displayName, seat: p.seat })),
+      players: orderedPlayers.map((p) => ({ playerId: p.playerId, displayName: p.displayName, seat: p.seat, eliminated: p.eliminated, withdrawn: p.withdrawn === true })),
       pickedCards: picks.map((p) => p.card),
+      cardsRemainingToDraft: Math.max(0, targetCards - picks.length),
+      cardsRemainingExact: fullFairRounds,
+      disqualified: state.players.find((p) => p.playerId === playerId)?.eliminated === true,
       poolInfo: { name: String(cfg.cardPool ?? 'full'), count: this.poolsCodes(cfg) },
       pack,
+      draftReserveMs: passing ? (state.pickReserves[playerId] ?? cfg.reserveSeconds * 1000) : undefined,
       queueLengths,
       pause: state.pause,
       droppedCards: state.droppedCards,
-      phaseDeadline: state.phaseDeadline,
+      phaseDeadline: state.frozen && state.frozenTimers?.deckbuilding !== undefined ? null : state.phaseDeadline,
+      phaseDeadlineRemainingMs: state.frozen ? state.frozenTimers?.deckbuilding : undefined,
       pendingPhase: state.pendingPhase,
       deck: state.decks[playerId],
       matches: state.matches
@@ -370,6 +506,7 @@ export class TournamentsService {
       if (e.entity === 'player' && e.action === 'player_join') summary = `报名 ${p.playerId}`;
       else if (e.entity === 'player' && e.action === 'player_remove') summary = `删除玩家 ${p}`;
       else if (e.entity === 'player' && e.action === 'seat_assign') summary = '座位分配';
+      else if (e.entity === 'player' && e.action === 'player_dsq') summary = `DSQ ${p.playerId}（${p.reason ?? '卡组不合规'}）`;
       else if (e.entity === 'pack' && e.action === 'packs_created') summary = `牌堆生成（${(p.packs ?? []).length} 堆${p.droppedCards?.length ? `，弃置 ${p.droppedCards.length} 张` : ''}${p.queues ? '，传递式' : ''}）`;
       else if (e.entity === 'draft' && e.action === 'deadlines') summary = '选牌计时重设';
       else if (e.entity === 'draft' && e.action === 'cursor') summary = p ? `牌堆 ${p.packIndex} → ${p.playerId}` : '选牌结束';

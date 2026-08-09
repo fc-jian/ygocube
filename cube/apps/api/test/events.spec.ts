@@ -1,5 +1,5 @@
 import { useTestDb, makeTournaments, TEST_POOL } from './helpers';
-import { loadState, revertTo, logEvent } from '../src/events/events.service';
+import { loadState, revertTo, hardRevertTo, resetStateCache, logEvent } from '../src/events/events.service';
 
 describe('event log & revert', () => {
   beforeEach(() => useTestDb());
@@ -30,6 +30,34 @@ describe('event log & revert', () => {
     const state = revertTo(tid, seqRow.seq);
     expect(state.status).toBe('drafting');
     expect(state.frozen).toBe(true);
+    const max = db.prepare('SELECT MAX(seq) AS seq FROM events WHERE tournament_id=?').get(tid) as { seq: number };
+    expect(max.seq).toBe(seqRow.seq);
+  });
+
+  it('hard revert truncates the future, rebuilds projections, and survives cache reload', () => {
+    const tournaments = makeTournaments();
+    const tid = tournaments.create({ name: 'hard', maxPlayers: 3, cardPool: TEST_POOL }, 'test').tid;
+    const a = tournaments.join(tid, 'a', 'A');
+    const db = require('../src/db').getDb();
+    const target = (db.prepare('SELECT MAX(seq) AS seq FROM events WHERE tournament_id=?').get(tid) as { seq: number }).seq;
+    const hashBefore = (db.prepare('SELECT token_hash FROM tournament_players WHERE tournament_id=? AND player_id=?').get(tid, 'a') as { token_hash: string }).token_hash;
+    tournaments.join(tid, 'b', 'B');
+    tournaments.setPhase(tid, 'drafting', undefined, 'test');
+
+    const result = hardRevertTo(tid, target, 'super-admin');
+    expect(result.deletedEvents).toBe(2);
+    expect(result.replacementTokens).toEqual({});
+    expect(result.state.players.map((p) => p.playerId)).toEqual(['a']);
+    expect(db.prepare('SELECT count(*) AS c FROM events WHERE tournament_id=? AND seq>?').get(tid, target)).toEqual({ c: 0 });
+    expect(db.prepare('SELECT active FROM tournament_players WHERE tournament_id=? AND player_id=?').get(tid, 'b')).toEqual({ active: 0 });
+    expect((db.prepare('SELECT token_hash FROM tournament_players WHERE tournament_id=? AND player_id=?').get(tid, 'a') as { token_hash: string }).token_hash).toBe(hashBefore);
+    expect(a.token).toHaveLength(32);
+
+    resetStateCache();
+    const restored = loadState(tid);
+    expect(restored.frozen).toBe(true);
+    expect(restored.status).toBe('registration');
+    expect(restored.players.map((p) => p.playerId)).toEqual(['a']);
   });
 
   it('every mutation appends to the append-only log', () => {

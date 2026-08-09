@@ -38,6 +38,19 @@ describe('tournament card pool validation', () => {
     const tournaments = makeTournaments();
     const { tid } = tournaments.create({ name: 'ok', maxPlayers: 4, cardPool: TEST_POOL }, 'test');
     expect(tid).toBeGreaterThan(0);
+    const cfg = JSON.parse(loadState(tid).configJson);
+    expect(cfg.packSize).toBe(18);
+    expect(cfg.deckbuildingSeconds).toBeNull();
+    expect(cfg.matchFormat).toBe('round_robin');
+  });
+
+  it('materializes recommended Swiss settings and validates manual settings', () => {
+    const tournaments = makeTournaments();
+    const tid = tournaments.create({ name: 'recommended', maxPlayers: 12, cardPool: TEST_POOL }, 'test').tid;
+    expect(JSON.parse(loadState(tid).configJson)).toMatchObject({ matchFormat: 'swiss', swissRoundCount: 4, playoffSize: 4 });
+    expect(() => tournaments.create({ name: 'bad', maxPlayers: 8, cardPool: TEST_POOL, matchFormat: 'swiss', swissRoundCount: 4, playoffSize: 16 }, 'test')).toThrow('FORMAT_PLAYER_COUNT');
+    const cfg = tournaments.updateMatchFormat(tid, { matchFormat: 'double_elimination', playoffSize: 0 }, 'test');
+    expect(cfg.matchFormat).toBe('double_elimination');
   });
 
   it("updateConfig rejects 'full' and unknown pools, accepts an existing pool", () => {
@@ -78,11 +91,21 @@ describe('admin player management', () => {
     const tid = tournaments.create({ name: 'x', maxPlayers: 4, cardPool: TEST_POOL }, 'test').tid;
     tournaments.join(tid, 'p1', 'P1');
     const { token } = tournaments.resetPlayerToken(tid, 'p1');
-    expect(token).toMatch(/^[a-z]+(-[a-z]+){2}$/);
+    expect(token).toMatch(/^[A-Za-z0-9_-]{32}$/);
     const row = require('../src/db').getDb()
       .prepare('SELECT token_hash FROM tournament_players WHERE tournament_id=? AND player_id=?')
       .get(tid, 'p1');
     expect(row.token_hash).toBe(require('crypto').createHash('sha256').update(token).digest('hex'));
     expect(() => tournaments.resetPlayerToken(tid, 'nobody')).toThrow('PLAYER_NOT_FOUND');
+  });
+
+  it('withdraws players without deleting history and allows restore before matches', () => {
+    const tournaments = makeTournaments();
+    const tid = tournaments.create({ name: 'x', maxPlayers: 4, cardPool: TEST_POOL }, 'test').tid;
+    tournaments.join(tid, 'p1', 'P1');
+    tournaments.withdrawPlayer(tid, 'p1', 'admin');
+    expect(loadState(tid).players[0].withdrawn).toBe(true);
+    tournaments.restorePlayer(tid, 'p1', 'admin');
+    expect(loadState(tid).players[0].withdrawn).toBe(false);
   });
 });

@@ -1,7 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { ArgumentsHost, Catch, ExceptionFilter, HttpException } from '@nestjs/common';
 import { AppModule } from './app.module';
-import { config } from './config';
+import { config, validateStartupSecurity } from './config';
 import { getDb } from './db';
 import { Request, Response, NextFunction } from 'express';
 
@@ -25,6 +25,7 @@ const CONFLICT_CODES = new Set([
   'LOCKED', 'ALREADY_LOCKED', 'DECK_INVALID', 'PAUSED', 'PAUSE_EXISTS', 'NO_PAUSE',
   'ALREADY_VOTED', 'NOT_PAUSED', 'FORBIDDEN', 'TOURNAMENT_FULL', 'NOT_ENOUGH_PLAYERS',
   'POOL_EXISTS', 'POOL_NOT_FOUND', 'FROZEN', 'ALREADY_JOINED', 'CARD_NOT_IN_POOL',
+  'NO_VALID_PAIRING',
 ]);
 
 @Catch()
@@ -49,7 +50,9 @@ class ApiExceptionFilter implements ExceptionFilter {
       details = (exception as Error & { details?: unknown }).details;
       if (code === 'PLAYER_NOT_FOUND') status = 404;
       else if (code === 'MATCH_NOT_FOUND') status = 404;
-      else if (code === 'BAD_PLAYER_ID' || code === 'BAD_RESULT') status = 400;
+      else if (code === 'BAD_PLAYER_ID' || code === 'BAD_RESULT' || code === 'BAD_PAYLOAD' || code === 'BAD_POOL_IMPORT' || code === 'REVERT_CONFIRMATION_MISMATCH') status = 400;
+      else if (code === 'REVERT_EVENT_NOT_FOUND') status = 404;
+      else if (code.startsWith('REVERT_ROOM_CLOSE_FAILED')) status = 503;
       else if (code === 'DRAFT_NOT_STARTED') status = 409;
       else if (CONFLICT_CODES.has(code)) status = 409;
     }
@@ -58,13 +61,20 @@ class ApiExceptionFilter implements ExceptionFilter {
 }
 
 async function bootstrap() {
+  validateStartupSecurity();
   getDb(); // init schema
   // eager card import (cards.cdb): search/pools need the table warm
   const { CardsService } = require('./cards/cards.service');
   new CardsService().allCodes();
   const app = await NestFactory.create(AppModule, { logger: ['error', 'warn', 'log'] });
   app.use(cookieParser);
-  app.enableCors({ origin: true, credentials: true });
+  app.enableCors({
+    origin: (origin, callback) => {
+      if (!origin || config.server.allowedOrigins.includes(origin)) callback(null, true);
+      else callback(new Error('CORS_ORIGIN_DENIED'), false);
+    },
+    credentials: true,
+  });
   app.useGlobalFilters(new ApiExceptionFilter());
   await app.listen(config.server.port);
   console.log(`cube api listening on ${config.server.port}`);

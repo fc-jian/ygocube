@@ -1,5 +1,5 @@
 import { useTestDb, makeTournaments, TEST_POOL } from './helpers';
-import { loadState, logEvent } from '../src/events/events.service';
+import { freeze, loadState, logEvent, unfreeze } from '../src/events/events.service';
 import { DraftService } from '../src/draft/draft.service';
 import { CardsService } from '../src/cards/cards.service';
 import { PoolsService } from '../src/pools/pools.service';
@@ -49,7 +49,7 @@ describe('phase rules', () => {
     // progress preserved: cursor positioned at the next pack start
     expect(state.pickCursor!.packIndex).toBe(1);
     expect(state.pickCursor!.round).toBe(0);
-    expect(state.phaseDeadline).not.toBeNull();
+    expect(state.phaseDeadline).toBeNull(); // default deckbuilding is unlimited
     // rollback: resume drafting from the preserved cursor
     tournaments.setPhase(tid, 'drafting', undefined, 'test');
     state = loadState(tid);
@@ -85,7 +85,7 @@ describe('phase rules', () => {
     const pool = cards.poolCodes().slice(0, 31);
     const p = new PoolsService(cards);
     p.create('dropleft', pool);
-    const tid = tournaments.create({ name: 'dropleft', maxPlayers: 3, cardPool: 'dropleft', dropMode: 'drop_leftover', packSize: 9 }, 'test').tid;
+    const tid = tournaments.create({ name: 'dropleft', maxPlayers: 3, cardPool: 'dropleft', dropMode: 'drop_leftover', packSize: 9, dropPublic: true }, 'test').tid;
     for (let i = 0; i < 3; i++) tournaments.join(tid, `p${i}`, `P${i}`);
     draft.startDraft(tid, 'test');
     const state = loadState(tid);
@@ -100,7 +100,7 @@ describe('phase rules', () => {
     const pool = cards.poolCodes().slice(0, 35); // floor(35/9)=3, 3%3=0 -> 3 packs (27), 8 dropped
     const p = new PoolsService(cards);
     p.create('dropexact', pool);
-    const tid = tournaments.create({ name: 'dropexact', maxPlayers: 3, cardPool: 'dropexact', dropMode: 'drop_leftover_exact', packSize: 9 }, 'test').tid;
+    const tid = tournaments.create({ name: 'dropexact', maxPlayers: 3, cardPool: 'dropexact', dropMode: 'drop_leftover_exact', packSize: 9, dropPublic: true }, 'test').tid;
     for (let i = 0; i < 3; i++) tournaments.join(tid, `p${i}`, `P${i}`);
     draft.startDraft(tid, 'test');
     const state = loadState(tid);
@@ -109,7 +109,7 @@ describe('phase rules', () => {
     // 32 cards: floor(32/9)=3, 3%3=0 -> still 3 packs; 34 cards: floor=3, 3%3=0
     // 用 38 张验证 trim：floor(38/9)=4, 4%3=1 -> 3 packs (27), 11 dropped
     p.create('dropexact2', cards.poolCodes().slice(0, 38));
-    const tid2 = tournaments.create({ name: 'dropexact2', maxPlayers: 3, cardPool: 'dropexact2', dropMode: 'drop_leftover_exact', packSize: 9 }, 'test').tid;
+    const tid2 = tournaments.create({ name: 'dropexact2', maxPlayers: 3, cardPool: 'dropexact2', dropMode: 'drop_leftover_exact', packSize: 9, dropPublic: true }, 'test').tid;
     for (let i = 0; i < 3; i++) tournaments.join(tid2, `p${i}`, `P${i}`);
     draft.startDraft(tid2, 'test');
     const s2 = loadState(tid2);
@@ -127,14 +127,42 @@ describe('phase rules', () => {
     expect(cfg.dropMode).toBe('use_all');
   });
 
-  it('deckbuilding sets a phase deadline', () => {
+  it('deckbuilding is unlimited by default and retains an explicit deadline option', () => {
     const { tournaments, tid } = setup(3);
     tournaments.setPhase(tid, 'drafting', undefined, 'test');
     tournaments.setPhase(tid, 'deckbuilding', undefined, 'test');
-    const state = loadState(tid);
-    expect(state.status).toBe('deckbuilding');
-    expect(state.phaseDeadline).not.toBeNull();
-    expect(new Date(state.phaseDeadline!).getTime()).toBeGreaterThan(Date.now());
+    expect(loadState(tid).phaseDeadline).toBeNull();
+
+    const finite = makeTournaments();
+    const finiteTid = finite.create({ name: 'finite', maxPlayers: 3, cardPool: TEST_POOL, deckbuildingSeconds: 120 }, 'test').tid;
+    for (let i = 0; i < 3; i++) finite.join(finiteTid, `f${i}`, `F${i}`);
+    finite.setPhase(finiteTid, 'drafting', undefined, 'test');
+    finite.setPhase(finiteTid, 'deckbuilding', undefined, 'test');
+    const finiteState = loadState(finiteTid);
+    expect(finiteState.phaseDeadline).not.toBeNull();
+    expect(new Date(finiteState.phaseDeadline!).getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it('admin freeze preserves a finite deckbuilding countdown exactly', () => {
+    jest.useFakeTimers();
+    try {
+      const { tournaments, draft, tid } = setup(3);
+      tournaments.updateConfig(tid, { deckbuildingSeconds: 120 }, 'test');
+      tournaments.setPhase(tid, 'drafting', undefined, 'test');
+      tournaments.setPhase(tid, 'deckbuilding', undefined, 'test');
+      jest.advanceTimersByTime(20000);
+      draft.freezeTimers(tid);
+      freeze(tid, 'test');
+      expect(loadState(tid).frozenTimers!.deckbuilding).toBe(100000);
+      jest.advanceTimersByTime(60000);
+      expect(loadState(tid).status).toBe('deckbuilding');
+      unfreeze(tid);
+      draft.resumeFrozenTimers(tid);
+      const left = new Date(loadState(tid).phaseDeadline!).getTime() - Date.now();
+      expect(left).toBe(100000);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
 
@@ -232,7 +260,8 @@ describe('pack strategy', () => {
     const p = new PoolsService(cards);
     p.create('str', [...mainCodes, ...extraCodes]);
     const draft = new DraftService(cards, tournaments, new PoolsService(cards), new MatchesService(fakeSrvpro as any));
-    const tid = tournaments.create({ name: 'str', maxPlayers: 3, cardPool: 'str', dropMode: 'use_all', packStrategy: 'stratify' }, 'test').tid;
+    // Keep this test focused on stratification rather than the global default pack size.
+    const tid = tournaments.create({ name: 'str', maxPlayers: 3, cardPool: 'str', dropMode: 'use_all', packStrategy: 'stratify', packSize: 9 }, 'test').tid;
     for (let i = 0; i < 3; i++) tournaments.join(tid, `p${i}`, `P${i}`);
     draft.startDraft(tid, 'test');
     const state = loadState(tid);
@@ -278,7 +307,7 @@ describe('pack strategy', () => {
     draft.startDraft(tid, 'test');
     const state = loadState(tid);
     expect(state.packs[0].order.length).toBe(9);
-    expect(state.packs[0].order.length).not.toBe(12); // 不是新默认 12
+    expect(state.packs[0].order.length).toBe(9); // 显式 legacy 参数优先，不使用新默认 18
   });
 
   it('packCount fixes the number of packs; remainder is dropped', () => {
@@ -287,13 +316,35 @@ describe('pack strategy', () => {
     const draft = new DraftService(cards, tournaments, new PoolsService(cards), new MatchesService(fakeSrvpro as any));
     const p = new PoolsService(cards);
     p.create('pk', cards.poolCodes().slice(0, 40));
-    const tid = tournaments.create({ name: 'pk', maxPlayers: 3, cardPool: 'pk', packSize: 9, packCount: 3 }, 'test').tid;
+    const tid = tournaments.create({ name: 'pk', maxPlayers: 3, cardPool: 'pk', packSize: 9, packCount: 3, dropPublic: true }, 'test').tid;
     for (let i = 0; i < 3; i++) tournaments.join(tid, `p${i}`, `P${i}`);
     draft.startDraft(tid, 'test');
     const state = loadState(tid);
     expect(state.packs.length).toBe(3); // 27 张进堆
     expect(state.packs[0].order.length).toBe(9);
     expect(state.droppedCards.length).toBe(40 - 27); // 剩余 13 张全部随机丢弃
+  });
+
+  it('initial random discard preserves the pool main/extra ratio for every pack strategy', () => {
+    const tournaments = makeTournaments();
+    const cards = new CardsService();
+    const pools = new PoolsService(cards);
+    const mainCodes = cards.poolCodes().filter((code) => !cards.isExtraDeck(code)).slice(0, 80);
+    const extraCodes = cards.poolCodes().filter((code) => cards.isExtraDeck(code)).slice(0, 20);
+    pools.create('proportional-drop', [...mainCodes, ...extraCodes]);
+    const draft = new DraftService(cards, tournaments, pools, new MatchesService(fakeSrvpro as any));
+    const tid = tournaments.create({
+      name: 'proportional-drop', maxPlayers: 3, cardPool: 'proportional-drop',
+      packSize: 10, packCount: 5, evenPackCount: false, packStrategy: 'random', dropPublic: true,
+    }, 'test').tid;
+    for (let i = 0; i < 3; i++) tournaments.join(tid, `p${i}`, `P${i}`);
+    draft.startDraft(tid, 'test');
+    const state = loadState(tid);
+    const drafted = state.packs.flatMap((pack) => pack.order);
+    expect(drafted).toHaveLength(50);
+    expect(drafted.filter((code) => cards.isExtraDeck(code))).toHaveLength(10);
+    expect(state.droppedCards).toHaveLength(50);
+    expect(state.droppedCards.filter((code) => cards.isExtraDeck(code))).toHaveLength(10);
   });
 
   it('packCount above the pool limit switches to use-all (no discard, last pack may be short)', () => {
@@ -348,4 +399,18 @@ describe('pack strategy', () => {
       expect(pk.startOffset).toBeGreaterThanOrEqual(0);
       expect(pk.startOffset).toBeLessThan(3);
     }
+  });
+
+  it('dropPublic defaults to false (dropped cards not exposed)', () => {
+    const tournaments = makeTournaments();
+    const cards = new CardsService();
+    const draft = new DraftService(cards, tournaments, new PoolsService(cards), new MatchesService(fakeSrvpro as any));
+    const p = new PoolsService(cards);
+    p.create('priv2', cards.poolCodes().slice(0, 31));
+    const tid = tournaments.create({ name: 'priv2', maxPlayers: 3, cardPool: 'priv2', packSize: 9 }, 'test').tid;
+    for (let i = 0; i < 3; i++) tournaments.join(tid, `p${i}`, `P${i}`);
+    draft.startDraft(tid, 'test');
+    const state = loadState(tid);
+    expect(state.packs.length).toBe(3);
+    expect(state.droppedCards.length).toBe(0); // 丢弃 4 张但默认不公开
   });

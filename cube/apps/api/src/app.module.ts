@@ -68,6 +68,7 @@ export class AppModule {
         }
         case 'deadlines':
         case 'deal':
+        case 'seat_assign':
           // passing 模式计时重设（暂停/恢复/冻结/解冻）/ 新一轮发堆：通知客户端 refetch
           realtime.emitPack(tid, { deadlines: true });
           break;

@@ -82,4 +82,14 @@ describe('auth model', () => {
     const { sha256 } = require('../src/auth/auth.guard');
     expect(row.admin_token_hash).toBe(sha256(t1.admin_token));
   });
+
+  it('resetAdminToken invalidates the old tournament token immediately', () => {
+    const tournaments = makeTournaments();
+    const created = tournaments.create({ name: 'reset-admin', maxPlayers: 3, cardPool: TEST_POOL }, 'test');
+    const guard = new AuthGuard(new Reflector());
+    const reset = tournaments.resetAdminToken(created.tid);
+    expect(reset.admin_token).not.toBe(created.admin_token);
+    expectUnauthorized(() => guard.canActivate(makeCtx(`/admin/t/${created.tid}/state`, { 'x-admin-token': created.admin_token })));
+    expect(guard.canActivate(makeCtx(`/admin/t/${created.tid}/state`, { 'x-admin-token': reset.admin_token }))).toBe(true);
+  });
 });

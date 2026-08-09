@@ -30,6 +30,8 @@ export function getDb(): Database.Database {
       seat INTEGER,
       joined_at TEXT NOT NULL,
       eliminated INTEGER NOT NULL DEFAULT 0,
+      withdrawn INTEGER NOT NULL DEFAULT 0,
+      active INTEGER NOT NULL DEFAULT 1,
       UNIQUE(tournament_id, player_id)
     );
     CREATE TABLE IF NOT EXISTS packs (
@@ -75,8 +77,12 @@ export function getDb(): Database.Database {
       result_a INTEGER,
       result_b INTEGER,
       source TEXT,
+      faulted_at TEXT,
       started_at TEXT,
       finished_at TEXT
+      ,stage TEXT
+      ,bracket_round INTEGER
+      ,bracket_match_id TEXT
     );
     CREATE TABLE IF NOT EXISTS events (
       seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,6 +111,13 @@ export function getDb(): Database.Database {
       atk INTEGER NOT NULL DEFAULT 0,
       def INTEGER NOT NULL DEFAULT 0,
       alias INTEGER NOT NULL DEFAULT 0
+      ,lscale INTEGER NOT NULL DEFAULT 0
+      ,rscale INTEGER NOT NULL DEFAULT 0
+      ,link_markers INTEGER NOT NULL DEFAULT 0
+      ,setcodes_json TEXT NOT NULL DEFAULT '[]'
+      ,setnames_json TEXT NOT NULL DEFAULT '[]'
+      ,search_text TEXT NOT NULL DEFAULT ''
+      ,metadata_version INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS card_pools (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -119,6 +132,11 @@ export function getDb(): Database.Database {
       action TEXT NOT NULL,
       detail_json TEXT NOT NULL,
       created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
     );
   `);
   migrate(db);
@@ -147,6 +165,14 @@ function migrate(d: Database.Database): void {
     d.exec('ALTER TABLE matches ADD COLUMN player_a_pass TEXT');
     d.exec('ALTER TABLE matches ADD COLUMN player_b_pass TEXT');
   }
+  if (!matchCols.some((c) => c.name === 'faulted_at')) {
+    d.exec('ALTER TABLE matches ADD COLUMN faulted_at TEXT');
+  }
+  if (!matchCols.some((c) => c.name === 'stage')) {
+    d.exec('ALTER TABLE matches ADD COLUMN stage TEXT');
+    d.exec('ALTER TABLE matches ADD COLUMN bracket_round INTEGER');
+    d.exec('ALTER TABLE matches ADD COLUMN bracket_match_id TEXT');
+  }
   const cardCols = d.prepare('PRAGMA table_info(cards)').all() as { name: string }[];
   if (!cardCols.some((c) => c.name === 'desc')) {
     d.exec("ALTER TABLE cards ADD COLUMN desc TEXT NOT NULL DEFAULT ''");
@@ -161,6 +187,26 @@ function migrate(d: Database.Database): void {
   if (!cardCols.some((c) => c.name === 'alias')) {
     d.exec('ALTER TABLE cards ADD COLUMN alias INTEGER NOT NULL DEFAULT 0');
   }
+  for (const [name, ddl] of [
+    ['lscale', 'INTEGER NOT NULL DEFAULT 0'],
+    ['rscale', 'INTEGER NOT NULL DEFAULT 0'],
+    ['link_markers', 'INTEGER NOT NULL DEFAULT 0'],
+    ['setcodes_json', "TEXT NOT NULL DEFAULT '[]'"],
+    ['setnames_json', "TEXT NOT NULL DEFAULT '[]'"],
+    ['search_text', "TEXT NOT NULL DEFAULT ''"],
+    ['metadata_version', 'INTEGER NOT NULL DEFAULT 0'],
+  ] as const) {
+    if (!cardCols.some((c) => c.name === name)) d.exec(`ALTER TABLE cards ADD COLUMN ${name} ${ddl}`);
+  }
+  const playerCols = d.prepare('PRAGMA table_info(tournament_players)').all() as { name: string }[];
+  if (!playerCols.some((c) => c.name === 'active')) {
+    d.exec('ALTER TABLE tournament_players ADD COLUMN active INTEGER NOT NULL DEFAULT 1');
+  }
+  if (!playerCols.some((c) => c.name === 'withdrawn')) {
+    d.exec('ALTER TABLE tournament_players ADD COLUMN withdrawn INTEGER NOT NULL DEFAULT 0');
+  }
+  d.exec('CREATE INDEX IF NOT EXISTS idx_cards_search_text ON cards(search_text)');
+  d.exec('CREATE INDEX IF NOT EXISTS idx_events_tid_seq ON events(tournament_id, seq)');
 }
 
 export function closeDb() {

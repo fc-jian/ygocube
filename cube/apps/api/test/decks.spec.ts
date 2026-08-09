@@ -1,16 +1,22 @@
 import { useTestDb, freshTournament, makeTournaments } from './helpers';
 import { loadState } from '../src/events/events.service';
-import { DecksService, DeckInvalidError } from '../src/decks/decks.service';
+import { DecksService, DeckInvalidError, compareCardsLikeYgopro } from '../src/decks/decks.service';
 import { CardsService } from '../src/cards/cards.service';
+import { cubeDeckFileBase } from '../src/decks/deck-filename';
 
 describe('deck validation', () => {
   beforeEach(() => useTestDb());
 
-  function setupDeckbuilding(picksPerPlayer: number) {
+  it('uses the shared safe timestamped cube deck filename format', () => {
+    expect(cubeDeckFileBase(17, 'p / one', new Date('2026-08-08T07:06:05.000Z')))
+      .toBe('cube-deck-17-p_one-20260808070605');
+  });
+
+  function setupDeckbuilding(picksPerPlayer: number, overrides: Record<string, unknown> = {}) {
     const tournaments = makeTournaments();
     const cards = new CardsService();
     const decks = new DecksService(cards);
-    const tid = freshTournament();
+    const tid = freshTournament('deck-test', overrides as any);
     for (let i = 0; i < 4; i++) tournaments.join(tid, `p${i}`, `P${i}`);
     tournaments.setPhase(tid, 'drafting', undefined, 'test');
   tournaments.setPhase(tid, 'deckbuilding', undefined, 'test');
@@ -31,7 +37,7 @@ describe('deck validation', () => {
   }
 
   it('lock rejects decks below/above limits and >3 copies', () => {
-    const { decks, tid, codes } = setupDeckbuilding(45);
+    const { cards, decks, tid, codes } = setupDeckbuilding(45);
     // move 39 main cards only -> below min
     for (let i = 0; i < 39; i++) decks.move(tid, 'p0', codes[i], 'pool', 'main');
     expect(() => decks.lock(tid, 'p0')).toThrowError(DeckInvalidError);
@@ -63,5 +69,93 @@ describe('deck validation', () => {
     expect(ydk).toContain('#main');
     expect(ydk).toContain('!side');
     expect(ydk.split('\n').filter((l) => /^\d+$/.test(l)).length).toBe(45);
+  });
+
+  it('maxCopies > 1 licenses copies of a picked card and preserves exact duplicate drag indices', () => {
+    const { decks, tid, codes } = setupDeckbuilding(45, { maxCopies: 3 });
+    const [a, b] = codes; // a was picked only once
+    decks.move(tid, 'p0', a, 'pool', 'main');
+    decks.move(tid, 'p0', b, 'pool', 'main');
+    decks.move(tid, 'p0', a, 'pool', 'main');
+    decks.move(tid, 'p0', a, 'pool', 'main');
+    expect(() => decks.move(tid, 'p0', a, 'pool', 'main')).toThrow('CARD_NOT_IN_POOL');
+    decks.move(tid, 'p0', a, 'main', 'main', 0, 2);
+    expect(loadState(tid).decks.p0.main).toEqual([a, a, b, a]);
+    decks.move(tid, 'p0', a, 'main', 'side', 0, 0);
+    expect(loadState(tid).decks.p0.main).toEqual([a, b, a]);
+    expect(loadState(tid).decks.p0.side).toEqual([a]);
+  });
+
+  it('match preparation moves random zone overflow to side and DSQs an undersized main deck', () => {
+    const { decks, tid, codes } = setupDeckbuilding(8, { mainMin: 3, mainMax: 4, extraMax: 2, sideMax: 2, maxCopies: 1 });
+    for (let i = 0; i < 6; i++) decks.move(tid, 'p0', codes[i], 'pool', 'main');
+    expect(decks.validationReport(tid).find((r) => r.playerId === 'p0')?.errors).toContain('main above maximum (6 > 4)');
+    const repaired = decks.repairForMatches(tid, 'p0');
+    expect(repaired).toMatchObject({ disqualified: false, movedToSide: 2, returnedToPool: 0 });
+    expect(loadState(tid).decks.p0.main).toHaveLength(4);
+    expect(loadState(tid).decks.p0.side).toHaveLength(2);
+
+    for (let i = 0; i < 2; i++) decks.move(tid, 'p1', codes[i], 'pool', 'main');
+    expect(decks.repairForMatches(tid, 'p1').disqualified).toBe(true);
+    expect(loadState(tid).players.find((p) => p.playerId === 'p1')?.eliminated).toBe(true);
+  });
+
+  it('locking every deck no longer bypasses the administrator match-start preflight', () => {
+    const { decks, tid, codes } = setupDeckbuilding(4, { mainMin: 3, mainMax: 4, extraMax: 2, sideMax: 2 });
+    for (const pid of ['p0', 'p1', 'p2', 'p3']) {
+      for (let i = 0; i < 3; i++) decks.move(tid, pid, codes[i], 'pool', 'main');
+      decks.lock(tid, pid);
+    }
+    expect(loadState(tid).status).toBe('deckbuilding');
+  });
+
+  it('keeps newly added cards at the end and sorts all zones only on explicit request', () => {
+    const { cards, decks, tid, codes } = setupDeckbuilding(45);
+    const picked = [codes[8], codes[3], codes[6], codes[1]];
+    for (const code of picked) decks.move(tid, 'p0', code, 'pool', 'main');
+    expect(loadState(tid).decks.p0.main).toEqual(picked);
+
+    const last = codes[12];
+    decks.move(tid, 'p0', last, 'pool', 'main');
+    expect(loadState(tid).decks.p0.main.at(-1)).toBe(last);
+
+    decks.sort(tid, 'p0');
+    const sorted = loadState(tid).decks.p0.main;
+    expect(sorted).toEqual([...picked, last].sort((a, b) => compareCardsLikeYgopro(cards.get(a)!, cards.get(b)!)));
+  });
+
+  it('random shuffle changes only main order and preserves every card', () => {
+    const { decks, tid, codes } = setupDeckbuilding(45);
+    for (const code of codes.slice(0, 6)) decks.move(tid, 'p0', code, 'pool', 'main');
+    decks.move(tid, 'p0', codes[5], 'main', 'side');
+    const before = loadState(tid).decks.p0;
+    const random = jest.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      decks.shuffleMain(tid, 'p0');
+    } finally {
+      random.mockRestore();
+    }
+    const after = loadState(tid).decks.p0;
+    expect(after.main).not.toEqual(before.main);
+    expect([...after.main].sort((a, b) => a - b)).toEqual([...before.main].sort((a, b) => a - b));
+    expect(after.extra).toEqual(before.extra);
+    expect(after.side).toEqual(before.side);
+  });
+
+  it('moves materially picked but unused cards into their natural zones on entering deckbuilding', () => {
+    const tournaments = makeTournaments();
+    const cards = new CardsService();
+    const tid = freshTournament('unused-auto-zone');
+    tournaments.join(tid, 'p0', 'P0');
+    tournaments.join(tid, 'p1', 'P1');
+    tournaments.setPhase(tid, 'drafting', undefined, 'test');
+    const mainCode = cards.allCodes().find((code) => !cards.isExtraDeck(code))!;
+    const extraCode = cards.allCodes().find((code) => cards.isExtraDeck(code))!;
+    logPick(tid, 'p0', mainCode, 0);
+    logPick(tid, 'p0', extraCode, 1);
+    expect(loadState(tid).decks.p0.main).toEqual([]);
+    tournaments.setPhase(tid, 'deckbuilding', undefined, 'test');
+    expect(loadState(tid).decks.p0.main).toEqual([mainCode]);
+    expect(loadState(tid).decks.p0.extra).toEqual([extraCode]);
   });
 });

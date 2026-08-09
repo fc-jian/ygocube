@@ -38,11 +38,17 @@ export class DraftService implements OnModuleInit {
     for (const r of rows) {
       try {
         const state = loadState(r.id);
+        if (state.frozen) continue;
+        if (state.pause?.pausedAt) {
+          const elapsed = Math.max(0, Date.now() - new Date(state.pause.pausedAt).getTime());
+          const pauseLeft = Math.max(0, state.pause.remainingMs - elapsed);
+          if (pauseLeft <= 0) this.pauseExpired(r.id);
+          else this.armPauseTimer(r.id, pauseLeft);
+          continue;
+        }
         if (this.isPassing(state)) {
-          if (!state.pause?.pausedAt) {
-            for (const p of state.players) this.armPassTimer(r.id, p.playerId);
-          }
-        } else if (state.pickCursor?.deadlineAt && !state.pause?.pausedAt) {
+          for (const p of state.players) this.armPassTimer(r.id, p.playerId);
+        } else if (state.pickCursor?.deadlineAt) {
           this.armTimer(state);
         }
       } catch (e) {
@@ -52,6 +58,7 @@ export class DraftService implements OnModuleInit {
     const deckRows = db.prepare('SELECT id FROM tournaments WHERE status=?').all('deckbuilding') as { id: number }[];
     for (const r of deckRows) {
       try {
+        if (loadState(r.id).frozen) continue;
         this.armDeckbuildingTimer(r.id);
       } catch (e) {
         console.error('re-arm deckbuilding failed for tournament', r.id, e);
@@ -61,6 +68,7 @@ export class DraftService implements OnModuleInit {
 
   startDraft(tid: number, actor: string): void {
     const state = loadState(tid);
+    if (state.frozen) throw new Error('FROZEN');
     if (state.status !== 'registration') throw new Error('WRONG_PHASE');
     const cfg = getConfig(state);
     const rawCfg = JSON.parse(state.configJson) as Record<string, unknown>;
@@ -103,7 +111,7 @@ export class DraftService implements OnModuleInit {
         : cfg.dropLeftover === false
           ? 'use_all'
           : 'drop_leftover_exact'; // 旧配置兼容
-    const dropPublic = (rawCfg.dropPublic as boolean | undefined) !== false;
+    const dropPublic = (rawCfg.dropPublic as boolean | undefined) === true; // 默认不公开丢弃列表
     const explicitPacks = (rawCfg.packCount as number | undefined) ?? 0;
     // evenPackCount（默认开）：牌堆数须为人数整数倍——显式 packCount 非倍数直接拒绝；
     // 自动/钳制结果向下取整到最大倍数（余数按 dropPublic 规则处理）；不足一整轮时兜底不取整
@@ -125,6 +133,35 @@ export class DraftService implements OnModuleInit {
       const m = packCount - (packCount % n);
       if (m >= n) packCount = m;
     }
+    // Before arranging packs, choose the drafted subset with proportional
+    // stratification. Therefore any initial random discard preserves the
+    // pool's main/extra ratio (within unavoidable integer rounding), regardless
+    // of the later pack display strategy.
+    const shuffle = <T>(items: T[]): T[] => {
+      const out = [...items];
+      for (let i = out.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [out[i], out[j]] = [out[j], out[i]];
+      }
+      return out;
+    };
+    const allMain: number[] = [];
+    const allExtra: number[] = [];
+    for (const code of poolCodes) {
+      const info = this.cards.get(code);
+      ((info && info.type & 0x4802040) ? allExtra : allMain).push(code);
+    }
+    const draftedCount = Math.min(poolCodes.length, packSize * packCount);
+    const idealExtra = Math.round(draftedCount * (allExtra.length / Math.max(1, poolCodes.length)));
+    const draftedExtraCount = Math.max(
+      Math.max(0, draftedCount - allMain.length),
+      Math.min(allExtra.length, idealExtra),
+    );
+    const draftedMainCount = draftedCount - draftedExtraCount;
+    const draftedMain = allMain.slice(0, draftedMainCount);
+    const draftedExtra = allExtra.slice(0, draftedExtraCount);
+    const discardedPoolCodes = [...allMain.slice(draftedMainCount), ...allExtra.slice(draftedExtraCount)];
+
     // 牌堆构成策略（packStrategy）：
     //  stratify（默认）   = 主卡/额外卡按整体比例均匀分布到每一堆（各池先洗牌再按比例取）
     //  random             = 全卡池随机洗牌后顺序切堆
@@ -132,36 +169,34 @@ export class DraftService implements OnModuleInit {
     const strategy = cfg.packStrategy === 'random' || cfg.packStrategy === 'main_then_extra' ? cfg.packStrategy : 'stratify';
     let codes: number[];
     if (strategy === 'random') {
-      codes = poolCodes;
+      codes = shuffle([...draftedMain, ...draftedExtra]);
+    } else if (strategy === 'main_then_extra') {
+      codes = [...draftedMain, ...draftedExtra];
     } else {
-      const main: number[] = [];
-      const extra: number[] = [];
-      for (const c of poolCodes) {
-        const info = this.cards.get(c);
-        ((info && info.type & 0x4802040) ? extra : main).push(c);
+      // stratify: dynamically apportion every pack from the remaining drafted
+      // main/extra cards, with bounds that always fill the requested pack.
+      let mi = 0;
+      let ei = 0;
+      const per: number[][] = [];
+      for (let k = 0; k < packCount; k++) {
+        const size = Math.min(packSize, draftedCount - k * packSize);
+        const remMain = draftedMain.length - mi;
+        const remExtra = draftedExtra.length - ei;
+        const minExtra = Math.max(0, size - remMain);
+        const maxExtra = Math.min(size, remExtra);
+        const proportionalExtra = Math.round(size * (remExtra / Math.max(1, remMain + remExtra)));
+        const extraCount = Math.max(minExtra, Math.min(maxExtra, proportionalExtra));
+        const mainCount = size - extraCount;
+        per.push(shuffle([
+          ...draftedMain.slice(mi, mi + mainCount),
+          ...draftedExtra.slice(ei, ei + extraCount),
+        ]));
+        mi += mainCount;
+        ei += extraCount;
       }
-      if (strategy === 'main_then_extra') {
-        codes = [...main, ...extra];
-      } else {
-        // stratify: 逐堆按剩余 main:extra 比例动态取卡（两池已各自洗牌），堆外剩余追加为弃置
-        let mi = 0;
-        let ei = 0;
-        const per: number[][] = [];
-        for (let k = 0; k < packCount; k++) {
-          const size = Math.min(packSize, poolCodes.length - k * packSize);
-          const remMain = main.length - mi;
-          const remExtra = extra.length - ei;
-          const m = Math.min(remMain, Math.round(size * (remMain / Math.max(1, remMain + remExtra))));
-          const e = Math.min(remExtra, size - m);
-          per.push([...main.slice(mi, mi + m), ...extra.slice(ei, ei + e)]);
-          mi += m;
-          ei += e;
-        }
-        codes = [...per.flat(), ...main.slice(mi), ...extra.slice(ei)];
-      }
+      codes = per.flat();
     }
-    let droppedCards: number[] = codes.slice(packSize * packCount);
-    if (!dropPublic) droppedCards = [];
+    const droppedCards: number[] = dropPublic ? shuffle(discardedPoolCodes) : [];
     const draftMode = (rawCfg.draftMode as string | undefined) === 'serial' ? 'serial' : 'passing';
     const packs = [];
     for (let k = 0; k < packCount; k++) {
@@ -171,11 +206,7 @@ export class DraftService implements OnModuleInit {
         draftMode === 'serial' ? (packSize % n === 0 ? (n - (k % n)) % n : Math.floor(Math.random() * n)) : undefined;
       packs.push({ index: k, size: orderList.length, dropCard: null, startOffset, order: orderList });
     }
-    // leftover pool cards (drop 模式): randomly dropped, list made public before the draft starts
-    for (let i = droppedCards.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [droppedCards[i], droppedCards[j]] = [droppedCards[j], droppedCards[i]];
-    }
+    // leftover pool cards are already randomly sampled and shuffled above.
     logEvent(tid, 'tournament', 'phase', { status: 'drafting', round: 0 }, actor);
     logEvent(tid, 'player', 'seat_assign', seatMap, actor);
     if (draftMode === 'serial') {
@@ -221,8 +252,14 @@ export class DraftService implements OnModuleInit {
   private remainingInPack(state: TournamentState, packIndex: number): number[] {
     const pack = state.packs.find((p) => p.index === packIndex);
     if (!pack) return [];
-    const taken = new Set(state.picks.filter((p) => p.packIndex === packIndex).map((p) => p.card));
-    return pack.order.filter((c) => !taken.has(c));
+    const taken = new Map<number, number>();
+    for (const p of state.picks.filter((p) => p.packIndex === packIndex)) taken.set(p.card, (taken.get(p.card) ?? 0) + 1);
+    return pack.order.filter((c) => {
+      const n = taken.get(c) ?? 0;
+      if (n <= 0) return true;
+      taken.set(c, n - 1);
+      return false;
+    });
   }
 
   private isLastPickOfPack(state: TournamentState, packIndex: number): boolean {
@@ -277,7 +314,7 @@ export class DraftService implements OnModuleInit {
     persistMeta(tid);
   }
 
-  // 恢复（解冻）时：构筑倒计时重新开始
+  // 恢复（解冻）时：构筑倒计时按持久化 deadline 重新武装
   resumeDeckbuildingTimer(tid: number): void {
     this.armDeckbuildingTimer(tid);
   }
@@ -316,11 +353,8 @@ export class DraftService implements OnModuleInit {
       return;
     }
     const decks = new DecksService(this.cards);
-    for (const p of state.players) {
-      if (!state.decks[p.playerId]?.lockedAt) {
-        decks.autoFix(tid, p.playerId);
-      }
-    }
+    for (const p of state.players.filter((player) => !player.eliminated && !player.withdrawn)) decks.repairForMatches(tid, p.playerId);
+    this.matches.validateStart(tid);
     this.tournaments.setPhase(tid, 'matches', 1, 'system');
     try {
       this.matches.startRound(tid, 1, 'system');
@@ -354,6 +388,83 @@ export class DraftService implements OnModuleInit {
   haltPickTimer(tid: number): void {
     this.clearTimer(tid);
     this.clearPassTimers(tid);
+  }
+
+  // 管理员冻结：先把当前剩余时间写入事件日志，再挂起定时器。
+  // 这样短暂停不会继续消耗时间，进程重启后也能精确恢复。
+  freezeTimers(tid: number): void {
+    const state = loadState(tid);
+    const now = Date.now();
+    const frozen: { passing?: Record<string, number>; serial?: number; deckbuilding?: number } = {};
+    if (state.status === 'drafting') {
+      if (this.isPassing(state)) {
+        frozen.passing = {};
+        for (const p of state.players) {
+          const paused = state.pause?.pausedAt ? state.pause.pausedDeadlines?.[p.playerId] : undefined;
+          const dl = state.pickDeadlines[p.playerId];
+          if ((paused !== undefined || dl) && (state.packQueues[p.playerId]?.length ?? 0) > 0) {
+            frozen.passing[p.playerId] = paused ?? Math.max(0, new Date(dl!).getTime() - now);
+          }
+        }
+      } else if (state.pickCursor?.deadlineAt) {
+        frozen.serial = state.pause?.pausedAt
+          ? state.pause.pausedPickRemainingMs ?? 0
+          : Math.max(0, new Date(state.pickCursor.deadlineAt).getTime() - now);
+      }
+    } else if (state.status === 'deckbuilding' && state.phaseDeadline) {
+      frozen.deckbuilding = Math.max(0, new Date(state.phaseDeadline).getTime() - now);
+    }
+    logEvent(tid, 'tournament', 'timer_freeze', frozen, 'system');
+    this.haltPickTimer(tid);
+    const deckbuilding = this.deckbuildingTimers.get(tid);
+    if (deckbuilding) clearTimeout(deckbuilding);
+    this.deckbuildingTimers.delete(tid);
+    persistMeta(tid);
+  }
+
+  // 管理员解冻：严格恢复冻结瞬间的剩余时间；旧冻结事件无快照时走兼容逻辑。
+  resumeFrozenTimers(tid: number): void {
+    let state = loadState(tid);
+    const frozen = state.frozenTimers;
+    const now = Date.now();
+    if (!frozen) {
+      this.resumePickTimer(tid);
+      this.resumeDeckbuildingTimer(tid);
+      return;
+    }
+    if (state.status === 'drafting' && frozen.passing) {
+      const deadlines: Record<string, string | null> = { ...state.pickDeadlines };
+      for (const p of state.players) {
+        const ms = frozen.passing[p.playerId];
+        deadlines[p.playerId] = ms !== undefined && (state.packQueues[p.playerId]?.length ?? 0) > 0
+          ? new Date(now + ms).toISOString()
+          : null;
+      }
+      logEvent(tid, 'draft', 'deadlines', { deadlines, reserves: state.pickReserves }, 'system');
+    } else if (state.status === 'drafting' && frozen.serial !== undefined && state.pickCursor) {
+      logEvent(tid, 'draft', 'cursor', { ...state.pickCursor, deadlineAt: new Date(now + frozen.serial).toISOString() }, 'system');
+    } else if (state.status === 'deckbuilding' && frozen.deckbuilding !== undefined) {
+      logEvent(tid, 'tournament', 'phase', {
+        status: state.status,
+        round: state.round,
+        deadlineAt: new Date(now + frozen.deckbuilding).toISOString(),
+      }, 'system');
+    }
+    logEvent(tid, 'tournament', 'timer_freeze', null, 'system');
+    persistMeta(tid);
+    state = loadState(tid);
+    if (state.status === 'drafting') this.resumePickTimer(tid);
+    if (state.status === 'deckbuilding') this.armDeckbuildingTimer(tid);
+  }
+
+  haltAllTimers(tid: number): void {
+    this.haltPickTimer(tid);
+    const deckbuilding = this.deckbuildingTimers.get(tid);
+    if (deckbuilding) clearTimeout(deckbuilding);
+    this.deckbuildingTimers.delete(tid);
+    const pause = this.pauseTimers.get(tid);
+    if (pause) clearTimeout(pause);
+    this.pauseTimers.delete(tid);
   }
 
   resumePickTimer(tid: number): void {
@@ -459,15 +570,10 @@ export class DraftService implements OnModuleInit {
     const isExtra = this.cards.isExtraDeck(card);
     if (targetZone === 'main' && isExtra) throw new Error('WRONG_ZONE');
     if (targetZone === 'extra' && !isExtra) throw new Error('WRONG_ZONE');
-    if (targetZone === 'main' || targetZone === 'side') {
-      if (!deck[targetZone].includes(card)) deck[targetZone].push(card);
-    } else if (targetZone === 'extra') {
-      if (!deck.extra.includes(card)) deck.extra.push(card);
-    } else if (isExtra) {
-      if (!deck.extra.includes(card)) deck.extra.push(card);
-    } else if (!deck.main.includes(card)) {
-      deck.main.push(card);
-    }
+    if (targetZone === 'main' || targetZone === 'side') deck[targetZone].push(card);
+    else if (targetZone === 'extra') deck.extra.push(card);
+    else if (isExtra) deck.extra.push(card);
+    else deck.main.push(card);
     logEvent(tid, 'deck', 'deck', { playerId, deck }, actor);
   }
 
@@ -632,7 +738,21 @@ export class DraftService implements OnModuleInit {
     const remaining = state.packs.length - state.packsDealt;
     if (remaining <= 0) return;
     const count = Math.min(n, remaining);
-    const seatsArr = state.players.slice().sort((a, b) => a.seat - b.seat);
+    let seatsArr = state.players.slice().sort((a, b) => a.seat - b.seat);
+    // reseatEachRound（默认开）：每轮结束后随机重排玩家座位，再发下一轮（seat_assign 事件落日志，回放一致）
+    if (cfg.reseatEachRound && remaining > 0) {
+      const shuffled = seatsArr.slice();
+      for (let i = shuffled.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+      }
+      const seatMap: Record<string, number> = {};
+      shuffled.forEach((p, idx) => {
+        seatMap[p.playerId] = idx;
+      });
+      logEvent(tid, 'player', 'seat_assign', seatMap, actor);
+      seatsArr = loadState(tid).players.slice().sort((a, b) => a.seat - b.seat);
+    }
     const recipients = seatsArr.slice();
     if (count < n) {
       // 残轮：随机互斥分配
@@ -717,16 +837,14 @@ export class DraftService implements OnModuleInit {
       return;
     }
     this.clearTimer(tid);
-    // freeze remaining pick time into pause
-    let remainingMs = state.pause.remainingMs;
-    if (state.pickCursor?.deadlineAt) {
-      const left = new Date(state.pickCursor.deadlineAt).getTime() - Date.now();
-      if (left > 0) remainingMs = Math.max(0, remainingMs - (state.pause.remainingMs > 0 ? state.pause.remainingMs - left : left));
-    }
-    logEvent(tid, 'pause', 'pause', { ...state.pause, remainingMs, pausedAt: new Date().toISOString() }, 'system');
+    // serial：分别保存允许暂停的时长和当前选牌剩余时间，禁止两个计时器互相污染。
+    const pausedPickRemainingMs = state.pickCursor?.deadlineAt
+      ? Math.max(0, new Date(state.pickCursor.deadlineAt).getTime() - Date.now())
+      : 0;
+    logEvent(tid, 'pause', 'pause', { ...state.pause, pausedPickRemainingMs, pausedAt: new Date().toISOString() }, 'system');
     persistMeta(tid);
     // 暂停时长上限（默认 5 分钟）：到期自动恢复（dev_docs/05 §3）
-    this.armPauseTimer(tid, remainingMs);
+    this.armPauseTimer(tid, state.pause.remainingMs);
   }
 
   private armPauseTimer(tid: number, ms: number): void {
@@ -759,15 +877,17 @@ export class DraftService implements OnModuleInit {
     if (old) clearTimeout(old);
     this.pauseTimers.delete(tid);
     if (this.isPassing(state)) {
-      // 恢复：给完整基础时长 + 剩余 reserve（与 resumePickTimer 语义一致，reserve 余额不变）
+      // 恢复：严格恢复暂停瞬间冻结的剩余时间，reserve 余额不变。
       const cfg = getConfig(state);
       const reserves: Record<string, number> = { ...state.pickReserves };
       const now = Date.now();
       const deadlines: Record<string, string | null> = {};
       for (const p of state.players) {
         const hasPack = (state.packQueues[p.playerId]?.length ?? 0) > 0;
+        const remaining = state.pause.pausedDeadlines?.[p.playerId]
+          ?? (cfg.pickSeconds * 1000 + (reserves[p.playerId] ?? cfg.reserveSeconds * 1000));
         deadlines[p.playerId] = hasPack
-          ? new Date(now + cfg.pickSeconds * 1000 + (reserves[p.playerId] ?? cfg.reserveSeconds * 1000)).toISOString()
+          ? new Date(now + Math.max(0, remaining ?? 0)).toISOString()
           : null;
       }
       logEvent(tid, 'pause', 'pause', null, playerId);
@@ -777,14 +897,12 @@ export class DraftService implements OnModuleInit {
       return;
     }
     const s = loadState(tid);
-    // restore deadline: now + remaining pick time (paused budget consumed)
+    // serial：严格恢复暂停瞬间冻结的当前选牌剩余时间。
     const cfg = getConfig(s);
-    const pickLeft = s.pickCursor?.deadlineAt
-      ? Math.max(0, new Date(s.pickCursor.deadlineAt).getTime() - Date.now() + (s.pause?.remainingMs ?? 0) - cfg.pickSeconds * 1000)
-      : cfg.pickSeconds * 1000;
+    const pickLeft = Math.max(0, s.pause?.pausedPickRemainingMs ?? cfg.pickSeconds * 1000);
     logEvent(tid, 'pause', 'pause', null, playerId);
     if (s.pickCursor) {
-      const deadlineAt = new Date(Date.now() + Math.max(0, pickLeft || cfg.pickSeconds * 1000)).toISOString();
+      const deadlineAt = new Date(Date.now() + pickLeft).toISOString();
       logEvent(tid, 'draft', 'cursor', { ...s.pickCursor, deadlineAt }, playerId);
       this.armTimer(loadState(tid));
     }

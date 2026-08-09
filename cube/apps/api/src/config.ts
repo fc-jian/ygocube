@@ -19,6 +19,9 @@ export interface AppConfig {
     port: number;
     dbPath: string;
     cardsCdb: string;
+    stringsConf: string;
+    allowedOrigins: string[];
+    allowInsecureDefaults: boolean;
   };
   pics: {
     ygoproRoot: string;
@@ -58,6 +61,11 @@ function loadConfig(): AppConfig {
     const rawValue = v ?? envV ?? fallback;
     return path.isAbsolute(rawValue) ? rawValue : path.resolve(base, rawValue);
   };
+  const cardsCdb = resolvePath(server.cards_cdb as string | undefined, process.env.CARDS_CDB, '../../srvpro/ygopro/cards.cdb');
+  const originsRaw = server.allowed_origins ?? process.env.CUBE_ALLOWED_ORIGINS ?? ['http://localhost:3000', 'http://127.0.0.1:3000'];
+  const allowedOrigins = Array.isArray(originsRaw)
+    ? originsRaw.map(String)
+    : String(originsRaw).split(',').map((x) => x.trim()).filter(Boolean);
   return {
     admin: {
       superToken: String(admin.super_token ?? process.env.CUBE_SUPER_TOKEN ?? 'change-me-super-token'),
@@ -72,7 +80,10 @@ function loadConfig(): AppConfig {
     server: {
       port: Number(server.port ?? process.env.PORT ?? 3001),
       dbPath: resolvePath(server.db_path as string | undefined, process.env.DB_PATH, 'data/cube.sqlite'),
-      cardsCdb: resolvePath(server.cards_cdb as string | undefined, process.env.CARDS_CDB, '../../srvpro/ygopro/cards.cdb'),
+      cardsCdb,
+      stringsConf: resolvePath(server.strings_conf as string | undefined, process.env.STRINGS_CONF, path.join(path.dirname(cardsCdb), 'strings.conf')),
+      allowedOrigins,
+      allowInsecureDefaults: server.allow_insecure_defaults === true || process.env.CUBE_ALLOW_INSECURE_DEFAULTS === '1',
     },
     pics: {
       ygoproRoot: resolvePath(pics.ygopro_root as string | undefined, process.env.PICS_YGOPRO_ROOT, ''),
@@ -85,14 +96,15 @@ function loadConfig(): AppConfig {
 export const config = loadConfig();
 
 export const defaults = {
-  packSize: 12, // 每堆卡牌数（任意正整数，不再要求是人数整数倍）
+  packSize: 18, // 每堆卡牌数（任意正整数，不再要求是人数整数倍）
   packSizeMultiple: 3, // 旧配置兼容（packSize 缺失时每堆 = 人数 × 该倍数）
   draftMode: 'passing', // passing=每玩家牌堆队列传递式；serial=旧全局串行（仅 raw config 可设）
   evenPackCount: true, // 牌堆数须为人数整数倍（显式 packCount 非倍数拒绝；自动计算向下取整）
   reserveSeconds: 300, // passing 模式每玩家保留时间（单选超时先扣 reserve，耗尽才自动选）
+  reseatEachRound: true, // passing 每轮结束后随机重排玩家座位（默认开）
   pickSeconds: 30,
   pauseSeconds: 300,
-  deckbuildingSeconds: 600,
+  deckbuildingSeconds: null as number | null, // 默认无限；管理员手动进入对战阶段
   mainMin: 40,
   mainMax: 60,
   extraMax: 30,
@@ -100,3 +112,12 @@ export const defaults = {
   maxCopies: 1,
   timeLimit: 180,
 };
+
+export function validateStartupSecurity(): void {
+  if (config.server.allowInsecureDefaults) return;
+  const bad = new Set(['', 'change-me-super-token', 'change-me-create-token']);
+  if (bad.has(config.admin.superToken) || bad.has(config.admin.createToken) || config.admin.superToken === config.admin.createToken) {
+    throw new Error('insecure admin token configuration; set unique non-placeholder tokens or server.allow_insecure_defaults=true');
+  }
+  if (!config.srvpro.apiKey) throw new Error('srvpro.api_key must not be empty');
+}

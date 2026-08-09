@@ -4,6 +4,7 @@ import { loadState, logEvent, getConfig, persistMeta, MatchState } from '../even
 import { config } from '../config';
 import axios from 'axios';
 import crypto from 'crypto';
+import { cubeDeckFileBase } from '../decks/deck-filename';
 
 // 房间号随机词（在规律编号后附加，避免玩家进错房间）
 const ROOM_WORDS = [
@@ -51,6 +52,7 @@ interface PointsRow {
 export class MatchesService implements OnModuleInit {
   private poller: NodeJS.Timeout | null = null;
   private roomRetryCooldown = new Map<number, number>(); // tid -> last attempt ts
+  private operationGeneration = new Map<number, number>();
   constructor(private srvpro: SrvproApi = new RealSrvproClient(config.srvpro.url, config.srvpro.apiKey)) {}
 
   onModuleInit(): void {
@@ -61,15 +63,82 @@ export class MatchesService implements OnModuleInit {
 
   // ---------- pairing (dev_docs/05 §5) ----------
 
+  validateStart(tid: number): void {
+    const state = loadState(tid);
+    const count = this.activePlayers(state).length;
+    if (count < 2) throw new Error('FORMAT_PLAYER_COUNT');
+    if (this.format(state) === 'swiss') {
+      const rounds = this.configuredSwissRounds(state);
+      const playoff = Number(getConfig(state).playoffSize ?? 0);
+      const maxRounds = count % 2 === 0 ? count - 1 : count;
+      if (!Number.isInteger(rounds) || rounds < 1 || rounds > maxRounds) throw new Error('BAD_SWISS_ROUNDS');
+      if (playoff > count) throw new Error('FORMAT_PLAYER_COUNT');
+    }
+  }
+
   swissRounds(n: number): number {
     if (n <= 5) return n - 1; // round robin
     if (n <= 16) return 4;
     return Math.ceil(Math.log2(n)) + 1; // 17+: 标准瑞士轮（dev_docs/05 §5）
   }
 
+  private activePlayers(state: ReturnType<typeof loadState>) {
+    return state.players.filter((p) => !p.eliminated && !p.withdrawn);
+  }
+
+  private format(state: ReturnType<typeof loadState>): 'round_robin' | 'swiss' | 'double_elimination' {
+    const cfg = getConfig(state);
+    if (cfg.matchFormat === 'round_robin' || cfg.matchFormat === 'swiss' || cfg.matchFormat === 'double_elimination') return cfg.matchFormat;
+    return this.activePlayers(state).length <= 5 ? 'round_robin' : 'swiss';
+  }
+
+  private configuredSwissRounds(state: ReturnType<typeof loadState>): number {
+    const cfg = getConfig(state);
+    return Number.isInteger(cfg.swissRoundCount) ? Number(cfg.swissRoundCount) : this.swissRounds(this.activePlayers(state).length);
+  }
+
+  private roundRobinSchedule(ids: string[]): [string, string | null][][] {
+    if (ids.length % 2 === 0) {
+      const rounds: [string, string | null][][] = [];
+      const arr = [...ids];
+      for (let r = 0; r < ids.length - 1; r++) {
+        const pairs: [string, string | null][] = [];
+        for (let i = 0; i < ids.length / 2; i++) pairs.push([arr[2 * i], arr[2 * i + 1]]);
+        rounds.push(pairs);
+        const first = arr.splice(1, 1)[0];
+        arr.push(first);
+      }
+      return rounds;
+    }
+    const ring: (string | null)[] = [...ids];
+    ring.push(null);
+    const rounds: [string, string | null][][] = [];
+    for (let r = 0; r < ring.length - 1; r++) {
+      const pairs: [string, string | null][] = [];
+      for (let i = 0; i < ring.length / 2; i++) {
+        const a = ring[i];
+        const b = ring[ring.length - 1 - i];
+        if (a !== null) pairs.push([a, b]);
+        else if (b !== null) pairs.push([b, null]);
+      }
+      rounds.push(pairs);
+      ring.splice(1, 0, ring.pop()!);
+    }
+    return rounds;
+  }
+
+  private shuffled<T>(values: T[]): T[] {
+    const out = [...values];
+    for (let i = out.length - 1; i > 0; i--) {
+      const j = crypto.randomInt(i + 1);
+      [out[i], out[j]] = [out[j], out[i]];
+    }
+    return out;
+  }
+
   private points(state: ReturnType<typeof loadState>, round: number): PointsRow[] {
     const rows: PointsRow[] = state.players
-      .filter((p) => !p.eliminated)
+      .filter((p) => !p.eliminated && !p.withdrawn)
       .map((p) => {
         let points = 0;
         let gameDiff = 0;
@@ -110,54 +179,68 @@ export class MatchesService implements OnModuleInit {
   }
 
   private generateRound(state: ReturnType<typeof loadState>, round: number): MatchState[] {
-    const n = state.players.filter((p) => !p.eliminated).length;
+    const n = this.activePlayers(state).length;
     const ids = this.points(state, round).map((r) => r.playerId);
     const playedPairs = new Set<string>();
     for (const m of state.matches) {
       playedPairs.add([m.playerA, m.playerB].sort().join('|'));
     }
     const pairs: [string, string][] = [];
-    if (n <= 5) {
-      // round robin (circle method): each call generates exactly ONE round,
-      // every player appears in at most one match per round (dev_docs/05 §5).
-      // 4 players: R1 1v2,3v4; R2 1v3,2v4; R3 1v4,2v3
-      const arr = [ids[0], ...ids.slice(1)];
-      for (let r = 1; r < round; r++) {
-        // others rotate left one seat per round
-        const first = arr.splice(1, 1)[0];
-        arr.push(first);
-      }
-      for (let i = 0; i < Math.floor(n / 2); i++) {
-        const a = arr[2 * i];
-        const b = arr[2 * i + 1];
-        if (a !== undefined && b !== undefined && a !== b) pairs.push([a, b]);
+    if (this.format(state) === 'round_robin') {
+      const planned = state.competition?.roundRobinSchedule?.[round - 1] ?? [];
+      for (const [a, b] of planned) {
+        if (b && ids.includes(a) && ids.includes(b)) pairs.push([a, b]);
       }
     } else {
-      // swiss: pair adjacent, skip repeats; leftover players pair among themselves
-      // (a forced rematch is acceptable when unavoidable in swiss)
-      const used = new Set<string>();
-      for (let i = 0; i < ids.length - 1; i++) {
-        if (used.has(ids[i])) continue;
-        for (let j = i + 1; j < ids.length; j++) {
-          if (used.has(ids[j])) continue;
-          const key = [ids[i], ids[j]].sort().join('|');
-          if (playedPairs.has(key)) continue;
-          pairs.push([ids[i], ids[j]]);
-          used.add(ids[i]);
-          used.add(ids[j]);
-          break;
+      // Swiss pairing is a whole-round constraint problem, not a per-table
+      // greedy choice. The old greedy implementation could consume all valid
+      // opponents for the last two players and then pair that repeated matchup
+      // as a fallback even though another complete solution existed.
+      const memo = new Set<string>();
+      const solve = (remaining: string[]): [string, string][] | null => {
+        if (remaining.length === 0) return [];
+        const signature = remaining.join('\0');
+        if (memo.has(signature)) return null;
+        const a = remaining[0];
+        // ids is already standings order. Trying nearby candidates first keeps
+        // score groups as close as possible while backtracking when necessary.
+        for (let i = 1; i < remaining.length; i++) {
+          const b = remaining[i];
+          if (playedPairs.has([a, b].sort().join('|'))) continue;
+          const rest = [...remaining.slice(1, i), ...remaining.slice(i + 1)];
+          const tail = solve(rest);
+          if (tail) return [[a, b], ...tail];
+        }
+        memo.add(signature);
+        return null;
+      };
+
+      let swissPairs: [string, string][] | null = null;
+      if (n % 2 === 0) {
+        swissPairs = solve(ids);
+      } else {
+        const previousByes = new Set(state.matches.filter((m) => m.playerB === '(bye)').map((m) => m.playerA));
+        // Prefer the lowest-ranked player who has not already received a bye.
+        const byeCandidates = ids
+          .map((id, index) => ({ id, index, hadBye: previousByes.has(id) }))
+          .sort((a, b) => Number(a.hadBye) - Number(b.hadBye) || b.index - a.index);
+        for (const candidate of byeCandidates) {
+          memo.clear();
+          const result = solve(ids.filter((id) => id !== candidate.id));
+          if (result) {
+            swissPairs = result;
+            // Keep the bye player unmatched; the common bye creation below
+            // detects the one id absent from swissPairs.
+            break;
+          }
         }
       }
-      const leftover = ids.filter((id) => !used.has(id));
-      for (let i = 0; i < leftover.length - 1; i += 2) {
-        pairs.push([leftover[i], leftover[i + 1]]);
-        used.add(leftover[i]);
-        used.add(leftover[i + 1]);
-      }
+      if (!swissPairs) throw new Error('NO_VALID_PAIRING');
+      pairs.push(...swissPairs);
     }
     // byes: eliminated-adjacent; a lone player gets a bye (3 points)
     const matched = new Set(pairs.flat());
-    const bye = ids.find((id) => !matched.has(id));
+    const bye = this.format(state) === 'swiss' ? ids.find((id) => !matched.has(id)) : undefined;
     const matches: MatchState[] = pairs.map(([a, b], i) => ({
       id: 0,
       round,
@@ -173,25 +256,77 @@ export class MatchesService implements OnModuleInit {
       faultedAt: null,
       startedAt: null,
       finishedAt: null,
+      stage: this.format(state) === 'round_robin' ? 'round_robin' : 'swiss',
+      bracketRound: round,
     }));
     if (bye && n % 2 === 1) {
-      matches.push({ id: 0, round, playerA: bye, playerB: '(bye)', tableNo: matches.length + 1, roomName: null, playerAPass: null, playerBPass: null, resultA: 2, resultB: 0, source: 'bye', faultedAt: null, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString() });
+      matches.push({ id: 0, round, playerA: bye, playerB: '(bye)', tableNo: matches.length + 1, roomName: null, playerAPass: null, playerBPass: null, resultA: 2, resultB: 0, source: 'bye', faultedAt: null, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), stage: 'swiss', bracketRound: round });
+    }
+    return matches;
+  }
+
+  private generateDoubleEliminationRound(state: ReturnType<typeof loadState>, round: number): MatchState[] {
+    const seeds = (state.competition?.seeds ?? this.activePlayers(state).map((p) => p.playerId))
+      .filter((id) => this.activePlayers(state).some((p) => p.playerId === id));
+    const losses = Object.fromEntries(seeds.map((id) => [id, 0])) as Record<string, number>;
+    for (const match of state.matches.filter((m) => ['winners', 'losers'].includes(String(m.stage)) && m.resultA !== null && m.resultB !== null)) {
+      if (match.resultA === match.resultB) continue;
+      const loser = match.resultA! < match.resultB! ? match.playerA : match.playerB;
+      losses[loser] = (losses[loser] ?? 0) + 1;
+    }
+    const alive = seeds.filter((id) => (losses[id] ?? 0) < 2);
+    if (alive.length < 2) return [];
+    const completedGrandFinal = state.matches.some((m) => m.stage === 'grand_final' && m.resultA !== null && m.resultB !== null);
+    if (completedGrandFinal) return [];
+    const make = (a: string, b: string, stage: 'winners' | 'losers' | 'grand_final', index: number): MatchState => ({
+      id: 0, round, playerA: a, playerB: b, tableNo: index + 1,
+      roomName: null, playerAPass: null, playerBPass: null, resultA: null, resultB: null,
+      source: null, faultedAt: null, startedAt: null, finishedAt: null,
+      stage, bracketRound: round, bracketMatchId: `${stage}-${round}-${index + 1}`,
+    });
+    if (alive.length === 2) return [make(alive[0], alive[1], 'grand_final', 0)];
+    const matches: MatchState[] = [];
+    for (const lossCount of [0, 1]) {
+      const group = alive.filter((id) => (losses[id] ?? 0) === lossCount);
+      for (let i = 0; i + 1 < group.length; i += 2) {
+        matches.push(make(group[i], group[i + 1], lossCount === 0 ? 'winners' : 'losers', matches.length));
+      }
     }
     return matches;
   }
 
   startRound(tid: number, round: number, actor: string): void {
     const state = loadState(tid);
+    if (state.frozen) throw new Error('FROZEN');
     if (state.status !== 'matches') throw new Error('WRONG_PHASE');
+    if (state.matches.length === 0) this.validateStart(tid);
     if (state.matches.some((m) => m.round === round)) throw new Error('ROUND_EXISTS');
-    const matches = this.generateRound(state, round);
+    if (!state.competition) {
+      const format = this.format(state);
+      const seeds = this.activePlayers(state).map((p) => p.playerId);
+      logEvent(tid, 'tournament', 'competition', {
+        format,
+        seeds: format === 'double_elimination' ? this.shuffled(seeds) : seeds,
+        roundRobinSchedule: format === 'round_robin' ? this.roundRobinSchedule(seeds) : undefined,
+        losses: format === 'double_elimination' ? Object.fromEntries(seeds.map((id) => [id, 0])) : undefined,
+      }, actor);
+    }
+    const current = loadState(tid);
+    const matches = this.format(current) === 'double_elimination'
+      ? this.generateDoubleEliminationRound(current, round)
+      : this.generateRound(current, round);
+    if (matches.length === 0) {
+      logEvent(tid, 'tournament', 'phase', { status: 'finished', round: Math.max(0, round - 1) }, actor);
+      persistMeta(tid);
+      return;
+    }
     // persist with ids
     const now = new Date().toISOString();
     const insert = getDb().prepare(
-      'INSERT INTO matches (tournament_id, round, player_a, player_b, table_no, room_name, player_a_pass, player_b_pass, result_a, result_b, source, started_at, finished_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      'INSERT INTO matches (tournament_id, round, player_a, player_b, table_no, room_name, player_a_pass, player_b_pass, result_a, result_b, source, started_at, finished_at, stage, bracket_round, bracket_match_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
     );
     for (const m of matches) {
-      const row = insert.run(tid, m.round, m.playerA, m.playerB, m.tableNo, null, m.playerAPass, m.playerBPass, m.resultA, m.resultB, m.source, now, m.finishedAt);
+      const row = insert.run(tid, m.round, m.playerA, m.playerB, m.tableNo, null, m.playerAPass, m.playerBPass, m.resultA, m.resultB, m.source, now, m.finishedAt, m.stage ?? null, m.bracketRound ?? null, m.bracketMatchId ?? null);
       logEvent(tid, 'match', 'match', { ...m, id: Number(row.lastInsertRowid) }, actor);
     }
     if (state.round !== round) {
@@ -204,10 +339,13 @@ export class MatchesService implements OnModuleInit {
 
   private async createRoomsForRound(tid: number, round: number): Promise<void> {
     const state = loadState(tid);
+    if (state.frozen) return;
+    const generation = this.operationGeneration.get(tid) ?? 0;
     const cfg = getConfig(state);
     for (const m of state.matches.filter((x) => x.round === round && x.roomName === null && x.playerB !== '(bye)')) {
       try {
         const roomName = `CUBE-${tid}-${round}-${m.tableNo}-${ROOM_WORDS[crypto.randomInt(ROOM_WORDS.length)]}`;
+        const syncedAt = new Date();
         const deckA = state.decks[m.playerA];
         const deckB = state.decks[m.playerB];
         const res = await this.srvpro.createRoom({
@@ -228,12 +366,18 @@ export class MatchesService implements OnModuleInit {
             { player_id: m.playerB, name_vpass: m.playerB },
           ],
           cube_decks: {
-            [m.playerA]: { main: [...deckA.main, ...deckA.extra], side: deckA.side },
-            [m.playerB]: { main: [...deckB.main, ...deckB.extra], side: deckB.side },
+            [m.playerA]: { main: [...deckA.main, ...deckA.extra], side: deckA.side, filename: cubeDeckFileBase(tid, m.playerA, syncedAt) },
+            [m.playerB]: { main: [...deckB.main, ...deckB.extra], side: deckB.side, filename: cubeDeckFileBase(tid, m.playerB, syncedAt) },
           },
         });
         if (res.ok) {
-          this.patchMatch(tid, m.id, { roomName, source: 'srvpro' });
+          const current = loadState(tid);
+          const currentMatch = current.matches.find((x) => x.id === m.id);
+          if ((this.operationGeneration.get(tid) ?? 0) !== generation || current.frozen || !currentMatch || currentMatch.roomName !== null) {
+            try { await this.srvpro.closeRoom(roomName); } catch { /* already gone */ }
+          } else {
+            this.patchMatch(tid, m.id, { roomName, source: 'srvpro' });
+          }
         } else {
           console.error('srvpro create_room failed', roomName, res);
         }
@@ -245,18 +389,23 @@ export class MatchesService implements OnModuleInit {
 
   private patchMatch(tid: number, id: number, patch: Partial<MatchState>): void {
     const state = loadState(tid);
+    if (state.frozen) return;
     const m = state.matches.find((x) => x.id === id);
     if (!m) return;
     logEvent(tid, 'match', 'match', { ...m, ...patch }, 'system');
     const db = getDb();
-    db.prepare('UPDATE matches SET room_name=?, player_a_pass=?, player_b_pass=?, result_a=?, result_b=?, source=?, finished_at=? WHERE id=?').run(
-      patch.roomName ?? m.roomName,
-      patch.playerAPass ?? m.playerAPass,
-      patch.playerBPass ?? m.playerBPass,
-      patch.resultA ?? m.resultA,
-      patch.resultB ?? m.resultB,
-      patch.source ?? m.source,
-      patch.finishedAt ?? m.finishedAt,
+    const value = <K extends keyof MatchState>(key: K): MatchState[K] =>
+      Object.prototype.hasOwnProperty.call(patch, key) ? patch[key] as MatchState[K] : m[key];
+    db.prepare('UPDATE matches SET room_name=?, player_a_pass=?, player_b_pass=?, result_a=?, result_b=?, source=?, faulted_at=?, started_at=?, finished_at=? WHERE id=?').run(
+      value('roomName'),
+      value('playerAPass'),
+      value('playerBPass'),
+      value('resultA'),
+      value('resultB'),
+      value('source'),
+      value('faultedAt'),
+      value('startedAt'),
+      value('finishedAt'),
       id,
     );
     persistMeta(tid);
@@ -272,16 +421,22 @@ export class MatchesService implements OnModuleInit {
     return [ra, rb];
   }
 
+  private isEliminationMatch(match: MatchState): boolean {
+    return ['playoff', 'winners', 'losers', 'grand_final'].includes(String(match.stage));
+  }
+
   // srvpro webhook receiver (dev_docs/07 §3.4)
   onWebhook(body: any): { ack: boolean } {
-    const roomName: string = body.room_name;
+    const roomName = body?.room_name;
+    if (typeof roomName !== 'string') return { ack: false };
     const m = roomName.match(/^CUBE-(\d+)-(\d+)-(\d+)(?:-[A-Za-z0-9]+)?$/);
     if (!m) return { ack: false };
     const tid = Number(m[1]);
     const round = Number(m[2]);
     const table = Number(m[3]);
     const state = loadState(tid);
-    const match = state.matches.find((x) => x.round === round && x.tableNo === table);
+    if (state.frozen) return { ack: false };
+    const match = state.matches.find((x) => x.round === round && x.tableNo === table && x.roomName === roomName);
     if (!match) return { ack: false };
     if (match.resultA !== null) return { ack: true }; // idempotent
     const byId: Record<string, any> = {};
@@ -290,6 +445,10 @@ export class MatchesService implements OnModuleInit {
     const b = byId[match.playerB];
     if (!a || !b) return { ack: false };
     const [resultA, resultB] = MatchesService.normalizeDisconnect(a.score, b.score);
+    if (this.isEliminationMatch(match) && resultA === resultB) {
+      this.patchMatch(tid, match.id, { source: 'invalid_draw', faultedAt: new Date().toISOString() });
+      return { ack: true };
+    }
     this.patchMatch(tid, match.id, { resultA, resultB, source: 'webhook', finishedAt: body.end ?? new Date().toISOString() });
     this.maybeAdvance(tid, round);
     return { ack: true };
@@ -297,50 +456,101 @@ export class MatchesService implements OnModuleInit {
 
   private maybeAdvance(tid: number, round: number): void {
     const state = loadState(tid);
+    if (state.frozen) return;
     const roundMatches = state.matches.filter((m) => m.round === round);
     if (roundMatches.length === 0) return;
     const done = roundMatches.every((m) => m.resultA !== null && m.resultB !== null);
     if (!done) return;
-    const n = state.players.filter((p) => !p.eliminated).length;
-    const swissRounds = this.swissRounds(n);
-    const isPlayoffRound = round > swissRounds;
-    if (isPlayoffRound) {
-      if (roundMatches.length <= 1) {
-        logEvent(tid, 'tournament', 'phase', { status: 'finished', round }, 'system');
-      } else {
-        // next playoff round: winners of this round pair up
-        const winners = roundMatches.map((m) => (m.resultA! > m.resultB! ? m.playerA : m.playerB));
-        this.pairPlayoffRound(tid, round + 1, winners);
-      }
+    if (roundMatches.some((m) => m.stage === 'grand_final') || (roundMatches.length === 1 && roundMatches[0].stage === 'playoff')) {
+      // 决赛结束：冠军已定，直接完成（无需管理员确认）
+      logEvent(tid, 'tournament', 'phase', { status: 'finished', round }, 'system');
       persistMeta(tid);
       return;
     }
-    if (round < swissRounds) {
-      this.startRound(tid, round + 1, 'system');
-    } else if (n >= 9) {
-      // top 4 (9-16) or top 8 (17+) playoffs：按积分+净胜局取种子（dev_docs/05 §5）
-      const top = this.points(state, round + 1).slice(0, n >= 17 ? 8 : 4).map((r) => r.playerId);
-      this.pairPlayoffRound(tid, round + 1, top);
-    } else {
-      logEvent(tid, 'tournament', 'phase', { status: 'finished', round }, 'system');
-    }
+    // 其余轮次不自动推进：发 round_complete 事件，由管理员确认后 advanceRound 开始下一轮
+    logEvent(tid, 'tournament', 'round_complete', { round }, 'system');
     persistMeta(tid);
   }
 
-  private pairPlayoffRound(tid: number, round: number, ids: string[]): void {
+  // 管理员确认当前轮全部有结果后，开始下一轮（swiss→swiss / swiss 完→季后赛种子 / 季后赛→胜者配对 / 全部打完→结束）
+  advanceRound(tid: number, actor: string): void {
     const state = loadState(tid);
+    if (state.frozen) throw new Error('FROZEN');
+    if (state.status !== 'matches') throw new Error('WRONG_PHASE');
+    const cur = state.round;
+    const roundMatches = state.matches.filter((m) => m.round === cur);
+    if (roundMatches.length === 0) throw new Error('NO_ROUND');
+    if (!roundMatches.every((m) => m.resultA !== null && m.resultB !== null)) throw new Error('ROUND_PENDING');
+    const n = this.activePlayers(state).length;
+    const format = this.format(state);
+    if (format === 'double_elimination') {
+      this.startRound(tid, cur + 1, actor);
+      return;
+    }
+    if (format === 'round_robin') {
+      const total = state.competition?.roundRobinSchedule?.length ?? Math.max(1, n - 1);
+      if (cur < total) this.startRound(tid, cur + 1, actor);
+      else {
+        logEvent(tid, 'tournament', 'phase', { status: 'finished', round: cur }, actor);
+        persistMeta(tid);
+      }
+      return;
+    }
+    const swissRounds = this.configuredSwissRounds(state);
+    if (cur < swissRounds) {
+      this.startRound(tid, cur + 1, actor);
+    } else if (cur === swissRounds) {
+      const playoffSize = Number(getConfig(state).playoffSize ?? (n >= 9 ? (n >= 17 ? 8 : 4) : 0));
+      if (playoffSize > 0) {
+        // 季后赛按排名取种子，并按标准高低种子固定 bracket。
+        const top = this.points(state, cur + 1)
+          .slice(0, playoffSize)
+          .map((r) => r.playerId);
+        this.pairPlayoffRound(tid, cur + 1, this.bracketSeedOrder(top), 1);
+      } else {
+        logEvent(tid, 'tournament', 'phase', { status: 'finished', round: cur }, actor);
+        persistMeta(tid);
+      }
+    } else {
+      // 季后赛轮：胜者配对晋级
+      const winners = roundMatches.map((m) => (m.resultA! > m.resultB! ? m.playerA : m.playerB));
+      if (winners.length <= 1) {
+        logEvent(tid, 'tournament', 'phase', { status: 'finished', round: cur }, actor);
+        persistMeta(tid);
+      } else {
+        this.pairPlayoffRound(tid, cur + 1, winners, cur - swissRounds + 1);
+      }
+    }
+  }
+
+  private bracketSeedOrder(ids: string[]): string[] {
+    if (ids.length <= 2) return ids;
+    let positions = [1, 2];
+    while (positions.length < ids.length) {
+      const size = positions.length * 2 + 1;
+      positions = positions.flatMap((seed) => [seed, size - seed]);
+    }
+    return positions.map((seed) => ids[seed - 1]).filter(Boolean);
+  }
+
+  private pairPlayoffRound(tid: number, round: number, ids: string[], bracketRound: number): void {
+    const state = loadState(tid);
+    if (state.matches.some((m) => m.round === round)) throw new Error('ROUND_EXISTS');
     const matches: MatchState[] = [];
     for (let i = 0; i < ids.length; i += 2) {
       if (i + 1 >= ids.length) break;
-      matches.push({ id: 0, round, playerA: ids[i], playerB: ids[i + 1], tableNo: i / 2 + 1, roomName: null, playerAPass: null, playerBPass: null, resultA: null, resultB: null, source: null, faultedAt: null, startedAt: null, finishedAt: null });
+      matches.push({ id: 0, round, playerA: ids[i], playerB: ids[i + 1], tableNo: i / 2 + 1, roomName: null, playerAPass: null, playerBPass: null, resultA: null, resultB: null, source: null, faultedAt: null, startedAt: null, finishedAt: null, stage: 'playoff', bracketRound, bracketMatchId: `playoff-${bracketRound}-${i / 2 + 1}` });
     }
     const now = new Date().toISOString();
     const insert = getDb().prepare(
-      'INSERT INTO matches (tournament_id, round, player_a, player_b, table_no, room_name, player_a_pass, player_b_pass, result_a, result_b, source, started_at, finished_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      'INSERT INTO matches (tournament_id, round, player_a, player_b, table_no, room_name, player_a_pass, player_b_pass, result_a, result_b, source, started_at, finished_at, stage, bracket_round, bracket_match_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
     );
     for (const m of matches) {
-      const row = insert.run(tid, m.round, m.playerA, m.playerB, m.tableNo, null, null, null, m.resultA, m.resultB, m.source, now, null);
+      const row = insert.run(tid, m.round, m.playerA, m.playerB, m.tableNo, null, null, null, m.resultA, m.resultB, m.source, now, null, m.stage, m.bracketRound, m.bracketMatchId);
       logEvent(tid, 'match', 'match', { ...m, id: Number(row.lastInsertRowid) }, 'system');
+    }
+    if (state.round !== round) {
+      logEvent(tid, 'tournament', 'phase', { status: 'matches', round }, 'system');
     }
     persistMeta(tid);
     void this.createRoomsForRound(tid, round);
@@ -368,6 +578,7 @@ export class MatchesService implements OnModuleInit {
       } catch {
         continue; // 比赛已被删除
       }
+      if (state.frozen) continue;
       for (const m of state.matches.filter((x) => x.roomName && x.resultA === null && !x.faultedAt && x.playerB !== '(bye)')) {
         try {
           const st = await this.srvpro.roomStatus(m.roomName!);
@@ -376,6 +587,10 @@ export class MatchesService implements OnModuleInit {
             const a = scores[state.players.find((p) => p.playerId === m.playerA)?.playerId ?? ''];
             const b = scores[state.players.find((p) => p.playerId === m.playerB)?.playerId ?? ''];
             const [resultA, resultB] = MatchesService.normalizeDisconnect(a, b);
+            if (this.isEliminationMatch(m) && resultA === resultB) {
+              this.patchMatch(r.tournament_id, m.id, { source: 'invalid_draw', faultedAt: new Date().toISOString() });
+              continue;
+            }
             this.patchMatch(r.tournament_id, m.id, { resultA, resultB, source: 'poll', finishedAt: new Date().toISOString() });
             this.maybeAdvance(r.tournament_id, m.round);
           }
@@ -395,6 +610,7 @@ export class MatchesService implements OnModuleInit {
       if (Date.now() - last < 30000) continue;
       try {
         const st = loadState(r.id);
+        if (st.frozen) continue;
         const missing = st.matches.some((m) => m.round === st.round && m.roomName === null && m.resultA === null && m.playerB !== '(bye)');
         if (missing) {
           this.roomRetryCooldown.set(r.id, Date.now());
@@ -414,12 +630,36 @@ export class MatchesService implements OnModuleInit {
     }
   }
 
+  invalidateTournament(tid: number): void {
+    this.operationGeneration.set(tid, (this.operationGeneration.get(tid) ?? 0) + 1);
+    this.roomRetryCooldown.delete(tid);
+  }
+
+  async closeRoomsForRevert(roomNames: string[]): Promise<void> {
+    const failures: string[] = [];
+    for (const roomName of [...new Set(roomNames)]) {
+      try {
+        await this.srvpro.closeRoom(roomName);
+      } catch (e) {
+        if ((e as { response?: { status?: number } }).response?.status !== 404) failures.push(roomName);
+      }
+    }
+    if (failures.length) throw new Error(`REVERT_ROOM_CLOSE_FAILED:${failures.join(',')}`);
+  }
+
+  resumeAfterRevert(tid: number): void {
+    const state = loadState(tid);
+    if (!state.frozen && state.status === 'matches') void this.createRoomsForRound(tid, state.round);
+  }
+
   // 管理台手动设置/修改对战结果（含故障房间补录）；触发轮次推进与实时积分更新
   setMatchResult(tid: number, round: number, tableNo: number, resultA: number, resultB: number): void {
     const state = loadState(tid);
+    if (state.frozen) throw new Error('FROZEN');
     const m = state.matches.find((x) => x.round === round && x.tableNo === tableNo);
     if (!m) throw new Error('MATCH_NOT_FOUND');
     if (![0, 1, 2].includes(resultA) || ![0, 1, 2].includes(resultB)) throw new Error('BAD_RESULT');
+    if (this.isEliminationMatch(m) && resultA === resultB) throw new Error('ELIMINATION_DRAW');
     const room = m.roomName;
     this.patchMatch(tid, m.id, { resultA, resultB, source: 'admin', faultedAt: null, finishedAt: new Date().toISOString() });
     this.maybeAdvance(tid, round);
@@ -496,6 +736,9 @@ export class MatchesService implements OnModuleInit {
         resultB: m.resultB,
         startedAt: m.startedAt,
         finishedAt: m.finishedAt,
+        stage: m.stage,
+        bracketRound: m.bracketRound,
+        bracketMatchId: m.bracketMatchId,
       }));
   }
 }

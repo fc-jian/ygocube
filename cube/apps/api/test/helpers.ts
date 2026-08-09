@@ -6,10 +6,9 @@ import { PoolsService } from '../src/pools/pools.service';
 // Test DB isolation: every test gets a fresh db. The temp file path is derived from
 // the pid + a module counter, but jest may load this helper once per spec file (counter
 // resets), so the file is physically deleted before opening — collisions cannot leak data.
-let tmpCounter = 0;
 export function useTestDb(): void {
-  tmpCounter++;
-  config.server.dbPath = `/tmp/cube-test-${process.pid}-${tmpCounter}.sqlite`;
+  const unique = require('crypto').randomUUID();
+  config.server.dbPath = `/tmp/ygocube-test-${process.pid}-${unique}.sqlite`;
   const { closeDb, getDb } = require('../src/db');
   closeDb();
   // eslint-disable-next-line @typescript-eslint/no-var-requires

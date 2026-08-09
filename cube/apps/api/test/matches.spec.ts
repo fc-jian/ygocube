@@ -7,9 +7,9 @@ import { getDb } from '../src/db';
 
 // In-memory fake srvpro: records createRoom calls, lets tests resolve rooms.
 class FakeSrvpro {
-  rooms: Record<string, { players: string[]; scores: Record<string, number> }> = {};
+  rooms: Record<string, { players: string[]; scores: Record<string, number>; request: any }> = {};
   async createRoom(req: any) {
-    this.rooms[req.room_name] = { players: req.players.map((p: any) => p.player_id), scores: {} };
+    this.rooms[req.room_name] = { players: req.players.map((p: any) => p.player_id), scores: {}, request: req };
     return { ok: true, room_name: req.room_name, port: 12345 };
   }
   async roomStatus(roomName: string) {
@@ -45,6 +45,10 @@ function setupMatches(n: number) {
   return { tournaments, matches, tid, fake };
 }
 
+async function waitRooms(): Promise<void> {
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
 describe('pairing engine', () => {
   beforeEach(() => useTestDb());
 
@@ -76,6 +80,43 @@ describe('pairing engine', () => {
     expect(fmt).toContain('R3:p0vp3');
   });
 
+  it('5 players round robin schedules every pair once with one bye per round', () => {
+    const { matches, tid } = setupMatches(5);
+    const seen = new Set<string>();
+    for (let round = 1; round <= 5; round++) {
+      matches.startRound(tid, round, 'test');
+      const current = loadState(tid).matches.filter((m) => m.round === round);
+      expect(current).toHaveLength(2);
+      for (const match of current) {
+        const key = [match.playerA, match.playerB].sort().join('|');
+        expect(seen.has(key)).toBe(false);
+        seen.add(key);
+      }
+    }
+    expect(seen.size).toBe(10);
+  });
+
+  it('double elimination advances winners and losers groups into a single grand final', () => {
+    const tournaments = makeTournaments();
+    const matches = new MatchesService(new FakeSrvpro() as any);
+    const tid = tournaments.create({ name: 'de', maxPlayers: 4, cardPool: TEST_POOL, matchFormat: 'double_elimination' }, 'test').tid;
+    for (let i = 0; i < 4; i++) tournaments.join(tid, `p${i}`, `P${i}`);
+    tournaments.setPhase(tid, 'matches', 1, 'test');
+    matches.startRound(tid, 1, 'test');
+    for (let round = 1; round <= 3; round++) {
+      const current = loadState(tid).matches.filter((m) => m.round === round);
+      expect(current.length).toBeGreaterThan(0);
+      current.forEach((m) => matches.setMatchResult(tid, round, m.tableNo, 2, 0));
+      matches.advanceRound(tid, 'test');
+    }
+    const final = loadState(tid).matches.filter((m) => m.round === 4);
+    expect(final).toHaveLength(1);
+    expect(final[0].stage).toBe('grand_final');
+    expect(() => matches.setMatchResult(tid, 4, final[0].tableNo, 1, 1)).toThrow('ELIMINATION_DRAW');
+    matches.setMatchResult(tid, 4, final[0].tableNo, 2, 0);
+    expect(loadState(tid).status).toBe('finished');
+  });
+
   it('6 players: 4 swiss rounds, no repeated pairings within a round', () => {
     const { matches, tid } = setupMatches(6);
     const seen = new Set<string>();
@@ -88,6 +129,7 @@ describe('pairing engine', () => {
       for (const m of roundMatches) {
         const key = [m.playerA, m.playerB].sort().join('|');
         expect(roundKeys.has(key)).toBe(false);
+        expect(seen.has(key)).toBe(false);
         roundKeys.add(key);
         seen.add(key);
       }
@@ -97,6 +139,33 @@ describe('pairing engine', () => {
         logEvent(tid, 'match', 'match', { ...m, resultA: 2, resultB: 0, finishedAt: new Date().toISOString() }, 'test');
         getDb().prepare('UPDATE matches SET result_a=2, result_b=0 WHERE id=?').run(m.id);
       }
+    }
+  });
+
+  it('backtracks across the whole swiss round instead of repeating the final leftover pair', () => {
+    const { matches, tid } = setupMatches(6);
+    const { logEvent } = require('../src/events/events.service');
+    // Everyone drew in round 1, so standings remain p0..p5. A greedy scheduler
+    // would choose p0-p1 and p2-p3, then leave the already-played p4-p5 pair.
+    // A complete no-rematch solution exists and must be found by backtracking.
+    const previous: [string, string][] = [['p0', 'p2'], ['p1', 'p3'], ['p4', 'p5']];
+    previous.forEach(([playerA, playerB], index) => {
+      logEvent(tid, 'match', 'match', {
+        id: -(index + 1), round: 1, playerA, playerB, tableNo: index + 1,
+        roomName: null, playerAPass: null, playerBPass: null,
+        resultA: 1, resultB: 1, source: 'admin', faultedAt: null,
+        startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+      }, 'test');
+    });
+
+    matches.startRound(tid, 2, 'test');
+    const roundTwo = loadState(tid).matches.filter((match) => match.round === 2);
+    expect(roundTwo).toHaveLength(3);
+    const previousKeys = new Set(previous.map((pair) => [...pair].sort().join('|')));
+    const roundTwoPlayers = roundTwo.flatMap((match) => [match.playerA, match.playerB]);
+    expect(new Set(roundTwoPlayers).size).toBe(6);
+    for (const match of roundTwo) {
+      expect(previousKeys.has([match.playerA, match.playerB].sort().join('|'))).toBe(false);
     }
   });
 
@@ -115,20 +184,25 @@ describe('pairing engine', () => {
     expect(matches.swissRounds(17)).toBe(6);
   });
 
-  it('9 players: after 4 swiss rounds transitions to top-4 playoff (not a 5th swiss round)', () => {
+  it('9 players: after 4 swiss rounds transitions to top-4 playoff (not a 5th swiss round)', async () => {
     const { matches, tid } = setupMatches(9);
     matches.startRound(tid, 1, 'test');
     // 每轮全部对局以 A 胜（2:0）结束；maybeAdvance 自动推进下一轮
     for (let r = 1; r <= 4; r++) {
+      await waitRooms();
       const roundMatches = loadState(tid).matches.filter((m) => m.round === r);
       expect(roundMatches.length).toBeGreaterThan(0);
       for (const m of roundMatches) {
-        const room = `CUBE-${tid}-${r}-${m.tableNo}-ember`;
+        if (m.playerB === '(bye)') continue;
+        const room = m.roomName!;
         matches.onWebhook({
           room_name: room,
           players: [{ player_id: m.playerA, score: 2 }, { player_id: m.playerB, score: 0 }],
         });
       }
+      // 轮次结果齐后不会自动推进：管理员确认后才进入下一轮
+      if (r < 4) expect(loadState(tid).matches.some((x) => x.round === r + 1)).toBe(false);
+      matches.advanceRound(tid, 'test');
     }
     const st = loadState(tid);
     // 第 5 轮必须是季后赛（2 桌、4 名不同选手），而不是 4+ 桌的瑞士轮
@@ -136,25 +210,33 @@ describe('pairing engine', () => {
     expect(r5.length).toBe(2);
     const r5Players = new Set(r5.flatMap((m) => [m.playerA, m.playerB]));
     expect(r5Players.size).toBe(4);
-    // 打完季后赛两场 -> 决赛 1 桌 -> 结束
-    for (const m of r5) {
-      matches.onWebhook({ room_name: `CUBE-${tid}-5-${m.tableNo}-ember`, players: [{ player_id: m.playerA, score: 2 }, { player_id: m.playerB, score: 0 }] });
+    await waitRooms();
+    // 打完季后赛两场 -> 管理员确认 -> 决赛 1 桌 -> 打完自动结束
+    for (const m of loadState(tid).matches.filter((x) => x.round === 5)) {
+      matches.onWebhook({ room_name: m.roomName!, players: [{ player_id: m.playerA, score: 2 }, { player_id: m.playerB, score: 0 }] });
     }
+    matches.advanceRound(tid, 'test');
     const st2 = loadState(tid);
     const r6 = st2.matches.filter((m) => m.round === 6);
     expect(r6.length).toBe(1);
+    await waitRooms();
+    // 决赛完成：无需确认自动 finished
+    const final = loadState(tid).matches.find((m) => m.id === r6[0].id)!;
+    matches.onWebhook({ room_name: final.roomName!, players: [{ player_id: final.playerA, score: 2 }, { player_id: final.playerB, score: 0 }] });
+    expect(loadState(tid).status).toBe('finished');
     for (const m of r6) {
-      matches.onWebhook({ room_name: `CUBE-${tid}-6-${m.tableNo}-ember`, players: [{ player_id: m.playerA, score: 2 }, { player_id: m.playerB, score: 0 }] });
+      matches.onWebhook({ room_name: m.roomName!, players: [{ player_id: m.playerA, score: 2 }, { player_id: m.playerB, score: 0 }] });
     }
     expect(loadState(tid).status).toBe('finished');
   });
 
-  it('webhook records results and is idempotent', () => {
+  it('webhook records results and is idempotent and rejects stale room names', async () => {
     const { matches, tid } = setupMatches(4);
     matches.startRound(tid, 1, 'test');
+    await waitRooms();
     const state = loadState(tid);
     const m = state.matches.find((x) => x.round === 1)!;
-    const room = `CUBE-${tid}-1-${m.tableNo}-ember`;
+    const room = m.roomName!;
     const body = {
       room_name: room,
       start: new Date().toISOString(),
@@ -172,6 +254,7 @@ describe('pairing engine', () => {
     expect(matches.onWebhook(body).ack).toBe(true); // idempotent, no double-advance
     const s2 = loadState(tid);
     expect(s2.matches.find((x) => x.id === m.id)!.resultA).toBe(2);
+    expect(matches.onWebhook({ ...body, room_name: `CUBE-${tid}-1-${m.tableNo}-stale` }).ack).toBe(false);
   });
 
   it('create_room sends recorded decks and deck limits', async () => {
@@ -187,6 +270,9 @@ describe('pairing engine', () => {
     // the srvpro request body captured decks & limits via createRoom arg
     expect(Object.keys(fake.rooms).length).toBe(1);
     expect(created.players.length).toBe(2);
+    for (const playerId of created.players) {
+      expect(created.request.cube_decks[playerId].filename).toMatch(new RegExp(`^cube-deck-${tid}-${playerId}-\\d{14}$`));
+    }
   });
 });
 
@@ -207,8 +293,14 @@ describe('manual results & fault detection', () => {
     for (const m1 of loadState(tid).matches.filter((x) => x.round === 1)) {
       matches.setMatchResult(tid, 1, m1.tableNo, m1.playerA === m1.playerA ? 2 : 0, 0);
     }
-    // 两桌都完成后 round2 自动生成
+    // 两桌都完成后不会自动生成 round2（等待管理员确认）
+    expect(loadState(tid).matches.some((x) => x.round === 2)).toBe(false);
+    expect(() => matches.advanceRound(tid, 'test')).not.toThrow();
     expect(loadState(tid).matches.some((x) => x.round === 2)).toBe(true);
+    // 未完成时 advance 拒绝
+    const m2 = loadState(tid).matches.find((x) => x.round === 2)!;
+    matches.setMatchResult(tid, 2, m2.tableNo, 1, 0);
+    expect(() => matches.advanceRound(tid, 'test')).toThrow('ROUND_PENDING');
   });
 
   it('setMatchResult rejects invalid scores and unknown matches', () => {
@@ -236,23 +328,24 @@ describe('manual results & fault detection', () => {
   });
 });
 
-  it('disconnected player (-9) is recorded as a 0:2 loss', () => {
+  it('disconnected player (-9) is recorded as a 0:2 loss', async () => {
     const { matches, tid } = setupMatches(7);
     matches.startRound(tid, 1, 'test');
+    await waitRooms();
     const ms = loadState(tid).matches.filter((x) => x.round === 1 && x.playerB !== '(bye)');
     // A 断线：A 记 0，B 记 2
     const m = ms[0];
-    matches.onWebhook({ room_name: m.roomName ?? `CUBE-${tid}-1-${m.tableNo}-ember`, players: [{ player_id: m.playerA, score: -9 }, { player_id: m.playerB, score: 1 }] });
+    matches.onWebhook({ room_name: m.roomName!, players: [{ player_id: m.playerA, score: -9 }, { player_id: m.playerB, score: 1 }] });
     let mm = loadState(tid).matches.find((x) => x.id === m.id)!;
     expect([mm.resultA, mm.resultB]).toEqual([0, 2]);
     // B 断线：B 记 0，A 记 2
     const m2 = ms[1];
-    matches.onWebhook({ room_name: m2.roomName ?? `CUBE-${tid}-1-${m2.tableNo}-ember`, players: [{ player_id: m2.playerA, score: 0 }, { player_id: m2.playerB, score: -9 }] });
+    matches.onWebhook({ room_name: m2.roomName!, players: [{ player_id: m2.playerA, score: 0 }, { player_id: m2.playerB, score: -9 }] });
     mm = loadState(tid).matches.find((x) => x.id === m2.id)!;
     expect([mm.resultA, mm.resultB]).toEqual([2, 0]);
     // 双方均断线：0:0（无人胜出）
     const m4 = ms[2];
-    matches.onWebhook({ room_name: m4.roomName ?? `CUBE-${tid}-1-${m4.tableNo}-ember`, players: [{ player_id: m4.playerA, score: -9 }, { player_id: m4.playerB, score: -9 }] });
+    matches.onWebhook({ room_name: m4.roomName!, players: [{ player_id: m4.playerA, score: -9 }, { player_id: m4.playerB, score: -9 }] });
     mm = loadState(tid).matches.find((x) => x.id === m4.id)!;
     expect([mm.resultA, mm.resultB]).toEqual([0, 0]);
   });

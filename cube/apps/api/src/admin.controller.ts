@@ -7,7 +7,8 @@ import { MatchesService } from './matches/matches.service';
 import { PoolsService } from './pools/pools.service';
 import { CardsService } from './cards/cards.service';
 import { RealtimeService } from './realtime/realtime.service';
-import { loadState, revertTo, unfreeze, freeze, dropState, getConfig } from './events/events.service';
+import { loadState, hardRevertTo, previewRevert, unfreeze, freeze, dropState, getConfig } from './events/events.service';
+import { validateMatchFormat } from './tournaments/tournaments.service';
 import { getDb } from './db';
 
 // Admin endpoints authenticate via X-Admin-Token (handled inside AuthGuard):
@@ -25,7 +26,8 @@ export class AdminController {
   ) {}
 
   private adminActor(req: AuthedRequest): string {
-    return String(req.headers['x-admin-token'] ?? 'admin');
+    const identity = req.identity as Identity;
+    return identity.isSuper ? 'super-admin' : 'tournament-admin';
   }
 
   private superOnly(req: AuthedRequest): void {
@@ -40,7 +42,7 @@ export class AdminController {
     this.superOnly(req);
     return getDb()
       .prepare(
-        'SELECT t.id, t.name, t.status, t.round, (SELECT count(*) FROM tournament_players tp WHERE tp.tournament_id = t.id) AS player_count, t.created_at FROM tournaments t ORDER BY t.id DESC',
+        'SELECT t.id, t.name, t.status, t.round, (SELECT count(*) FROM tournament_players tp WHERE tp.tournament_id = t.id AND tp.active=1) AS player_count, t.created_at FROM tournaments t ORDER BY t.id DESC',
       )
       .all() as { id: number; name: string; status: string; round: number; player_count: number; created_at: string }[];
   }
@@ -74,8 +76,8 @@ export class AdminController {
   @Post('t/:tid/pause')
   pauseTournament(@Req() req: AuthedRequest) {
     const tid = Number(req.params.tid);
+    this.draft.freezeTimers(tid);
     freeze(tid, this.adminActor(req));
-    this.draft.haltPickTimer(tid); // 暂停立即生效：选牌定时器挂起
     return { ok: true };
   }
 
@@ -92,19 +94,28 @@ export class AdminController {
   phase(@Req() req: AuthedRequest, @Body() body: Record<string, unknown>) {
     const tid = Number(req.params.tid);
     const status = String(body.status);
+    if (status === 'matches') {
+      const invalid = this.decks.validationReport(tid);
+      if (invalid.length > 0 && body.confirm_invalid_decks !== true) {
+        return { ok: false, requires_confirmation: true, invalid_decks: invalid };
+      }
+      const repairs = loadState(tid).players
+        .filter((p) => !p.eliminated && !p.withdrawn)
+        .map((p) => ({ playerId: p.playerId, ...this.decks.repairForMatches(tid, p.playerId) }));
+      const eligible = loadState(tid).players.filter((p) => !p.eliminated && !p.withdrawn).length;
+      if (eligible < 2) throw new Error('FORMAT_PLAYER_COUNT');
+      validateMatchFormat(getConfig(loadState(tid)), eligible);
+      this.tournaments.setPhase(tid, status, body.round !== undefined ? Number(body.round) : 1, this.adminActor(req));
+      const round = body.round !== undefined ? Number(body.round) : loadState(tid).round || 1;
+      this.matches.startRound(tid, round, this.adminActor(req));
+      const s = loadState(tid);
+      this.realtime.emitPhase(tid, s.status, s.round);
+      return { ok: true, repairs };
+    }
     this.tournaments.setPhase(tid, status, body.round !== undefined ? Number(body.round) : undefined, this.adminActor(req));
     // 阶段切换后重新武装对应定时器（setPhase 只写状态；定时器由这里/推进链路负责）
     if (status === 'drafting') this.draft.resumePickTimer(tid);
     else if (status === 'deckbuilding') this.draft.resumeDeckbuildingTimer(tid);
-    // 进入对战阶段：先自动修复未锁定卡组（与构筑时限到期行为一致），再自动安排本轮对阵
-    if (status === 'matches') {
-      const st = loadState(tid);
-      for (const p of st.players) {
-        if (!st.decks[p.playerId]?.lockedAt) this.decks.autoFix(tid, p.playerId);
-      }
-      const round = body.round !== undefined ? Number(body.round) : loadState(tid).round || 1;
-      this.matches.startRound(tid, round, this.adminActor(req));
-    }
     const s = loadState(tid);
     this.realtime.emitPhase(tid, s.status, s.round);
     return { ok: true };
@@ -113,8 +124,9 @@ export class AdminController {
   @Put('t/:tid/config')
   updateTournamentConfig(@Req() req: AuthedRequest, @Body() body: Record<string, unknown>) {
     const tid = Number(req.params.tid);
+    if (loadState(tid).frozen) throw new Error('FROZEN');
     const patch: Record<string, unknown> = {};
-    for (const key of ['name', 'maxPlayers', 'mode', 'packSize', 'packSizeMultiple', 'cardPool', 'mainMin', 'mainMax', 'extraMax', 'sideMax', 'maxCopies', 'timeLimit', 'pickSeconds', 'deckbuildingSeconds', 'dropMode', 'packStrategy', 'packCount', 'dropPublic', 'draftMode', 'evenPackCount', 'reserveSeconds']) {
+    for (const key of ['name', 'maxPlayers', 'mode', 'packSize', 'packSizeMultiple', 'cardPool', 'mainMin', 'mainMax', 'extraMax', 'sideMax', 'maxCopies', 'timeLimit', 'pickSeconds', 'deckbuildingSeconds', 'dropMode', 'packStrategy', 'packCount', 'dropPublic', 'draftMode', 'evenPackCount', 'reserveSeconds', 'reseatEachRound']) {
       if (body[key] !== undefined) patch[key] = body[key];
     }
     if (Object.keys(patch).length === 0) throw new Error('BAD_PAYLOAD');
@@ -129,11 +141,54 @@ export class AdminController {
     return { ok: true, config: cfg };
   }
 
+  @Put('t/:tid/match-format')
+  updateMatchFormat(@Req() req: AuthedRequest, @Body() body: Record<string, unknown>) {
+    const tid = Number(req.params.tid);
+    const patch = {
+      matchFormat: body.matchFormat,
+      swissRoundCount: body.swissRoundCount,
+      playoffSize: body.playoffSize ?? 0,
+    };
+    return { ok: true, config: this.tournaments.updateMatchFormat(tid, patch, this.adminActor(req)) };
+  }
+
+  @Post('t/:tid/players/:pid/withdraw')
+  withdrawPlayer(@Req() req: AuthedRequest, @Param('pid') pid: string) {
+    this.tournaments.withdrawPlayer(Number(req.params.tid), decodeURIComponent(pid), this.adminActor(req));
+    return { ok: true };
+  }
+
+  @Post('t/:tid/players/:pid/restore')
+  restorePlayer(@Req() req: AuthedRequest, @Param('pid') pid: string) {
+    this.tournaments.restorePlayer(Number(req.params.tid), decodeURIComponent(pid), this.adminActor(req));
+    return { ok: true };
+  }
+
   @Post('t/:tid/security')
   security(@Req() req: AuthedRequest, @Body() body: Record<string, unknown>) {
     const tid = Number(req.params.tid);
     this.tournaments.setAuthRequired(tid, body.require_token !== false, this.adminActor(req));
     return { ok: true };
+  }
+
+  @Post('t/:tid/admin-token')
+  resetAdminToken(@Req() req: AuthedRequest) {
+    const result = this.tournaments.resetAdminToken(Number(req.params.tid));
+    return { ...result, caller_was_super: (req.identity as Identity).isSuper === true };
+  }
+
+  @Get('settings/default-pool')
+  defaultPool(@Req() req: AuthedRequest) {
+    this.superOnly(req);
+    return { pool: this.pools.defaultPool() };
+  }
+
+  @Put('settings/default-pool')
+  setDefaultPool(@Req() req: AuthedRequest, @Body() body: Record<string, unknown>) {
+    this.superOnly(req);
+    const id = Number(body.pool_id);
+    if (!Number.isInteger(id)) throw new Error('BAD_PAYLOAD');
+    return { pool: this.pools.setDefaultPool(id) };
   }
 
   @Post('t/:tid/pause/resume')
@@ -155,27 +210,52 @@ export class AdminController {
   startRound(@Req() req: AuthedRequest, @Body() body: Record<string, unknown>) {
     const tid = Number(req.params.tid);
     const round = body.round !== undefined ? Number(body.round) : 1;
+    if (loadState(tid).matches.length === 0) this.matches.validateStart(tid);
     this.matches.startRound(tid, round, this.adminActor(req));
     return { ok: true };
   }
 
+  @Post('t/:tid/matches/advance')
+  advanceRound(@Req() req: AuthedRequest) {
+    const tid = Number(req.params.tid);
+    this.matches.advanceRound(tid, this.adminActor(req));
+    return { ok: true };
+  }
+
   @Post('t/:tid/revert')
-  revert(@Req() req: AuthedRequest, @Body() body: Record<string, unknown>) {
+  async revert(@Req() req: AuthedRequest, @Body() body: Record<string, unknown>) {
     const tid = Number(req.params.tid);
     const seq = Number(body.seq);
     if (!Number.isInteger(seq)) throw new Error('BAD_PAYLOAD');
-    const state = revertTo(tid, seq);
+    const preview = previewRevert(tid, seq);
+    if (String(body.confirm_name ?? '') !== preview.tournamentName) throw new Error('REVERT_CONFIRMATION_MISMATCH');
+    this.matches.invalidateTournament(tid);
+    this.draft.haltAllTimers(tid);
+    freeze(tid, this.adminActor(req));
+    // If external room shutdown fails, keep the tournament frozen and preserve the
+    // event branch. The operator can retry without risking a late result mutation.
+    await this.matches.closeRoomsForRevert(preview.closeRooms);
+    const result = hardRevertTo(tid, seq, this.adminActor(req));
+    const state = result.state;
     this.realtime.emitNotice(tid, `admin reverted to event ${seq}; tournament frozen`);
     this.realtime.emitPhase(tid, state.status, state.round);
-    return { ok: true, state: state.status };
+    return { ok: true, state: state.status, deleted_events: result.deletedEvents, replacement_tokens: result.replacementTokens };
+  }
+
+  @Get('t/:tid/revert/preview')
+  revertPreview(@Req() req: AuthedRequest, @Query('seq') rawSeq: string) {
+    const tid = Number(req.params.tid);
+    const seq = Number(rawSeq);
+    if (!Number.isInteger(seq)) throw new Error('BAD_PAYLOAD');
+    return previewRevert(tid, seq);
   }
 
   @Post('t/:tid/unfreeze')
   unfreeze(@Req() req: AuthedRequest) {
     const tid = Number(req.params.tid);
     unfreeze(tid);
-    this.draft.resumePickTimer(tid); // 解冻后选牌重新计时（过期则恢复完整时长）
-    this.draft.resumeDeckbuildingTimer(tid);
+    this.draft.resumeFrozenTimers(tid);
+    this.matches.resumeAfterRevert(tid);
     return { ok: true };
   }
 
@@ -237,9 +317,13 @@ export class AdminController {
   createPool(@Req() req: AuthedRequest, @Body() body: Record<string, unknown>) {
     this.superOnly(req);
     const name = String(body.name ?? '');
+    if (typeof body.importText === 'string') {
+      const { pool, filtered, missingCodes, entryWarnings } = this.pools.createFromText(name, body.importText);
+      return { ...pool, filtered, missingCodes, entryWarnings };
+    }
     const codes = Array.isArray(body.codes) ? (body.codes as unknown[]).map(Number).filter(Number.isInteger) : [];
-    const { pool, filtered } = this.pools.create(name, codes);
-    return { ...pool, filtered };
+    const { pool, filtered, missingCodes, entryWarnings } = this.pools.create(name, codes);
+    return { ...pool, filtered, missingCodes, entryWarnings };
   }
 
   @Post('pools/random')
@@ -247,8 +331,8 @@ export class AdminController {
     this.superOnly(req);
     const name = String(body.name ?? '');
     const size = body.size !== undefined ? Number(body.size) : 1000;
-    const { pool, filtered } = this.pools.createRandom(name, size);
-    return { ...pool, filtered };
+    const { pool, filtered, missingCodes, entryWarnings } = this.pools.createRandom(name, size);
+    return { ...pool, filtered, missingCodes, entryWarnings };
   }
 
   @Get('pools/:id')
@@ -261,8 +345,8 @@ export class AdminController {
   updatePool(@Req() req: AuthedRequest, @Param('id') id: string, @Body() body: Record<string, unknown>) {
     this.superOnly(req);
     const codes = Array.isArray(body.codes) ? (body.codes as unknown[]).map(Number).filter(Number.isInteger) : [];
-    const { pool, filtered } = this.pools.update(Number(id), codes);
-    return { ...pool, filtered };
+    const { pool, filtered, missingCodes, entryWarnings } = this.pools.update(Number(id), codes);
+    return { ...pool, filtered, missingCodes, entryWarnings };
   }
 
   // 卡池编辑页使用的全卡查询/搜索（super admin）

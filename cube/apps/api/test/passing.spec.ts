@@ -1,5 +1,5 @@
 import { useTestDb, makeTournaments } from './helpers';
-import { loadState, resetStateCache, TournamentState } from '../src/events/events.service';
+import { freeze, loadState, resetStateCache, TournamentState, unfreeze } from '../src/events/events.service';
 import { DraftService } from '../src/draft/draft.service';
 import { CardsService } from '../src/cards/cards.service';
 import { PoolsService } from '../src/pools/pools.service';
@@ -51,7 +51,7 @@ describe('passing draft: round-based dealing', () => {
 
   it('only round 0 is dealt initially; next round is dealt only after the round fully drains', () => {
     // 3 人 54 卡 packSize 9 → 6 堆 = 2 整轮
-    const { draft, tid } = setupPassing('pq', 3, 54, 9);
+    const { draft, tid } = setupPassing('pq', 3, 54, 9, { reseatEachRound: false });
     const state = loadState(tid);
     const seats = seatsOf(state);
     expect(state.packs.length).toBe(6);
@@ -132,13 +132,27 @@ describe('passing draft: round-based dealing', () => {
     expect(state.status).toBe('deckbuilding');
     expect(state.picks.length).toBe(54);
     expect(new Set(state.picks.map((p) => p.card)).size).toBe(54);
-    expect(state.phaseDeadline).not.toBeNull();
+    expect(state.phaseDeadline).toBeNull();
     // 整轮 ×2：每人 18 张
     for (const p of state.players) {
       expect(state.picks.filter((x) => x.playerId === p.playerId).length).toBe(18);
       const deck = state.decks[p.playerId];
       expect(deck.main.length + deck.extra.length + deck.side.length).toBe(18);
     }
+  });
+
+  it('arbitrary pack size is fair when pack count is a player-count multiple, and reports cards remaining', () => {
+    // 3 players, 6 packs of 8: two complete rounds, so each player gets 16 cards.
+    const { tournaments, draft, tid } = setupPassing('any-pack-size', 3, 48, 8, { reseatEachRound: false });
+    const seats = seatsOf(loadState(tid));
+    let view = tournaments.stateForPlayer(tid, seats[0]);
+    expect(view.cardsRemainingExact).toBe(true);
+    expect(view.cardsRemainingToDraft).toBe(16);
+    draft.pick(tid, seats[0], remainingOf(loadState(tid), 0)[0]);
+    view = tournaments.stateForPlayer(tid, seats[0]);
+    expect(view.cardsRemainingToDraft).toBe(15);
+    while (loadState(tid).status === 'drafting') driveOnce(draft, tid);
+    for (const pid of seats) expect(loadState(tid).picks.filter((p) => p.playerId === pid)).toHaveLength(16);
   });
 
   it('event replay reproduces queues/deadlines/reserves/dealt exactly', () => {
@@ -170,7 +184,7 @@ describe('passing draft: evenPackCount', () => {
 
   it('auto packCount rounds down to a multiple of players when evenPackCount is on', () => {
     // 3 人 45 卡 packSize 9：floor=5 → 取整为 3；余下 18 张按 drop 规则公开
-    const { tid } = setupPassing('ev2', 3, 45, 9);
+    const { tid } = setupPassing('ev2', 3, 45, 9, { dropPublic: true });
     const state = loadState(tid);
     expect(state.packs.length).toBe(3);
     expect(state.droppedCards.length).toBe(45 - 27);
@@ -187,7 +201,7 @@ describe('passing draft: explicit packCount inference', () => {
 
   it('packCount <= floor(pool/packSize): fixed count, remaining pool discarded', () => {
     // 3 人 54 卡 packSize 9：上限 maxFull=6，显式 3 → 固定 3 堆，弃置 54-27=27
-    const { tid } = setupPassing('pc1', 3, 54, 9, { packCount: 3 });
+    const { tid } = setupPassing('pc1', 3, 54, 9, { packCount: 3, dropPublic: true });
     const state = loadState(tid);
     expect(state.packs.length).toBe(3);
     expect(state.droppedCards.length).toBe(27);
@@ -204,7 +218,7 @@ describe('passing draft: explicit packCount inference', () => {
 
   it('packCount > floor(pool/packSize) with evenPackCount on: use-all then rounds down to a multiple', () => {
     // 3 人 45 卡 packSize 9：maxFull=5，显式 6 > 5 → ceil=5，再向下取整到 3，弃置 45-27=18
-    const { tid } = setupPassing('pc3', 3, 45, 9, { packCount: 6 });
+    const { tid } = setupPassing('pc3', 3, 45, 9, { packCount: 6, dropPublic: true });
     const state = loadState(tid);
     expect(state.packs.length).toBe(3);
     expect(state.droppedCards.length).toBe(18);
@@ -276,18 +290,23 @@ describe('passing draft: timers, pause, admin transitions', () => {
     }
   });
 
-  it('majority pause freezes immediately; resume restores per-player timers', () => {
+  it('majority pause freezes immediately; resume preserves exact per-player time', () => {
     jest.useFakeTimers();
     try {
-      const { draft, tid } = setupPassing('ppz', 3, 27, 9, { pickSeconds: 30, reserveSeconds: 0 });
+      const { tournaments, draft, tid } = setupPassing('ppz', 3, 27, 9, { pickSeconds: 30, reserveSeconds: 0 });
       const state = loadState(tid);
       const seats = seatsOf(state);
+      jest.advanceTimersByTime(10000);
       draft.proposePause(tid, seats[0]);
       draft.votePause(tid, seats[1], true); // 2/3 过半
       let s = loadState(tid);
       expect(s.pause!.pausedAt).not.toBeNull(); // passing 立即暂停（无需等选牌）
       expect(s.pause!.pausedDeadlines).toBeDefined();
       expect(Object.keys(s.pause!.pausedDeadlines!).length).toBe(3);
+      for (const ms of Object.values(s.pause!.pausedDeadlines!)) expect(ms).toBe(20000);
+      const pausedView = tournaments.stateForPlayer(tid, seats[0]);
+      expect((pausedView.pack as any).deadlineAt).toBeNull();
+      expect((pausedView.pack as any).pausedRemainingMs).toBe(20000);
       expect(() => draft.pick(tid, seats[0], remainingOf(loadState(tid), 0)[0])).toThrow('PAUSED');
       // 暂停期间计时器冻结：推进 60s 也不会有自动选牌
       jest.advanceTimersByTime(60000);
@@ -297,8 +316,32 @@ describe('passing draft: timers, pause, admin transitions', () => {
       s = loadState(tid);
       expect(s.pause).toBeNull();
       for (const pid of seats) expect(s.pickDeadlines[pid]).not.toBeNull();
-      // 恢复后计时恢复：推进 31s → 每人自动选 1 张
-      jest.advanceTimersByTime(31000);
+      // 恢复后仍只有暂停前剩下的 20s，而不是重置成完整 30s。
+      jest.advanceTimersByTime(19000);
+      expect(loadState(tid).picks.length).toBe(0);
+      jest.advanceTimersByTime(2000);
+      expect(loadState(tid).picks.filter((p) => p.auto).length).toBe(3);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('admin freeze preserves exact passing countdown instead of consuming or resetting it', () => {
+    jest.useFakeTimers();
+    try {
+      const { draft, tid } = setupPassing('admin-freeze', 3, 27, 9, { pickSeconds: 30, reserveSeconds: 0 });
+      jest.advanceTimersByTime(7000);
+      draft.freezeTimers(tid);
+      freeze(tid, 'test');
+      const frozen = loadState(tid);
+      for (const ms of Object.values(frozen.frozenTimers!.passing!)) expect(ms).toBe(23000);
+      jest.advanceTimersByTime(60000);
+      expect(loadState(tid).picks.length).toBe(0);
+      unfreeze(tid);
+      draft.resumeFrozenTimers(tid);
+      jest.advanceTimersByTime(22000);
+      expect(loadState(tid).picks.length).toBe(0);
+      jest.advanceTimersByTime(2000);
       expect(loadState(tid).picks.filter((p) => p.auto).length).toBe(3);
     } finally {
       jest.useRealTimers();
@@ -349,7 +392,7 @@ describe('passing draft: player-facing state', () => {
   beforeEach(() => useTestDb());
 
   it('stateForPlayer: own head pack visible, queue lengths and reserve exposed', () => {
-    const { tournaments, tid } = setupPassing('ps', 3, 27, 9, { reserveSeconds: 300 });
+    const { tournaments, draft, tid } = setupPassing('ps', 3, 27, 9, { reserveSeconds: 300 });
     const state = loadState(tid);
     const seats = seatsOf(state);
     const me = tournaments.stateForPlayer(tid, seats[0]);
@@ -366,5 +409,52 @@ describe('passing draft: player-facing state', () => {
     // 其他玩家视角同理：看到的是他们自己的队首堆
     const other = tournaments.stateForPlayer(tid, seats[1]);
     expect((other.pack as any).index).toBe(1);
+    // After picking before the previous seat has passed a pack to us, our
+    // queue is temporarily empty; the reserve bank must still be visible.
+    draft.pick(tid, seats[0], mePack.cards[0]);
+    const waiting = tournaments.stateForPlayer(tid, seats[0]);
+    expect(waiting.pack).toBeNull();
+    expect(waiting.draftReserveMs).toBe(300000);
   });
 });
+
+  it('reseatEachRound (default): seats are reshuffled before the next round is dealt', () => {
+    const { tournaments, draft, tid } = setupPassing('res1', 3, 54, 9);
+    const initial = seatsOf(loadState(tid));
+    let picks = 0;
+    while (loadState(tid).packsDealt === 3 && picks < 27) {
+      driveOnce(draft, tid);
+      picks = loadState(tid).picks.length;
+    }
+    const s2 = loadState(tid);
+    expect(s2.packsDealt).toBe(6);
+    // 第二轮发堆前必须发生第二次 seat_assign（每轮随机重排，默认开）
+    const nSeats = getDb().prepare('SELECT COUNT(*) c FROM events WHERE tournament_id=? AND action=?').get(tid, 'seat_assign') as { c: number };
+    expect(nSeats.c).toBe(2);
+    // 座位仍是 0..n-1 全排列（重排不丢人）；第二轮堆 k 发给座位 k 的玩家
+    const after = seatsOf(s2);
+    expect(after.length).toBe(3);
+    const view = tournaments.stateForPlayer(tid, after[0]);
+    expect(view.players.map((p) => p.playerId)).toEqual(after);
+    expect(view.queueLengths!.map((q) => q.playerId)).toEqual(after);
+    for (const [pid, q] of Object.entries(s2.packQueues)) {
+      const seat = s2.players.find((p) => p.playerId === pid)!.seat;
+      expect(q).toEqual([3 + seat]);
+    }
+    void initial;
+  });
+
+  it('reseatEachRound=false keeps seats for later rounds', () => {
+    const { draft, tid } = setupPassing('res2', 3, 54, 9, { reseatEachRound: false });
+    const initial = seatsOf(loadState(tid));
+    let picks = 0;
+    while (loadState(tid).packsDealt === 3 && picks < 27) {
+      driveOnce(draft, tid);
+      picks = loadState(tid).picks.length;
+    }
+    const s2 = loadState(tid);
+    expect(s2.packsDealt).toBe(6);
+    expect(seatsOf(s2)).toEqual(initial);
+    const nSeats = getDb().prepare('SELECT COUNT(*) c FROM events WHERE tournament_id=? AND action=?').get(tid, 'seat_assign') as { c: number };
+    expect(nSeats.c).toBe(1); // 只有 startDraft 的初始分配
+  });

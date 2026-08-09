@@ -11,6 +11,7 @@ import { RealtimeService } from './realtime/realtime.service';
 import { config } from './config';
 import { loadState } from './events/events.service';
 import { CreateTournamentInput } from './tournaments/tournaments.service';
+import { cubeDeckFileBase } from './decks/deck-filename';
 
 export const Public = () => SetMetadata('public', true);
 
@@ -199,7 +200,26 @@ export class ApiController {
       String(body.from) as 'main' | 'extra' | 'side' | 'pool',
       String(body.to) as 'main' | 'extra' | 'side' | 'pool',
       body.index !== undefined ? Number(body.index) : undefined,
+      body.from_index !== undefined ? Number(body.from_index) : undefined,
     );
+    this.realtime.emitDeck(id.tournamentId, { playerId: id.playerId });
+    return { ok: true };
+  }
+
+  @Post('t/:tid/deck/sort')
+  deckSort(@Req() req: AuthedRequest) {
+    const id = req.identity as Identity;
+    this.assertNotFrozen(id.tournamentId);
+    this.decks.sort(id.tournamentId, id.playerId);
+    this.realtime.emitDeck(id.tournamentId, { playerId: id.playerId });
+    return { ok: true };
+  }
+
+  @Post('t/:tid/deck/shuffle')
+  deckShuffle(@Req() req: AuthedRequest) {
+    const id = req.identity as Identity;
+    this.assertNotFrozen(id.tournamentId);
+    this.decks.shuffleMain(id.tournamentId, id.playerId);
     this.realtime.emitDeck(id.tournamentId, { playerId: id.playerId });
     return { ok: true };
   }
@@ -226,9 +246,8 @@ export class ApiController {
     const id = req.identity as Identity;
     const ydk = this.decks.ydk(id.tournamentId, id.playerId);
     res.setHeader('Content-Type', 'application/octet-stream');
-    // header values must be ISO-8859-1: percent-encode non-ASCII player ids in the filename
-    const ts = new Date().toISOString().replace(/[-:T.Z]/g, '').slice(0, 14);
-    res.setHeader('Content-Disposition', `attachment; filename="deck-${id.tournamentId}-${encodeURIComponent(id.playerId)}-${ts}.ydk"`);
+    // The shared helper emits an ASCII-only filesystem-safe name usable by browsers and YGOPro.
+    res.setHeader('Content-Disposition', `attachment; filename="${cubeDeckFileBase(id.tournamentId, id.playerId)}.ydk"`);
     res.send(ydk);
   }
 

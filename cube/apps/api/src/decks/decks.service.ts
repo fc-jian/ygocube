@@ -1,12 +1,34 @@
 import { Injectable } from '@nestjs/common';
 import { loadState, logEvent, getConfig, pickedCards, persistMeta, DeckState } from '../events/events.service';
-import { CardsService } from '../cards/cards.service';
+import { CardInfo, CardsService } from '../cards/cards.service';
 import { MatchesService } from '../matches/matches.service';
+import { getDb } from '../db';
 
 export class DeckInvalidError extends Error {
   constructor(public details: string[]) {
     super('DECK_INVALID');
   }
+}
+
+// Exact comparator used by YGOPro's deck editor BUTTON_SORT_DECK
+// (DataManager::deck_sort_lv). This is deliberately the single canonical sort;
+// attack/defense/name/id are search-result options in YGOPro, not deck-order actions.
+export function compareCardsLikeYgopro(a: CardInfo, b: CardInfo): number {
+  const categoryA = a.type & 0x7;
+  const categoryB = b.type & 0x7;
+  if (categoryA !== categoryB) return categoryA - categoryB;
+  if (categoryA === 1) {
+    const typeA = a.type & 0x48020c0 ? (a.type & 0x48020c1) >>> 0 : (a.type & 0x31) >>> 0;
+    const typeB = b.type & 0x48020c0 ? (b.type & 0x48020c1) >>> 0 : (b.type & 0x31) >>> 0;
+    if (typeA !== typeB) return typeA - typeB;
+    if (a.level !== b.level) return b.level - a.level;
+    if (a.atk !== b.atk) return b.atk - a.atk;
+    if (a.def !== b.def) return b.def - a.def;
+    return a.code - b.code;
+  }
+  const typeA = (a.type & 0xfffffff8) >>> 0;
+  const typeB = (b.type & 0xfffffff8) >>> 0;
+  return typeA - typeB || a.code - b.code;
 }
 
 // Deck building: move/lock/unlock, validation, timeout auto-fix, ydk export (dev_docs/05 §4).
@@ -25,7 +47,10 @@ export class DecksService {
     from: 'main' | 'extra' | 'side' | 'pool',
     to: 'main' | 'extra' | 'side' | 'pool',
     index?: number,
+    fromIndex?: number,
   ): void {
+    if (index !== undefined && (!Number.isInteger(index) || index < 0)) throw new Error('BAD_PAYLOAD');
+    if (fromIndex !== undefined && (!Number.isInteger(fromIndex) || fromIndex < 0)) throw new Error('BAD_PAYLOAD');
     const state = loadState(tid);
     if (state.status !== 'deckbuilding' && state.status !== 'drafting') throw new Error('WRONG_PHASE');
     const deck = this.deckOf(state, playerId);
@@ -33,15 +58,24 @@ export class DecksService {
     const ci = this.cards.get(card);
     if (!ci && from !== 'pool') throw new Error('CARD_NOT_AVAILABLE');
     // 选牌池校验：from=pool 的卡必须属于该玩家已选卡（防绕过选牌直接塞卡，dev_docs/05 §4）
-    if (from === 'pool' && !pickedCards(state, playerId).includes(card)) throw new Error('CARD_NOT_IN_POOL');
+    if (from === 'pool') {
+      const pickedCount = pickedCards(state, playerId).filter((c) => c === card).length;
+      const usedCount = [...deck.main, ...deck.extra, ...deck.side].filter((c) => c === card).length;
+      const maxCopies = Number(getConfig(state).maxCopies ?? 3);
+      // Picking a code licenses up to maxCopies copies in the constructed deck.
+      if (pickedCount === 0 || usedCount >= maxCopies) throw new Error('CARD_NOT_IN_POOL');
+    }
     if (to === 'main' && ci && this.cards.isExtraDeck(card)) throw new Error('WRONG_ZONE');
     if (to === 'extra' && ci && !this.cards.isExtraDeck(card)) throw new Error('WRONG_ZONE');
     const newDeck: DeckState = { ...deck, main: [...deck.main], extra: [...deck.extra], side: [...deck.side] };
     const zones: Record<string, number[]> = { main: newDeck.main, extra: newDeck.extra, side: newDeck.side };
+    let removedIndex: number | undefined;
     if (from !== 'pool') {
       const src = zones[from];
-      const i = src.indexOf(card);
+      const i = fromIndex !== undefined ? fromIndex : src.indexOf(card);
+      if (i >= 0 && src[i] !== card) throw new Error('CARD_NOT_IN_ZONE');
       if (i < 0) throw new Error('CARD_NOT_IN_ZONE');
+      removedIndex = i;
       src.splice(i, 1);
     }
     if (to === 'pool') {
@@ -50,9 +84,43 @@ export class DecksService {
       return;
     }
     const dst = zones[to];
-    const pos = index !== undefined && index <= dst.length ? index : dst.length;
+    let requested = index ?? dst.length;
+    if (from === to && removedIndex !== undefined && removedIndex < requested) requested--;
+    const pos = Math.max(0, Math.min(requested, dst.length));
     dst.splice(pos, 0, card);
     this.save(tid, playerId, newDeck);
+  }
+
+  sort(tid: number, playerId: string): void {
+    const state = loadState(tid);
+    if (state.status !== 'deckbuilding' && state.status !== 'drafting') throw new Error('WRONG_PHASE');
+    const deck = this.deckOf(state, playerId);
+    if (deck.lockedAt) throw new Error('LOCKED');
+    const sortZone = (codes: number[]) => [...codes].sort((a, b) => {
+      const ca = this.cards.get(a);
+      const cb = this.cards.get(b);
+      if (!ca || !cb) return ca ? -1 : (cb ? 1 : 0);
+      return compareCardsLikeYgopro(ca, cb);
+    });
+    this.save(tid, playerId, {
+      ...deck,
+      main: sortZone(deck.main),
+      extra: sortZone(deck.extra),
+      side: sortZone(deck.side),
+    });
+  }
+
+  shuffleMain(tid: number, playerId: string): void {
+    const state = loadState(tid);
+    if (state.status !== 'deckbuilding') throw new Error('WRONG_PHASE');
+    const deck = this.deckOf(state, playerId);
+    if (deck.lockedAt) throw new Error('LOCKED');
+    const main = [...deck.main];
+    for (let i = main.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [main[i], main[j]] = [main[j], main[i]];
+    }
+    this.save(tid, playerId, { ...deck, main });
   }
 
   lock(tid: number, playerId: string): void {
@@ -88,15 +156,16 @@ export class DecksService {
     for (const c of deck.main) {
       if (this.cards.isExtraDeck(c)) errors.push(`extra-deck card ${c} in main`);
     }
-    // 卡组必须是已选卡的子集（dev_docs/05 §4）
+    // 只有选到过的编号可用；该编号在三区合计最多 maxCopies 份（dev_docs/05 §4）。
     const picked = new Set(pickedCards(state, playerId));
     const counts = new Map<number, number>();
     for (const c of [...deck.main, ...deck.extra, ...deck.side]) {
+      const already = counts.get(c) ?? 0;
       if (!picked.has(c)) {
         errors.push(`card ${c} not in picked pool`);
         continue;
       }
-      counts.set(c, (counts.get(c) ?? 0) + 1);
+      counts.set(c, already + 1);
     }
     const maxCopies = Number(cfg.maxCopies ?? 3);
     for (const [c, n] of counts) {
@@ -108,23 +177,28 @@ export class DecksService {
   // timeout auto-fix: random fill/remove to legal (dev_docs/05 §4)
   autoFix(tid: number, playerId: string): void {
     const state = loadState(tid);
+    if (state.frozen) throw new Error('FROZEN');
     const deck = this.deckOf(state, playerId);
     const cfg = getConfig(state);
     const pool = pickedCards(state, playerId);
     const newDeck: DeckState = { ...deck, main: [...deck.main], extra: [...deck.extra], side: [...deck.side] };
     // fill main from pool (respecting zone rules), trim overflows
-    const mainSet = new Set(newDeck.main);
-    const extraSet = new Set(newDeck.extra);
-    const used = new Set([...newDeck.main, ...newDeck.extra, ...newDeck.side]);
+    const used = new Map<number, number>();
+    for (const c of [...newDeck.main, ...newDeck.extra, ...newDeck.side]) used.set(c, (used.get(c) ?? 0) + 1);
+    const poolCounts = new Map<number, number>();
+    for (const c of pool) poolCounts.set(c, (poolCounts.get(c) ?? 0) + 1);
+    const maxCopies = Number(cfg.maxCopies ?? 3);
     for (const c of pool) {
-      if (newDeck.main.length >= cfg.mainMax) break;
-      if (used.has(c)) continue;
+      if ((used.get(c) ?? 0) >= (poolCounts.get(c) ?? 0)) continue;
+      if ((used.get(c) ?? 0) >= maxCopies) continue;
       if (this.cards.isExtraDeck(c)) {
-        if (extraSet.has(c)) continue;
-      } else {
+        if (newDeck.extra.length < cfg.extraMax) {
+          newDeck.extra.push(c);
+          used.set(c, (used.get(c) ?? 0) + 1);
+        }
+      } else if (newDeck.main.length < cfg.mainMax) {
         newDeck.main.push(c);
-        mainSet.add(c);
-        used.add(c);
+        used.set(c, (used.get(c) ?? 0) + 1);
       }
     }
     newDeck.main = newDeck.main.slice(0, cfg.mainMax);
@@ -136,15 +210,89 @@ export class DecksService {
     this.save(tid, playerId, { ...newDeck, lockedAt: new Date().toISOString(), status: 'locked' }, 'system');
   }
 
+  validationReport(tid: number): { playerId: string; displayName: string; errors: string[] }[] {
+    const state = loadState(tid);
+    return state.players
+      .filter((p) => !p.eliminated)
+      .map((p) => ({ playerId: p.playerId, displayName: p.displayName, errors: this.validate(state, this.deckOf(state, p.playerId), p.playerId) }))
+      .filter((r) => r.errors.length > 0);
+  }
+
+  // Admin-confirmed transition repair. Never invents cards to reach mainMin:
+  // undersized main decks are disqualified. Zone overflow is randomly moved to
+  // side while capacity remains, then returned to the unused pool.
+  repairForMatches(tid: number, playerId: string): { disqualified: boolean; movedToSide: number; returnedToPool: number } {
+    const state = loadState(tid);
+    if (state.frozen) throw new Error('FROZEN');
+    const cfg = getConfig(state);
+    const picked = new Set(pickedCards(state, playerId));
+    const maxCopies = Number(cfg.maxCopies ?? 3);
+    const source = this.deckOf(state, playerId);
+    let returnedToPool = 0;
+    let movedToSide = 0;
+    const counts = new Map<number, number>();
+    const legalCopies = (codes: number[]) => codes.filter((code) => {
+      const count = counts.get(code) ?? 0;
+      if (!picked.has(code) || count >= maxCopies) {
+        returnedToPool++;
+        return false;
+      }
+      counts.set(code, count + 1);
+      return true;
+    });
+    let main = legalCopies(source.main);
+    let extra = legalCopies(source.extra);
+    let side = legalCopies(source.side);
+    const shuffle = <T>(items: T[]): T[] => {
+      const out = [...items];
+      for (let i = out.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [out[i], out[j]] = [out[j], out[i]];
+      }
+      return out;
+    };
+    const overflowToSide = (codes: number[]) => {
+      for (const code of shuffle(codes)) {
+        if (side.length < cfg.sideMax) {
+          side.push(code);
+          movedToSide++;
+        } else returnedToPool++;
+      }
+    };
+
+    const wrongMain = main.filter((c) => this.cards.isExtraDeck(c));
+    main = main.filter((c) => !this.cards.isExtraDeck(c));
+    for (const code of shuffle(wrongMain)) {
+      if (extra.length < cfg.extraMax) extra.push(code);
+      else overflowToSide([code]);
+    }
+    const wrongExtra = extra.filter((c) => !this.cards.isExtraDeck(c));
+    extra = extra.filter((c) => this.cards.isExtraDeck(c));
+    for (const code of shuffle(wrongExtra)) {
+      if (main.length < cfg.mainMax) main.push(code);
+      else overflowToSide([code]);
+    }
+    while (main.length > cfg.mainMax) overflowToSide(main.splice(Math.floor(Math.random() * main.length), 1));
+    while (extra.length > cfg.extraMax) overflowToSide(extra.splice(Math.floor(Math.random() * extra.length), 1));
+    while (side.length > cfg.sideMax) {
+      side.splice(Math.floor(Math.random() * side.length), 1);
+      returnedToPool++;
+    }
+    const disqualified = main.length < cfg.mainMin;
+    this.save(tid, playerId, { main, extra, side, lockedAt: new Date().toISOString(), status: 'locked' }, 'system');
+    if (disqualified) {
+      getDb().prepare('UPDATE tournament_players SET eliminated=1 WHERE tournament_id=? AND player_id=?').run(tid, playerId);
+      logEvent(tid, 'player', 'player_dsq', { playerId, reason: `main below minimum (${main.length} < ${cfg.mainMin})` }, 'system');
+      persistMeta(tid);
+    }
+    return { disqualified, movedToSide, returnedToPool };
+  }
+
   private checkAllLocked(tid: number): void {
     const state = loadState(tid);
     if (state.status !== 'deckbuilding') return;
-    const all = state.players.every((p) => state.decks[p.playerId]?.lockedAt);
-    if (all) {
-      logEvent(tid, 'tournament', 'phase', { status: 'matches', round: 1 }, 'system');
-      persistMeta(tid);
-      this.matches?.startRound(tid, 1, 'system');
-    }
+    // Even when everybody has locked, an administrator must explicitly start
+    // matches so the compliance preview/confirmation cannot be bypassed.
   }
 
   private save(tid: number, playerId: string, deck: DeckState, actor?: string): void {

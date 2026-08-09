@@ -22,7 +22,7 @@ function setupDraft(n: number, pickSeconds = 30) {
 describe('draft engine', () => {
   beforeEach(() => useTestDb());
 
-  it('creates packs of size players*3 and exposes dropped cards (drop_leftover_exact)', () => {
+  it('creates packs of the configured default size and exposes dropped cards (drop_leftover_exact)', () => {
     const { tid, cards } = setupDraft(4);
     const tournaments = makeTournaments();
     const exactTid = tournaments.create({ name: 'dexact', maxPlayers: 4, pickSeconds: 30, cardPool: TEST_POOL, dropMode: 'drop_leftover_exact' }, 'test').tid;
@@ -39,8 +39,8 @@ describe('draft engine', () => {
     expect(state.packs.length).toBeGreaterThan(0);
     expect(state.packs.length % 4).toBe(0); // exact mode keeps pack count a multiple of player count
     for (const p of state.packs) {
-      expect(p.size).toBe(4 * cfg.packSizeMultiple);
-      expect(p.order.length).toBe(p.size); // packs are full n*3 cards (no per-pack drop)
+      expect(p.size).toBe(cfg.packSize);
+      expect(p.order.length).toBe(p.size); // packs are full-sized (no per-pack drop)
     }
     // leftover pool cards are dropped publicly up front
     expect(Array.isArray(state.droppedCards)).toBe(true);
