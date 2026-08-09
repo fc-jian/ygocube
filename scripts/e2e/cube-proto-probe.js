@@ -74,6 +74,7 @@ function pkt(type, payload) {
 function captureProtos(pid, roomName) {
   return new Promise((resolve) => {
     const seq = [];
+    let cubeFilename = null;
     const sock = net.connect(SRVPRO_GAME_PORT, SRVPRO_HOST);
     let buf = Buffer.alloc(0);
     let done = false;
@@ -81,7 +82,7 @@ function captureProtos(pid, roomName) {
       if (done) return;
       done = true;
       try { sock.destroy(); } catch {}
-      resolve({ pid, seq, why });
+      resolve({ pid, seq, why, cubeFilename });
     };
     const timeout = setTimeout(() => finish('capture timeout'), 20000);
     sock.on('error', () => finish('socket error'));
@@ -91,10 +92,14 @@ function captureProtos(pid, roomName) {
       pi.write(pid, 0, 'utf16le');
       sock.write(pkt(0x10, pi)); // CTOS_PLAYER_INFO
       setTimeout(() => {
-        const jg = Buffer.alloc(48);
+        // Match the real client: legacy fixed struct for <20 UTF-16 units;
+        // variable NUL-terminated extension for long room passwords.
+        const encodedPass = Buffer.from(`${roomName}\0`, 'utf16le');
+        const units = encodedPass.length / 2 - 1;
+        const jg = Buffer.alloc(units < 20 ? 48 : 8 + encodedPass.length);
         jg.writeUInt16LE(PROTO_VERSION, 0);
         jg.writeUInt32LE(0, 4);
-        jg.write(roomName, 8, 'utf16le');
+        encodedPass.copy(jg, 8);
         sock.write(pkt(0x12, jg)); // CTOS_JOIN_GAME
       }, 100);
     });
@@ -104,6 +109,20 @@ function captureProtos(pid, roomName) {
         const len = buf.readUInt16LE(0);
         if (buf.length < 2 + len) break;
         const type = buf.readUInt8(2);
+        if (type === STOC_CUBE_DECK) {
+          const payload = buf.subarray(3, 2 + len);
+          if (payload.length >= 8) {
+            const mainc = payload.readUInt32LE(0);
+            const sidec = payload.readUInt32LE(4);
+            const filenameOffset = 8 + (mainc + sidec) * 4;
+            if (payload.length >= filenameOffset + 2) {
+              const filenameLength = payload.readUInt16LE(filenameOffset);
+              if (filenameLength > 0 && payload.length >= filenameOffset + 2 + filenameLength) {
+                cubeFilename = payload.subarray(filenameOffset + 2, filenameOffset + 2 + filenameLength).toString('utf8');
+              }
+            }
+          }
+        }
         buf = buf.slice(2 + len);
         if (seq.length < CAPTURE_LIMIT) seq.push(type);
         if (seq.includes(STOC_CUBE_DECK)) {
@@ -238,8 +257,11 @@ async function buildDecks(tid) {
     } else if (cubeIdx < joinIdx) {
       log(`FAIL ${r.pid}: STOC_CUBE_DECK at #${cubeIdx} arrives BEFORE STOC_JOIN_GAME at #${joinIdx}`);
       ok = false;
+    } else if (!new RegExp(`^cube-deck-${tid}-${r.pid}-\\d{14}$`).test(r.cubeFilename || '')) {
+      log(`FAIL ${r.pid}: invalid synchronized deck filename ${JSON.stringify(r.cubeFilename)}`);
+      ok = false;
     } else {
-      log(`OK ${r.pid}: STOC_JOIN_GAME at #${joinIdx}, STOC_CUBE_DECK at #${cubeIdx}`);
+      log(`OK ${r.pid}: STOC_JOIN_GAME at #${joinIdx}, STOC_CUBE_DECK at #${cubeIdx}, filename=${r.cubeFilename}`);
     }
   }
   log(ok ? 'PROBE PASS' : 'PROBE FAIL');
