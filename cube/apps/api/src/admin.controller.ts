@@ -103,8 +103,8 @@ export class AdminController {
         .filter((p) => !p.eliminated && !p.withdrawn)
         .map((p) => ({ playerId: p.playerId, ...this.decks.repairForMatches(tid, p.playerId) }));
       const eligible = loadState(tid).players.filter((p) => !p.eliminated && !p.withdrawn).length;
-      if (eligible < 2) throw new Error('FORMAT_PLAYER_COUNT');
-      validateMatchFormat(getConfig(loadState(tid)), eligible);
+      if (eligible < 1) throw new Error('FORMAT_PLAYER_COUNT');
+      if (eligible >= 2) validateMatchFormat(getConfig(loadState(tid)), eligible);
       this.tournaments.setPhase(tid, status, body.round !== undefined ? Number(body.round) : 1, this.adminActor(req));
       const round = body.round !== undefined ? Number(body.round) : loadState(tid).round || 1;
       this.matches.startRound(tid, round, this.adminActor(req));

@@ -354,7 +354,12 @@ export class DraftService implements OnModuleInit {
     }
     const decks = new DecksService(this.cards);
     for (const p of state.players.filter((player) => !player.eliminated && !player.withdrawn)) decks.repairForMatches(tid, p.playerId);
-    this.matches.validateStart(tid);
+    // A previous admin transition may already have persisted round 1 before
+    // returning the tournament to deckbuilding. In that recovery path the
+    // existing matches are authoritative even if later deck repairs leave no
+    // eligible player for a fresh-format validation.
+    const hasRoundOne = loadState(tid).matches.some((match) => match.round === 1);
+    if (!hasRoundOne) this.matches.validateStart(tid);
     this.tournaments.setPhase(tid, 'matches', 1, 'system');
     try {
       this.matches.startRound(tid, 1, 'system');

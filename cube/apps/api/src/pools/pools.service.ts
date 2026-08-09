@@ -188,7 +188,21 @@ export class PoolsService {
       const j = Math.floor(Math.random() * (i + 1));
       [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
     }
-    return this.create(name, shuffled.slice(0, Math.max(0, Math.min(size, shuffled.length))));
+    // poolCodes() is already canonical, deduplicated, and token-free. Store the
+    // sample directly so a transient alias lookup cannot randomly shrink a pool
+    // that was sampled from the same authoritative list.
+    if (!name.trim()) throw new Error('BAD_PAYLOAD');
+    const selected = shuffled.slice(0, Math.max(0, Math.min(size, shuffled.length)));
+    const exists = getDb().prepare('SELECT 1 FROM card_pools WHERE name=?').get(name) as PoolRow | undefined;
+    if (exists) throw new Error('POOL_EXISTS');
+    const createdAt = new Date().toISOString();
+    const row = getDb().prepare('INSERT INTO card_pools (name, codes_json, created_at) VALUES (?,?,?)').run(name, JSON.stringify(selected), createdAt);
+    return {
+      pool: { id: Number(row.lastInsertRowid), name, codes: selected, createdAt },
+      filtered: 0,
+      missingCodes: [],
+      entryWarnings: [],
+    };
   }
 
   get(id: number): CardPool | null {

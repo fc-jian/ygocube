@@ -66,7 +66,11 @@ export class MatchesService implements OnModuleInit {
   validateStart(tid: number): void {
     const state = loadState(tid);
     const count = this.activePlayers(state).length;
-    if (count < 2) throw new Error('FORMAT_PLAYER_COUNT');
+    // A deckbuilding preflight may DSQ/withdraw everyone except one player. That
+    // player still needs a recorded bye (and the tournament can then finish), so
+    // only an empty field is invalid at this point.
+    if (count < 1) throw new Error('FORMAT_PLAYER_COUNT');
+    if (count === 1) return;
     if (this.format(state) === 'swiss') {
       const rounds = this.configuredSwissRounds(state);
       const playoff = Number(getConfig(state).playoffSize ?? 0);
@@ -240,7 +244,7 @@ export class MatchesService implements OnModuleInit {
     }
     // byes: eliminated-adjacent; a lone player gets a bye (3 points)
     const matched = new Set(pairs.flat());
-    const bye = this.format(state) === 'swiss' ? ids.find((id) => !matched.has(id)) : undefined;
+    const bye = ids.find((id) => !matched.has(id));
     const matches: MatchState[] = pairs.map(([a, b], i) => ({
       id: 0,
       round,
@@ -259,8 +263,11 @@ export class MatchesService implements OnModuleInit {
       stage: this.format(state) === 'round_robin' ? 'round_robin' : 'swiss',
       bracketRound: round,
     }));
-    if (bye && n % 2 === 1) {
-      matches.push({ id: 0, round, playerA: bye, playerB: '(bye)', tableNo: matches.length + 1, roomName: null, playerAPass: null, playerBPass: null, resultA: 2, resultB: 0, source: 'bye', faultedAt: null, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), stage: 'swiss', bracketRound: round });
+    // Swiss records byes for odd fields. Round-robin keeps the historical
+    // schedule shape (only real tables) except for a singleton field left after
+    // DSQ/withdrawal, where a bye is the only meaningful result to record.
+    if (bye && n % 2 === 1 && (this.format(state) === 'swiss' || n === 1)) {
+      matches.push({ id: 0, round, playerA: bye, playerB: '(bye)', tableNo: matches.length + 1, roomName: null, playerAPass: null, playerBPass: null, resultA: 2, resultB: 0, source: 'bye', faultedAt: null, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), stage: this.format(state) === 'round_robin' ? 'round_robin' : 'swiss', bracketRound: round });
     }
     return matches;
   }
