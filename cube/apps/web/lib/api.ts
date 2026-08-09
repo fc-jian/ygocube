@@ -116,7 +116,7 @@ export async function api<T = any>(
 export async function apiDownload(path: string, identity: Identity | null): Promise<void> {
   const res = await fetch(`/api${path}`, { headers: identityHeaders(identity) });
   if (!res.ok) throw new ApiError(res.status, 'HTTP_ERROR');
-  // 优先使用后端 Content-Disposition 文件名（deck-<tid>-<pid>-<timestamp>.ydk）
+  // 优先使用后端 Content-Disposition 文件名（cube-deck-<tid>-<pid>-<timestamp>.ydk）
   const cd = res.headers.get('content-disposition') ?? '';
   const match = cd.match(/filename="?([^";]+)"?/);
   const filename = match ? decodeURIComponent(match[1]) : (path.split('/').pop() ?? 'download');

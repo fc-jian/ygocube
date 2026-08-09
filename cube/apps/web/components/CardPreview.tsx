@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { CardInfo } from '@/lib/types';
 import { CardImage } from './CardImage';
-import { atkDefLine, raceAttrLine, statLine, typeLabel } from '@/lib/cardInfo';
+import { atkDefLine, linkMarkerLine, raceAttrLine, setNameLine, statLine, typeLabel } from '@/lib/cardInfo';
 
 // 全局浮动卡牌预览（ygopro 风格，position:fixed，不受容器 overflow 裁剪）。
 // hover 显示；点击小窗可固化（可滚动/选择文本/复制），右上角关闭。
@@ -100,11 +100,13 @@ export function CardPreviewHost() {
             <CardImage code={card.code} name={card.name} className="h-52 w-38 shrink-0" />
             <div className="min-w-0 flex-1">
               <p className="text-base font-bold leading-snug text-gold">{card.name}</p>
-              <p className="mt-1 font-mono text-xs text-slate-500">#{card.code}</p>
+              <p className="mt-1 font-mono text-xs text-slate-500">[{String(card.code).padStart(8, '0')}]</p>
               <p className="mt-2 text-sm text-slate-300">{typeLabel(card)}</p>
               {raceAttrLine(card) && <p className="text-sm text-slate-300">{raceAttrLine(card)}</p>}
               {statLine(card) && <p className="text-sm text-slate-300">{statLine(card)}</p>}
               {atkDefLine(card) && <p className="text-sm font-semibold text-slate-100">{atkDefLine(card)}</p>}
+              {linkMarkerLine(card) && <p className="text-sm text-slate-300">{linkMarkerLine(card)}</p>}
+              {setNameLine(card) && <p className="mt-1 text-xs text-slate-400">{setNameLine(card)}</p>}
             </div>
           </div>
           {card.desc && (
@@ -164,11 +166,13 @@ export function CardPreviewHost() {
         <CardImage code={card.code} name={card.name} className="h-36 w-26 shrink-0" />
         <div className="min-w-0 flex-1">
           <p className="text-sm font-bold leading-snug text-gold">{card.name}</p>
-          <p className="mt-0.5 font-mono text-[0.625rem] text-slate-500">#{card.code}</p>
+          <p className="mt-0.5 font-mono text-[0.625rem] text-slate-500">[{String(card.code).padStart(8, '0')}]</p>
           <p className="mt-1 text-[0.6875rem] text-slate-300">{typeLabel(card)}</p>
           {raceAttrLine(card) && <p className="text-[0.6875rem] text-slate-300">{raceAttrLine(card)}</p>}
           {statLine(card) && <p className="text-[0.6875rem] text-slate-300">{statLine(card)}</p>}
           {atkDefLine(card) && <p className="text-[0.6875rem] font-semibold text-slate-100">{atkDefLine(card)}</p>}
+          {linkMarkerLine(card) && <p className="text-[0.6875rem] text-slate-300">{linkMarkerLine(card)}</p>}
+          {setNameLine(card) && <p className="text-[0.625rem] text-slate-400">{setNameLine(card)}</p>}
         </div>
       </div>
       {card.desc && (

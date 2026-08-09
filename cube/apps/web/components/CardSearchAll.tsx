@@ -57,7 +57,7 @@ export function CardSearchAll({ tid, identity }: { tid: string; identity: Identi
       <div className="flex gap-2">
         <input
           className="flex-1 rounded bg-felt-deep px-2 py-1 text-xs outline-none ring-gold/50 focus:ring-2"
-          placeholder="按名称或编号搜索（如：青眼白龙 / 8964）"
+          placeholder="搜索名称、编号、效果、字段或系列"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && void search()}

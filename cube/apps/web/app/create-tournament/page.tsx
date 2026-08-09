@@ -5,17 +5,25 @@ import { api } from '@/lib/api';
 import { ConfirmModal } from '@/components/ConfirmModal';
 
 interface PoolInfo {
+  id: number;
   name: string;
   count: number;
+  isDefault?: boolean;
 }
+
+type MatchFormat = 'round_robin' | 'swiss' | 'double_elimination';
+const recommendFormat = (n: number): { matchFormat: MatchFormat; swissRoundCount: number; playoffSize: number } =>
+  n <= 5 ? { matchFormat: 'round_robin', swissRoundCount: 1, playoffSize: 0 }
+    : n <= 8 ? { matchFormat: 'swiss', swissRoundCount: 4, playoffSize: 0 }
+      : n <= 16 ? { matchFormat: 'swiss', swissRoundCount: 4, playoffSize: 4 }
+        : { matchFormat: 'swiss', swissRoundCount: Math.ceil(Math.log2(n)) + 1, playoffSize: 8 };
 
 export default function CreateTournamentPage() {
   const [name, setName] = useState('');
   const [maxPlayers, setMaxPlayers] = useState(4);
-  const [packSize, setPackSize] = useState(12);
-  const [packTouched, setPackTouched] = useState(false);
+  const [packSize, setPackSize] = useState(18);
   const [packCount, setPackCount] = useState<number | ''>('');
-  const [dropPublic, setDropPublic] = useState(true);
+  const [dropPublic, setDropPublic] = useState(false);
   const [mode, setMode] = useState<'single' | 'match'>('match');
   const [pools, setPools] = useState<PoolInfo[]>([]);
   const [cardPool, setCardPool] = useState('');
@@ -27,19 +35,33 @@ export default function CreateTournamentPage() {
   const [timeLimit, setTimeLimit] = useState(999);
   const [pickSeconds, setPickSeconds] = useState(30);
   const [deckbuildingSeconds, setDeckbuildingSeconds] = useState(600);
+  const [limitDeckbuilding, setLimitDeckbuilding] = useState(false);
   const [packStrategy, setPackStrategy] = useState('stratify');
   const [evenPackCount, setEvenPackCount] = useState(true);
+  const [reseatEachRound, setReseatEachRound] = useState(true);
   const [reserveSeconds, setReserveSeconds] = useState(300);
   const [confirmFairness, setConfirmFairness] = useState(false);
   const [createToken, setCreateToken] = useState('');
   const [created, setCreated] = useState<{ url: string; adminToken: string } | null>(null);
   const [error, setError] = useState('');
+  const initialFormat = recommendFormat(4);
+  const [matchFormat, setMatchFormat] = useState<MatchFormat>(initialFormat.matchFormat);
+  const [swissRoundCount, setSwissRoundCount] = useState(initialFormat.swissRoundCount);
+  const [playoffSize, setPlayoffSize] = useState(initialFormat.playoffSize);
+  const [formatTouched, setFormatTouched] = useState(false);
+
+  const applyRecommendation = (n: number) => {
+    const r = recommendFormat(n);
+    setMatchFormat(r.matchFormat);
+    setSwissRoundCount(r.swissRoundCount);
+    setPlayoffSize(r.playoffSize);
+  };
 
   useEffect(() => {
     api<PoolInfo[]>('/pools', { identity: null })
       .then((p) => {
         setPools(p);
-        if (p.length) setCardPool((cur) => cur || p[0].name);
+        if (p.length) setCardPool((cur) => cur || p.find((pool) => pool.isDefault)?.name || p[0].name);
       })
       .catch(() => setPools([]));
   }, []);
@@ -57,19 +79,19 @@ export default function CreateTournamentPage() {
   const ceilRounded = ceilPacks - (ceilPacks % maxPlayers);
   const overLimitEffective = evenPackCount && ceilRounded >= maxPlayers ? ceilRounded : ceilPacks;
   const effectivePacks = packCount === '' ? autoEstimate : overLimit ? overLimitEffective : Number(packCount);
+  const draftedCards = Math.min(poolCount, Math.max(0, effectivePacks * packSize));
+  const cardsPerPlayerLow = Math.floor(draftedCards / Math.max(1, maxPlayers));
+  const cardsPerPlayerHigh = Math.ceil(draftedCards / Math.max(1, maxPlayers));
   const overLimitDrop = Math.max(0, poolCount - overLimitEffective * packSize);
   const packCountInvalid = packCount !== '' && evenPackCount && Number(packCount) % maxPlayers !== 0;
-  // 公平性警告：每堆卡数或牌堆数非人数整数倍（各玩家选牌次数可能不等）
-  const unfair =
-    packSize % maxPlayers !== 0 ||
-    (packCount !== '' && Number(packCount) % maxPlayers !== 0) ||
-    (!evenPackCount && packCount === '' && autoEstimate % maxPlayers !== 0);
+  // passing 模式公平性只取决于牌堆总数是否为人数倍数；每堆张数可以任意。
+  const unfair = effectivePacks % maxPlayers !== 0;
 
   const doCreate = async () => {
     try {
       const r = await api<{ tid: number; url: string; admin_token: string }>('/tournaments', {
         method: 'POST',
-        body: { name, maxPlayers, mode, packSize, cardPool, mainMin, mainMax, extraMax, sideMax, maxCopies, timeLimit, pickSeconds, deckbuildingSeconds, packStrategy, packCount: packCount === '' ? undefined : Number(packCount), dropPublic, evenPackCount, reserveSeconds },
+        body: { name, maxPlayers, mode, packSize, cardPool, mainMin, mainMax, extraMax, sideMax, maxCopies, timeLimit, pickSeconds, deckbuildingSeconds: limitDeckbuilding ? deckbuildingSeconds : null, packStrategy, packCount: packCount === '' ? undefined : Number(packCount), dropPublic, evenPackCount, reserveSeconds, reseatEachRound, matchFormat, swissRoundCount: matchFormat === 'swiss' ? swissRoundCount : undefined, playoffSize: matchFormat === 'swiss' ? playoffSize : 0 },
         createToken,
       });
       setCreated({ url: r.url, adminToken: r.admin_token });
@@ -88,10 +110,12 @@ export default function CreateTournamentPage() {
   };
 
   return (
-    <main className="mx-auto max-w-2xl p-4 sm:p-8">
-      <h1 className="mb-6 text-3xl font-bold text-gold">创建比赛</h1>
+    <main className="mx-auto max-w-3xl p-4 sm:p-8">
+      <a href="/" className="mb-5 inline-flex items-center gap-2 text-xs text-emerald-100/60 hover:text-gold">← 返回首页</a>
+      <p className="yc-kicker mb-1">Tournament setup</p>
+      <h1 className="yc-title mb-6 text-3xl font-bold">创建比赛</h1>
       {created ? (
-        <div className="space-y-3 rounded-lg border border-felt-edge bg-felt p-4">
+        <div className="yc-panel space-y-3 p-6">
           <p className="mb-2">比赛创建成功。</p>
           <a href={created.url} className="block font-mono text-gold underline">
             {created.url}
@@ -105,7 +129,7 @@ export default function CreateTournamentPage() {
           </a>
         </div>
       ) : (
-        <div className="space-y-4 rounded-lg border border-felt-edge bg-felt p-6">
+        <div className="yc-panel space-y-5 p-5 sm:p-7">
           <input
             className="w-full rounded bg-felt-deep px-3 py-2 outline-none ring-gold/50 focus:ring-2"
             placeholder="比赛名称"
@@ -124,7 +148,7 @@ export default function CreateTournamentPage() {
                 onChange={(e) => {
                   const n = Number(e.target.value);
                   setMaxPlayers(n);
-                  if (!packTouched) setPackSize(Math.max(1, n * 3));
+                  if (!formatTouched) applyRecommendation(n);
                 }}
               />
             </label>
@@ -136,18 +160,16 @@ export default function CreateTournamentPage() {
               </select>
             </label>
             <label className="flex items-center gap-2">
-              每堆卡数（建议 {maxPlayers * 3}）
+              每堆卡数
               <input
                 type="number"
                 min={1}
                 max={60}
                 className="w-16 rounded bg-felt-deep px-2 py-1"
                 value={packSize}
-                onChange={(e) => { setPackTouched(true); setPackSize(Math.max(1, Number(e.target.value))); }}
+                onChange={(e) => setPackSize(Math.max(1, Number(e.target.value)))}
               />
-              {packSize % maxPlayers !== 0 && (
-                <span className="text-xs text-amber-300">非人数整数倍：各玩家从每堆选牌的次数可能不同</span>
-              )}
+              <span className="text-xs text-slate-400">每个完整轮次每位玩家获得 {packSize} 张</span>
             </label>
             <label className="flex items-center gap-2">
               卡池
@@ -161,6 +183,29 @@ export default function CreateTournamentPage() {
               {pools.length === 0 && <span className="text-xs text-red-300">暂无可用卡池，请先由管理员创建</span>}
             </label>
           </div>
+          <section className="rounded-lg border border-gold/25 bg-felt-deep/45 p-4">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div><p className="yc-kicker">Match format</p><h2 className="font-semibold text-gold">赛制</h2></div>
+              <button type="button" className="rounded bg-felt-edge px-3 py-1 text-xs hover:brightness-110" onClick={() => { applyRecommendation(maxPlayers); setFormatTouched(false); }}>应用 {maxPlayers} 人推荐</button>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-3">
+              {([
+                ['round_robin', '单循环', '每两名玩家交手一次'],
+                ['swiss', '瑞士轮', '自定义轮数及单败淘汰'],
+                ['double_elimination', '双败淘汰', '两败淘汰，单场总决赛'],
+              ] as const).map(([value, title, desc]) => (
+                <button key={value} type="button" onClick={() => { setMatchFormat(value); setFormatTouched(true); }} className={`rounded border p-3 text-left transition ${matchFormat === value ? 'border-gold bg-gold/10' : 'border-felt-edge hover:border-gold/40'}`}>
+                  <b className="block text-sm text-gold">{title}</b><span className="text-xs text-slate-400">{desc}</span>
+                </button>
+              ))}
+            </div>
+            {matchFormat === 'swiss' && <div className="mt-3 flex flex-wrap gap-4 text-sm">
+              <label className="flex items-center gap-2">瑞士轮数 <input type="number" min={1} max={64} className="w-16 rounded bg-felt px-2 py-1" value={swissRoundCount} onChange={(e) => { setSwissRoundCount(Math.max(1, Number(e.target.value))); setFormatTouched(true); }} /></label>
+              <label className="flex items-center gap-2">淘汰赛人数 <select className="rounded bg-felt px-2 py-1" value={playoffSize} onChange={(e) => { setPlayoffSize(Number(e.target.value)); setFormatTouched(true); }}>
+                {[0, 2, 4, 8, 16, 32, 64].filter((n) => n === 0 || n <= maxPlayers).map((n) => <option key={n} value={n}>{n === 0 ? '无淘汰赛' : `Top ${n}`}</option>)}
+              </select></label>
+            </div>}
+          </section>
           <div className="flex flex-wrap gap-4 text-sm">
             <label className="flex items-center gap-2">
               主卡组
@@ -189,8 +234,11 @@ export default function CreateTournamentPage() {
               <input type="number" min={5} max={300} className="w-16 rounded bg-felt-deep px-2 py-1" value={pickSeconds} onChange={(e) => setPickSeconds(Number(e.target.value))} />
             </label>
             <label className="flex items-center gap-2">
-              构筑限时（秒）
-              <input type="number" min={30} max={7200} className="w-20 rounded bg-felt-deep px-2 py-1" value={deckbuildingSeconds} onChange={(e) => setDeckbuildingSeconds(Number(e.target.value))} />
+              <input type="checkbox" checked={limitDeckbuilding} onChange={(e) => setLimitDeckbuilding(e.target.checked)} />
+              限制构筑时间
+              {limitDeckbuilding ? (
+                <><input type="number" min={30} max={7200} className="w-20 rounded bg-felt-deep px-2 py-1" value={deckbuildingSeconds} onChange={(e) => setDeckbuildingSeconds(Number(e.target.value))} /> 秒</>
+              ) : <span className="text-xs text-slate-400">无限；由管理员手动进入对战</span>}
             </label>
             <label className="flex items-center gap-2">
               保留时间（秒）
@@ -227,6 +275,10 @@ export default function CreateTournamentPage() {
               )}
               {packCountInvalid && <span className="text-xs text-red-300">牌堆总数必须是人数（{maxPlayers}）的整数倍</span>}
             </label>
+            <div className="flex items-center rounded border border-emerald-300/20 bg-emerald-950/30 px-3 py-1.5 text-xs text-emerald-100">
+              每位玩家可获得：{cardsPerPlayerLow === cardsPerPlayerHigh ? <b className="ml-1 text-gold">{cardsPerPlayerLow} 张</b> : <b className="ml-1 text-amber-300">{cardsPerPlayerLow}–{cardsPerPlayerHigh} 张</b>}
+              <span className="ml-2 text-slate-400">（按实际使用 {draftedCards} 张计算）</span>
+            </div>
             <label className="flex items-center gap-2">
               <input type="checkbox" checked={evenPackCount} onChange={(e) => setEvenPackCount(e.target.checked)} />
               牌堆数为人数整数倍
@@ -234,6 +286,10 @@ export default function CreateTournamentPage() {
             <label className="flex items-center gap-2">
               <input type="checkbox" checked={dropPublic} onChange={(e) => setDropPublic(e.target.checked)} />
               公开被丢弃的卡牌
+            </label>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={reseatEachRound} onChange={(e) => setReseatEachRound(e.target.checked)} />
+              每轮结束后随机重排玩家座位
             </label>
             <label className="flex items-center gap-2">
               卡堆组成
@@ -252,7 +308,7 @@ export default function CreateTournamentPage() {
             onChange={(e) => setCreateToken(e.target.value)}
           />
           {error && <p className="text-xs text-red-300">{error}</p>}
-          <button onClick={create} disabled={!cardPool || packCountInvalid} className="rounded bg-gold px-6 py-2 font-semibold text-felt-deep transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40">
+          <button onClick={create} disabled={!cardPool || packCountInvalid} className="yc-primary px-6 py-2.5 font-semibold disabled:cursor-not-allowed disabled:opacity-40">
             创建比赛
           </button>
           <ConfirmModal
@@ -266,7 +322,7 @@ export default function CreateTournamentPage() {
             confirmText="仍然创建"
           >
             <p className="text-xs leading-relaxed text-slate-300">
-              每堆卡数或牌堆总数不是人数（{maxPlayers}）的整数倍：传递式轮抽中各玩家的选牌次数可能不相等。建议调整每堆卡数/牌堆总数为 {maxPlayers} 的整数倍。
+              实际牌堆总数不是人数（{maxPlayers}）的整数倍：最后一轮无法让所有玩家各获得一堆。每堆卡数可以任意，无需是人数的倍数。
             </p>
           </ConfirmModal>
         </div>

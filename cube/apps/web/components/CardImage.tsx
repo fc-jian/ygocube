@@ -62,11 +62,11 @@ export function CardImage({ code, name, className = '' }: { code: number; name?:
   }, [code]);
 
   if (src) {
-    return <img src={src} alt={name ?? String(code)} className={`rounded-sm object-cover ${className}`} loading="lazy" />;
+    return <img src={src} alt={name ?? String(code)} className={`rounded-md border border-white/10 object-cover shadow-[0_5px_14px_rgba(0,0,0,0.28)] ${className}`} loading="lazy" />;
   }
   return (
     <div
-      className={`flex items-center justify-center rounded-sm border border-slate-600 bg-gradient-to-b from-slate-700 to-slate-900 p-1 text-center ${className}`}
+      className={`flex items-center justify-center rounded-md border border-slate-600/70 bg-gradient-to-b from-slate-700 to-slate-950 p-1 text-center shadow-[0_5px_14px_rgba(0,0,0,0.28)] ${className}`}
     >
       <span className="line-clamp-3 break-all text-[0.625rem] leading-tight text-slate-300">{name ?? code}</span>
     </div>

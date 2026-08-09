@@ -58,8 +58,14 @@ export default function DeckPage() {
     try {
       const s = await api<DraftState>(`/t/${tid}/state`, { identity });
       setState(s);
-      const used = new Set([...(s.deck?.main ?? []), ...(s.deck?.extra ?? []), ...(s.deck?.side ?? [])]);
-      setDiscard((s.pickedCards ?? []).filter((c) => !used.has(c)));
+      const used = new Map<number, number>();
+      for (const code of [...(s.deck?.main ?? []), ...(s.deck?.extra ?? []), ...(s.deck?.side ?? [])]) used.set(code, (used.get(code) ?? 0) + 1);
+      const maxCopies = Number(s.config?.maxCopies ?? 1);
+      const available: number[] = [];
+      for (const code of [...new Set(s.pickedCards ?? [])]) {
+        for (let i = used.get(code) ?? 0; i < maxCopies; i++) available.push(code);
+      }
+      setDiscard(available);
       const codes = new Set<number>([...(s.pickedCards ?? [])]);
       if (codes.size) {
         const cards = await api<CardInfo[]>(`/t/${tid}/cards?codes=${[...codes].join(',')}`, { identity });
@@ -84,19 +90,46 @@ export default function DeckPage() {
   }, [load]);
 
   useTournamentStream(tid, identity, useCallback(() => void load(), [load]));
+  // SSE is primary; short polling is a fallback so an admin phase change is
+  // reflected even if the browser temporarily lost the event stream.
+  useEffect(() => {
+    if (state?.status !== 'deckbuilding') return;
+    const timer = setInterval(() => void load(), 3000);
+    return () => clearInterval(timer);
+  }, [state?.status, load]);
   const now = useNowTick(true);
 
-  const move = async (card: number, from: string, to: string, index?: number) => {
+  const move = async (card: number, from: string, to: string, index?: number, fromIndex?: number) => {
     try {
       flip.snapshot(); // FLIP: capture positions before the post-move re-render
       await api(`/t/${tid}/deck/move`, {
         method: 'POST',
-        body: { card_code: card, from, to, ...(index !== undefined ? { index } : {}) },
+        body: { card_code: card, from, to, ...(index !== undefined ? { index } : {}), ...(fromIndex !== undefined ? { from_index: fromIndex } : {}) },
         identity,
       });
       await load();
     } catch (e: any) {
       setError(e.code === 'WRONG_ZONE' ? '该类型卡不能放入此区域' : (e.code ?? String(e)));
+    }
+  };
+
+  const sortDeck = async () => {
+    try {
+      flip.snapshot();
+      await api(`/t/${tid}/deck/sort`, { method: 'POST', identity });
+      await load();
+    } catch (e: any) {
+      setError(e.code ?? String(e));
+    }
+  };
+
+  const shuffleMain = async () => {
+    try {
+      flip.snapshot();
+      await api(`/t/${tid}/deck/shuffle`, { method: 'POST', identity });
+      await load();
+    } catch (e: any) {
+      setError(e.code ?? String(e));
     }
   };
 
@@ -163,7 +196,11 @@ export default function DeckPage() {
   const deck = state.deck ?? { main: [], extra: [], side: [], lockedAt: null };
   const locked = !!deck.lockedAt;
   const cfg = state.config;
-  const buildSecondsLeft = state.phaseDeadline ? Math.max(0, Math.ceil((new Date(state.phaseDeadline).getTime() - now) / 1000)) : null;
+  const buildSecondsLeft = state.phaseDeadlineRemainingMs !== undefined
+    ? Math.max(0, Math.ceil(state.phaseDeadlineRemainingMs / 1000))
+    : state.phaseDeadline
+      ? Math.max(0, Math.ceil((new Date(state.phaseDeadline).getTime() - now) / 1000))
+      : null;
   const poolIds = flipIds('pool', discard);
 
   return (
@@ -174,8 +211,11 @@ export default function DeckPage() {
           {locked && <span className="ml-3 rounded bg-gold px-2 py-0.5 text-xs text-felt-deep">已锁定</span>}
           {buildSecondsLeft !== null && !locked && (
             <span className={`ml-3 rounded px-2 py-0.5 font-mono text-xs ${buildSecondsLeft <= 60 ? 'bg-red-900 text-red-100' : 'bg-felt-edge text-gold'}`}>
-              剩余 {Math.floor(buildSecondsLeft / 60)} 分 {buildSecondsLeft % 60} 秒
+              {state.phaseDeadlineRemainingMs !== undefined ? '已暂停 · ' : ''}剩余 {Math.floor(buildSecondsLeft / 60)} 分 {buildSecondsLeft % 60} 秒
             </span>
+          )}
+          {buildSecondsLeft === null && state.status === 'deckbuilding' && !locked && (
+            <span className="ml-3 rounded bg-felt-edge px-2 py-0.5 text-xs text-emerald-100">构筑不限时 · 等待管理员开始对战</span>
           )}
         </span>
         <span className="flex items-center gap-2 text-xs">
@@ -189,11 +229,30 @@ export default function DeckPage() {
           )}
         </span>
       </header>
+      {state.status === 'matches' && (
+        <div className={`m-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border px-5 py-4 ${state.disqualified ? 'border-red-300/40 bg-red-950/70' : 'border-emerald-300/40 bg-emerald-950/70 shadow-[0_0_24px_rgba(16,185,129,0.18)]'}`}>
+          <div>
+            <p className={`text-lg font-bold ${state.disqualified ? 'text-red-100' : 'text-emerald-100'}`}>{state.disqualified ? '卡组主卡数量不足，已被判 DSQ' : '对战阶段已开始'}</p>
+            <p className="text-xs text-slate-300">{state.disqualified ? '你不会被加入本轮对阵。' : '卡组已锁定，请前往对战页查看桌号、对手和房间。'}</p>
+          </div>
+          {!state.disqualified && <a href={`/t/${tid}/matches/${pid}`} className="rounded bg-gold px-6 py-2 font-semibold text-felt-deep hover:brightness-110">立即前往对战</a>}
+        </div>
+      )}
       <div ref={flip.ref} className="flex flex-1 flex-col gap-3 p-3 md:flex-row md:overflow-hidden">
         <div className="flex w-full flex-col gap-2 md:w-3/5 md:overflow-y-auto md:pr-1">
-          <DeckZone title="主卡组" zone="main" codes={deck.main} limit={`${cfg.mainMin}-${cfg.mainMax}`} cardMap={cardMap} onCardMove={(c, f, _t, i) => move(c, f, 'main', i)} />
-          <DeckZone title="额外卡组" zone="extra" codes={deck.extra} limit={String(cfg.extraMax)} cardMap={cardMap} onCardMove={(c, f, _t, i) => move(c, f, 'extra', i)} />
-          <DeckZone title="副卡组" zone="side" codes={deck.side} limit={String(cfg.sideMax)} cardMap={cardMap} onCardMove={(c, f, _t, i) => move(c, f, 'side', i)} />
+          {!locked && state.status === 'deckbuilding' && (
+            <div className="flex justify-end gap-2">
+              <button onClick={() => void sortDeck()} className="rounded bg-felt-edge px-3 py-1.5 text-xs hover:brightness-110" title="按 YGOPro 卡组编辑器逻辑整理主卡组、额外卡组和副卡组">
+                整理卡组
+              </button>
+              <button onClick={() => void shuffleMain()} className="rounded bg-felt-edge px-3 py-1.5 text-xs hover:brightness-110" title="仅随机打乱主卡组顺序，用于模拟洗牌和抽卡">
+                随机洗牌
+              </button>
+            </div>
+          )}
+          <DeckZone title="主卡组" zone="main" codes={deck.main} limit={`${cfg.mainMin}-${cfg.mainMax}`} cardMap={cardMap} onCardMove={(c, f, _t, i, fi) => move(c, f, 'main', i, fi)} />
+          <DeckZone title="额外卡组" zone="extra" codes={deck.extra} limit={String(cfg.extraMax)} cardMap={cardMap} onCardMove={(c, f, _t, i, fi) => move(c, f, 'extra', i, fi)} />
+          <DeckZone title="副卡组" zone="side" codes={deck.side} limit={String(cfg.sideMax)} cardMap={cardMap} onCardMove={(c, f, _t, i, fi) => move(c, f, 'side', i, fi)} />
         </div>
         <aside
           className="flex flex-1 flex-col gap-2 md:overflow-y-auto"
@@ -224,6 +283,7 @@ export default function DeckPage() {
                     e.dataTransfer.setData('text/plain', String(c));
                     e.dataTransfer.setData('application/x-card-zone', 'deck');
                     e.dataTransfer.setData('application/x-card-source', 'pool');
+                    e.dataTransfer.setData('application/x-card-source-index', String(i));
                   }}
                   className="animate-card-in cursor-grab active:cursor-grabbing"
                 >
@@ -242,6 +302,7 @@ export default function DeckPage() {
         >
           下载 ydk
         </button>
+        <div className="flex items-center gap-2">
         {state.status !== 'deckbuilding' ? (
           <span className="text-xs text-slate-500">对战已开始，卡组已锁定不可修改</span>
         ) : locked ? (
@@ -253,6 +314,7 @@ export default function DeckPage() {
             锁定卡组
           </button>
         )}
+        </div>
       </footer>
       {error && <div className="mx-3 mb-2 rounded bg-red-900/60 px-3 py-1 text-xs text-red-200">{error}</div>}
     </main>

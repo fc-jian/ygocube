@@ -35,8 +35,8 @@ export default function 报名参加Page() {
   const existing = readIdentity(tid);
 
   return (
-    <main className="mx-auto mt-16 max-w-md px-4">
-      <div className="rounded-lg border border-felt-edge bg-felt p-6">
+    <main className="mx-auto mt-12 max-w-md px-4 sm:mt-20">
+      <div className="yc-panel p-6 sm:p-8">
         <h1 className="mb-1 text-xl font-bold text-gold">{info?.name ?? '比赛'}</h1>
         <p className="mb-4 text-xs text-slate-400">
           {info?.playerCount}/{info?.config?.maxPlayers} 人 · 阶段： {info?.status}

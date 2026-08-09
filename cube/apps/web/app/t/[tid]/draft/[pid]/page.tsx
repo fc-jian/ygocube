@@ -11,6 +11,7 @@ import { CardSearchAll } from '@/components/CardSearchAll';
 import { CardImage, CardWithTooltip } from '@/components/CardImage';
 import { setCardPreviewAction } from '@/components/CardPreview';
 import { CardInfo } from '@/lib/types';
+import { matchesCardQuery } from '@/lib/cardInfo';
 
 export default function DraftPage() {
   const params = useParams<{ tid: string; pid: string }>();
@@ -129,9 +130,9 @@ export default function DraftPage() {
     }
   }, [secondsLeft, state?.pack?.isMyTurn, load]);
   useEffect(() => {
-    if (state?.status !== 'drafting' && state?.status !== 'registration') return;
+    if (state?.status !== 'drafting' && state?.status !== 'registration' && state?.status !== 'deckbuilding') return;
     // 选牌阶段高频轮询，其他玩家选完后及时获得新列表（dev_docs/06 §6）
-    const intervalMs = state?.status === 'drafting' ? 2000 : 5000;
+    const intervalMs = state?.status === 'drafting' ? 2000 : state?.status === 'deckbuilding' ? 3000 : 5000;
     const t = setInterval(() => void load(), intervalMs);
     return () => clearInterval(t);
   }, [state?.status, load]);
@@ -157,12 +158,21 @@ export default function DraftPage() {
     }
   };
 
-  const move = async (code: number, from: string, to: string, index?: number) => {
+  const move = async (code: number, from: string, to: string, index?: number, fromIndex?: number) => {
     try {
-      await api(`/t/${tid}/deck/move`, { method: 'POST', body: { card_code: code, from, to, ...(index !== undefined ? { index } : {}) }, identity });
+      await api(`/t/${tid}/deck/move`, { method: 'POST', body: { card_code: code, from, to, ...(index !== undefined ? { index } : {}), ...(fromIndex !== undefined ? { from_index: fromIndex } : {}) }, identity });
       await load();
     } catch (e: any) {
       setError(e.code === 'WRONG_ZONE' ? '该类型卡不能放入此区域' : (e.code ?? String(e)));
+    }
+  };
+
+  const sortDeck = async () => {
+    try {
+      await api(`/t/${tid}/deck/sort`, { method: 'POST', identity });
+      await load();
+    } catch (e: any) {
+      setError(e.code ?? String(e));
     }
   };
 
@@ -205,7 +215,22 @@ export default function DraftPage() {
   const deck = state.deck ?? { main: [], extra: [], side: [], lockedAt: null };
   const q = cardFilter.trim().toLowerCase();
   const filterCodes = (codes: number[]) =>
-    !q ? codes : codes.filter((c) => (cardMap[c]?.name ?? '').toLowerCase().includes(q) || String(c).includes(q));
+    !q ? codes : codes.filter((c) => matchesCardQuery(cardMap[c], q));
+  const actualIndex = (codes: number[], visibleIndex: number | undefined): number | undefined => {
+    if (visibleIndex === undefined || !q) return visibleIndex;
+    let visible = 0;
+    for (let i = 0; i < codes.length; i++) {
+      if (filterCodes([codes[i]]).length === 0) continue;
+      if (visible++ === visibleIndex) return i;
+    }
+    return codes.length;
+  };
+  const moveVisible = (code: number, from: string, to: string, index?: number, fromIndex?: number) => {
+    const zones: Record<string, number[]> = { main: deck.main, extra: deck.extra, side: deck.side };
+    const actualFrom = from === 'pool' ? undefined : actualIndex(zones[from] ?? [], fromIndex);
+    const actualTo = to === 'pool' ? undefined : actualIndex(zones[to] ?? [], index);
+    void move(code, from, to, actualTo, actualFrom);
+  };
 
   return (
     <main className="flex min-h-screen flex-col md:h-screen">
@@ -213,18 +238,23 @@ export default function DraftPage() {
       {state.status === 'drafting' && (
         <div className="flex flex-1 flex-col gap-3 p-3 md:flex-row md:overflow-hidden">
           <div className="flex w-full flex-col gap-2 md:w-3/5 md:overflow-y-auto md:pr-1">
-            <input
-              className="rounded bg-felt-deep px-3 py-1.5 text-xs outline-none ring-gold/50 focus:ring-2"
-              placeholder="搜索已选卡牌（名称、编号或效果文本）"
-              value={cardFilter}
-              onChange={(e) => setCardFilter(e.target.value)}
-            />
-            <DeckZone title="主卡组" zone="main" codes={filterCodes(deck.main)} limit={`${state.config.mainMin}-${state.config.mainMax}`} cardMap={cardMap} onCardPick={pick} onCardMove={move} />
-            <DeckZone title="额外卡组" zone="extra" codes={filterCodes(deck.extra)} limit={String(state.config.extraMax)} cardMap={cardMap} onCardPick={pick} onCardMove={move} />
-            <DeckZone title="副卡组" zone="side" codes={filterCodes(deck.side)} limit={String(state.config.sideMax)} cardMap={cardMap} onCardPick={pick} onCardMove={move} />
+            <div className="flex gap-2">
+              <input
+                className="min-w-0 flex-1 rounded bg-felt-deep px-3 py-1.5 text-xs outline-none ring-gold/50 focus:ring-2"
+                placeholder="搜索名称、编号、效果、字段或系列"
+                value={cardFilter}
+                onChange={(e) => setCardFilter(e.target.value)}
+              />
+              <button onClick={() => void sortDeck()} className="rounded bg-felt-edge px-3 py-1.5 text-xs hover:brightness-110" title="按 YGOPro 卡组编辑器逻辑整理三个卡组区域">
+                整理卡组
+              </button>
+            </div>
+            <DeckZone title="主卡组" zone="main" codes={filterCodes(deck.main)} limit={`${state.config.mainMin}-${state.config.mainMax}`} cardMap={cardMap} onCardPick={pick} onCardMove={moveVisible} />
+            <DeckZone title="额外卡组" zone="extra" codes={filterCodes(deck.extra)} limit={String(state.config.extraMax)} cardMap={cardMap} onCardPick={pick} onCardMove={moveVisible} />
+            <DeckZone title="副卡组" zone="side" codes={filterCodes(deck.side)} limit={String(state.config.sideMax)} cardMap={cardMap} onCardPick={pick} onCardMove={moveVisible} />
             <CardSearchAll tid={tid} identity={identity} />
           </div>
-          <div className="order-first md:order-none md:flex-1">
+          <div className="order-first min-h-0 md:order-none md:flex-1">
             <PackZone pack={state.pack} cardMap={cardMap} droppedCards={state.droppedCards} onPick={pick} />
           </div>
         </div>
@@ -243,7 +273,7 @@ export default function DraftPage() {
             <div className="flex gap-2">
               <input
                 className="flex-1 rounded bg-felt-deep px-2 py-1 text-xs outline-none ring-gold/50 focus:ring-2"
-                placeholder="按名称、编号或效果文本搜索"
+                placeholder="搜索名称、编号、效果、字段或系列"
                 value={poolSearch}
                 onChange={(e) => setPoolSearch(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && void searchPool()}

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { CardInfo } from '@/lib/types';
 import { CardWithTooltip } from '@/components/CardImage';
-import { isExtraDeckType } from '@/lib/cardInfo';
+import { isExtraDeckType, sortCardCodes } from '@/lib/cardInfo';
 
 // 卡池编辑页（dev_docs/06 §5.7）：左侧按 main/extra 显示当前卡池，右侧搜索全卡，
 // 拖拽/点击增删；保存需要 super admin 令牌。
@@ -19,6 +19,7 @@ export default function PoolEditorPage() {
   const [q, setQ] = useState('');
   const [results, setResults] = useState<CardInfo[]>([]);
   const [msg, setMsg] = useState('');
+  const [saveReport, setSaveReport] = useState<{ filtered: number; missingCodes: number[] } | null>(null);
   const [loading, setLoading] = useState(true);
   const [metaLoading, setMetaLoading] = useState(false);
 
@@ -126,7 +127,11 @@ export default function PoolEditorPage() {
     try {
       const body = { codes: list };
       const d = isNew ? await adminFetch('/admin/pools', 'POST', { name: name.trim() || '未命名卡池', ...body }) : await adminFetch(`/admin/pools/${params.id}`, 'PUT', body);
-      setMsg(d.filtered > 0 ? `已保存，自动过滤 ${d.filtered} 张 token 卡` : '已保存');
+      const report = { filtered: Number(d.filtered ?? 0), missingCodes: d.missingCodes ?? [] };
+      setSaveReport(report);
+      setMsg(report.missingCodes.length > 0
+        ? `已保存，但 ${report.missingCodes.length} 个编号未找到`
+        : (report.filtered > 0 ? `已保存，自动过滤 ${report.filtered} 张 token 卡` : '已保存'));
       if (isNew) router.replace(`/admin/pool/${d.id}`);
     } catch (e: any) {
       setMsg(e.message === 'POOL_EXISTS' ? '卡池名称已存在' : e.message);
@@ -172,6 +177,13 @@ export default function PoolEditorPage() {
             <b className="text-gold">{name}</b>
           )}
           <span className="text-xs text-slate-400">{codes.size} 张卡</span>
+          <button
+            onClick={() => setCodes(new Set(sortCardCodes([...codes], cardMap, 'lv')))}
+            className="rounded bg-felt-edge px-2 py-0.5 text-xs hover:brightness-110"
+            title="按 YGOPro 卡组编辑器整理顺序排列主卡与额外卡"
+          >
+            整理卡表
+          </button>
         </span>
         <span className="flex items-center gap-2">
           {msg && <span className="text-xs text-amber-300">{msg}</span>}
@@ -282,6 +294,14 @@ export default function PoolEditorPage() {
           </div>
         </aside>
       </div>
+      {saveReport && (saveReport.filtered > 0 || saveReport.missingCodes.length > 0) && (
+        <div className="yc-notice fixed bottom-4 left-4 right-4 z-50 p-3 text-xs shadow-2xl sm:left-auto sm:max-w-lg" role="alert">
+          <button onClick={() => setSaveReport(null)} className="float-right rounded px-1.5" aria-label="关闭保存报告">×</button>
+          <b className="block">卡池保存报告</b>
+          {saveReport.missingCodes.length > 0 && <p className="mt-1 break-all">未找到并跳过：<code>{saveReport.missingCodes.join(', ')}</code></p>}
+          {saveReport.filtered > 0 && <p className="mt-1">已过滤 {saveReport.filtered} 张 token 卡。</p>}
+        </div>
+      )}
     </main>
   );
 }

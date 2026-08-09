@@ -18,6 +18,8 @@ interface MatchInfo {
   resultB: number | null;
   startedAt: string | null;
   finishedAt: string | null;
+  stage?: string;
+  bracketRound?: number;
 }
 
 export default function MatchesPage() {
@@ -125,7 +127,7 @@ export default function MatchesPage() {
         <table className="w-full min-w-[34rem] text-sm">
         <thead className="bg-felt text-left text-xs text-slate-400">
           <tr>
-            <th className="px-3 py-2">Round</th>
+            <th className="px-3 py-2">阶段 / Round</th>
             <th className="px-3 py-2">#</th>
             <th className="px-3 py-2">You</th>
             <th className="px-3 py-2">vs</th>
@@ -144,7 +146,7 @@ export default function MatchesPage() {
           )}
           {matches.map((m) => (
             <tr key={m.id} className="border-t border-felt-edge">
-              <td className="px-3 py-2 font-mono text-xs text-slate-400">R{m.round}</td>
+              <td className="px-3 py-2 font-mono text-xs text-slate-400">{m.stage ? `${m.stage} · ` : ''}R{m.round}</td>
               <td className="px-3 py-2">{m.tableNo}</td>
               <td className="px-3 py-2 font-semibold text-gold">{pid}</td>
               <td className="px-3 py-2 text-slate-500">vs</td>

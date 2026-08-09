@@ -1,9 +1,10 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { CardImage, CardWithTooltip } from './CardImage';
 import { ConfirmModal } from './ConfirmModal';
 import { CardInfo } from '@/lib/types';
+import { matchesCardQuery, sortCardCodes } from '@/lib/cardInfo';
 import { useNowTick } from './TopBar';
 
 // 右侧牌堆区（dev_docs/06 §2）：他人回合显示卡背+数量，自己回合显示正面，
@@ -15,7 +16,8 @@ export function PackZone({ pack, cardMap, droppedCards, onPick }: {
     queueLength?: number; // passing 模式：本人牌堆队列长度
     reserveMs?: number; // passing 模式：本人剩余保留时间（ms）
     cards?: number[];
-    deadlineAt: string;
+    deadlineAt: string | null;
+    pausedRemainingMs?: number;
   } | null;
   cardMap: Record<number, CardInfo>;
   droppedCards?: number[];
@@ -24,6 +26,10 @@ export function PackZone({ pack, cardMap, droppedCards, onPick }: {
   const [pending, setPending] = useState<number | null>(null);
   const [showDropped, setShowDropped] = useState(false);
   const [dropFilter, setDropFilter] = useState('');
+  const [sortedCards, setSortedCards] = useState<number[] | null>(null);
+  const packSignature = pack?.cards?.join(',') ?? '';
+  useEffect(() => setSortedCards(null), [packSignature]);
+  const displayCards = sortedCards ?? pack?.cards ?? [];
   const now = useNowTick(true);
 
   // 初始弃置（公开）：按钮 + 可搜索的卡图-卡名列表弹窗（dev_docs/06 §2）
@@ -33,14 +39,22 @@ export function PackZone({ pack, cardMap, droppedCards, onPick }: {
     if (!q) return droppedList;
     return droppedList.filter((c) => {
       const info = cardMap[c];
-      return (info?.name ?? '').toLowerCase().includes(q) || String(c).includes(q);
+      return matchesCardQuery(info, q);
     });
   }, [droppedList, cardMap, dropFilter]);
 
-  const secondsLeft = pack?.deadlineAt ? Math.max(0, Math.ceil((new Date(pack.deadlineAt).getTime() - now) / 1000)) : null;
+  const secondsLeft = pack?.pausedRemainingMs !== undefined
+    ? Math.max(0, Math.ceil(pack.pausedRemainingMs / 1000))
+    : pack?.deadlineAt
+      ? Math.max(0, Math.ceil((new Date(pack.deadlineAt).getTime() - now) / 1000))
+      : null;
   // passing 保留时间：base 期显示基础倒计时，reserve 期红色提示正在消耗保留时间
   const reserveMs = pack?.reserveMs ?? 0;
-  const baseLeft = pack?.deadlineAt ? Math.max(0, Math.ceil((new Date(pack.deadlineAt).getTime() - reserveMs - now) / 1000)) : null;
+  const baseLeft = pack?.pausedRemainingMs !== undefined
+    ? Math.max(0, Math.ceil((pack.pausedRemainingMs - reserveMs) / 1000))
+    : pack?.deadlineAt
+      ? Math.max(0, Math.ceil((new Date(pack.deadlineAt).getTime() - reserveMs - now) / 1000))
+      : null;
   const inReserve = baseLeft !== null && baseLeft <= 0 && secondsLeft !== null && secondsLeft > 0;
 
   if (!pack) {
@@ -54,7 +68,7 @@ export function PackZone({ pack, cardMap, droppedCards, onPick }: {
   const pendingCard = pending !== null ? cardMap[pending] : undefined;
 
   return (
-    <aside className="relative flex flex-col overflow-hidden rounded-lg border border-felt-edge bg-felt/60">
+    <aside className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-felt-edge bg-felt/60">
       {pack.isMyTurn && secondsLeft !== null && (
         <div
           className="countdown-bg pointer-events-none absolute inset-0"
@@ -68,16 +82,25 @@ export function PackZone({ pack, cardMap, droppedCards, onPick }: {
           {pack.isMyTurn ? '轮到你选牌' : '等待其他玩家'} · 剩余 {pack.cardsLeft} 张
           {pack.queueLength !== undefined && ` · 队列 ${pack.queueLength} 堆`}
         </span>
+        {pack.isMyTurn && pack.cards && (
+          <button
+            onClick={() => setSortedCards(sortCardCodes(pack.cards!, cardMap, 'lv'))}
+            className="rounded bg-felt-edge px-2 py-0.5 text-[0.625rem] hover:brightness-110"
+            title="按 YGOPro 卡组编辑器逻辑整理当前牌堆"
+          >
+            整理
+          </button>
+        )}
         {secondsLeft !== null && (
           <span className={`font-mono ${inReserve || (baseLeft ?? 1) <= 5 ? 'text-red-300' : 'text-gold'}`}>
-            {inReserve ? `保留时间 ${secondsLeft} 秒` : `${baseLeft ?? secondsLeft} 秒`}
+            {pack.pausedRemainingMs !== undefined ? `已暂停 · 剩余 ${secondsLeft} 秒` : inReserve ? `保留时间 ${secondsLeft} 秒` : `${baseLeft ?? secondsLeft} 秒`}
           </span>
         )}
       </header>
-      <div className="z-10 flex-1 overflow-y-auto p-2">
+      <div className="z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain p-2">
         {pack.isMyTurn && pack.cards ? (
-          <div className="card-grid-5">
-            {pack.cards.map((c, i) => (
+          <div className="card-grid-pack">
+            {displayCards.map((c, i) => (
               <div
                 key={i}
                 draggable
@@ -94,7 +117,7 @@ export function PackZone({ pack, cardMap, droppedCards, onPick }: {
             ))}
           </div>
         ) : (
-          <div className="card-grid-5">
+          <div className="card-grid-pack">
             {Array.from({ length: Math.min(pack.cardsLeft, 10) }).map((_, i) => (
               <div key={i} className="aspect-[7/10] w-full rounded-sm border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-950" />
             ))}

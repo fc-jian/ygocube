@@ -4,8 +4,9 @@ import { CardPreviewHost } from '@/components/CardPreview';
 import { FontSizeController } from '@/components/FontSizeController';
 
 export const metadata: Metadata = {
-  title: 'YGO Cube',
+  title: { default: 'YGO Cube', template: '%s · YGO Cube' },
   description: 'Cube draft tournament system for YGOPro',
+  applicationName: 'YGO Cube',
 };
 
 export const viewport: Viewport = {

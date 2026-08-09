@@ -16,8 +16,12 @@ export interface DraftState {
   config: Record<string, unknown>;
   players: { playerId: string; displayName: string; seat: number }[];
   pickedCards: number[];
+  cardsRemainingToDraft: number;
+  cardsRemainingExact: boolean;
+  disqualified: boolean;
   droppedCards: number[];
   phaseDeadline: string | null;
+  phaseDeadlineRemainingMs?: number;
   pendingPhase: string | null;
   poolInfo: { name: string; count: number };
   pack: {
@@ -25,13 +29,15 @@ export interface DraftState {
     cardsLeft: number;
     packsRemaining: number;
     currentPicker: string;
-    deadlineAt: string;
+    deadlineAt: string | null;
+    pausedRemainingMs?: number;
     isMyTurn: boolean;
     queueLength?: number; // passing 模式：本人牌堆队列长度
     reserveMs?: number; // passing 模式：本人剩余保留时间（ms）；deadlineAt - reserveMs = 基础时间用尽时刻
     cards?: number[];
     droppedCard?: number | null;
   } | null;
+  draftReserveMs?: number;
   // passing 模式：所有玩家的牌堆队列长度（仅数量，dev_docs/05 §3 信息隐藏）
   queueLengths?: { playerId: string; length: number }[];
   pause: { pausedAt: string | null; proposer: string | null; remainingMs: number } | null;
@@ -61,30 +67,42 @@ export function TopBar({ state, pid, token, tid }: { state: DraftState; pid: str
   const [showInfo, setShowInfo] = useState(false);
   const pack = state.pack;
   const cfg = state.config;
-  const now = useNowTick(!!pack?.isMyTurn);
+  const formatText = cfg.matchFormat === 'round_robin' ? '单循环' : cfg.matchFormat === 'double_elimination' ? '双败淘汰' : cfg.matchFormat === 'swiss' ? `瑞士 ${String(cfg.swissRoundCount ?? '-')} 轮${Number(cfg.playoffSize ?? 0) ? ` + Top ${String(cfg.playoffSize)} 淘汰` : ''}` : '历史自动赛制';
+  const now = useNowTick(!!pack?.isMyTurn && !!pack?.deadlineAt);
 
-  const secondsLeft = pack?.deadlineAt ? Math.max(0, Math.ceil((new Date(pack.deadlineAt).getTime() - now) / 1000)) : null;
+  const secondsLeft = pack?.pausedRemainingMs !== undefined
+    ? Math.max(0, Math.ceil(pack.pausedRemainingMs / 1000))
+    : pack?.deadlineAt
+      ? Math.max(0, Math.ceil((new Date(pack.deadlineAt).getTime() - now) / 1000))
+      : null;
   // passing 保留时间：base 期显示基础倒计时 + 保留余额；reserve 期红色显示保留倒计时
-  const reserveMs = pack?.reserveMs ?? 0;
-  const baseLeft = pack?.deadlineAt ? Math.max(0, Math.ceil((new Date(pack.deadlineAt).getTime() - reserveMs - now) / 1000)) : null;
+  const reserveMs = pack?.reserveMs ?? state.draftReserveMs ?? 0;
+  const baseLeft = pack?.pausedRemainingMs !== undefined
+    ? Math.max(0, Math.ceil((pack.pausedRemainingMs - reserveMs) / 1000))
+    : pack?.deadlineAt
+      ? Math.max(0, Math.ceil((new Date(pack.deadlineAt).getTime() - reserveMs - now) / 1000))
+      : null;
   const inReserve = baseLeft !== null && baseLeft <= 0 && secondsLeft !== null && secondsLeft > 0;
-  const fmtReserve = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.ceil((ms % 60000) / 1000)).padStart(2, '0')}`;
+  const fmtReserve = (ms: number) => {
+    const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+    return `${Math.floor(totalSeconds / 60)}:${String(totalSeconds % 60).padStart(2, '0')}`;
+  };
 
   const pickerName = state.players.find((p) => p.playerId === pack?.currentPicker)?.displayName ?? pack?.currentPicker;
 
   return (
     <header className="sticky top-0 z-40 border-b border-felt-edge bg-felt/95 backdrop-blur">
-      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-4 py-2">
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-2.5">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-          <span className="text-sm font-bold text-gold">{state.name}</span>
-          <span className="rounded bg-felt-edge px-2 py-0.5 text-xs text-slate-200">{STATUS_TEXT[state.status] ?? state.status}</span>
+          <span className="flex items-center gap-2 text-sm font-bold text-gold"><i className="h-2 w-2 rounded-full bg-emerald-300 shadow-[0_0_12px_rgba(110,231,183,0.8)]" />{state.name}</span>
+          <span className="rounded-full border border-emerald-200/10 bg-felt-edge px-2.5 py-0.5 text-xs text-slate-200">{STATUS_TEXT[state.status] ?? state.status}</span>
           {state.frozen && <span className="rounded bg-red-900 px-2 py-0.5 text-xs text-red-200">管理员冻结</span>}
           <button onClick={() => setShowInfo((v) => !v)} className="rounded bg-felt-edge px-2 py-0.5 text-xs hover:brightness-110">
             详情
           </button>
           {showInfo && (
             <span className="text-xs text-slate-400">
-              {String(cfg.maxPlayers ?? '-')} 人 · {cfg.mode === 'match' ? '三局两胜' : '单局'} · 每堆 {String(cfg.packSize ?? `${String(cfg.packSizeMultiple ?? 3)}×人数`)} 张 · 卡池 {state.poolInfo?.name ?? cfg.cardPool ?? '-'}（{String(state.poolInfo?.count ?? '-')} 张）· 主卡组 {String(cfg.mainMin)}-{String(cfg.mainMax)} · 额外 {String(cfg.extraMax)} · 副卡组 {String(cfg.sideMax)} · 选牌限时 {String(cfg.pickSeconds)} 秒
+              {String(cfg.maxPlayers ?? '-')} 人 · {formatText} · {cfg.mode === 'match' ? '三局两胜' : '单局'} · 每堆 {String(cfg.packSize ?? `${String(cfg.packSizeMultiple ?? 3)}×人数`)} 张 · 卡池 {state.poolInfo?.name ?? cfg.cardPool ?? '-'}（{String(state.poolInfo?.count ?? '-')} 张）· 主卡组 {String(cfg.mainMin)}-{String(cfg.mainMax)} · 额外 {String(cfg.extraMax)} · 副卡组 {String(cfg.sideMax)} · 选牌限时 {String(cfg.pickSeconds)} 秒
             </span>
           )}
         </div>
@@ -93,22 +111,33 @@ export function TopBar({ state, pid, token, tid }: { state: DraftState; pid: str
             // passing 模式：状态栏展示每位玩家的牌堆队列长度（高亮自己）；人多时横向滚动不挤破布局
             <div className="flex min-w-0 max-w-full items-center gap-2 overflow-x-auto text-slate-200">
               <span className="shrink-0 text-slate-400">队列</span>
-              {state.queueLengths.map((q) => {
+              {state.queueLengths.map((q, index) => {
                 const name = state.players.find((p) => p.playerId === q.playerId)?.displayName ?? q.playerId;
                 return (
-                  <span key={q.playerId} className={`shrink-0 ${q.playerId === pid ? 'font-semibold text-gold' : ''}`}>
-                    {name} <b>{q.length}</b>
+                  <span key={q.playerId} className="flex shrink-0 items-center gap-2">
+                    {index > 0 && <span className="text-emerald-300/50">→</span>}
+                    <span className={q.playerId === pid ? 'font-semibold text-gold' : ''}>{name} <b>{q.length}</b></span>
                   </span>
                 );
               })}
+              <span className="shrink-0 rounded bg-felt-edge px-2 py-0.5 text-emerald-100">
+                {state.cardsRemainingExact ? '还可获得' : '预计还可获得'} <b>{state.cardsRemainingToDraft}</b> 张
+              </span>
               {pack && secondsLeft !== null && (
-                inReserve ? (
+                pack.pausedRemainingMs !== undefined ? (
+                  <span className="rounded bg-amber-950 px-2 py-0.5 font-mono text-amber-200">已暂停 · 剩余 {secondsLeft} 秒</span>
+                ) : inReserve ? (
                   <span className="rounded bg-red-900 px-2 py-0.5 font-mono text-red-100">保留时间 {secondsLeft} 秒</span>
                 ) : (
                   <span className={`rounded px-2 py-0.5 font-mono ${baseLeft !== null && baseLeft <= 5 ? 'bg-red-900 text-red-100' : 'bg-felt-edge text-gold'}`}>
                     {baseLeft ?? secondsLeft} 秒{reserveMs > 0 && <span className="text-slate-300"> · 保留 {fmtReserve(reserveMs)}</span>}
                   </span>
                 )
+              )}
+              {!pack && state.draftReserveMs !== undefined && (
+                <span className="shrink-0 rounded bg-felt-edge px-2 py-0.5 font-mono text-slate-200">
+                  保留 {fmtReserve(state.draftReserveMs)}
+                </span>
               )}
             </div>
           ) : pack ? (
@@ -158,11 +187,13 @@ export function DeckZone({ title, zone, codes, limit, cardMap, onCardDrop, onCar
   cardMap?: Record<number, CardInfo>;
   onCardDrop?: (code: number) => void;
   onCardPick?: (code: number, zone: 'main' | 'extra' | 'side') => void;
-  onCardMove?: (code: number, from: string, to: string, index?: number) => void;
+  onCardMove?: (code: number, from: string, to: string, index?: number, fromIndex?: number) => void;
 }) {
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const draggable = !!onCardMove || !!onCardDrop;
   const acceptsDrop = !!onCardPick || !!onCardMove || !!onCardDrop;
+  // Always render the server order. New cards therefore remain at the end and
+  // manual drag indices map directly to persisted indices.
   const ids = flipIds(zone, codes);
   return (
     <section
@@ -184,21 +215,19 @@ export function DeckZone({ title, zone, codes, limit, cardMap, onCardDrop, onCar
           onCardPick?.(code, zone);
         } else if (zoneKind === 'deck') {
           const from = e.dataTransfer.getData('application/x-card-source') || 'pool';
-          let index = dropIndex(e.currentTarget, e.clientX, e.clientY, codes.length);
-          // backend evaluates index after removing the card from its source,
-          // so a same-zone reorder from before the drop point shifts by one
-          if (from === zone) {
-            const fromIdx = codes.indexOf(code);
-            if (fromIdx >= 0 && fromIdx < index) index -= 1;
-          }
-          onCardMove?.(code, from, zone, index);
+          const rawFromIndex = e.dataTransfer.getData('application/x-card-source-index');
+          const fromIndex = rawFromIndex === '' ? undefined : Number(rawFromIndex);
+          const index = dropIndex(e.currentTarget, e.clientX, e.clientY, codes.length);
+          // Indices refer to the pre-move arrays. The backend performs same-zone
+          // removal adjustment atomically, including duplicate cards.
+          onCardMove?.(code, from, zone, index, fromIndex);
         } else {
           onCardDrop?.(code);
         }
       } : undefined}
       className="rounded-lg border border-felt-edge bg-felt/60 p-2"
     >
-      <header className="mb-1 flex items-center justify-between text-xs text-slate-300">
+      <header className="mb-1 flex items-center justify-between gap-2 text-xs text-slate-300">
         <span className="font-semibold">{title}</span>
         <span className="font-mono text-gold">
           {codes.length}
@@ -216,6 +245,7 @@ export function DeckZone({ title, zone, codes, limit, cardMap, onCardDrop, onCar
               e.dataTransfer.setData('text/plain', String(c));
               e.dataTransfer.setData('application/x-card-zone', 'deck');
               e.dataTransfer.setData('application/x-card-source', zone);
+              e.dataTransfer.setData('application/x-card-source-index', String(i));
             }}
             className="animate-card-in relative cursor-grab active:cursor-grabbing"
           >
