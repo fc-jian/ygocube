@@ -89,9 +89,9 @@
 
 ## 7. 客户端卡组同步（STOC_CUBE_DECK，cube-server 分支客户端构建）
 
-> 对应需求：进房后服务器把 cube 卡组同步到客户端本地 `deck/cube-current.ydk` 并锁定卡组选择；siding 在 cube 卡组范围内生效。协议定义见 dev_docs/07 §4.0。
+> 对应需求：进房后服务器把 cube 卡组同步到客户端本地 `deck/cube-deck-<tid>-<pid>-<timestamp>.ydk` 并锁定卡组选择；siding 在 cube 卡组范围内生效。协议定义见 dev_docs/07 §4.0。
 
-- `gframe/network.h`：新增 `#define STOC_CUBE_DECK 0xA`（变长 STOC；payload 同 CTOS_UPDATE_DECK 体：`int32 mainc(含extra), int32 sidec, int32 codes[]`）。**不 bump PRO_VERSION**（旧客户端忽略未知 STOC，向下兼容）。
-- `gframe/duelclient.cpp` `HandleSTOCPacketLan` 新增 case：解析 → `DeckManager::LoadDeck` 按类型分拣 extra → `SaveDeck` 到 `./deck/cube-current.ydk` → `RefreshCategoryDeck`/`RefreshDeck` 选中 → `LoadCurrentDeck` 填入 `current_deck` → 锁定 `cbCategorySelect/cbDeckSelect`（`setEnabled(false)`），置 `is_cube_deck_locked`；离房/新房间复位。
+- `gframe/network.h`：新增 `#define STOC_CUBE_DECK 0xA`（变长 STOC；payload 为 CTOS_UPDATE_DECK 体 + 可选 UTF-8 文件名尾部）。**不 bump PRO_VERSION**（旧客户端忽略未知 STOC/尾部，向下兼容）。
+- `gframe/duelclient.cpp` `HandleSTOCPacketLan` 新增 case：解析 → 校验安全文件名 → `DeckManager::LoadDeck` 按类型分拣 extra → `SaveDeck` 到 `./deck/<filename>.ydk` → `RefreshCategoryDeck`/`RefreshDeck` 选中 → `LoadCurrentDeck` 填入 `current_deck` → 锁定 `cbCategorySelect/cbDeckSelect`（`setEnabled(false)`），置 `is_cube_deck_locked`；离房/新房间复位。
 - 锁定拦截：`menu_handler.cpp` `CHECKBOX_HP_READY` 路径（~574-596）锁定态跳过下拉重载；`deck_con.cpp` `BUTTON_SIDE_RELOAD` 锁定态忽略；`BUTTON_SIDE_OK` 锁定态校验"三区并集多重集 == STOC_CHANGE_SIDE 时快照"，不符弹错不发送。
 - 客户端构建需 `--client --max-extra=30 --max-side=30`（53e25a89 宏覆盖），否则 cube 大卡组被 deck_con 编译期常量拦截。

@@ -14,6 +14,10 @@ server:
   port: 3001
   db_path: "data/cube.sqlite"
   cards_cdb: "srvpro/ygopro/cards.cdb"
+  strings_conf: "srvpro/ygopro/strings.conf"
+  allowed_origins: ["http://localhost:3000", "http://127.0.0.1:3000"]
+  # 仅本机临时开发可开启；生产环境必须使用非占位且互不相同的管理 token。
+  allow_insecure_defaults: false
 pics:
   # 服务端本地卡图根目录（可选，真实场景留空）：卡图只存在于玩家本地，由前端
   # showDirectoryPicker 显式授权后直接读取；留空则服务端代理 404、前端回退空白卡。

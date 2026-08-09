@@ -34,7 +34,7 @@ ygocube/
 - **选牌信息隐藏**：玩家只能看到自己当前可选牌堆的卡牌内容，其余只有数量；**SSE 广播事件一律不含卡牌/卡组内容与其他对局的房间名**（客户端 refetch 本人状态）。
 - **选牌模式（draftMode）**：默认 `passing`（每玩家 FIFO 牌堆队列，**按轮发堆**：一轮全空才发下一轮；队首堆选 1 张顺时针传递；各自独立计时 + 每玩家保留时间 `reserveSeconds` 默认 300s，超时先扣 reserve 耗尽才自动选；`evenPackCount` 默认开 = 堆数须为人数整数倍）；`serial` 为旧全局串行（仅 raw config 可设）。运行时按 `packs_created` 事件是否带 `queues` 分派，旧比赛回放行为不变。
 - **每玩家独立 URL**：玩家页路由为 `/t/:tid/{draft,deck,matches}/:pid`；token 按 `localStorage yc_token_<tid>_<pid>` 存储；缺失弹输入框；super token 可作万能玩家 token；tournament 关闭鉴权（`/admin/t/:tid/security`）则不校验。
-- **超时自动处理**：选牌超时 = 服务器随机选（记 `auto_picked`）；构筑超时 = 随机补/删至合法（记日志）。
+- **超时自动处理**：选牌超时 = 服务器随机选（记 `auto_picked`）；构筑默认不限时，由管理员手动进入对战，显式设置构筑限时时超时 = 随机补/删至合法（记日志）。暂停/冻结必须保存并原样恢复剩余倒计时。
 
 ## 关键文件地图
 

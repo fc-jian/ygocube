@@ -34,8 +34,9 @@ registration → drafting → deckbuilding → matches → finished
 
 ## 3. 选牌引擎（DraftModule）
 
-- **牌堆生成**：卡池（管理员选定的 cards.cdb 全量或自定义池）随机洗牌 → 顺序切成 N 个牌堆，每堆 size = `packSize`（任意正整数，默认 12，不再要求是人数整数倍；旧配置 `packSizeMultiple` 仍兼容 = 人数 × 倍数）。剩余卡处理由 `dropMode` 决定（默认 `drop_leftover`）：`use_all` 所有卡进牌堆（最后一堆可不满）；`drop_leftover` 只丢弃无法整除的余数（不要求牌堆数是玩家数倍数）；`drop_leftover_exact` 丢弃余数且要求牌堆数是玩家数倍数。丢弃的卡牌是否公开由 `dropPublic` 独立配置（默认公开；false 时只移除不展示）。牌堆总数（轮数）可由 `packCount` 显式设置：≤ floor(池卡数 / 每堆卡数) 时固定堆数、剩余卡全部随机丢弃；**> 该上限时推断为"用尽全部卡池"**——堆数 = ceil(池卡数 / 每堆卡数)（末堆可不满），不丢弃（创建界面据此省略"剩余卡处理"选项；`dropMode` 保留为 legacy，仅未显式 packCount 的自动情形与旧比赛回放使用）。缺省按 dropMode 自动决定。 牌堆构成由 `packStrategy` 决定（默认 `stratify`）：`stratify` 主卡/额外卡按整体比例均匀分布到每一堆；`random` 全卡池随机切堆；`main_then_extra` 先排完全部主卡再排额外卡。
+- **牌堆生成**：卡池（管理员选定的 cards.cdb 全量或自定义池）随机洗牌 → 顺序切成 N 个牌堆，每堆 size = `packSize`（任意正整数，默认 18，不再要求是人数整数倍；旧配置 `packSizeMultiple` 仍兼容 = 人数 × 倍数）。剩余卡处理由 `dropMode` 决定（默认 `drop_leftover`）：`use_all` 所有卡进牌堆（最后一堆可不满）；`drop_leftover` 只丢弃无法整除的余数（不要求牌堆数是玩家数倍数）；`drop_leftover_exact` 丢弃余数且要求牌堆数是玩家数倍数。丢弃的卡牌是否公开由 `dropPublic` 独立配置（默认**不**公开；true 时公开列表，false 只移除不展示）。牌堆总数（轮数）可由 `packCount` 显式设置：≤ floor(池卡数 / 每堆卡数) 时固定堆数、剩余卡全部随机丢弃；**> 该上限时推断为"用尽全部卡池"**——堆数 = ceil(池卡数 / 每堆卡数)（末堆可不满），不丢弃（创建界面据此省略"剩余卡处理"选项；`dropMode` 保留为 legacy，仅未显式 packCount 的自动情形与旧比赛回放使用）。缺省按 dropMode 自动决定。 牌堆构成由 `packStrategy` 决定（默认 `stratify`）：`stratify` 主卡/额外卡按整体比例均匀分布到每一堆；`random` 全卡池随机切堆；`main_then_extra` 先排完全部主卡再排额外卡。
 - **传递式轮转（draftMode=passing，默认）**：每名玩家维护一个 FIFO 牌堆队列，**按轮发堆**：开局只发第 0 轮（堆 k → 座位 k，k<n）；一轮中所有玩家的队列全部选空后才发下一轮（整轮 n 堆按座位入队尾；`evenPackCount` 关闭且堆数非人数整数倍时，末尾残轮 r 堆随机分给 r 名互斥玩家）。玩家只要队列非空即可随时从**队首堆**选 1 张；选完若该堆未空则传给顺时针下一座位 (seat+1)%n 的玩家队尾，空堆直接消亡。全部堆发完且全部队列为空时选牌结束，进入构筑。
+- **每轮重排座位（reseatEachRound，默认开）**：passing 模式每一轮（所有玩家并行选完一堆）结束后，随机打乱玩家座位（seat_assign 事件落日志）再发下一轮；关闭则保持初始座位。
 - **牌堆数整数倍要求（evenPackCount，默认开）**：开启时牌堆总数必须是玩家人数的整数倍——显式 `packCount` 非倍数直接拒绝（PACKCOUNT_NOT_MULTIPLE）；自动计算时向下取整到最大倍数（`use_all` 的余数也同样舍弃，按 `dropPublic` 规则公开/丢弃；池子过小不足一轮时兜底不取整）。关闭则不做要求（残轮随机分配）。
 - **串行模式（draftMode=serial，旧兼容）**：全局单光标，从 1 号玩家开始顺时针选第一堆牌，一堆选完再开下一堆；最后选的玩家立刻连续选下一堆第一张。进行中的旧比赛按事件回放自动沿用此模式（`packs_created` 事件无 `queues` 字段即串行）。
 - **计时**：默认 30s/选。passing 模式下**每人独立计时**（队列非空即有自己的 deadline，每次选牌后重置），另有**每玩家保留时间**（`reserveSeconds`，默认 300 秒，可配置）：单次选牌超过基础时间后从保留时间扣除（不刷新），保留时间耗尽才真正超时——最终 deadline = 选牌开始 + pickSeconds + 剩余保留时间。serial 模式计时器只在轮到自己时启动（无保留时间）。超时服务器**随机选牌**（从队首堆/当前堆未选牌中随机），事件日志记录 `auto_pick`。
@@ -46,26 +47,24 @@ registration → drafting → deckbuilding → matches → finished
 
 ## 4. 构筑校验（DeckModule）
 
-- 校验规则（服务器权威）：main 40~60、extra ≤15、side ≤15（默认，均可配置）；main 只能主卡组类型、extra 只能额外类型（按卡类型判定）、side 两者皆可；单卡最多重复次数（`maxCopies`，默认 3，可配置）；**卡组必须是已选卡的子集**（`deck/move from=pool` 同样校验卡属于本人已选卡，防绕过选牌）。
+- 校验规则（服务器权威）：main 40~60、extra ≤30、side ≤30（默认，均可配置）；main 只能主卡组类型、extra 只能额外类型（按卡类型判定）、side 两者皆可；单卡最多重复次数（`maxCopies`，默认 1，可配置）；**本人必须选到过该编号**，选到一次即取得最多 `maxCopies` 份构筑许可（`deck/move from=pool` 同样校验，防绕过选牌）。
 - **锁定/解锁**：锁定后服务器校验；时限（整阶段倒计时）到达自动锁定，不合格则**随机填补/删除** 至满足限制（事件日志记录自动修正明细）。
 - ydk 导出：`GET /t/:id/player/:pid/deck.ydk`（鉴权后返回，格式 `#main` / `!side`，供玩家导入 ygopro 客户端）。
 - 数据来源：cards.cdb 导入 SQLite（cards 表：id/code、名称、类型位、效果文本、atk/def/level 等；文本含中/英）。
 
 ## 5. 排表与对局（MatchModule）
 
-- **排表规则**（默认，来自 guide）：
-  - 3~5 人：单循环；
-  - 6~8 人：4 轮瑞士轮直决；
-  - 9~16 人：4 轮瑞士轮 → 前 4 强单败淘汰（半决赛/决赛）；
-  - 17+：标准瑞士轮（轮数 = ceil(log2 N) + 1 之类的标准规则，实现时取标准公式）+ 前 8 淘汰赛。
-  - Match 模式（BO3，含换 side）或 Single（BO1），报名时确定。
+- **赛制必须显式保存**：新建比赛支持单循环、手动轮数瑞士轮（可选 0/2/4/8…人单败淘汰）和双败淘汰。界面按人数给出历史规则对应的推荐值，但推荐会在创建时写入配置，不在开赛时自动推断；首场对局生成后锁定。缺少赛制字段的旧比赛继续按历史规则回放。
+- **推荐值**：2~5 人单循环；6~8 人 4 轮瑞士无淘汰；9~16 人 4 轮瑞士 Top 4；17+ 为 `ceil(log2 N)+1` 轮瑞士 Top 8。
+- **双败**：随机种子持久化，胜者组/败者组分别推进，两败淘汰；总决赛仅一场、不重置 bracket。
+- Match 模式（BO3，含换 side）或 Single（BO1）仍在报名时确定。
 - **每轮流程**：
-  1. `scheduling`：按当前积分排对阵（瑞士轮：积分相同优先、避免重复交手；单循环：轮转法）；
+  1. `scheduling`：按当前积分排对阵（瑞士轮：积分相同优先、历史对手为硬排除约束，必须先求出整轮无重复交手的完整匹配；不得因逐桌贪心或剩余玩家兜底而安排重赛；无合法整轮时报 `NO_VALID_PAIRING`；单循环：轮转法）；
   2. `playing`：为每个对阵调 srvpro `/cube/create_room`（密码随机、deck_size 参数、cube_decks=双方固定卡组、cube_mode）；把服务器地址+端口+密码通知双方（前端展示 + SSE）；
   3. `reporting`：结果采集双通道——srvpro webhook POST 到本服务（主）+ 轮询 `/cube/room_status`（兜底）；必要时支持玩家上报与管理员仲裁（配置项，默认以 srvpro 数据为准）；
   4. 全部对阵结束 → 更新积分 → 下一轮或进入淘汰赛/结束。
 - 瑞士轮积分：胜 3 平 1 负 0；Tiebreaker 依次为：净胜局数（2:1=1、2:0=2、轮空=0）→ OMW%（对手胜率）→ 历史对手总积分。
-- 轮数：3~5 人单循环（n-1 轮）；6~16 人 4 轮瑞士轮（9~16 人后接前 4 强单败淘汰）；17+ 标准瑞士轮（ceil(log2N)+1 轮）后接前 8 淘汰赛；**季后赛种子按积分+净胜局取**（非最后一轮胜者）。
+- 管理员可标记玩家退赛；当前已生成对局不自动改判，后续排表排除。首轮前可恢复，首轮后不可撤销。淘汰赛种子采用高低种子固定 bracket。
 
 ## 6. srvpro 集成（SrvproClient）
 
@@ -77,22 +76,23 @@ registration → drafting → deckbuilding → matches → finished
 
 - **events 表**（append-only）：`(seq, tournament_id, entity, action, payload_json, created_at, actor)`；所有变更先写日志再执行（或同事务）。
 - **快照**：每 N 条事件或阶段切换时写 `tournament_snapshots`（全量状态 JSON）；恢复 = 最近快照 + 重放其后事件。
-- **时间回溯（管理员）**：`POST /admin/t/:id/revert?seq=<n>` → 生成当前状态副本（存档）→ 用 seq 处状态重建（快照+重放）→ 存档保留可回退。回溯期间标记 tournament 为 `admin-frozen`，禁止玩家操作。
+- **时间回溯（管理员）**：先预览影响，再以 `{ seq, confirm_name }` 执行不可恢复的硬截断。系统冻结 tournament、停止计时/建房、关闭活动 srvpro 房间，在单个 SQLite 事务中删除目标 seq 之后的事件与快照并重建投影表；`admin_actions` 仅保留不含秘密的审计摘要。
 - 选牌/构筑阶段天然适合事件回溯（无外部副作用）；对局阶段回溯需先解散相关 srvpro 房间（管理员确认后执行）。
 
 ## 8. SQLite Schema（要点）
 
 ```sql
-tournaments(id, name, config_json, status, round, created_at, updated_at, admin_token_hash, auth_required)  -- 后两列由 migrate 自动补充
-tournament_players(id, tournament_id, player_id, display_name, token_hash, seat, joined_at, eliminated)
+tournaments(id, name, config_json, status, round, created_at, updated_at, admin_token_hash, auth_required, frozen)
+tournament_players(id, tournament_id, player_id, display_name, token_hash, seat, joined_at, eliminated, active)
 packs(id, tournament_id, index, size, drop_card_code, order_json)      -- drop 公开
 picks(id, tournament_id, player_id, pack_index, pick_round, card_code, auto_picked, picked_at)
 decks(id, tournament_id, player_id, main_json, extra_json, side_json, locked_at, status)
 matches(id, tournament_id, round, player_a, player_b, table_no, room_name, room_status_json,
-        result_a, result_b, source, started_at, finished_at)
+        player_a_pass, player_b_pass, result_a, result_b, source, faulted_at, started_at, finished_at)
 events(seq, tournament_id, entity, action, payload_json, created_at, actor)
-tournament_snapshots(id, tournament_id, seq, state_json, created_at)
-cards(code PK, name, type, ...)   -- 从 cards.cdb 导入
+tournament_snapshots(id, tournament_id, seq, event_seq, state_json, created_at)
+cards(code PK, name, type, desc, level, lscale, rscale, link_markers, race, attribute,
+      atk, def, alias, setcodes_json, setnames_json, search_text, metadata_version)
 card_pools(id, name UNIQUE, codes_json, created_at)
 admin_actions(id, tournament_id, actor, action, detail_json, created_at)
 ```
@@ -117,11 +117,15 @@ server:
   port: 3001
   db_path: "data/cube.sqlite"
   cards_cdb: "srvpro/ygopro/cards.cdb"   # 相对 config.yaml 所在目录解析
+  strings_conf: "srvpro/ygopro/strings.conf"
+  allowed_origins: ["http://localhost:3000"]
+  allow_insecure_defaults: false
 pics:
   ygopro_root: ""       # 前端本地卡图：指向 ygopro 根目录（含 pics/ 与 expansions/*/pics/）
 ```
 
-- 后端启动时读取；相对路径（db_path/cards_cdb）以 config.yaml 所在目录为基准解析。
+- 后端启动时读取；相对路径以 config.yaml 所在目录为基准解析。除非显式开启仅供本地调试的
+  `allow_insecure_defaults`，占位/相同 admin token 或空 srvpro API key 会令启动失败。
 
 ### 9.2 admin token 体系（三层）
 
