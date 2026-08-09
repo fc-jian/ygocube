@@ -1,116 +1,143 @@
-# 01 - 项目总览与总体架构
+# 01 - 项目总览与当前架构
+
+> 本文是仓库当前实现的入口说明（最后核对：2026-08-09）。需求原稿见
+> `original_guide.md`；接口字段以 `07-protocol-api-design.md` 和
+> `cube/packages/shared/src/index.ts` 为准。
 
 ## 1. 项目目标
 
-基于开源 `ygopro` 游戏引擎 + `srvpro` 服务端，构建一套全流程 **轮抽模式 (Cube)** YGO 对战系统：
+YGO Cube 把 YGOPro 的对战引擎、srvpro 的联网房间和一个 Web 控制端组合成
+完整的轮抽比赛：
 
-一次完整 Cube Tournament 流程 = **选牌 (Draft)** → **构筑 (Deck Building)** → **对战比赛 (Matches)**。
+`报名 → 选牌（draft）→ 构筑（deck build）→ 排表/对战 → 结果与排名`
 
-| 阶段 | 说明 |
-|---|---|
-| 报名 | 主办方确定人数/卡池/模式等参数，生成 URL；玩家打开网页 UI 报名 |
-| 选牌 | 全卡池随机打乱 → 若干牌堆（每个牌堆大小为玩家数×3，drop last 且预先公开）；玩家按圆桌蛇形轮转选牌，30s 时限（超时随机），选牌互相不可见 |
-| 构筑 | 用选到的牌构筑主卡组(40~60) + 额外(≤15) + 副卡组(≤15，Match 模式)；锁定后服务器校验，超时自动补/删 |
-| 对战 | 按人数规则排表（单循环/瑞士轮+淘汰赛），每轮通过 srvpro 建房间，自动获取赛果并排下一轮 |
+当前支持：
+
+- `passing` 传递式选牌（默认）和用于旧比赛回放的 `serial` 串行模式；每堆
+  卡数可任意设置，默认 18；passing 默认按整轮发堆、每轮可随机换位。
+- 每名玩家独立的选牌计时与 300 秒保留时间；超时才自动随机选牌。暂停会
+  持久化冻结时刻的剩余时间，恢复后原样继续。
+- 服务器权威的主/额外/副卡组构筑、YGOPro 同逻辑整理、手动拖动和主卡组
+  随机洗牌模拟；默认主卡组 40--60、额外/副卡组各最多 30、单卡最多 1 张。
+- 明确赛制：单循环、手动轮数的瑞士轮（可选单败淘汰，淘汰人数可为 0）和
+  双败淘汰。创建时按人数写入推荐值，开赛后不再自动改赛制。
+- 卡池导入、字面卡名校验、缺失编号报告、默认卡池、事件日志/快照/回溯和
+  SSE 实时刷新。
 
 ## 2. 系统组成
 
 ```
-┌──────────────────────────── 部署拓扑 ────────────────────────────┐
-│                                                                  │
-│  [玩家浏览器]                                                     │
-│     │  HTTPS / SSE (选牌、构筑、排表、房间信息)                     │
-│     ▼                                                             │
-│  ┌─────────────────────────────────────────────┐                 │
-│  │  cube  (本项目新开发, cube/ 目录)             │                 │
-│  │  ├─ apps/web    Next.js 前端 (选牌/构筑/对局UI)│                │
-│  │  └─ apps/api    NestJS 后端 + SQLite          │                │
-│  │      └─ SrvproClient: HTTP 调用 srvpro        │                │
-│  └────────────────────┬────────────────────────┘                 │
-│                       │ HTTP (api_key 鉴权)                       │
-│                       ▼                                           │
-│  ┌─────────────────────────────────────────────┐                 │
-│  │  srvpro  (mycard/srvpro, CoffeeScript)      │                 │
-│  │  ├─ 房间管理 / 玩家代理 / 战绩与卡组记录       │                 │
-│  │  └─ spawn 每房间一个 ygopro 无头宿主进程      │                 │
-│  └────────────────────┬────────────────────────┘                 │
-│                       │ 命令行参数 + stdout(端口) + 游戏协议       │
-│                       ▼                                           │
-│  ┌─────────────────────────────────────────────┐                 │
-│  │  ygopro server binary (mycard/ygopro        │                 │
-│  │  **server 分支** 编译, 无头宿主模式)          │                 │
-│  │  └─ ocgcore 规则引擎 + netserver (房间内对战) │                 │
-│  └────────────────────┬────────────────────────┘                 │
-│                       │ 游戏协议 (CTOS/STOC, 7911 经 srvpro 代理)  │
-│                       ▼                                           │
-│  [玩家 ygopro 客户端]  ←── 玩家手动用 ydk 卡组进房对战              │
-└───────────────────────────────────────────────────────────────────┘
+玩家浏览器 ── REST/SSE ──▶ cube/apps/api (NestJS + better-sqlite3)
+     │                            │
+     │                            └── HTTP + X-Cube-Api-Key
+     │                                         ▼
+玩家 YGOPro 客户端 ◀── srvpro (cube 分支，房间代理/结果) ──▶ ygopro 宿主
+                                                        (cube-server 分支)
 ```
 
-**关键架构事实（来自代码勘察，详见 02-codebase-analysis.md）：**
+- 根仓库 `fc-jian/ygocube` 保存控制端、契约、脚本和文档。
+- `srvpro/`、`ygopro/` 是分别指向 `fc-jian/srvpro:cube` 与
+  `fc-jian/ygopro:cube-server` 的 Git submodule；它们保留各自上游许可证。
+- srvpro 每个房间启动一个无头 ygopro 宿主，读取 stdout 中的动态端口并代理
+  客户端流量。Cube 房间还会同步服务器权威卡组和安全的卡组文件名。
 
-1. **srvpro 本身不跑规则引擎**。`Room.spawn()` 为每个房间 `spawn './ygopro', param, {cwd:'ygopro'}`（`ygopro-server.coffee:1287,1454`），子进程把监听端口打印到 stdout（`ygopro-server.coffee:1480-1483`），srvpro 再把玩家 socket 代理到该端口。被 spawn 的 `./ygopro` 是无头宿主模式，其源码在 mycard/ygopro 的 **`server` 分支**（`gframe.cpp` 的 `main()`：`argc >= 13` 时按位置参数启动宿主，支持 `MAX_MATCH_COUNT` 个 seed 参数）。
-2. **deck 大小限制目前是编译期常量**：`gframe/deck_manager.h:17-20`（`DECK_MAX_SIZE=60 / DECK_MIN_SIZE=40 / EXTRA_MAX_SIZE=15 / SIDE_MAX_SIZE=15`），在 `DeckManager::CheckDeck()`（`deck_manager.cpp:87`）中硬编码执行。
-3. **srvpro 已有大量可复用机制**：房间名即规则字符串（Room 构造器解析 `LP8000,TIME180,NOCHECK,...` 等 token）；战绩/卡组/回放 webhook 上报（`arena_mode.post_score`，`room.delete():1510`）；断线重连模块（`settings.modules.reconnect`，`CLIENT_reconnect`）；HTTP 服务器（`settings.modules.http.port`，默认 7922，已有 websocket roomlist）。
-4. **结果获取已有成熟模式**：srvpro 追踪 `room.scores` / `duel_stage` / `decks`，房间销毁时通过 axios POST 到外部 URL（带 10 次重试）。cube 直接复用/扩展该模式。
+## 3. 技术栈与目录
 
-## 3. 技术栈
+| 目录/组件 | 当前实现 |
+| --- | --- |
+| `cube/apps/api` | NestJS、TypeScript、better-sqlite3；事件日志同时维护查询投影 |
+| `cube/apps/web` | Next.js 14 App Router、React、TailwindCSS、SSE |
+| `cube/packages/shared` | 浏览器/API/srvpro 共用的类型与协议常量 |
+| `srvpro` | CoffeeScript 源码及编译后的 JS，Cube HTTP API 在 `cube.coffee` |
+| `ygopro` | C++ premake 工程；server/client 共用源码，Cube 扩展在 `cube-server` |
+| `dev_docs` | 架构、接口、实现状态与验收记录 |
 
-| 组件 | 技术 |
-|---|---|
-| cube 前端 | Next.js (App Router) + React + TailwindCSS；SSE 实时推送 |
-| cube 后端 | NestJS + TypeORM/SQLite；事件日志 + 快照实现可恢复状态 |
-| srvpro | CoffeeScript（Node.js），原样扩展，新增 `modules.cube` |
-| ygopro | C++ (premake5)，server 分支改造 |
-| 数据库 | SQLite（cube 专用；srvpro 侧保持其现有存储） |
+根仓库只追踪运行控制端所需的最小元素。`assets/` 是运行时挂载点，整个目录
+（包括符号链接、卡图、数据库和生成缩略图）由 `.gitignore` 排除，不属于
+仓库内容。
 
-## 4. 目录规划
+## 4. 生命周期与默认值
 
+状态机为：
+
+`registration → drafting → deckbuilding → matches → finished`
+
+| 配置 | 默认值 | 说明 |
+| --- | ---: | --- |
+| `packSize` | 18 | 每堆卡数，不参与“公平”判断 |
+| `draftMode` | `passing` | 每轮发堆，队首堆顺时针传递 |
+| `pickSeconds` | 30 秒 | 基础选牌时间 |
+| `reserveSeconds` | 300 秒 | passing 每玩家保留时间，耗尽才自动选 |
+| `evenPackCount` | `true` | 牌堆数须为玩家数整数倍；关闭时末轮随机分配 |
+| `reseatEachRound` | `true` | passing 每轮结束重新随机座位 |
+| `deckbuildingSeconds` | `null` | 无限；管理员确认后手动进入对战 |
+| `mainMin/mainMax` | 40/60 | 主卡组限制 |
+| `extraMax/sideMax` | 30/30 | 额外/副卡组上限 |
+| `maxCopies` | 1 | 三个区域合计的构筑许可上限 |
+
+牌堆数是玩家人数的整数倍时，每名玩家在完整一轮得到同样的 `packSize` 张
+牌；不满足时 UI/API 只给出可获得区间，并不会把每堆大小误判为不公平。
+`packCount`、`dropMode`、`dropPublic` 和 `packStrategy` 仍支持显式配置及旧
+比赛回放。
+
+## 5. 赛制
+
+`matchFormat` 在创建时或首场对局前由管理员明确保存：
+
+1. `round_robin`：轮转法单循环。
+2. `swiss`：`swissRoundCount` 手动指定轮数，`playoffSize` 为 0 或不超过
+   有效人数的 2 次幂；瑞士排表把所有历史对手作为硬排除约束，无法产生完整
+   配对时返回 `NO_VALID_PAIRING`。
+3. `double_elimination`：胜者组/败者组，两败淘汰，最后一场为一次性总决赛。
+
+缺少赛制字段的历史比赛只按旧配置兼容回放。新建比赛的推荐值为：2--5 人
+单循环；6--8 人瑞士 4 轮无淘汰；9--16 人瑞士 4 轮 Top 4；17 人以上瑞士
+`ceil(log2(n))+1` 轮 Top 8。推荐值只是创建时写入的初始值，管理员仍可修改。
+
+## 6. 运行端口与部署
+
+| 服务 | 默认端口 | 用途 |
+| --- | ---: | --- |
+| Web | 3000 | 玩家/管理员页面 |
+| cube API | 3001 | REST、SSE、卡图代理 |
+| srvpro 游戏 | 7911 | YGOPro 客户端连接 |
+| srvpro HTTP | 7922 | `/cube/*` 与现有管理接口 |
+| srvpro HTTPS | 7923 | 可选 |
+| ygopro 宿主 | 动态 | 每房间由 srvpro 读取 stdout 端口 |
+
+所有 cube API 启动配置从根目录 `config.yaml`（或 `CONFIG_FILE`）读取；相对
+路径按配置文件目录解析。生产环境必须设置唯一的 admin/srvpro token，并把
+`server.allowed_origins` 精确列出 Web 来源。
+
+运行时卡牌资源必须由部署脚本或管理员另行提供：
+
+```text
+cards.cdb   script/   pics/   expansions/
 ```
-ygocube/
-├── AGENTS.md            # 项目约定（本文档的总结）
-├── dev_docs/            # 开发文档（本套文档）
-├── ygopro/              # mycard/ygopro，master=客户端；改动必须新建分支
-│   └── (新分支 cube-server 基于 origin/server)   # 无头宿主二进制
-├── srvpro/              # mycard/srvpro，改动必须新建分支 (cube)
-├── assets/              # 卡牌数据库 cards.cdb / pics/ / script/ / expansions/
-└── cube/                # 新开发 web 控制端
-    ├── apps/web/        # Next.js 前端
-    ├── apps/api/        # NestJS 后端
-    ├── packages/shared/ # 共享类型/常量（前后端 + srvpro 契约）
-    └── docs/            # 运行/部署说明
-```
 
-## 5. 端口与部署约定（初始值，可在 .env 覆盖）
+它们可以放在 `srvpro/ygopro/`，也可以用 `server.cards_cdb`、
+`pics.ygopro_root` 指向已有安装。原始卡图不入库；可选的低清 AVIF 由
+`pics.avif_dir` 提供。
 
-| 服务 | 端口 | 说明 |
-|---|---|---|
-| cube web | 3000 | Next.js，面向玩家 |
-| cube api | 3001 | NestJS REST + SSE |
-| srvpro 游戏 | 7911 | 玩家 ygopro 客户端直连（srvpro 代理） |
-| srvpro http | 7922 | cube↔srvpro API（新增 `/cube/*` 端点） |
-| srvpro ssl | 7923 | 可选 |
-| ygopro 宿主进程 | 动态 | 每个房间一个，端口随机，stdout 打印 |
+## 7. 关键设计约束
 
-部署布局：`srvpro/ygopro/` 目录内放置 server 分支编译产物 + `assets/` 内容（cards.cdb、script/、pics/、expansions/）。
+1. 所有比赛状态先写 append-only 事件，再由同一 `apply()` 回放；快照用于
+   快速恢复，管理员回溯会冻结比赛、关闭活动房间并截断未来事件。
+2. 玩家接口默认校验 `tournamentId + playerId + token`；super token 可作
+   调试用万能玩家 token。每场比赛可由管理员显式关闭 token 校验。
+3. SSE 只广播脱敏事件：不带卡牌/卡组内容，也不带其他对局房间名；客户端
+   收到事件后重新读取自己的状态。
+4. ygopro 启动参数只在末尾追加 4 个运行时 deck limit，旧参数组合继续按
+   40/60/15/15 工作；游戏协议结构只增不改。
 
-## 6. 核心设计决策
-
-1. **所有状态在服务器**（cube 后端），浏览器断线/刷新可随时恢复；后端事件日志 append-only，支持故障恢复与管理员时间回溯。
-2. **鉴权三要素**：`tournamentId + playerId + token`。所有后端输入（REST/SSE/ws）都必须携带并校验；token 由服务器报名时签发，入 cookie 且支持手动输入。
-3. **服务器不存储/传输原始卡图**：原图由前端配置本地 ygopro 路径读取 pics。例外：服务器保存**低清 avif 缩略图**（`assets/pics_avif/`，vips Q30/200px 批量生成），本地绑定失败时前端先 fallback 到 `GET /pics/:code.avif`，再尝试原图代理，最后空白卡。后端只下发卡牌 code 与卡面文本数据（从 cards.cdb 导入 SQLite）。
-4. **协议兼容**：ygopro 协议 struct 只增不改；宿主二进制新增参数追加在 spawn 参数尾部；srvpro 仅在 cube 房间启用新参数。
-5. **分支纪律**：ygopro/srvpro 均禁止直接改 master；各自新建特性分支开发适配（见 08-task-breakdown.md M0）。
-6. **对局结果采集双通道**：srvpro webhook 主动推送（主）+ cube 轮询（兜底）。
-
-## 7. 相关文档索引
+## 8. 文档索引
 
 | 文档 | 内容 |
-|---|---|
-| 02-codebase-analysis.md | ygopro / srvpro 现状勘察与扩展点 |
-| 03-ygopro-modification-plan.md | 宿主二进制改动方案 |
-| 04-srvpro-modification-plan.md | srvpro 改动方案 |
-| 05-cube-backend-plan.md | cube 后端模块 + SQLite 设计 |
-| 06-cube-frontend-plan.md | cube 前端页面与交互设计 |
-| 07-protocol-api-design.md | 三侧接口/协议/鉴权详细定义 |
-| 08-task-breakdown.md | 里程碑与任务拆分 |
+| --- | --- |
+| `02-codebase-analysis.md` | 两个 submodule 的分支、关键文件与实际扩展点 |
+| `03-ygopro-modification-plan.md` | 宿主参数、运行时 deck limit、客户端同步实现 |
+| `04-srvpro-modification-plan.md` | Cube 房间、长密码、卡组覆盖和 webhook |
+| `05-cube-backend-plan.md` | 后端状态机、牌堆、构筑、排表、数据库和配置 |
+| `06-cube-frontend-plan.md` | 页面路由、交互、脱敏、卡图和实时刷新 |
+| `07-protocol-api-design.md` | 三侧唯一接口契约 |
+| `08-task-breakdown.md` | 已完成项、未完成验证项和验收命令 |

@@ -1,118 +1,126 @@
-# 04 - srvpro 改造方案（cube 集成层）
+# 04 - srvpro Cube 集成说明
 
-> 目标代码库：`mycard/srvpro`。**分支策略**：新建 `cube` 分支，禁止直接改 master。改动集中在 `ygopro-server.coffee` + `data/default_config.json` + 新增 `cube.coffee`（建议拆出独立模块文件，避免单文件继续膨胀）。
+> 当前实现位于 `srvpro` submodule 的 `cube` 分支（源文件和编译后的 JS 都已
+> 提交）。srvpro 仍是房间代理和 YGOPro 宿主编排层；比赛业务状态由 cube API
+> 保存。
 
-## 1. 需求映射
+## 1. 房间规则与宿主启动
 
-| 需求 | 实现位置 |
-|---|---|
-| deck size 动态可配置（建房间参数） | Room 构造器规则解析 + spawn 参数追加 |
-| 固定卡组记录、自动加载、验证 ID | UPDATE_DECK handler（cube 模式覆盖）+ 房间存储 |
-| 断线重连 | 复用 `modules.reconnect`（确认开启 + 文档化） |
-| 比赛结果自动获取，供 cube 调用 | 新增 `modules.cube`：webhook 推送（主）+ HTTP 查询（兜底） |
-| cube 建房间/通知服务器信息+密码 | HTTP `/cube/*` API（api_key 鉴权） |
+`ygopro-server.coffee` 的 `Room` 构造器支持：
 
-## 2. 改动清单
+```text
+MAIN<min>-<max> / MN<min>-<max>
+EXTRA<max>      / EX<max>
+SIDE<max>       / SD<max>
+```
 
-### 2.1 房间规则 token：deck size（Room 构造器）
+缺省值是 40/60/15/15；部分 token 会经过 `normalizeDeckSize()` 补齐其余字段。
+`Room.spawn()` 在传统 12 项参数后追加四个数值 deck limit，顺序必须与
+`dev_docs/03` 和 `gframe.cpp` 一致。只有含 `deck_size` 的 Cube 房间追加参数，
+普通旧房间不受影响。
 
-**文件：`ygopro-server.coffee`，`Room` 构造器（1289 起，规则解析段 1333-1436）**
+当前分支还把房间最终规则统一为 `lflist=-1`、`duel_rule=5`（新大师规则布局），
+轮抽环境不使用禁限卡表；若部署需要传统 srvpro 规则，应使用未合入 Cube 扩展
+的上游构建或另行回滚该策略。
 
-- 新增 token（风格与现有 `LP8000,TIME180` 一致）：
-  - `MAIN<min>-<max>`（如 `MAIN40-60`，短别名 `MN40-60`）
-  - `EXTRA<max>`（如 `EXTRA15`，短别名 `EX15`）
-  - `SIDE<max>`（如 `SIDE15`，短别名 `SD15`）
-- 协议限制：JOIN_GAME 的 pass 字段只有 20 个 UTF-16 字符，长规则串（如 `EXTRA30,SIDE30,M,TIME999#test` 共 29 字符）在标准客户端会被截断；srvpro 做了两层兼容：① 短别名（`EX30,SD30,M,TM999#x` 可放进 20 字符）；② 扩展解析——若客户端发送了超过 48 字节的加长 JOIN_GAME 包，srvpro 从原始 buffer 还原完整 pass（老客户端行为不变）。
-- 解析结果存入 `@hostinfo.deck_size = { main_min, main_max, extra_max, side_max }`；未指定时回退 `{40,60,15,15}`。
-- 同时允许 cube API 直接传 `hostinfo` 对象（见 2.4），token 解析与 API 传参共用同一校验函数 `normalizeDeckSize()`。
-- 紧凑格式（1333 正则）不改，cube 房间统一走扩展 token 或 API 传参。
+## 2. Cube HTTP API
 
-### 2.2 spawn 参数追加（Room.spawn，1454-1457）
+`cube.coffee` 由现有 HTTP listener 分派，所有请求都必须带
+`X-Cube-Api-Key`，错误使用 `{ok:false, code, message?}`：
 
-- 在现有 12 参数后追加 4 位：`@hostinfo.deck_size.main_min, main_max, extra_max, side_max`（顺序与 ygopro 侧 03-2.1 一致）。
-- 仅当 `@hostinfo.deck_size` 存在（cube 创建）时追加；普通房间不带 → 老宿主二进制行为不变。
-- spawn 前对 `@hostinfo.deck_size` 做 `normalizeDeckSize()` 归一化：规则字符串 token 可能只给部分字段（如仅 `MAIN40-50`），缺项回退默认，避免把 `undefined` 传给宿主导致 `SetDeckLimits` 静默失效（含 `deck_limits_set` 强制校验失效）。
-- 同步 ygopro 侧 `cube-server` 分支的解析（03-2.1），交付时两边参数表必须一致（维护在 07-protocol-api-design.md）。
+| 方法/路径 | 说明 |
+| --- | --- |
+| `POST /cube/create_room` | 接收 room name、hostinfo、deck size、登记玩家和固定卡组；幂等创建并等待宿主 stdout 端口 |
+| `GET /cube/room_status?room_name=` | 返回 established、port、duel stage、连接玩家和 scores |
+| `POST /cube/close_room` | 关闭房间并走 `Room.delete()` 结果流程 |
 
-### 2.3 固定卡组自动加载与 ID 验证（UPDATE_DECK handler，3487 起）
+`create_room` 中 `players[].name_vpass` 是 YGOPro 客户端实际输入的昵称，必须是
+ASCII 且与客户端一致；服务器根据 `cube_player_id_by_name` 将其映射到 Cube
+player id。Cube 创建会强制 `no_check_deck=true`、开启 replay 保存，并在
+宿主层仍执行运行时 deck limit/未知卡检查。
 
-cube 模式（`room.cube_mode`）下，UPDATE_DECK 处理改为：
+## 3. UPDATE_DECK 与客户端同步
 
-1. 按玩家身份（cube 在建房间时写入的 `player_id` ↔ srvpro 连接，**按 `client.name_vpass` 匹配**，如 `alice$pw1`）查房间内记录的固定卡组 `room.cube_decks[player_id]`；
-2. **忽略客户端上传的卡组内容**，把记录的卡组编码为 UPDATE_DECK buffer 并**返回该 buffer 替换转发包**（YGOProMessages 的 handler 返回 Buffer 才会替换转发内容，只改局部变量无效——`YGOProMessages.js:259-263`）；
-3. **ID 验证**：交给宿主 `LoadDeck`（未知 card code 记 `deck_error` → PlayerReady 报 UNKNOWNCARD）；srvpro 侧只做友好提示；
-4. 数量校验语义（实测确认）：宿主 `LoadDeck` 会把超出 `main_max/extra_max/side_max` 的卡**截断丢弃**（不会报错），`CheckDeck` 实际可触发的错误是 **main 低于 `main_min`（MAINCOUNT）与未知卡（UNKNOWNCARD）**；上层（cube 后端锁定校验）负责 max 侧拦截。
+### 3.1 开局覆盖
 
-> 说明：srvpro 不解析 cdb 数据结构本身时，可只做"ID 存在性"检查（data-manager 提供查询接口，实现时确认其 API），类型/数量规则由宿主最终裁决；srvpro 侧重提前反馈与日志。
+`UPDATE_DECK` handler 按房间的 Cube player id 查找 `cube_decks`：
 
-### 2.4 HTTP `/cube/*` API（新增模块 `cube.coffee`）
+- 开局忽略客户端上传内容，返回固定卡组 buffer；
+- `client.start_deckbuf` 保存覆盖后的 buffer，作为断线重连比较基准；
+- `mainc/sidec > 256` 直接拒绝，防止超大输入造成资源消耗。
 
-复用现有 http server（`httpRequestListener`，634）。新增端点（挂 `settings.modules.http` 同服）：
+### 3.2 siding 分流
 
-| 端点 | 方法 | 用途 |
-|---|---|---|
-| `/cube/create_room` | POST | 建房间：参数 = 房间名规则/或显式 hostinfo、密码、玩家列表（name_vpass + cube player_id）、cube_decks、cube_mode |
-| `/cube/room_status` | GET | 查询房间状态：players 连接情况、duel_stage、scores、decks、replays 摘要（供 cube 轮询兜底） |
-| `/cube/close_room` | POST | 强制解散房间（走 room.delete 流程，正常上报结果） |
-| `/cube/result` | POST | **cube 主动确认收到结果的 ack**（配合 webhook 重试） |
+在 `duel_stage=BEGIN` 之外，客户端上传的三区卡组若满足“各区数量与原卡组
+一致、main+extra+side 多重集一致”，就原样转发；否则回退服务器固定卡组。
+这与宿主 `DeckManager::LoadSide()` 的检查叠加，保证合法换 side、拒绝凭空
+添加卡片以及旧客户端兼容三者同时成立。
 
-- 鉴权：`X-Cube-Api-Key: <settings.modules.cube.api_key>`（所有 /cube/* 必带；与玩家协议隔离）。
-- 房间名生成：由 cube 生成唯一名（如 `CUBE-<tournamentId>-<round>-<table>`），srvpro 侧无需理解其业务含义；规则字符串与显式参数二选一，推荐显式 hostinfo 对象（避免长名字符串解析出错）。
+### 3.3 STOC_CUBE_DECK
 
-### 2.5 结果上报 webhook（room.delete()，1510 起）
+`JOIN_GAME` follow handler 在原入房消息发送完之后注入 `STOC_CUBE_DECK (0xA)`。
+payload 包含 main（含 extra）/side code 和可选安全文件名，文件名由 cube API
+生成并透传。合法命名格式为：
 
-- 新增 `settings.modules.cube.enabled && room.cube_mode` 分支：`axios.post(settings.modules.cube.webhook_url, {...})`（JSON，结构见 07-protocol-api-design.md），沿用 `utility.retry` 重试；cube 返回 ack 后停止重试。
-- 载荷包含：tournament_id、room 名、players（cube player_id + name_vpass）、scores、decks、deck_history、replays(base64)、first、wins、start/end。
-- 现有 arena_mode/challonge 分支不受影响。
+```text
+cube-deck-<tid>-<pid>-<timestamp>
+```
 
-### 2.6 配置（data/default_config.json 新增 `modules.cube`）
+仅允许字母、数字、点、下划线和连字符；客户端会自动保存 `.ydk` 并锁定卡组
+选择。重连时不重复注入，避免清除已经建立的客户端锁定。
+
+## 4. 长 JOIN_GAME 密码
+
+标准 48 字节包继续走原有解析。对于加长包，srvpro：
+
+1. 验证至少 8 字节头和 UTF-16 对齐；
+2. 要求 NUL 终止，最多 255 个 UTF-16 code unit；
+3. 禁止 NUL 后出现非零尾部；
+4. 使用扩展密码替代被 struct 截断的 `pass[20]`。
+
+任一步失败都向客户端发送诊断错误并取消加入。这样超限房间密码不会悄悄
+失效，也不会因多个可见相同前缀产生错误路由。
+
+## 5. 结果 webhook 与重试
+
+Cube 房间删除时，如果 `settings.modules.cube.enabled`，srvpro POST 到
+`webhook_url`：房间时间、Cube player id、`name_vpass`、score、当前 deck、
+deck history、first/wins 和 replay base64。请求带 `X-Cube-Api-Key`，沿用
+`utility.retry` 最多重试 10 次；cube API 以 room name 幂等处理重复结果。
+
+未启用 Cube 模块时不调用该 webhook。普通 srvpro 的 arena/challonge/云回放
+逻辑保持原分支行为，但要注意当前 `cube` 分支对房间规则的 MR5/no-banlist
+归一化是全局代码路径的一部分。
+
+## 6. 配置与构建
+
+`data/default_config.json` 的相关配置：
 
 ```json
 "cube": {
   "enabled": false,
   "api_key": "",
   "webhook_url": "",
-  "deck_override": true,
-  "reconnect": true
+  "room_wait_ms": 10000
 }
 ```
 
-- 默认 `enabled: false`，存量部署零影响。
-- 启动 init()（267 起）增加 cube 模块初始化：校验 api_key 非空、webhook_url 合法、注册 HTTP 路由（若启用）。
-- 建 cube 房间时强制 `no_check_deck=T`（deck_override 依赖）与 `replay_mode |= 0x1`（保存回放供 cube 归档）。
+修改 CoffeeScript 后必须同时生成 JS：
 
-### 2.7 断线重连
+```bash
+npx coffee -c ygopro-server.coffee cube.coffee
+```
 
-- 确认 `modules.reconnect` 配置在 cube 房间默认开启；cube 玩家断线 → 代理连接保持 + 超时窗口内重连比对固定卡组（2.3 已保证卡组一致，天然通过 `CLIENT_is_able_to_reconnect` 比对）。
-- 文档化参数：重连窗口秒数、是否允许踢号重连（`CLIENT_kick_reconnect`）。
+启动前把匹配当前 `cube-server` 分支的宿主放在 `srvpro/ygopro/ygopro`，并另行
+挂载 `cards.cdb`、`script/`、`pics/`、`expansions/`。这些资源和个人路径符号
+链接不属于根仓库。
 
-## 3. 构建与交付
+## 7. 验收清单
 
-- 修改 `.coffee` 后编译：`npx coffee -c ygopro-server.coffee cube.coffee ...`（产出 .js）；Docker 镜像（Dockerfile）内已有编译步骤则保持一致。
-- 交付物：`cube` 分支 + 编译产物 + `config/settings.json` 示例（含 modules.cube 与 ygopro 部署路径）。
-
-## 4. 验收标准
-
-1. `curl -X POST /cube/create_room`（带 api_key）可建出 cube 房间；ygopro 宿主进程被 spawn，参数含 4 个 deck size 值；stdout 端口被读取，房间 established。
-2. 玩家用客户端进房：**客户端上传任何卡组都会被固定卡组覆盖**；非法 ID 卡组被拒并收到友好提示。
-3. 对局结束 → room.delete → `/cube/webhook_url` 收到完整 JSON 载荷（重试后 ack 生效）；中途 kill cube 后端，srvpro 重试 10 次不丢数据。
-4. 玩家断线 30s 内重连成功且卡组比对通过；超时后房间正常清理。
-5. `modules.cube.enabled=false` 时全部行为与 master 一致（回归）。
-
-## 5. 相关文件清单
-
-| 文件 | 改动 |
-|---|---|
-| `ygopro-server.coffee` | Room 构造器 token、spawn 参数、UPDATE_DECK 分支、room.delete webhook、init 初始化 |
-| `cube.coffee`（新增） | /cube/* 路由、校验、结果载荷组装 |
-| `data/default_config.json` | modules.cube 配置段 |
-| `data/proto_structs.json` | 无改动（协议结构不变；如 03-2.3 未来扩展再同步） |
-| `README.md` / `config/settings.json.example` | cube 部署说明 |
-
-## 2.8 STOC_CUBE_DECK 注入与 siding 分流
-
-> 协议见 dev_docs/07 §4.0。根因：UPDATE_DECK 的 cube 覆盖分支（ygopro-server.coffee:3638-3653）原先不区分 duel_stage，局间 side 调整被整包还原。
-
-- **注入**：cube 房间向 client 转发 STOC_JOIN_GAME 后，立即 `stoc_send` 一条 STOC_CUBE_DECK 原始 buffer（数据 = `room.cube_decks[cube_player_id_by_name[client.name_vpass]]`，main 含 extra 合并，客户端自行分拣）。
-- **siding 分流**：`duel_stage == BEGIN` → 整包覆盖（现状）；siding 阶段 → 校验客户端提交与 cube 卡组"并集多重集相同 + 各区数量一致"，通过则**原样转发**并更新 `client.main/client.side`；失败回退整包覆盖（未打补丁客户端兼容：side 无效但不卡死）。
-- `data/constants.json` / `data/proto_structs.json`：补 STOC_CUBE_DECK 登记条目（仅名字映射，不做 struct 改写）。
+1. 使用 `/cube/create_room` 建房，响应含动态端口，宿主参数含 13--16 四个
+   deck limit。
+2. 用普通、长密码和错误长密码各加入一次；错误输入必须有明确错误。
+3. 开局上传任意卡组都被固定卡组替换；siding 合法换区成功，添加未知卡失败。
+4. 客户端收到 `STOC_CUBE_DECK` 后生成命名 ydk、锁定选组；旧客户端仍能靠
+   server override 对战。
+5. 删除房间后 webhook 带 API key 发出，cube API 重复收到同一结果不重复记分。

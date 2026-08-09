@@ -1,97 +1,116 @@
-# 03 - ygopro 改造方案（宿主二进制 + 可选客户端）
+# 03 - ygopro Cube 改造与交付说明
 
-> 目标代码库：`mycard/ygopro`。**分支策略**：新建 `cube-server`（基于 `origin/server`）承载无头宿主改造；客户端改造（如需）基于 master 建 `cube-client`。禁止直接改 master/server。
+> 当前代码已经落在 `ygopro` submodule 的 `cube-server` 分支；客户端与无头
+> 宿主共用该分支，不再维护一个未实现的 `cube-client` 分支。本文同时记录
+> 已实现的协议和发布检查。
 
-## 1. 需求与现状对照
+## 1. 宿主参数与运行时 deck limit
 
-| 需求 | 现状 | 结论 |
-|---|---|---|
-| deck size（main/extra/side）动态可配置 | 编译期常量（deck_manager.h:17-20） | **必须改**：宿主按 spawn 参数运行时生效 |
-| 固定卡组自动加载 + 验证 ID | 宿主接收客户端 CTOS_UPDATE_DECK，CheckDeck 校验 | 卡组覆盖逻辑放 srvpro（见 04 文档）；宿主侧确保 CheckDeck 使用运行时限制即可 |
-| 断线重连 | netserver 有玩家状态保持；srvpro 侧有 reconnect 模块 | 验证宿主侧重连窗口与 srvpro 配合，必要时补超时配置 |
-| 比赛结果自动获取 | 宿主发送胜负消息（STOC_DuelEnd / chat），srvpro 解析 | 宿主侧无需改动；srvpro 采集（见 04） |
+传统宿主参数为 12 项。Cube srvpro 在末尾追加：
 
-## 2. 改动清单（均基于 `cube-server` 分支）
+| 参数 | 含义 | 默认 |
+| --- | --- | ---: |
+| 13 | `main_min` | 40 |
+| 14 | `main_max` | 60 |
+| 15 | `extra_max` | 15（Cube API 可传 30） |
+| 16 | `side_max` | 15（Cube API 可传 30） |
 
-### 2.1 宿主启动参数扩展：deck size 运行时化
+`gframe.cpp` 只在参数 13--16 全部为数字时调用
+`deckManager.SetDeckLimits()`，replay seed 从第 17 项开始；旧版 spawn 或
+普通房间不带扩展时保持编译期默认值。
 
-**文件：`gframe/gframe.cpp`（server 分支的 main()）**
+`DeckManager` 的当前语义：
 
-- 现有参数位 1~12（见 02-1.4），13+ 为 match seed。**新增尾部参数位 13~16**（顺序与 srvpro 一致，缺省时回退常量）：
+- `CheckDeck()` 使用运行时 min/max 和 extra/side 上限；
+- `SingleDuel`、`TagDuel` 的初次装载及 `LoadSide()` 都使用同一组值；
+- `LoadDeck()` 对未知 code 返回错误，对超过上限的输入截断。故 API 的构筑
+  校验仍是业务上的最终上限检查，不能把“宿主没有报错”当作卡组合规证明；
+- `SetDeckLimits()` 对负数或 min>max 直接忽略，避免错误参数破坏普通房间。
 
-| 新参数位 | 含义 | 缺省 |
-|---|---|---|
-| 13 | main_min | 40 |
-| 14 | main_max | 60 |
-| 15 | extra_max | 15 |
-| 16 | side_max | 15 |
+## 2. 客户端 Cube 卡组同步
 
-- 解析后写入全局配置（如 `host_info` 扩展字段或 `deckManager.SetDeckLimits(...)`）。
-- 兼容性：srvpro 仅在 cube 模式房间追加这些参数；老 srvpro 不带参数 → 回退常量，行为不变。
-- **注意**：`argc >= 13` 的判定条件需调整为 `>= 17` 才读取新参数；老二进制/新 srvpro 或新二进制/老 srvpro 组合都不崩溃（新二进制对 argc 13~16 视为无扩展参数）。
+### 2.1 `STOC_CUBE_DECK = 0xA`
 
-### 2.2 Deck 校验运行时限制
+`network.h` 只增加消息 ID，不修改已有 struct 或 `static_assert` 尺寸。srvpro
+在 `STOC_JOIN_GAME` 刷新后排队发送消息，确保客户端先收到入房消息。payload 为：
 
-**文件：`gframe/deck_manager.h` / `gframe/deck_manager.cpp`**
+```text
+uint32 main_count（含额外卡）
+uint32 side_count
+uint32 main_count + side_count 个 card code
+uint16 filename_length + ASCII 文件名（可选尾部）
+```
 
-- 在 `DeckManager` 增加成员：`int deck_main_min, deck_main_max, deck_extra_max, deck_side_max;` + `bool deck_limits_set;` + `void SetDeckLimits(...)`（非法输入回退默认，不置位）。
-- `CheckDeck()`（deck_manager.cpp:90-95）改用成员值（替代常量）；`LoadDeck()` 的填牌逻辑（:172-192）改静态参数 `main_max/extra_max/side_max`（LoadDeck 是 static，不能访问实例成员——由调用方传入 `deckManager.deck_main_max` 等）。
-- 调用点（server 分支 single_duel.cpp:428 / tag_duel.cpp:403）传入运行时限制。
-- `LoadSide()`（match 模式局间换 side）同样必须使用运行时限制：其内部 `LoadDeck` 若用静态默认值会把超限卡组截断，导致尺寸一致性检查失败（ERRMSG_SIDEERROR）、BO3 第二局卡死。
-- 初始化：构造时用常量默认值，`main()` 解析参数后调用 `SetDeckLimits`。
-- 不变式：`main_min >= 0 && main_min <= main_max`，非法输入回退默认。
-- **实测语义（重要）**：`LoadDeck` 对超过上限的卡**截断丢弃**，所以 `CheckDeck` 实际只会报 main 低于下限（MAINCOUNT）与未知卡（UNKNOWNCARD）；上限靠截断保证合法。上层（srvpro/cube）负责 max 侧的业务校验。
+`duelclient.cpp` 会做长度和文件名字符校验，按 cards.cdb 类型把 main 中的
+额外卡分到 extra，保存并加载：
 
-### 2.3 协议与数据通道
+```text
+deck/cube-deck-<tid>-<pid>-<YYYYMMDDhhmmss>.ydk
+```
 
-- **无需修改 network.h 消息结构**：deck size 走 spawn 命令行参数，不进游戏协议，天然向后兼容，也不影响 `static_assert` 校验。
-- 若未来需要客户端显示自定义限制：新增 `STOC_*` 字段走 `host_info` 同步（需同步 `data/proto_structs.json`），**本阶段不做**（玩家用 ydk 进房，客户端本地限制用 `no_check_deck=T` 绕过）。
+缺少合法文件名的旧 payload 兼容保存为 `cube-current.ydk`。成功后锁定卡组
+选择控件；文件保存或加载失败时明确提示且不锁定。
 
-### 2.4 断线重连（验证 + 补齐）
+### 2.2 siding
 
-- 核对 netserver 对玩家断线（socket close）后的保留策略：玩家位置、手牌/场况、超时重连窗口。
-- 需要确认项：重连窗口是否可配置（srvpro `modules.reconnect` 负责上层策略，宿主侧需容忍 srvpro 的代理重连——代理 socket 断开≠玩家离开）。
-- 若宿主对代理断开即清理玩家，则与 srvpro 重连模块冲突，需要把"代理短暂断开"与"玩家掉线"区分（可通过 srvpro 重连期不关闭代理连接实现，倾向优先在 srvpro 侧解决，宿主仅补超时）。
+进入 siding 时保存服务器同步卡组快照。客户端只允许在 main/extra/side 三个
+区域的总多重集不变时调整分区；`srvpro` 同样验证各区数量与总多重集，合法时
+原样转发，非法时恢复服务器卡组。这样打补丁与未打补丁客户端都能完成 BO3。
 
-### 2.5 结果输出（验证项）
+## 3. 长房间密码
 
-- 宿主每小局结束已有胜负消息，srvpro 解析（`room.scores`）。验证 match 模式（BO3）整场结束信号的完整性即可，预计无需改动。
+标准 `CTOS_JoinGame` 的 20 个 UTF-16 code unit 保持兼容。客户端对更长密码
+发送 8 字节头（version/padding/gameid）+ UTF-16LE 密码 + NUL，最多 255 个
+UTF-16 code unit；Unicode 编码失败、超限或密码尾部异常会在客户端/服务器
+显式报错。srvpro 不再静默使用被截断的 `pass[20]`，因此 Cube 长房间名/密码
+不会错误失效或串房。
 
-## 3. 客户端侧（可选，`cube-client` 分支，默认不做）
+## 4. 构建与验证
 
-- 场景：cube 允许自定义 main 上下限（如 50~60）时，玩家在客户端卡组编辑器（deck_con.cpp:1778-1806）会看到 40/60 的旧限制提示。
-- 方案：客户端从 `STOC_CREATE_GAME/host_info` 读取限制并显示；或依赖 srvpro 的 `no_check_deck=T` + 宿主强制。
-- **决策**：第一版不改造客户端，srvpro 建 cube 房间时强制 `no_check_deck=T`，由宿主（2.2 运行时限制）兜底校验。
+### 4.1 Linux 无头宿主
 
-## 4. 构建与交付
+```bash
+bash scripts/build-ygopro.sh
+```
 
-- Linux 部署机：`premake5 gmake2` → `make config=release` → 产物 `bin/release/YGOPro`（重命名为 `ygopro` 放入 `srvpro/ygopro/`）。
-- Windows 本地联调：`premake5 vs2022` 或按 README 的 CI 流程；产物同样命名 `ygopro.exe`。
-- 版本标记：保持 `gframe/config.h` 的 `PRO_VERSION` 同步（srvpro 启动时读取做版本校验，见 ygopro-server.coffee:440），**改动协议/参数必须 bump**。
+脚本使用 `envs/tools/premake5` 和 `envs/ygocube`，输出
+`ygopro/bin/release/ygopro`；部署时复制到 `srvpro/ygopro/ygopro`。启动示例：
 
-## 5. 验收标准
+```text
+./ygopro 0 -1 0 1 5 T F 8000 5 1 180 1 40 60 30 30
+```
 
-1. `./ygopro 0 -1 0 0 3 F T 8000 5 1 180 0 40 50 10 5` 这类带 4 个扩展参数的启动可正常建宿主，且 stdout 打印端口。
-2. 不带扩展参数启动时行为与改动前完全一致（回归）。
-3. 运行时限制生效（实测，见 scripts/e2e/run-e2e.sh）：39 张主卡组（main_min=40）被拒（MAINCOUNT）；55 张被截断为 50 张通过；未知卡 ID 被拒（UNKNOWNCARD）；`no_check_deck=T` 的 cube 房间仍执行上述校验（`deck_limits_set` 强制）。
-4. 客户端断线 30s 内重连可回到对局；srvpro 代理重连不被误判为玩家离开。
-5. 对局正常结束，srvpro 能收到完整比分/结果数据。
+宿主应打印动态端口，且通过 12 项旧参数启动时行为不变。
 
-## 6. 相关文件清单
+### 4.2 Windows GUI 客户端
 
-| 文件 | 改动 |
-|---|---|
-| `gframe/gframe.cpp`（cube-server 分支） | 参数解析 13~16 + 调用 SetDeckLimits |
-| `gframe/deck_manager.h` | 新增成员与 SetDeckLimits 声明 |
-| `gframe/deck_manager.cpp` | CheckDeck / LoadDeck 使用运行时限制 |
-| `gframe/netserver.cpp`（验证） | 断线保留窗口/代理断开语义 |
-| `gframe/config.h` | 版本号（如协议/参数变化时） |
+在 WSL 中准备源码/依赖后，可用已有 `premake5.exe` 生成 VS2022 工程；
+`scripts/build-ygopro.sh --client --no-audio --max-extra=30 --max-side=30`
+是 Linux 交叉联调等价配置。Windows 发布必须确认：
 
-## 7. 客户端卡组同步（STOC_CUBE_DECK，cube-server 分支客户端构建）
+1. premake 生成的是 `vs2022`、`Release`、`YGOPro` 目标；
+2. `YGOPro.exe` 与 DLL/资源来自同一构建，不是 `.obj` 或 Debug 中间文件；
+3. 运行目录含 `cards.cdb`、`script/`、`expansions/` 和 `pics/`（这些资源不在
+   根 Git 仓库）；
+4. 启动、加入普通房间、加入 Cube 长密码房间、接收 `STOC_CUBE_DECK` 和 BO3
+   siding 都做一次烟测。
 
-> 对应需求：进房后服务器把 cube 卡组同步到客户端本地 `deck/cube-deck-<tid>-<pid>-<timestamp>.ydk` 并锁定卡组选择；siding 在 cube 卡组范围内生效。协议定义见 dev_docs/07 §4.0。
+### 4.3 协议回归
 
-- `gframe/network.h`：新增 `#define STOC_CUBE_DECK 0xA`（变长 STOC；payload 为 CTOS_UPDATE_DECK 体 + 可选 UTF-8 文件名尾部）。**不 bump PRO_VERSION**（旧客户端忽略未知 STOC/尾部，向下兼容）。
-- `gframe/duelclient.cpp` `HandleSTOCPacketLan` 新增 case：解析 → 校验安全文件名 → `DeckManager::LoadDeck` 按类型分拣 extra → `SaveDeck` 到 `./deck/<filename>.ydk` → `RefreshCategoryDeck`/`RefreshDeck` 选中 → `LoadCurrentDeck` 填入 `current_deck` → 锁定 `cbCategorySelect/cbDeckSelect`（`setEnabled(false)`），置 `is_cube_deck_locked`；离房/新房间复位。
-- 锁定拦截：`menu_handler.cpp` `CHECKBOX_HP_READY` 路径（~574-596）锁定态跳过下拉重载；`deck_con.cpp` `BUTTON_SIDE_RELOAD` 锁定态忽略；`BUTTON_SIDE_OK` 锁定态校验"三区并集多重集 == STOC_CHANGE_SIDE 时快照"，不符弹错不发送。
-- 客户端构建需 `--client --max-extra=30 --max-side=30`（53e25a89 宏覆盖），否则 cube 大卡组被 deck_con 编译期常量拦截。
+- `network.h` 结构大小检查必须通过；srvpro `data/proto_structs.json` 不应
+  因 deck limit 或长密码扩展而改旧字段。
+- 新客户端连接旧 srvpro 时，短密码和普通对局仍可用；旧客户端连接新 srvpro
+  时会忽略 0xA，但开局 deck override 仍生效。
+- 失败的宿主启动、文件写入和非法 payload 必须返回可诊断日志，而不是静默
+  建立一个使用默认上限的房间。
+
+## 5. 相关文件
+
+| 文件 | 责任 |
+| --- | --- |
+| `gframe/gframe.cpp` | 解析参数 13--16、区分 replay seed |
+| `gframe/deck_manager.h/.cpp` | 运行时限制、LoadDeck/LoadSide |
+| `gframe/network.h` | `STOC_CUBE_DECK` ID |
+| `gframe/duelclient.cpp` | 长密码、同步卡组、锁定与 siding 快照 |
+| `gframe/deck_con.cpp`、`menu_handler.cpp` | UI 锁定与 side 校验 |
+| `scripts/build-ygopro.sh` | Linux 宿主/客户端构建入口 |

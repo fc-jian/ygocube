@@ -31,7 +31,7 @@ the match server.
 | `cube/packages/shared` | Shared TypeScript contracts |
 | `srvpro` | Forked srvpro submodule with Cube room and deck integration |
 | `ygopro` | Forked YGOPro submodule with Cube protocol/client support |
-| `assets` | Card database, scripts, and card resources used by the deployment |
+| `assets` | Runtime card resources provisioned separately (intentionally not tracked) |
 | `dev_docs` | Architecture, protocol, and implementation notes |
 
 The submodules are pinned to the `fc-jian` forks and the feature branches
@@ -48,6 +48,12 @@ git submodule update --init --recursive
 
 Requirements: Node.js, pnpm, a working SQLite/native build toolchain, and the
 card/srvpro resources referenced by `config.yaml`.
+
+The root `assets/` directory is deliberately excluded from Git.  A deployment
+must provision `cards.cdb`, `script/`, `pics/`, and `expansions/` from the same
+YGOPro data release (or point `server.cards_cdb` and `pics.*` at an existing
+installation).  Card images and generated `assets/pics_avif/` thumbnails are
+runtime data; cloning this repository does not create or track local symlinks.
 
 ```bash
 cp config.example.yaml config.yaml

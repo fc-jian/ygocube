@@ -1,3 +1,7 @@
+> 本文件是最初需求原稿，仅用于追溯背景；其中的默认值、页面布局和未实现
+> 假设可能过时。当前行为以 `01-overview.md`、`05-cube-backend-plan.md`、
+> `06-cube-frontend-plan.md` 与 `07-protocol-api-design.md` 为准。
+
 ## 任务描述
 
 本项目的目的是基于开源 `ygopro` 游戏引擎及服务端 `srvpro` 改写一个全流程 “轮抽模式” YGO 游戏系统。

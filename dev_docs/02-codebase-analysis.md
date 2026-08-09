@@ -1,174 +1,162 @@
-# 02 - 现有代码库分析（ygopro + srvpro）
+# 02 - 代码库现状与扩展点
 
-本文档记录对 `ygopro/` 与 `srvpro/` 两个开源仓库的勘察结果，作为改造方案的依据。所有行号以当前 checkout 为准。
+> 本文记录当前 submodule checkout，而不是上游仓库的历史默认分支。核对基准：
+> `srvpro` 分支 `cube`（`090691f`），`ygopro` 分支 `cube-server`
+>（`be1997f`）。行号会随编译/合并变化，优先使用文件和符号名定位。
 
-## 1. ygopro（mycard/ygopro）
+## 1. ygopro（`ygopro/` submodule）
 
-### 1.1 仓库结构
+### 1.1 目录与构建模式
 
-- 无头宿主二进制源码在 **`server` 分支**（本 checkout 是 `master`，即客户端）。
-- `master` 与 `origin/server` 的 gframe/ 文件清单相同（无独立 server 目录），差异在代码内容。
+`cube-server` 同时保留客户端和无头宿主源码；是否生成宿主由
+`YGOPRO_SERVER_MODE`/premake 配置决定，不是一个独立的 `server/` 目录。
+核心目录如下：
 
-```
-ygopro/
-├── gframe/          # 客户端 + 内置 LAN 宿主 (netserver)
-├── ocgcore/         # 规则引擎核心（卡片处理）
-├── premake5.lua     # 构建脚本（workspace "YGOPro"）
-├── lflist.conf / strings.conf / system.conf
-├── resource/ script/ sound/ textures/
-```
-
-### 1.2 关键文件
-
-| 文件 | 作用 |
-|---|---|
-| `gframe/gframe.cpp` | `main()`。master：解析 `-e -n -h -p -w -k -d -c -j -r -s` 客户端参数；**server 分支：`argc>=13` 时进入无头宿主模式**（位置参数见 1.4） |
-| `gframe/netserver.cpp/h` | 房间内对战宿主（客户端内置 LAN server；server 分支下即被 srvpro spawn 的宿主进程） |
-| `gframe/duelclient.cpp/h` | 客户端网络层；`SendUpdateDeck()` (duelclient.cpp:4109) 发送 `CTOS_UPDATE_DECK` |
-| `gframe/network.h` | 协议 struct 定义（CTOS_/STOC_），全部带 `static_assert` 尺寸校验 |
-| `gframe/deck_manager.h/cpp` | 卡组校验/加载：`DeckManager::CheckDeck()` (deck_manager.cpp:87)、`LoadDeck()` (deck_manager.cpp:151) |
-| `gframe/deck.h` | `Deck` 结构（main/extra/side 三个 vector） |
-| `gframe/deck_con.cpp` | 客户端卡组编辑器 UI（使用同样的 deck 常量，deck_con.cpp:1316,1778-1806） |
-| `gframe/data_manager.h/cpp` | 卡牌数据库读取（cards.cdb, SQLite） |
-| `ocgcore/` | 规则引擎（无需改动，除非涉及规则本身） |
-
-### 1.3 Deck 大小限制（改造核心点）
-
-```cpp
-// gframe/deck_manager.h:17-20
-constexpr int DECK_MAX_SIZE = 60;
-constexpr int DECK_MIN_SIZE = 40;
-constexpr int EXTRA_MAX_SIZE = 15;
-constexpr int SIDE_MAX_SIZE = 15;
+```text
+gframe/       网络、GUI、卡组管理和宿主入口
+ocgcore/      规则引擎（另有自己的 submodule）
+script/       运行时脚本（外部资源也可单独部署）
+resource/     客户端资源
+premake5.lua  Linux/Windows 工程生成
 ```
 
-使用位置：
-- `DeckManager::CheckDeck()` (deck_manager.cpp:90-95)：主卡组 40~60、额外 ≤15、副 ≤15；
-- `DeckManager::LoadDeck()` (deck_manager.cpp:172-192)：is_packlist 填充逻辑中的补齐判断；
-- `deck_con.cpp`（客户端 UI 限制，siding 时上限 +5）。
+Linux 宿主由 `scripts/build-ygopro.sh` 构建；客户端构建使用
+`--client` 以及可选的 `--max-extra/--max-side` 宏。Windows 侧使用
+已有 `premake5.exe` 生成 VS2022 工程，最终必须从正确的 Release 配置取得
+`YGOPro.exe`，不能把 Debug/中间文件当成可运行产物。
 
-### 1.4 server 分支无头宿主启动协议（srvpro spawn 参数）
+### 1.2 入口与运行时 deck limit
 
-`gframe.cpp`（server 分支）`main()`：`argc >= 13` 时按位置解析：
+`gframe/gframe.cpp` 的 server 入口接受前 12 个传统参数；Cube 房间在其后
+追加四个纯数字参数：
 
-| 参数位 | 含义 | 来源（srvpro ygopro-server.coffee:1455-1457） |
-|---|---|---|
-| 1 | 0（保留） | 固定 0 |
-| 2 | lflist index | `@hostinfo.lflist` |
-| 3 | rule | `@hostinfo.rule` |
-| 4 | mode (0/1/2) | `@hostinfo.mode` |
-| 5 | duel_rule (大师规则) | `@hostinfo.duel_rule` |
-| 6 | no_check_deck ('T'/'F') | `@hostinfo.no_check_deck` |
-| 7 | no_shuffle_deck ('T'/'F') | `@hostinfo.no_shuffle_deck` |
-| 8 | start_lp | `@hostinfo.start_lp` |
-| 9 | start_hand | `@hostinfo.start_hand` |
-| 10 | draw_count | `@hostinfo.draw_count` |
-| 11 | time_limit | `@hostinfo.time_limit` |
-| 12 | replay_mode | `@hostinfo.replay_mode` |
-| 13+ | match 模式下的 seed（base64） | firstSeed（replay 恢复） |
-
-宿主启动后把 **端口打印到 stdout**（srvpro 在 `ygopro-server.coffee:1480-1483` 读取 `@port = parseInt data`）。
-
-### 1.5 协议结构（network.h，本次改造涉及）
-
-- `CTOS_CreateGame` (100B) / `CTOS_JoinGame` (48B)：客户端建/加房间；
-- `CTOS_UpdateDeck`：卡组上传（主+副卡组 buffer）；
-- `STOC_HS_PlayerEnter` (41B) / `STOC_HS_PlayerChange`：房间内玩家状态；
-- `STOC_TimeLimit`、`STOC_ErrorMsg` (8B)、`STOC_DuelEnd` 等。
-- 消息类型与 struct 均带 `static_assert`，改协议必须同步 srvpro 侧 `data/proto_structs.json`（见 2.4）。
-
-### 1.6 构建
-
-- premake5 单 workspace "YGOPro"：projects = `ocgcore` + `gframe`(YGOPro) + 依赖（lua/event/freetype/sqlite/irrlicht/jpeg/png/lzma/zlib/miniaudio）。
-- server 分支二进制与客户端同构，只是 `main()` 分支不同；Linux 下 `premake5 gmake2 && make`。
-
-## 2. srvpro（mycard/srvpro）
-
-### 2.1 仓库结构（CoffeeScript 工程）
-
-```
-srvpro/
-├── ygopro-server.coffee   # 主服务器（4193 行），编译为 ygopro-server.js (5622 行)
-├── ygopro.coffee          # 协议 handler 注册封装（stoc_follow/ctos_follow/stoc_send...）
-├── roomlist.coffee        # websocket 房间列表（http 模块的一部分）
-├── YGOProMessages.ts/js   # 协议消息助手（struct 编解码，基于 data/proto_structs.json）
-├── ygopro-auth.ts/js      # MyCard 账号认证
-├── ygopro-tournament.ts   # 锦标赛工具（challonge 集成）
-├── ygopro-webhook.js      # webhook 上报工具
-├── ygopro-deck-stats.js / ygopro-update.js / load-constants.js ...
-├── data/                  # default_config.json / constants.json / proto_structs.json / i18n.json
-├── data-manager/          # 数据管理
-└── Dockerfile* / pm2 配置
+```text
+13 main_min   14 main_max   15 extra_max   16 side_max
 ```
 
-### 2.2 启动与配置
+只有四项都存在且是数字时才启用扩展，随后 replay seed 从第 17 项开始。缺少
+扩展时沿用编译期默认值 40/60/15/15。该判别避免了旧版 seed（base64）被误解
+为 deck limit。
 
-- `init()` (ygopro-server.coffee:267)：从 `data/default_config.json` 加载设置 → `config/settings.json`（可覆盖）；
-- 主端口 `settings.port`（默认 **7911**），HTTP `settings.modules.http.port`（默认 **7922**），SSL 7923；
-- 从 `ygopro/gframe/config.h` 读 `PRO_VERSION` 与客户端版本校验（:440）；
-- 读 `ygopro/expansions/lflist.conf` 与 `ygopro/lflist.conf` 加载禁卡表；
-- 模块开关全部走 `settings.modules.*`：`reconnect` / `challonge` / `arena_mode` / `tournament_mode` / `random_duel` / `windbot` / `athletic_check` / `http` / `mycard` / `test_mode` 等。
+`gframe/deck_manager.h/.cpp`：
 
-### 2.3 房间模型（改造核心）
+- `DeckManager::SetDeckLimits()` 校验非负数和 min≤max；非法值保持默认。
+- `CheckDeck()` 使用运行时 main/extra/side 上限。
+- server 的 `SingleDuel`、`TagDuel` 和 `LoadSide()` 都传递相同运行时上限，
+  确保 BO3 换 side 不会回退到 15 张静态上限。
+- `LoadDeck()` 对未知编号返回错误码，对超过上限的输入截断；因此业务层仍
+  必须在构筑锁定和比赛开始前检查上限，不能只依赖宿主错误码。
 
-`class Room` (ygopro-server.coffee:1289)：
+### 1.3 Cube 客户端改动
 
-| 成员/方法 | 行号 | 说明 |
-|---|---|---|
-| `constructor(name, hostinfo)` | 1290 | **房间名即规则字符串**：解析 `LP8000,TIME180,START5,DRAW1,TCGONLY,LFLIST2,NOCHECK,NOSHUFFLE,DEATH40,MR4,NU,NW,...` 等 token；也支持紧凑格式正则 `^(\d)(\d)([12345TF])(T\|F)(T\|F)(\d+),(\d+),(\d+)` 与 `M#`/`T#`/`AI#` 前缀 |
-| `spawn(firstSeed)` | 1454 | 组装参数数组 → `global.rawSpawn` (1287) `spawn './ygopro', param, {cwd:'ygopro'}`；读 stdout 端口；`@established=true`；为每个玩家建立代理连接 |
-| `delete()` | 1510 | **结果上报**：构造 score_array（含 `@scores`/`@decks`/`@deck_history`），`axios.post(settings.modules.arena_mode.post_score, ...)` + `utility.retry` 10 次；含回放 base64 |
-| `post_challonge_score()` | 1688 | 锦标赛比分上报 |
-| `disconnect(client)` | 1746 | 玩家断开处理（含断线重连入口） |
-| `join_player(client)` | 1895 | 玩家加入房间 |
-| `@scores/@decks/@deck_history/@replays` | 1304-1312 | **已记录每个玩家的卡组与战绩**（战绩按 `name_vpass` = 名称+密码 组合键） |
+`gframe/network.h` 新增 `STOC_CUBE_DECK = 0xA`，不修改既有 struct 大小。
+`duelclient.cpp` 收到该消息后：
 
-### 2.4 协议处理（YGOProMessages）
+1. 读取 main（含 extra）和 side 编码，限制消息长度并拒绝不安全文件名；
+2. 保存为 `deck/cube-deck-<tid>-<pid>-<timestamp>.ydk`（旧 payload 没有
+   文件名时仍兼容 `cube-current`）；
+3. 刷新卡组列表、加载 `current_deck` 并锁定选组控件；
+4. 进入 siding 时保存快照，`deck_con.cpp` 只允许在三区总多重集不变的前提下
+   调整 main/extra/side。
 
-- `ygopro.coffee` 提供 `stoc_follow/ctos_follow/stoc_send/ctos_send` 等注册/发送函数；
-- struct 定义在 `data/proto_structs.json`，由 `YGOProMessages.ts` 驱动编解码（srvpro 1 为同步模式，2 为异步；本仓库是 1）。
-- `ctos_filter = ["UPDATE_DECK"]` (2077)：UPDATE_DECK 由 srvpro 拦截处理而非直接转发。
+加入房间的长密码也在客户端实现：短密码仍发送标准 48 字节
+`CTOS_JoinGame`；超过 20 个 UTF-16 code unit 时发送 NUL 结尾的扩展包，最大
+255 个 UTF-16 code unit，编码失败或超限会显式报错，不静默截断。
 
-### 2.5 卡组处理（改造核心）
+### 1.4 协议兼容边界
 
-`ctos_follow 'UPDATE_DECK'` (3487-3536+)：
-- 断线重连分支：`settings.modules.reconnect.enabled && client.pre_reconnecting` → `CLIENT_is_able_to_reconnect(client, buffer)`（比对卡组）→ `CLIENT_reconnect` / `CLIENT_kick_reconnect`；
-- 防护：`mainc > 256 or sidec > 256` 直接踢（安全补丁）；
-- 记录 `client.main` / `client.side` / `client.start_deckbuf`（BEGIN 阶段的原始卡组 buffer，供重连比对与战绩记录）；
-- 卡组合法性提示（deck_ok / deck_bad 聊天消息，:3530-3536）与 `tournament_mode.deck_check`（:3569）。
+- deck limit 走宿主命令行，不占 CTOS/STOC 既有 struct。
+- `STOC_CUBE_DECK` 是新增消息；旧客户端会忽略，无法获得自动同步/锁定能力，
+  但仍可按 srvpro 的 UPDATE_DECK 覆盖逻辑对战。
+- 修改 `network.h` 的消息布局时，必须同步 srvpro 的
+  `data/proto_structs.json`；当前 Cube 扩展没有改既有布局。
 
-### 2.6 结果/上报与 HTTP（改造核心）
+## 2. srvpro（`srvpro/` submodule）
 
-- **webhook 模式**：`room.delete()` → `axios.post(post_score, form_data)`（URL-encoded，含 usernameA/B、userscoreA/B、userdeckA/B、deckHistory、first、wins、replays、start/end、arena、nonce）；`utility.retry` 重试。
-- **HTTP 服务器**：`http.createServer(httpRequestListener)` (634) + `settings.modules.http.ssl`；websocket roomlist (roomlist.coffee，JSON 事件：init/create/update/delete/start)。
-- 已有 axios 上报（random_duel.post_match_scores、arena_mode、challonge）等外部集成先例。
+### 2.1 启动与房间
 
-### 2.7 断线重连（现状）
+`ygopro-server.coffee` 是主实现，改动后必须同步编译为
+`ygopro-server.js`。默认游戏端口是 7911，HTTP 端口 7922，HTTPS 可选 7923；
+`data/default_config.json` 的 `modules.cube` 默认关闭以保护普通部署。
 
-- `settings.modules.reconnect`（data/default_config.json:127）：`enabled` 等参数；
-- 玩家断线后一定时间内重连：房间保留 `player_datas`、代理连接状态、卡组 buffer 比对；
-- **结论：断线重连主链路 srvpro 已具备**，cube 只需确认开启配置并补充房间级策略。
+`Room` 构造器把房间名规则解析为 `hostinfo`。Cube 相关 token 为：
 
-## 3. 需求 → 现有机制 → 扩展点映射
+```text
+MAIN40-60 / MN40-60
+EXTRA30   / EX30
+SIDE30    / SD30
+```
 
-| 需求（来自 original_guide.md） | 现有机制 | 扩展点 |
-|---|---|---|
-| deck size 动态可配置（建房间参数） | 编译期常量 DECK_MIN/MAX_SIZE (deck_manager.h:17-20)；房间名规则 token 解析 (ygopro-server.coffee:1333-1436)；spawn 参数数组 (1454) | ① srvpro 房间名新增 `MAIN/EXTRA/SIDE` token → ② spawn 参数追加 3 位 → ③ server 分支 gframe.cpp 解析 → ④ DeckManager 运行时限制 |
-| 记录固定卡组、比赛时自动加载+验证 ID | `client.start_deckbuf` / `@decks` / UPDATE_DECK handler (3487) | cube 模式：UPDATE_DECK 时以记录的卡组覆盖客户端上传；验证 ID 存在性（cards.cdb）与数量 |
-| 断线重连 | `modules.reconnect` + `CLIENT_reconnect` (3488-3505) | 确认配置开启；必要时为 cube 房间定制重连窗口 |
-| 比赛结果自动获取 + 供 cube 调用 | `room.delete()` webhook (1510-1576)；scores/decks 追踪 | 新增 `modules.cube.webhook_url`（或 cube 轮询 GET）；沿用 utility.retry |
-| cube 建房间/通知玩家服务器+密码 | 房间名规则字符串；Room 构造器；proxy 模型 | srvpro HTTP `/cube/*` API（api_key 鉴权）→ `createRoom(name, password, ...)` |
-| 客户端（玩家 ygopro） | master 分支客户端无需功能改造；deck 限制由 srvpro 设 `no_check_deck=T` 时宿主强制 | 可选：客户端显示自定义限制（master 新分支，非必须） |
+同时支持 `LP/TIME/START/DRAW/M/NOCHECK/...` 等旧 token。Cube/当前直接建房
+最终强制 `lflist=-1` 与 `duel_rule=5`，由卡池而不是禁限卡表定义环境。
 
-## 4. 部署布局结论
+`Room.spawn()` 调用 `rawSpawn('./ygopro', args, {cwd: 'ygopro'})`，读取宿主
+stdout 的端口并设置 `established`。Cube 房间还设置 `no_check_deck=true`、
+保存 replay，并在末尾追加四个 deck limit 参数。
 
-1. `srvpro/ygopro/` = server 分支编译产物（`./ygopro` 可执行）+ `assets/` 内容（cards.cdb、script/、pics/、expansions/）。
-2. srvpro 运行目录：`ygopro-server.js`（coffee 编译产物）或 `node ygopro-server.coffee`（依赖 coffee-script 运行时）+ `config/` + `data/`。
-3. cube 后端与 srvpro 同机或跨机均可（HTTP 通信）；玩家 ygopro 客户端连接 srvpro 主端口。
+### 2.2 Cube HTTP API
 
-## 5. 风险提示
+`cube.coffee` 挂载到现有 HTTP listener，所有端点都要求
+`X-Cube-Api-Key`：
 
-- **分支漂移**：server 分支相对 master 较旧，改动前需先确认 server 分支与 master 的 diff 规模；必要时把 master 的最新改动合入 cube-server 分支。
-- **CoffeeScript 维护成本**：单文件 4193 行；改动需 `npm run build`（coffee 编译）后以 JS 运行验证。
-- **协议一致性**：改动 network.h（ygopro 侧）必须同步 `data/proto_structs.json`（srvpro 侧），否则编解码错位。
-- **Windows 玩家生态**：宿主二进制需提供 Linux 编译（部署机）与 Windows 编译（本地联调）两种产物。
+| 端点 | 行为 |
+| --- | --- |
+| `POST /cube/create_room` | 幂等创建房间、等待宿主建立，返回房间名和端口 |
+| `GET /cube/room_status?room_name=` | 返回建立状态、端口、阶段、玩家连接和分数 |
+| `POST /cube/close_room` | 调用 `room.delete()`，触发正常清理/结果 webhook |
+
+请求的 `players[].name_vpass` 必须与客户端加入时使用的昵称一致；不在登记表
+中的玩家会被踢出 Cube 房间。API 没有单独的 `/cube/result` 入站端点，结果由
+srvpro 直接 POST 到 cube API 的 `/cube/result` webhook。
+
+### 2.3 卡组覆盖和换 side
+
+`UPDATE_DECK` handler 在 Cube 房间执行以下分流：
+
+- `duel_stage=BEGIN`：忽略客户端上传内容，使用 `cube_decks[player_id]`
+  覆盖；并以覆盖后的 buffer 作为重连比对基准。
+- siding：检查客户端提交的 main+extra+side 与服务器卡组的多重集合以及各区
+  数量是否一致。合法时原样转发换 side；不合法时回退为服务器卡组，保证旧
+  客户端不会卡死。
+
+handler 同时拒绝过大的协议计数（main/side >256），避免恶意 buffer。宿主仍
+  负责未知卡和运行时 deck limit 的最终检查。
+
+### 2.4 长房间密码
+
+标准 `CTOS_JoinGame.pass[20]` 仍兼容。扩展包的前 8 字节保持版本、对齐和
+gameid，后接 UTF-16LE 密码与 NUL。srvpro 要求扩展包长度、NUL 终止、尾部全为
+零且最多 255 个 UTF-16 code unit；格式错误会发送错误并取消本次加入。这样
+超长 Cube 房间密码不会因 struct 截断而匹配到错误房间。
+
+### 2.5 结果与重连
+
+`Room.delete()` 在 `modules.cube.enabled && room.cube_mode` 时向
+`webhook_url` POST 房间、玩家、score、deck、deck history、first/wins 和
+replay（base64），带 `X-Cube-Api-Key`，使用既有 `utility.retry` 重试 10 次。
+普通 arena/challonge 上报路径不受影响。
+
+srvpro 原有 `modules.reconnect` 继续负责代理断线重连；Cube 的重连比较基准
+是服务器推送的固定卡组，而不是客户端可篡改的上传 buffer。
+
+## 3. 扩展点映射
+
+| 需求 | 当前实现 | 主要文件 |
+| --- | --- | --- |
+| 动态 deck limit | 已实现，末尾参数 13--16 | `ygopro/gframe/gframe.cpp`, `deck_manager.*`, `srvpro/ygopro-server.coffee` |
+| 服务器权威 Cube 卡组 | 已实现，开局覆盖、siding 校验 | `srvpro/ygopro-server.coffee` |
+| 长密码 | 已实现，客户端扩展包 + srvpro 严格解析 | `ygopro/gframe/duelclient.cpp`, srvpro handler |
+| 自动落盘并锁定卡组 | 已实现，命名文件 + STOC 0xA | `ygopro/gframe/duelclient.cpp` |
+| 对局结果 | 已实现 webhook，cube API 另有轮询兜底 | `Room.delete()`, `cube/apps/api/src/matches` |
+| 协议修改 | 当前只新增消息 ID，不改旧 struct | `network.h`, `data/proto_structs.json` |
+
+## 4. 部署注意事项
+
+1. `srvpro/ygopro/ygopro`（或 Windows 对应 exe）必须是与当前 `cube-server`
+   参数协议匹配的宿主；普通上游 server 二进制不会识别 13--16。
+2. 卡牌运行资源不在根仓库：部署时单独挂载 `cards.cdb`、`script/`、`pics/`
+   和 `expansions/`，不要提交指向个人 Windows 路径的符号链接。
+3. CoffeeScript 与 JS 必须成对更新；发布前运行 `npx coffee -c` 并检查生成
+   文件已包含扩展逻辑。
+4. 客户端、srvpro、宿主升级应按“先兼容旧消息，再切换新功能”的顺序；长密码
+   和 STOC 0xA 均设计为可滚动升级。

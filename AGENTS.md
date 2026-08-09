@@ -6,9 +6,9 @@ YGO Cube：基于 ygopro + srvpro 的轮抽模式 (Cube) 对战系统。完整�
 
 ```
 ygocube/
-├── ygopro/     # mycard/ygopro：master=客户端；无头宿主二进制改造在 cube-server 分支（基于 origin/server）
-├── srvpro/     # mycard/srvpro：CoffeeScript 服务器；改动在 cube 分支
-├── assets/     # 卡牌数据 cards.cdb / pics/ / script/ / expansions/（部署进 srvpro/ygopro/）
+├── ygopro/     # fc-jian/ygopro：cube-server 分支同时承载客户端与无头宿主改造
+├── srvpro/     # fc-jian/srvpro：CoffeeScript 服务器；改动在 cube 分支
+├── assets/     # 运行时卡牌资源挂载点（不入 Git，cards.cdb/pics/script/expansions 需单独提供）
 ├── cube/       # 本项目新开发 web 控制端（apps/web=Next.js, apps/api=NestJS, packages/shared=共享契约）
 └── dev_docs/   # 规划与设计文档（中文），07 是接口契约，修改接口必须先改它
 ```
