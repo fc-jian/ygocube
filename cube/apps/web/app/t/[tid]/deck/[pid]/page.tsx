@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { api, apiDownload, Identity, resolvePlayerIdentity } from '@/lib/api';
 import { useTournamentStream } from '@/lib/sse';
@@ -10,7 +10,7 @@ import { CardSearch } from '@/components/CardSearch';
 import { closeCardPreview, setCardPreviewAction } from '@/components/CardPreview';
 import { TokenPrompt } from '@/components/TokenPrompt';
 import { CardInfo } from '@/lib/types';
-import { isExtraDeckType } from '@/lib/cardInfo';
+import { canonicalCardCode, isExtraDeckType } from '@/lib/cardInfo';
 import { flipIds, useFlip } from '@/lib/useFlip';
 
 export default function DeckPage() {
@@ -23,7 +23,6 @@ export default function DeckPage() {
   const [state, setState] = useState<DraftState | null>(null);
   const [cardMap, setCardMap] = useState<Record<number, CardInfo>>({});
   const [error, setError] = useState('');
-  const [discard, setDiscard] = useState<number[]>([]);
   const flip = useFlip<HTMLDivElement>();
 
   useEffect(() => {
@@ -58,14 +57,6 @@ export default function DeckPage() {
     try {
       const s = await api<DraftState>(`/t/${tid}/state`, { identity });
       setState(s);
-      const used = new Map<number, number>();
-      for (const code of [...(s.deck?.main ?? []), ...(s.deck?.extra ?? []), ...(s.deck?.side ?? [])]) used.set(code, (used.get(code) ?? 0) + 1);
-      const maxCopies = Number(s.config?.maxCopies ?? 1);
-      const available: number[] = [];
-      for (const code of [...new Set(s.pickedCards ?? [])]) {
-        for (let i = used.get(code) ?? 0; i < maxCopies; i++) available.push(code);
-      }
-      setDiscard(available);
       const codes = new Set<number>([...(s.pickedCards ?? [])]);
       if (codes.size) {
         const cards = await api<CardInfo[]>(`/t/${tid}/cards?codes=${[...codes].join(',')}`, { identity });
@@ -196,6 +187,25 @@ export default function DeckPage() {
   const deck = state.deck ?? { main: [], extra: [], side: [], lockedAt: null };
   const locked = !!deck.lockedAt;
   const cfg = state.config;
+  const discard = useMemo(() => {
+    const used = new Map<number, number>();
+    for (const code of [...deck.main, ...deck.extra, ...deck.side]) {
+      const key = canonicalCardCode(code, cardMap);
+      used.set(key, (used.get(key) ?? 0) + 1);
+    }
+    const maxCopies = Number(cfg.maxCopies ?? 1);
+    const available: number[] = [];
+    // Keep the exact selected code in the unused area. The rules copy key is
+    // only used to enforce the shared maxCopies limit across alias rows.
+    for (const code of [...new Set(state.pickedCards ?? [])]) {
+      const key = canonicalCardCode(code, cardMap);
+      while ((used.get(key) ?? 0) < maxCopies) {
+        available.push(code);
+        used.set(key, (used.get(key) ?? 0) + 1);
+      }
+    }
+    return available;
+  }, [cardMap, cfg.maxCopies, deck.extra, deck.main, deck.side, state.pickedCards]);
   const buildSecondsLeft = state.phaseDeadlineRemainingMs !== undefined
     ? Math.max(0, Math.ceil(state.phaseDeadlineRemainingMs / 1000))
     : state.phaseDeadline

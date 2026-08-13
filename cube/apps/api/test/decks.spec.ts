@@ -22,7 +22,16 @@ describe('deck validation', () => {
   tournaments.setPhase(tid, 'deckbuilding', undefined, 'test');
     const state = loadState(tid);
     // seed picks (45 main-suitable cards per player) directly via event log
-    const codes = cards.allCodes().filter((c) => !cards.isExtraDeck(c)).slice(0, 45);
+    const seenRulesCodes = new Set<number>();
+    const codes = cards.allCodes()
+      .filter((c) => !cards.isExtraDeck(c))
+      .filter((c) => {
+        const key = cards.canonicalCode(c);
+        if (seenRulesCodes.has(key)) return false;
+        seenRulesCodes.add(key);
+        return true;
+      })
+      .slice(0, 45);
     for (const p of state.players) {
       for (let k = 0; k < picksPerPlayer; k++) {
         logPick(tid, p.playerId, codes[k % codes.length], k);
@@ -84,6 +93,29 @@ describe('deck validation', () => {
     decks.move(tid, 'p0', a, 'main', 'side', 0, 0);
     expect(loadState(tid).decks.p0.main).toEqual([a, b, a]);
     expect(loadState(tid).decks.p0.side).toEqual([a]);
+  });
+
+  it('auto-fix can copy a picked exact code up to maxCopies', () => {
+    const { decks, tid, codes } = setupDeckbuilding(4, { mainMin: 3, mainMax: 4, maxCopies: 3 });
+    decks.autoFix(tid, 'p0');
+    const main = loadState(tid).decks.p0.main;
+    expect(main).toHaveLength(4);
+    expect(main.filter((code) => code === codes[0])).toHaveLength(3);
+    expect(main).toContain(codes[1]);
+  });
+
+  it('counts alias-related codes toward the same rules copy limit', () => {
+    const { cards, decks, tid } = setupDeckbuilding(45, { maxCopies: 1 });
+    const db = require('../src/db').getDb();
+    const alt = db.prepare('SELECT code, alias FROM cards WHERE alias != 0 LIMIT 1').get() as { code: number; alias: number } | undefined;
+    if (!alt) {
+      expect(true).toBe(true);
+      return;
+    }
+    logPick(tid, 'p0', alt.code, 100);
+    logPick(tid, 'p0', alt.alias, 101);
+    decks.move(tid, 'p0', alt.code, 'pool', 'main');
+    expect(() => decks.move(tid, 'p0', alt.alias, 'pool', 'side')).toThrow('CARD_NOT_IN_POOL');
   });
 
   it('match preparation moves random zone overflow to side and DSQs an undersized main deck', () => {

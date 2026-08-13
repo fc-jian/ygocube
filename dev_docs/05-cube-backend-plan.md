@@ -66,6 +66,16 @@ reserve；超出基础时间只扣 reserve，reserve 耗尽后才自动随机选
 
 `serial` 是旧的全局光标模式，仅用于兼容旧事件回放；新建页面默认不暴露该选项。
 
+牌堆 `order` 只保存抽牌/传递事实，不保存前端显示排序。Web 端对当前可见牌堆
+按 YGOPro `deck_sort_lv` comparator 整理，不能改变服务器选牌顺序或回放结果。
+
+### 2.2 选牌可见性
+
+`GET /t/:tid/cards/status` 的 `seen` 集合由事件顺序重建：玩家每次选牌前看到
+该时刻牌堆内全部剩余卡；passing 只额外加入当前队首牌堆，serial 只加入当前光标
+牌堆。已被前位玩家选走的卡不算后来玩家见过；私有初始弃牌保持 `unknown`，公开
+弃牌为 `dropped`。返回的 `code` 始终是请求的 exact code，不做 alias 替换。
+
 ## 3. 构筑与合规修复
 
 `DecksService` 保存三区有序数组，支持：
@@ -80,8 +90,9 @@ reserve；超出基础时间只扣 reserve，reserve 耗尽后才自动随机选
 
 1. main 在 `mainMin..mainMax`，extra≤`extraMax`，side≤`sideMax`；
 2. main 不能放额外卡，extra 只能放额外卡，side 可放两类；
-3. 卡片必须被本人选到过；同一 code 在三区合计不超过 `maxCopies`。因此
-   `maxCopies>1` 时可从“未使用”区复制到许可数量，但不能凭空新增编号。
+3. 卡片必须被本人选到过；三区中的 exact code 会按 `datas.alias` 解析出的 rules
+   identity 合并统计，不超过 `maxCopies`。因此 `maxCopies>1` 时可从“未使用”区
+   复制到许可数量，但不能凭空新增编号；alias 相关的 exact code 仍可同时存在于卡池。
 
 选牌结束进入构筑时，所有尚未使用的已选卡会按 cards.cdb 类型自动放入 main
 或 extra；构筑阶段再移回 pool 的卡不会出现在服务器同步 deck 中，也不会写入
@@ -97,16 +108,18 @@ main 仍低于下限的玩家记录 `player_dsq` 并从后续排表排除。
 ## 4. 卡片与卡池
 
 `CardsService` 从配置的 `server.cards_cdb` 导入 `datas/texts`：保留字面原名、
-效果文本、类型、攻守、等级/刻度、Link 标记、系列 code/name 等字段。`alias`
-只用于搜索/构筑规范化；卡池导入的名称校验使用 `getLiteral(code)` 的原始
-`texts.name`，不会把“规则上视作”的别名名称当成字面名称。
+效果文本、类型、种族、属性、攻守、等级/刻度、Link 标记、字段 code/name 等字段。
+卡池、搜索、选牌状态和详情均使用 exact code；`alias` 只在卡组规则副本上限与
+合法性检查中作为 rules identity。卡池导入的名称校验使用 `getLiteral(code)` 的
+原始 `texts.name`，不会把“规则上视作”的别名名称当成字面名称。
 
 卡池创建/编辑支持：
 
 - `codes: number[]`；
 - `importText`：每行 `code` 或 `code<TAB>name`；
 - 每行报告 `invalid`、`missing_code`、`name_mismatch`；所有警告都返回给前端；
-- token 卡、异画别名会在落库时过滤/合并并去重；随机卡池从规范化全卡表采样。
+- token 卡会在落库时过滤并去重 exact code；alias 相关卡不会合并，随机卡池从 exact
+  code 全卡表采样。
 
 卡池默认值存于 `app_settings.default_pool_id`，仅 super admin 可读写；创建页
 公开只返回名称和数量，不泄露 code 列表。

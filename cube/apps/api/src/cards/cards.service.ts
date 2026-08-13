@@ -66,7 +66,9 @@ interface CountRow {
   c: number;
 }
 
-const CARD_METADATA_VERSION = 2;
+// Re-index existing card caches when the imported search/field metadata shape
+// changes instead of serving a partially populated old cache.
+const CARD_METADATA_VERSION = 3;
 const MONSTER = 0x1;
 
 const RACE_NAMES: Record<number, string> = {
@@ -135,11 +137,21 @@ export function decodeCardFields(type: number, packedLevelValue: number, rawDefe
 function readSetNames(file: string): Map<number, string> {
   const out = new Map<number, string>();
   if (!file || !fs.existsSync(file)) return out;
-  for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
-    const m = line.match(/^!setname\s+(0x[0-9a-fA-F]+|\d+)\s+([^\t\r\n]+)/);
+  for (const line of fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '').split(/\r?\n/)) {
+    const m = line.match(/^\s*!setname\s+(0x[0-9a-fA-F]+|\d+)\s+([^\t\r\n]+)/);
     if (m) out.set(Number(m[1]), m[2].trim());
   }
   return out;
+}
+
+function resolveStringsConf(configured: string, cdbPath: string): string {
+  const candidates = [
+    configured,
+    path.join(path.dirname(cdbPath), 'strings.conf'),
+    path.join(process.cwd(), 'ygopro', 'strings.conf'),
+    path.join(process.cwd(), 'srvpro', 'ygopro', 'strings.conf'),
+  ].filter(Boolean);
+  return candidates.find((candidate, index) => candidates.indexOf(candidate) === index && fs.existsSync(candidate)) ?? '';
 }
 
 function isExtraDeckType(type: number): boolean {
@@ -171,7 +183,7 @@ export class CardsService {
         // cdb quirk: `id` is the INTEGER PRIMARY KEY (rowid alias) — select by `id`, not `rowid`
         const datas = cdb.prepare('SELECT id, type, level, race, attribute, atk, def, alias, CAST(setcode AS TEXT) AS setcode_text FROM datas').all() as DataRow[];
         const texts = cdb.prepare('SELECT id, name, desc FROM texts').all() as TextRow[];
-        const setNameMap = readSetNames(config.server.stringsConf);
+        const setNameMap = readSetNames(resolveStringsConf(config.server.stringsConf, cdbPath));
         const nameByRow = new Map<number, TextRow>();
         for (const t of texts) nameByRow.set(t.id, t);
         const insert = db.prepare(
@@ -195,6 +207,7 @@ export class CardsService {
               ...(d.type & 0x4000000 ? [`LINK ${level}`, `LINK-${level}`, `连接标记 ${linkMarkers}`] : []),
               ...(d.type & 0x1000000 ? [`刻度 ${lscale} ${rscale}`] : []),
               ...setNames,
+              ...setCodes.flatMap((code) => [String(code), `0x${code.toString(16)}`]),
             ];
             insert.run(d.id, t?.name ?? '', d.type, t?.desc ?? '', level, lscale, rscale, linkMarkers,
               d.race ?? 0, d.attribute ?? 0, d.atk ?? 0, defense, d.alias ?? 0,
@@ -223,18 +236,13 @@ export class CardsService {
 
   allCodes(): number[] {
     this.ensureLoaded();
-    return (getDb().prepare('SELECT code FROM cards').all() as CardRow[]).map((r) => r.code);
+    return (getDb().prepare('SELECT code FROM cards ORDER BY code').all() as CardRow[]).map((r) => r.code);
   }
 
   get(code: number): CardInfo | null {
     this.ensureLoaded();
     const r = getDb().prepare('SELECT * FROM cards WHERE code=?').get(code) as CardRow | undefined;
     if (!r) return null;
-    // 异画卡（alias != 0）统一返回原始卡（编号最小者），显示 code 始终为原始 code
-    if (r.alias !== 0) {
-      const base = getDb().prepare('SELECT * FROM cards WHERE code=?').get(r.alias) as CardRow | undefined;
-      if (base && base.alias === 0) return this.toInfo(base);
-    }
     return this.toInfo(r);
   }
 
@@ -246,6 +254,14 @@ export class CardsService {
   }
 
   private toInfo(r: CardRow): CardInfo {
+    const parseArray = (raw: string | null | undefined): unknown[] => {
+      try {
+        const value = JSON.parse(raw ?? '[]');
+        return Array.isArray(value) ? value : [];
+      } catch {
+        return [];
+      }
+    };
     return {
       code: r.code,
       name: r.name,
@@ -260,30 +276,38 @@ export class CardsService {
       atk: r.atk ?? 0,
       def: r.def ?? 0,
       alias: r.alias ?? 0,
-      setCodes: JSON.parse(r.setcodes_json ?? '[]'),
-      setNames: JSON.parse(r.setnames_json ?? '[]'),
+      setCodes: parseArray(r.setcodes_json).filter((value): value is number => typeof value === 'number'),
+      setNames: parseArray(r.setnames_json).filter((value): value is string => typeof value === 'string'),
     };
   }
 
-  // 异画卡（alias 指向原始卡）→ 返回原始卡 code；否则原样返回
+  // Resolve the YGOPro rules identity without changing the externally visible
+  // card identity. Alias chains are unusual but possible in imported data;
+  // the visited set prevents malformed cycles from looping forever.
   canonicalCode(code: number): number {
-    const r = getDb().prepare('SELECT code, alias FROM cards WHERE code=?').get(code) as { code: number; alias: number } | undefined;
-    if (r && r.alias !== 0) return r.alias;
-    return code;
+    this.ensureLoaded();
+    let current = code;
+    const visited = new Set<number>();
+    while (!visited.has(current)) {
+      visited.add(current);
+      const r = getDb().prepare('SELECT alias FROM cards WHERE code=?').get(current) as { alias: number } | undefined;
+      if (!r || !r.alias || r.alias === current) return current;
+      current = r.alias;
+    }
+    // Malformed cyclic alias data still needs one stable rules key so that
+    // copy-limit accounting cannot depend on which member was queried first.
+    return Math.min(...visited);
   }
 
-  // 卡池用码表：只含原始卡（异画并入原始，去重），且排除 token 卡（0x4000）
+  // Card-pool identity is the exact printed code. `datas.alias` is a rules
+  // relationship, not a reason to remove a physical card from a cube.
   poolCodes(): number[] {
-    const seen = new Set<number>();
     const out: number[] = [];
     for (const code of this.allCodes()) {
-      const c = this.canonicalCode(code);
-      if (seen.has(c)) continue;
-      const info = this.get(c);
+      const info = this.get(code);
       if (!info) continue;
       if (info.type & 0x4000) continue; // token 不允许进入卡池
-      seen.add(c);
-      out.push(c);
+      out.push(code);
     }
     return out;
   }
@@ -298,13 +322,13 @@ export class CardsService {
     const like = `%${q.toLowerCase()}%`;
     // 全文本匹配：卡名/效果/编号以及所有前端展示的规范化标签。
     const rows = getDb()
-      .prepare('SELECT * FROM cards WHERE search_text LIKE ? LIMIT ?')
+      .prepare('SELECT * FROM cards WHERE search_text LIKE ? ORDER BY code LIMIT ?')
       .all(like, limit) as CardRow[];
-    // 搜索结果同样规范化：异画并到原始卡（显示 code 恒为原始 code），按 code 去重
+    // Preserve every exact row. The primary key already makes codes unique;
+    // alias must not deduplicate search results.
     const dedup = new Map<number, CardInfo>();
     for (const r of rows) {
-      const c = this.get(r.code);
-      if (c) dedup.set(c.code, c);
+      dedup.set(r.code, this.toInfo(r));
     }
     return [...dedup.values()];
   }

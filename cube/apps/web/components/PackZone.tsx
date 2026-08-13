@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { CardImage, CardWithTooltip } from './CardImage';
 import { ConfirmModal } from './ConfirmModal';
 import { CardInfo } from '@/lib/types';
@@ -26,10 +26,9 @@ export function PackZone({ pack, cardMap, droppedCards, onPick }: {
   const [pending, setPending] = useState<number | null>(null);
   const [showDropped, setShowDropped] = useState(false);
   const [dropFilter, setDropFilter] = useState('');
-  const [sortedCards, setSortedCards] = useState<number[] | null>(null);
-  const packSignature = pack?.cards?.join(',') ?? '';
-  useEffect(() => setSortedCards(null), [packSignature]);
-  const displayCards = sortedCards ?? pack?.cards ?? [];
+  // Sorting is presentation-only. The server's pack order remains untouched so
+  // pick validation, passing, event logs, and replays keep their exact order.
+  const displayCards = useMemo(() => sortCardCodes(pack?.cards ?? [], cardMap, 'lv'), [pack?.cards, cardMap]);
   const now = useNowTick(true);
 
   // 初始弃置（公开）：按钮 + 可搜索的卡图-卡名列表弹窗（dev_docs/06 §2）
@@ -82,15 +81,6 @@ export function PackZone({ pack, cardMap, droppedCards, onPick }: {
           {pack.isMyTurn ? '轮到你选牌' : '等待其他玩家'} · 剩余 {pack.cardsLeft} 张
           {pack.queueLength !== undefined && ` · 队列 ${pack.queueLength} 堆`}
         </span>
-        {pack.isMyTurn && pack.cards && (
-          <button
-            onClick={() => setSortedCards(sortCardCodes(pack.cards!, cardMap, 'lv'))}
-            className="rounded bg-felt-edge px-2 py-0.5 text-[0.625rem] hover:brightness-110"
-            title="按 YGOPro 卡组编辑器逻辑整理当前牌堆"
-          >
-            整理
-          </button>
-        )}
         {secondsLeft !== null && (
           <span className={`font-mono ${inReserve || (baseLeft ?? 1) <= 5 ? 'text-red-300' : 'text-gold'}`}>
             {pack.pausedRemainingMs !== undefined ? `已暂停 · 剩余 ${secondsLeft} 秒` : inReserve ? `保留时间 ${secondsLeft} 秒` : `${baseLeft ?? secondsLeft} 秒`}

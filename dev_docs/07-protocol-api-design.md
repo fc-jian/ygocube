@@ -62,7 +62,7 @@ swissRoundCount, playoffSize
 | `GET /t/:tid/state` | 当前玩家视角完整状态（牌堆、队列、reserve、构筑、当前对局） |
 | `GET /t/:tid/pool` | 当前比赛 drop 前卡池（需玩家鉴权） |
 | `GET /t/:tid/cards?q=` / `?codes=` | 卡牌元数据/效果文本搜索或批量读取 |
-| `GET /t/:tid/cards/status?codes=` | 本玩家视角 `not_in_pool/dropped/picked/seen/unknown` |
+| `GET /t/:tid/cards/status?codes=` | 本玩家视角 `not_in_pool/dropped/picked/seen/unknown`；返回 exact 请求 code |
 | `POST /t/:tid/pick` | `{card_code,target_zone?}`，passing 队首选牌 |
 | `POST /t/:tid/pause` | `{action:propose|vote_yes|vote_no|resume}` |
 | `POST /t/:tid/deck/move` | `{card_code,from,to,index?,from_index?}`，`to=pool` 可移出构筑 |
@@ -184,8 +184,11 @@ room name 幂等记录，成功响应 `{ack:true}`。未知 room、非法 payloa
 ## 5. 卡牌元数据与错误码
 
 `CardInfo` 字段：`code/name/type/desc/level/lscale/rscale/linkMarkers/race/`
-`attribute/atk/def/alias/setCodes/setNames`。name 是字面卡表名称；alias 只
-用于规则规范化/去重，不替代导入名称比较。
+`attribute/atk/def/alias/setCodes/setNames`。name/code 是 exact 卡表行；alias 只
+用于卡组规则副本上限与合法性检查，不用于卡池、搜索、状态或详情去重。
+`CardVisibilityStatus` 为 `not_in_pool | dropped | picked | seen | unknown`。
+`seen` 只表示玩家在某次选牌前实际看到过仍存在的卡；已被前位玩家拿走的卡不会
+因为同属一个牌堆而自动标记为 seen。
 
 常用错误：
 

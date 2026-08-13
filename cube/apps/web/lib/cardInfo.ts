@@ -87,14 +87,50 @@ export function linkMarkerLine(c: CardInfo): string {
 }
 
 export function setNameLine(c: CardInfo): string {
-  return c.setNames?.length ? `系列：${c.setNames.join('|')}` : '';
+  return c.setNames?.length ? `字段：${c.setNames.join('|')}` : '';
+}
+
+export function setCodeLine(c: CardInfo): string {
+  if (!c.setCodes?.length) return '';
+  return `字段编号：${c.setCodes.map((code) => `0x${code.toString(16).toUpperCase()}`).join('、')}`;
+}
+
+function bitLabels(value: number | undefined, labels: Record<number, string>): string[] {
+  const bits = Number(value ?? 0);
+  return Object.entries(labels).filter(([bit]) => (bits & Number(bit)) !== 0).map(([, label]) => label);
+}
+
+export function raceLabel(c: CardInfo): string {
+  if (!(c.type & MONSTER)) return '';
+  return bitLabels(c.race, RACE_NAMES).join('、');
+}
+
+export function attributeLabel(c: CardInfo): string {
+  if (!(c.type & MONSTER)) return '';
+  return bitLabels(c.attribute, ATTRIBUTE_NAMES).join('、');
 }
 
 export function raceAttrLine(c: CardInfo): string {
-  if (!(c.type & MONSTER)) return '';
-  const race = RACE_NAMES[c.race] ?? '';
-  const attr = ATTRIBUTE_NAMES[c.attribute] ?? '';
-  return [race, attr].filter(Boolean).join(' · ');
+  const race = raceLabel(c);
+  const attr = attributeLabel(c);
+  return [race && `种族：${race}`, attr && `属性：${attr}`].filter(Boolean).join(' · ');
+}
+
+export function aliasLine(c: CardInfo): string {
+  return c.alias && c.alias !== c.code ? `规则同名编号：${c.alias}` : '';
+}
+
+/** Resolve a card's rules copy key without replacing the displayed code. */
+export function canonicalCardCode(code: number, cardMap: Record<number, CardInfo>): number {
+  let current = code;
+  const visited = new Set<number>();
+  while (!visited.has(current)) {
+    visited.add(current);
+    const alias = cardMap[current]?.alias ?? 0;
+    if (!alias || alias === current) return current;
+    current = alias;
+  }
+  return Math.min(...visited);
 }
 
 export function matchesCardQuery(c: CardInfo | undefined, query: string): boolean {
@@ -103,7 +139,7 @@ export function matchesCardQuery(c: CardInfo | undefined, query: string): boolea
   if (!c) return false;
   return [
     c.name, c.code, String(c.code).padStart(8, '0'), c.desc, typeLabel(c),
-    raceAttrLine(c), statLine(c), atkDefLine(c), linkMarkerLine(c), setNameLine(c),
+    raceAttrLine(c), statLine(c), atkDefLine(c), linkMarkerLine(c), setNameLine(c), setCodeLine(c), aliasLine(c),
   ].join(' ').toLowerCase().includes(q);
 }
 

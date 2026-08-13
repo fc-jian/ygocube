@@ -5,7 +5,7 @@ import { PoolsService } from '../src/pools/pools.service';
 describe('card pools', () => {
   beforeEach(() => useTestDb());
 
-  it('creates a pool from codes and resolves it (alt-art canonicalized)', () => {
+  it('creates a pool from exact codes and resolves it', () => {
     const cards = new CardsService();
     const pools = new PoolsService(cards);
     const codes = cards.poolCodes().slice(0, 10);
@@ -17,7 +17,7 @@ describe('card pools', () => {
     expect(() => pools.resolve('missing')).toThrow('POOL_NOT_FOUND');
   });
 
-  it('alt-art codes are canonicalized to the original card', () => {
+  it('keeps an aliased card exact while exposing its rules identity separately', () => {
     const cards = new CardsService();
     const db = require('../src/db').getDb();
     const alt = db.prepare('SELECT code, alias FROM cards WHERE alias != 0 LIMIT 1').get() as { code: number; alias: number } | undefined;
@@ -28,7 +28,24 @@ describe('card pools', () => {
     }
     expect(cards.canonicalCode(alt.code)).toBe(alt.alias);
     const info = cards.get(alt.code);
-    expect(info!.code).toBe(alt.alias);
+    expect(info!.code).toBe(alt.code);
+  });
+
+  it('keeps both alias-related cards in a pool and in search results', () => {
+    const cards = new CardsService();
+    cards.poolCodes();
+    const db = require('../src/db').getDb();
+    const baseCode = 68_468_459;
+    const aliasCode = 73_819_701;
+    const insert = db.prepare(`INSERT OR REPLACE INTO cards
+      (code, name, type, desc, level, race, attribute, atk, def, alias, search_text, metadata_version)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
+    insert.run(baseCode, '阿不思的落胤', 0x21, '', 4, 1, 0x10, 1800, 0, 0, '阿不思的落胤', 3);
+    insert.run(aliasCode, '白龙之落胤', 0x21, '这个卡名在规则上当作「阿不思的落胤」使用。', 4, 1, 0x10, 1800, 0, baseCode, '白龙之落胤 阿不思的落胤', 3);
+    const pools = new PoolsService(cards);
+    const pool = pools.create('both-alias-cards', [baseCode, aliasCode]).pool;
+    expect(pool.codes).toEqual([baseCode, aliasCode]);
+    expect(cards.search('白龙之落胤').map((card) => [card.code, card.name])).toContainEqual([aliasCode, '白龙之落胤']);
   });
 
   it('random pool samples from the full card table with dedupe', () => {
@@ -120,8 +137,8 @@ describe('card pools', () => {
     const insert = db.prepare(`INSERT OR REPLACE INTO cards
       (code, name, type, desc, level, race, attribute, atk, def, alias, search_text, metadata_version)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
-    insert.run(baseCode, '阿不思的落胤', 0x21, '', 4, 1, 0x10, 1800, 0, 0, '阿不思的落胤', 2);
-    insert.run(submittedCode, '白龙之落胤', 0x21, '', 4, 1, 0x10, 1800, 0, baseCode, '白龙之落胤', 2);
+    insert.run(baseCode, '阿不思的落胤', 0x21, '', 4, 1, 0x10, 1800, 0, 0, '阿不思的落胤', 3);
+    insert.run(submittedCode, '白龙之落胤', 0x21, '', 4, 1, 0x10, 1800, 0, baseCode, '白龙之落胤', 3);
     const pools = new PoolsService(cards);
 
     const literal = pools.createFromText('literal-alias-name', `${submittedCode}\t白龙之落胤`);

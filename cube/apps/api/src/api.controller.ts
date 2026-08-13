@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Param, Post, Query, Req, Res, SetMetadata, UseGuards } from '@nestjs/common';
+import type { CardVisibilityStatus } from '@ygocube/shared';
 import { Response } from 'express';
 import { AuthGuard, AuthedRequest, Identity } from './auth/auth.guard';
 import { TournamentsService } from './tournaments/tournaments.service';
@@ -12,6 +13,7 @@ import { config } from './config';
 import { loadState } from './events/events.service';
 import { CreateTournamentInput } from './tournaments/tournaments.service';
 import { cubeDeckFileBase } from './decks/deck-filename';
+import { cardsSeenByPlayer } from './cards/card-visibility';
 
 export const Public = () => SetMetadata('public', true);
 
@@ -115,10 +117,11 @@ export class ApiController {
   @Get('t/:tid/cards')
   cardsSearch(@Query('q') q: string, @Query('codes') codes: string) {
     if (codes) {
-      return codes
+      return [...new Set(codes
         .split(',')
         .map(Number)
         .filter(Number.isInteger)
+      )]
         .map((c) => this.cards.get(c))
         .filter((c) => c !== null);
     }
@@ -141,22 +144,24 @@ export class ApiController {
     const id = req.identity as Identity;
     const state = loadState(id.tournamentId);
     const cfg = JSON.parse(state.configJson) as Record<string, unknown>;
-    const pool = this.pools.resolve(cfg.cardPool as string | undefined);
-    const dropped = new Set(state.droppedCards);
+    const pool = new Set(this.pools.resolve(cfg.cardPool as string | undefined));
+    // Private initial drops are normally represented by an empty list. Keep
+    // the config check as a defence for legacy snapshots or edited settings.
+    const dropped = cfg.dropPublic === true ? new Set(state.droppedCards) : new Set<number>();
     const myPicks = new Set(state.picks.filter((p) => p.playerId === id.playerId).map((p) => p.card));
-    // 玩家"见过"的牌堆 = 参与过选牌的牌堆（passing 模式再加上当前队首堆——它正对本人可见）
-    const seenPacks = new Set(state.picks.filter((p) => p.playerId === id.playerId).map((p) => p.packIndex));
-    const myQueue = state.packQueues?.[id.playerId];
-    if (myQueue?.length) seenPacks.add(myQueue[0]);
-    const codesList = codes.split(',').map(Number).filter(Number.isInteger);
+    const seen = cardsSeenByPlayer(state, id.playerId);
+    const codesList = [...new Set(String(codes ?? '').split(',').map(Number).filter(Number.isInteger))];
     return codesList.map((c) => {
-      const canonical = this.cards.canonicalCode(c);
-      if (!pool.includes(canonical)) return { code: canonical, status: 'not_in_pool' };
-      if (dropped.has(canonical)) return { code: canonical, status: 'dropped' };
-      if (myPicks.has(canonical)) return { code: canonical, status: 'picked' };
-      const inSeenPack = state.packs.some((p) => seenPacks.has(p.index) && p.order.includes(canonical));
-      if (inSeenPack) return { code: canonical, status: 'seen' };
-      return { code: canonical, status: 'unknown' };
+      const status: CardVisibilityStatus = !pool.has(c)
+        ? 'not_in_pool'
+        : dropped.has(c)
+          ? 'dropped'
+          : myPicks.has(c)
+            ? 'picked'
+            : seen.has(c)
+              ? 'seen'
+              : 'unknown';
+      return { code: c, status };
     });
   }
 

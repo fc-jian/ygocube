@@ -38,6 +38,11 @@
   side/未使用区，main 不足下限的玩家 DSQ。
 - `maxCopies>1` 允许在已选编号许可内复制卡；未使用区移出的卡会从服务器 deck
   payload 排除，卡组同步文件使用 `cube-deck-<tid>-<pid>-<timestamp>.ydk`。
+- 卡池/搜索/选牌状态/详情按 exact card code 保留 alias 相关卡；只有卡组规则副本
+  上限按 alias identity 归并。牌堆前端自动使用 `deck_sort_lv` 显示排序，不改服务端
+  抽牌顺序。
+- `cards/status` 按每次选牌前的实际剩余卡重建玩家视角；前位玩家已选走的卡不会
+  被后位玩家误报为已见，返回 code 不做 alias 替换。
 - 整理按钮使用与 YGOPro `deck_sort_lv` 相同的比较器；手动拖动仍保留顺序，随机
   按钮只洗 main；卡池编辑页复用同一排序逻辑。
 

@@ -1,12 +1,13 @@
 'use client';
 
 import { useState } from 'react';
+import type { CardVisibilityStatus } from '@ygocube/shared';
 import { api, Identity } from '@/lib/api';
 import { CardInfo } from '@/lib/types';
 import { CardWithTooltip } from './CardImage';
 
 // 选牌期全卡牌搜索（dev_docs/06 §5.6）：搜索所有卡牌并标注每个玩家的已知状态。
-type Status = 'not_in_pool' | 'dropped' | 'picked' | 'seen' | 'unknown';
+type Status = CardVisibilityStatus;
 
 const STATUS_TEXT: Record<Status, string> = {
   not_in_pool: '未包含在卡池中',

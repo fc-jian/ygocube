@@ -267,7 +267,9 @@ footer[class*='border-felt-edge'][class*='bg-felt'] {
 
 .card-grid-pack {
   @apply grid gap-1;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  /* Draft packs stay six cards across; the surrounding panel scrolls when the
+     viewport cannot fit all rows. */
+  grid-template-columns: repeat(6, minmax(0, 1fr));
 }
 
 .card-grid > div,
@@ -291,7 +293,6 @@ footer[class*='border-felt-edge'][class*='bg-felt'] {
 @media (min-width: 768px) {
   .card-grid { grid-template-columns: repeat(10, minmax(0, 1fr)); }
   .card-grid-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
-  .card-grid-pack { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 }
 
 @keyframes page-reveal {

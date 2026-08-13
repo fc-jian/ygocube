@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { CardInfo } from '@/lib/types';
 import { CardImage } from './CardImage';
-import { atkDefLine, linkMarkerLine, raceAttrLine, setNameLine, statLine, typeLabel } from '@/lib/cardInfo';
+import { aliasLine, atkDefLine, linkMarkerLine, raceAttrLine, setCodeLine, setNameLine, statLine, typeLabel } from '@/lib/cardInfo';
 
 // 全局浮动卡牌预览（ygopro 风格，position:fixed，不受容器 overflow 裁剪）。
 // hover 显示；点击小窗可固化（可滚动/选择文本/复制），右上角关闭。
@@ -107,6 +107,8 @@ export function CardPreviewHost() {
               {atkDefLine(card) && <p className="text-sm font-semibold text-slate-100">{atkDefLine(card)}</p>}
               {linkMarkerLine(card) && <p className="text-sm text-slate-300">{linkMarkerLine(card)}</p>}
               {setNameLine(card) && <p className="mt-1 text-xs text-slate-400">{setNameLine(card)}</p>}
+              {setCodeLine(card) && <p className="text-xs text-slate-500">{setCodeLine(card)}</p>}
+              {aliasLine(card) && <p className="text-xs text-slate-500">{aliasLine(card)}</p>}
             </div>
           </div>
           {card.desc && (
@@ -173,6 +175,8 @@ export function CardPreviewHost() {
           {atkDefLine(card) && <p className="text-[0.6875rem] font-semibold text-slate-100">{atkDefLine(card)}</p>}
           {linkMarkerLine(card) && <p className="text-[0.6875rem] text-slate-300">{linkMarkerLine(card)}</p>}
           {setNameLine(card) && <p className="text-[0.625rem] text-slate-400">{setNameLine(card)}</p>}
+          {setCodeLine(card) && <p className="text-[0.625rem] text-slate-500">{setCodeLine(card)}</p>}
+          {aliasLine(card) && <p className="text-[0.625rem] text-slate-500">{aliasLine(card)}</p>}
         </div>
       </div>
       {card.desc && (

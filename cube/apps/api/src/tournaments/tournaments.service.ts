@@ -482,7 +482,9 @@ export class TournamentsService {
       draftReserveMs: passing ? (state.pickReserves[playerId] ?? cfg.reserveSeconds * 1000) : undefined,
       queueLengths,
       pause: state.pause,
-      droppedCards: state.droppedCards,
+      // Never disclose private initial drops through the player-facing state;
+      // adminState remains the authoritative full view.
+      droppedCards: cfg.dropPublic === true ? state.droppedCards : [],
       phaseDeadline: state.frozen && state.frozenTimers?.deckbuilding !== undefined ? null : state.phaseDeadline,
       phaseDeadlineRemainingMs: state.frozen ? state.frozenTimers?.deckbuilding : undefined,
       pendingPhase: state.pendingPhase,

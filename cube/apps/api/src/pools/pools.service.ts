@@ -68,8 +68,9 @@ export class PoolsService {
     return { id: pool.id, name: pool.name };
   }
 
-  // 异画卡（alias）只保留原始卡；token 卡不允许进入卡池。任何未命中的原始输入编号
-  // 都随响应返回，不能再静默丢弃，便于管理员修正错误的卡池清单。
+  // A pool contains exact printed card codes. `datas.alias` remains available
+  // to deck-rule validation, but must never collapse two physical pool cards.
+  // Token cards are filtered, and every missing source code is reported.
   private filterCodes(codes: number[], entries: PoolImportEntry[] = []): { unique: number[] } & PoolImportReport {
     let filtered = 0;
     const unique: number[] = [];
@@ -90,9 +91,8 @@ export class PoolsService {
       // (for example 白龙之落胤 -> 阿不思的落胤), so canonicalizing first would
       // report the rules name instead of the literal card-table name.
       const literalInfo = this.cards.getLiteral(submittedCode);
-      const canonicalCode = this.cards.canonicalCode(submittedCode);
-      const info = this.cards.get(canonicalCode);
-      if (!literalInfo || !info) {
+      const info = literalInfo;
+      if (!info) {
         if (!seenMissing.has(submittedCode)) {
           seenMissing.add(submittedCode);
           missingCodes.push(submittedCode);
@@ -188,9 +188,8 @@ export class PoolsService {
       const j = Math.floor(Math.random() * (i + 1));
       [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
     }
-    // poolCodes() is already canonical, deduplicated, and token-free. Store the
-    // sample directly so a transient alias lookup cannot randomly shrink a pool
-    // that was sampled from the same authoritative list.
+    // poolCodes() is exact-code, deduplicated, and token-free. Store the sample
+    // directly so alias metadata cannot randomly shrink a pool.
     if (!name.trim()) throw new Error('BAD_PAYLOAD');
     const selected = shuffled.slice(0, Math.max(0, Math.min(size, shuffled.length)));
     const exists = getDb().prepare('SELECT 1 FROM card_pools WHERE name=?').get(name) as PoolRow | undefined;

@@ -5,6 +5,7 @@ export type TournamentPhase = 'registration' | 'drafting' | 'deckbuilding' | 'ma
 export type DuelStage = 'begin' | 'dueling' | 'siding' | 'end';
 export type MatchFormat = 'round_robin' | 'swiss' | 'double_elimination';
 export type MatchStage = 'round_robin' | 'swiss' | 'playoff' | 'winners' | 'losers' | 'grand_final';
+export type CardVisibilityStatus = 'not_in_pool' | 'dropped' | 'picked' | 'seen' | 'unknown';
 
 export interface CardInfo {
   code: number;

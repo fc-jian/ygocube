@@ -36,6 +36,12 @@ export function compareCardsLikeYgopro(a: CardInfo, b: CardInfo): number {
 export class DecksService {
   constructor(private cards: CardsService, private matches?: MatchesService) {}
 
+  // The pool/deck still stores the exact printed code, while YGOPro's rules
+  // identity (datas.alias) is used only for copy-limit accounting.
+  private copyKey(code: number): number {
+    return this.cards.canonicalCode(code);
+  }
+
   private deckOf(state: ReturnType<typeof loadState>, playerId: string): DeckState {
     return state.decks[playerId] ?? { main: [], extra: [], side: [], lockedAt: null, status: 'building' };
   }
@@ -60,7 +66,8 @@ export class DecksService {
     // 选牌池校验：from=pool 的卡必须属于该玩家已选卡（防绕过选牌直接塞卡，dev_docs/05 §4）
     if (from === 'pool') {
       const pickedCount = pickedCards(state, playerId).filter((c) => c === card).length;
-      const usedCount = [...deck.main, ...deck.extra, ...deck.side].filter((c) => c === card).length;
+      const key = this.copyKey(card);
+      const usedCount = [...deck.main, ...deck.extra, ...deck.side].filter((c) => this.copyKey(c) === key).length;
       const maxCopies = Number(getConfig(state).maxCopies ?? 3);
       // Picking a code licenses up to maxCopies copies in the constructed deck.
       if (pickedCount === 0 || usedCount >= maxCopies) throw new Error('CARD_NOT_IN_POOL');
@@ -158,18 +165,19 @@ export class DecksService {
     }
     // 只有选到过的编号可用；该编号在三区合计最多 maxCopies 份（dev_docs/05 §4）。
     const picked = new Set(pickedCards(state, playerId));
-    const counts = new Map<number, number>();
+    const counts = new Map<number, { count: number; code: number }>();
     for (const c of [...deck.main, ...deck.extra, ...deck.side]) {
-      const already = counts.get(c) ?? 0;
       if (!picked.has(c)) {
         errors.push(`card ${c} not in picked pool`);
         continue;
       }
-      counts.set(c, already + 1);
+      const key = this.copyKey(c);
+      const previous = counts.get(key);
+      counts.set(key, { count: (previous?.count ?? 0) + 1, code: previous?.code ?? c });
     }
     const maxCopies = Number(cfg.maxCopies ?? 3);
-    for (const [c, n] of counts) {
-      if (n > maxCopies) errors.push(`more than ${maxCopies} copies of ${c}`);
+    for (const value of counts.values()) {
+      if (value.count > maxCopies) errors.push(`more than ${maxCopies} copies of ${value.code}`);
     }
     return errors;
   }
@@ -182,23 +190,56 @@ export class DecksService {
     const cfg = getConfig(state);
     const pool = pickedCards(state, playerId);
     const newDeck: DeckState = { ...deck, main: [...deck.main], extra: [...deck.extra], side: [...deck.side] };
-    // fill main from pool (respecting zone rules), trim overflows
-    const used = new Map<number, number>();
-    for (const c of [...newDeck.main, ...newDeck.extra, ...newDeck.side]) used.set(c, (used.get(c) ?? 0) + 1);
-    const poolCounts = new Map<number, number>();
-    for (const c of pool) poolCounts.set(c, (poolCounts.get(c) ?? 0) + 1);
     const maxCopies = Number(cfg.maxCopies ?? 3);
-    for (const c of pool) {
-      if ((used.get(c) ?? 0) >= (poolCounts.get(c) ?? 0)) continue;
-      if ((used.get(c) ?? 0) >= maxCopies) continue;
-      if (this.cards.isExtraDeck(c)) {
-        if (newDeck.extra.length < cfg.extraMax) {
+    const picked = new Set(pool);
+    const shuffled = <T>(items: T[]): T[] => {
+      const out = [...items];
+      for (let i = out.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [out[i], out[j]] = [out[j], out[i]];
+      }
+      return out;
+    };
+    // First discard unpicked, wrong-zone, and canonical-copy-overflow cards.
+    // This makes the timeout/admin repair legal even when a client left a
+    // partially invalid deck in the event log.
+    const used = new Map<number, number>();
+    const retain = (codes: number[], zone: 'main' | 'extra' | 'side'): number[] => shuffled(codes).filter((c) => {
+      if (!picked.has(c)) return false;
+      if (zone === 'main' && this.cards.isExtraDeck(c)) return false;
+      if (zone === 'extra' && !this.cards.isExtraDeck(c)) return false;
+      const key = this.copyKey(c);
+      const count = used.get(key) ?? 0;
+      if (count >= maxCopies) return false;
+      used.set(key, count + 1);
+      return true;
+    });
+    newDeck.main = retain(newDeck.main, 'main');
+    newDeck.extra = retain(newDeck.extra, 'extra');
+    newDeck.side = retain(newDeck.side, 'side');
+    // Keep each zone within its hard capacity before filling available slots.
+    newDeck.main = newDeck.main.slice(0, cfg.mainMax);
+    newDeck.extra = newDeck.extra.slice(0, cfg.extraMax);
+    newDeck.side = newDeck.side.slice(0, cfg.sideMax);
+    used.clear();
+    for (const c of [...newDeck.main, ...newDeck.extra, ...newDeck.side]) {
+      const key = this.copyKey(c);
+      used.set(key, (used.get(key) ?? 0) + 1);
+    }
+    // A picked exact code licenses up to maxCopies copies. Do not cap this by
+    // the number of physical pick events: maxCopies > 1 is intentionally the
+    // cube equivalent of copying a selected card during deck construction.
+    for (const c of [...new Set(pool)]) {
+      const key = this.copyKey(c);
+      while ((used.get(key) ?? 0) < maxCopies) {
+        if (this.cards.isExtraDeck(c)) {
+          if (newDeck.extra.length >= cfg.extraMax) break;
           newDeck.extra.push(c);
-          used.set(c, (used.get(c) ?? 0) + 1);
+        } else {
+          if (newDeck.main.length >= cfg.mainMax) break;
+          newDeck.main.push(c);
         }
-      } else if (newDeck.main.length < cfg.mainMax) {
-        newDeck.main.push(c);
-        used.set(c, (used.get(c) ?? 0) + 1);
+        used.set(key, (used.get(key) ?? 0) + 1);
       }
     }
     newDeck.main = newDeck.main.slice(0, cfg.mainMax);
@@ -232,12 +273,13 @@ export class DecksService {
     let movedToSide = 0;
     const counts = new Map<number, number>();
     const legalCopies = (codes: number[]) => codes.filter((code) => {
-      const count = counts.get(code) ?? 0;
+      const key = this.copyKey(code);
+      const count = counts.get(key) ?? 0;
       if (!picked.has(code) || count >= maxCopies) {
         returnedToPool++;
         return false;
       }
-      counts.set(code, count + 1);
+      counts.set(key, count + 1);
       return true;
     });
     let main = legalCopies(source.main);
