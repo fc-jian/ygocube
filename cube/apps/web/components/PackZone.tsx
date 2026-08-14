@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react';
 import { CardImage, CardWithTooltip } from './CardImage';
 import { ConfirmModal } from './ConfirmModal';
+import { CardMeta } from './CardPreview';
 import { CardInfo } from '@/lib/types';
 import { matchesCardQuery, sortCardCodes } from '@/lib/cardInfo';
 import { useNowTick } from './TopBar';
@@ -158,15 +159,27 @@ export function PackZone({ pack, cardMap, droppedCards, onPick }: {
           setPending(null);
         }}
       >
-        <div className="flex items-center gap-3">
-          <CardImage code={pending ?? 0} name={pendingCard?.name} className="h-28" />
-          <div className="flex-1">
-            <p className="text-sm font-semibold text-gold">{pendingCard?.name ?? pending}</p>
-            <p className="mt-1 max-h-32 overflow-y-auto whitespace-pre-line text-xs leading-relaxed text-slate-300">
-              {pendingCard?.desc}
-            </p>
-          </div>
-        </div>
+        {pendingCard ? (
+          <>
+            <div className="flex items-start gap-3">
+              <CardImage code={pendingCard.code} name={pendingCard.name} className="h-40 w-28 shrink-0" />
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-semibold leading-snug text-gold">{pendingCard.name}</p>
+                <p className="mt-1 font-mono text-xs text-slate-500">[{String(pendingCard.code).padStart(8, '0')}]</p>
+                <div className="mt-2">
+                  <CardMeta card={pendingCard} />
+                </div>
+              </div>
+            </div>
+            {pendingCard.desc && (
+              <p className="mt-3 max-h-56 overflow-y-auto whitespace-pre-line text-sm leading-relaxed text-slate-200">
+                {pendingCard.desc}
+              </p>
+            )}
+          </>
+        ) : (
+          <p className="text-sm text-slate-400">卡牌信息加载中…</p>
+        )}
       </ConfirmModal>
     </aside>
   );
