@@ -281,6 +281,15 @@ export class AdminController {
     return this.tournaments.resetPlayerToken(tid, String(req.params.pid));
   }
 
+  @Post('t/:tid/players/:pid/reserve')
+  addPlayerReserve(@Req() req: AuthedRequest, @Param('pid') pid: string, @Body() body: Record<string, unknown>) {
+    const seconds = Number(body.seconds);
+    if (!Number.isInteger(seconds) || seconds <= 0 || seconds > 3600) throw new Error('BAD_RESERVE_SECONDS');
+    const playerId = decodeURIComponent(pid);
+    const result = this.draft.addReserveSeconds(Number(req.params.tid), playerId, seconds, this.adminActor(req));
+    return { ok: true, player_id: playerId, added_seconds: seconds, ...result };
+  }
+
   @Post('t/:tid/match/result')
   setMatchResult(@Req() req: AuthedRequest, @Body() body: Record<string, number>) {
     const tid = Number(req.params.tid);

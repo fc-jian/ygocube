@@ -62,7 +62,11 @@ timeLimit=180
 passing 模式按轮发堆，每个玩家有 FIFO 队列；队首堆选一张后顺时针传递，整轮
 全部清空才发下一轮。每个玩家自己的 deadline = 基础 30 秒 + 尚未使用的
 reserve；超出基础时间只扣 reserve，reserve 耗尽后才自动随机选，事件记录
-`auto=true`。`reseatEachRound` 开启时会记录 `seat_assign` 事件再发下一轮。
+`auto=true`。玩家点击牌查看详情时会记录本人当前堆的最后一张候选牌；超时
+自动选牌优先使用仍在堆中的候选牌，候选牌仅对本人可见。管理员可通过
+`POST /admin/t/:tid/players/:pid/reserve` 增加指定玩家的 reserve，事件同时保存
+余额、deadline 和暂停快照，保证回放/回溯一致。`reseatEachRound` 开启时会记录
+`seat_assign` 事件再发下一轮。
 
 `serial` 是旧的全局光标模式，仅用于兼容旧事件回放；新建页面默认不暴露该选项。
 

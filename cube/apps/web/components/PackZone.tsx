@@ -10,7 +10,7 @@ import { useNowTick } from './TopBar';
 
 // 右侧牌堆区（dev_docs/06 §2）：他人回合显示卡背+数量，自己回合显示正面，
 // 背景为剩余秒数倒计时呼吸光效（每秒 tick 实时更新）。
-export function PackZone({ pack, cardMap, droppedCards, onPick }: {
+export function PackZone({ pack, cardMap, droppedCards, alternativeCode, onAlternative, onPick }: {
   pack: {
     cardsLeft: number;
     isMyTurn: boolean;
@@ -22,6 +22,8 @@ export function PackZone({ pack, cardMap, droppedCards, onPick }: {
   } | null;
   cardMap: Record<number, CardInfo>;
   droppedCards?: number[];
+  alternativeCode?: number | null;
+  onAlternative?: (code: number) => void;
   onPick: (code: number) => void;
 }) {
   const [pending, setPending] = useState<number | null>(null);
@@ -99,8 +101,13 @@ export function PackZone({ pack, cardMap, droppedCards, onPick }: {
                   e.dataTransfer.setData('text/plain', String(c));
                   e.dataTransfer.setData('application/x-card-zone', 'pack');
                 }}
-                onClick={() => setPending(c)}
-                className="animate-pick cursor-pointer"
+                onClick={() => {
+                  // Clicking opens the confirmation/details modal and records
+                  // this card as the timeout fallback. The latest click wins.
+                  setPending(c);
+                  onAlternative?.(c);
+                }}
+                className={`animate-pick cursor-pointer ${alternativeCode === c ? 'rounded ring-2 ring-amber-300 ring-offset-1 ring-offset-felt' : ''}`}
               >
                 {/* pinOnClick=false：点击只触发选牌确认，不再弹出第二个固定详情窗口 */}
                 <CardWithTooltip code={c} card={cardMap[c]} pinOnClick={false} />

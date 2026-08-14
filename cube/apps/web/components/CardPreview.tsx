@@ -13,13 +13,18 @@ let setPreviewState: React.Dispatch<React.SetStateAction<PreviewState>> | null =
 let previewAction: ((card: CardInfo) => PreviewAction) | null = null;
 let pinnedRef = false;
 
+function supportsFineHover(): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return true;
+  return window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+}
+
 // 页面注册预览操作（如"移动到副卡组/主卡组"）
 export function setCardPreviewAction(getAction: ((card: CardInfo) => PreviewAction) | null): void {
   previewAction = getAction;
 }
 
 export function showCardPreview(card: CardInfo, e: { clientX: number; clientY: number }): void {
-  if (pinnedRef) return; // 已固定详情时不再被 hover 顶替（避免双重窗口）
+  if (pinnedRef || !supportsFineHover()) return; // 触摸设备使用点击固定详情，不显示跟手 hover 窗口
   setPreviewState?.({ card, x: e.clientX, y: e.clientY });
 }
 
@@ -32,7 +37,7 @@ export function pinCardPreview(card: CardInfo, e: { clientX: number; clientY: nu
 let setPinnedState: React.Dispatch<React.SetStateAction<boolean>> | null = null;
 
 export function moveCardPreview(e: { clientX: number; clientY: number }): void {
-  if (pinnedRef) return;
+  if (pinnedRef || !supportsFineHover()) return;
   setPreviewState?.((s) => (s ? { ...s, x: e.clientX, y: e.clientY } : s));
 }
 
@@ -112,11 +117,11 @@ export function CardPreviewHost() {
       >
         <div
           data-card-preview
-          className="mx-4 max-h-[90vh] w-[420px] max-w-[92vw] overflow-y-auto rounded-lg border border-gold/50 bg-felt-deep p-4 shadow-2xl select-text"
+          className="mx-2 max-h-[min(90dvh,90vh)] w-[min(420px,calc(100vw-1rem))] max-w-[92vw] overflow-y-auto rounded-lg border border-gold/50 bg-felt-deep p-3 shadow-2xl select-text sm:mx-4 sm:p-4"
           onClick={(e) => e.stopPropagation()}
         >
           <div className="flex gap-4">
-            <CardImage code={card.code} name={card.name} className="h-52 w-38 shrink-0" />
+            <CardImage code={card.code} name={card.name} className="h-[clamp(9rem,32vh,13rem)] w-[clamp(6.5rem,24vw,9.5rem)] shrink-0" />
             <div className="min-w-0 flex-1">
               <p className="text-base font-bold leading-snug text-gold">{card.name}</p>
               <p className="mt-1 font-mono text-xs text-slate-500">[{String(card.code).padStart(8, '0')}]</p>
@@ -157,14 +162,24 @@ export function CardPreviewHost() {
       </div>
     );
   }
-  const flip = x > window.innerWidth - 320;
-  const flipY = y > window.innerHeight - 560;
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  const compact = viewportWidth < 640;
+  // Scale the preview with the viewport, then clamp it inside a safe gutter so
+  // narrow phones and short laptop screens never render an off-screen card.
+  const width = Math.min(viewportWidth - 16, compact ? 340 : Math.max(280, Math.min(360, viewportWidth * 0.3)));
+  const maxHeight = Math.max(180, viewportHeight - (compact ? 24 : 32));
+  const gap = compact ? 10 : 18;
+  const rawLeft = x > viewportWidth / 2 ? x - width - gap : x + gap;
+  const rawTop = y + gap + maxHeight <= viewportHeight - 8 ? y + gap : y - maxHeight - gap;
+  const left = Math.max(8, Math.min(rawLeft, viewportWidth - width - 8));
+  const top = Math.max(8, Math.min(rawTop, viewportHeight - maxHeight - 8));
   const style: React.CSSProperties = {
     position: 'fixed',
-    left: flip ? x - 300 : x + 18,
-    top: flipY ? y - 520 : y + 18,
-    width: 300,
-    maxHeight: 'calc(100vh - 40px)',
+    left,
+    top,
+    width,
+    maxHeight,
     zIndex: 1000,
   };
   return (
@@ -177,7 +192,7 @@ export function CardPreviewHost() {
     >
 
       <div className="flex gap-3">
-        <CardImage code={card.code} name={card.name} className="h-36 w-26 shrink-0" />
+        <CardImage code={card.code} name={card.name} className="h-[clamp(7rem,30vw,9rem)] w-[clamp(5rem,22vw,6.5rem)] shrink-0" />
         <div className="min-w-0 flex-1">
           <p className="text-sm font-bold leading-snug text-gold">{card.name}</p>
           <p className="mt-0.5 font-mono text-[0.625rem] text-slate-500">[{String(card.code).padStart(8, '0')}]</p>

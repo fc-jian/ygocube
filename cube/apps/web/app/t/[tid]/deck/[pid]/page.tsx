@@ -90,6 +90,32 @@ export default function DeckPage() {
   }, [state?.status, load]);
   const now = useNowTick(true);
 
+  // Keep every hook before the loading/permission early returns. Previously
+  // this memo lived below `if (!state) return`, so the first async render and
+  // the loaded render had different hook orders and crashed the deck page.
+  const deck = state?.deck ?? { main: [], extra: [], side: [], lockedAt: null };
+  const cfg = state?.config ?? {};
+  const discard = useMemo(() => {
+    if (!state) return [];
+    const used = new Map<number, number>();
+    for (const code of [...deck.main, ...deck.extra, ...deck.side]) {
+      const key = canonicalCardCode(code, cardMap);
+      used.set(key, (used.get(key) ?? 0) + 1);
+    }
+    const maxCopies = Number(cfg.maxCopies ?? 1);
+    const available: number[] = [];
+    // Keep the exact selected code in the unused area. The rules copy key is
+    // only used to enforce the shared maxCopies limit across alias rows.
+    for (const code of [...new Set(state.pickedCards ?? [])]) {
+      const key = canonicalCardCode(code, cardMap);
+      while ((used.get(key) ?? 0) < maxCopies) {
+        available.push(code);
+        used.set(key, (used.get(key) ?? 0) + 1);
+      }
+    }
+    return available;
+  }, [cardMap, cfg.maxCopies, deck.extra, deck.main, deck.side, state?.pickedCards]);
+
   const move = async (card: number, from: string, to: string, index?: number, fromIndex?: number) => {
     try {
       flip.snapshot(); // FLIP: capture positions before the post-move re-render
@@ -184,28 +210,7 @@ export default function DeckPage() {
     );
   if (!state || !identity) return <main className="p-8 text-slate-400">加载中...</main>;
 
-  const deck = state.deck ?? { main: [], extra: [], side: [], lockedAt: null };
   const locked = !!deck.lockedAt;
-  const cfg = state.config;
-  const discard = useMemo(() => {
-    const used = new Map<number, number>();
-    for (const code of [...deck.main, ...deck.extra, ...deck.side]) {
-      const key = canonicalCardCode(code, cardMap);
-      used.set(key, (used.get(key) ?? 0) + 1);
-    }
-    const maxCopies = Number(cfg.maxCopies ?? 1);
-    const available: number[] = [];
-    // Keep the exact selected code in the unused area. The rules copy key is
-    // only used to enforce the shared maxCopies limit across alias rows.
-    for (const code of [...new Set(state.pickedCards ?? [])]) {
-      const key = canonicalCardCode(code, cardMap);
-      while ((used.get(key) ?? 0) < maxCopies) {
-        available.push(code);
-        used.set(key, (used.get(key) ?? 0) + 1);
-      }
-    }
-    return available;
-  }, [cardMap, cfg.maxCopies, deck.extra, deck.main, deck.side, state.pickedCards]);
   const buildSecondsLeft = state.phaseDeadlineRemainingMs !== undefined
     ? Math.max(0, Math.ceil(state.phaseDeadlineRemainingMs / 1000))
     : state.phaseDeadline

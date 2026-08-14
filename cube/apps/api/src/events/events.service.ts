@@ -86,6 +86,11 @@ export interface FrozenTimerState {
   deckbuilding?: number;
 }
 
+export interface PickAlternative {
+  packIndex: number;
+  card: number;
+}
+
 export interface TournamentState {
   id: number;
   name: string;
@@ -105,6 +110,8 @@ export interface TournamentState {
   packsDealt: number;
   // passing：每玩家保留时间余额（ms，不刷新；单选超时先扣 reserve，耗尽才自动选）
   pickReserves: Record<string, number>;
+  // 每名玩家最后点击的候选牌；超时自动选牌优先使用仍在当前牌堆中的候选牌。
+  pickAlternatives?: Record<string, PickAlternative | null>;
   pause: PauseState | null;
   decks: Record<string, DeckState>;
   matches: MatchState[];
@@ -133,7 +140,7 @@ function emptyState(id: number, name: string, configJson: string): TournamentSta
   return {
     id, name, configJson, status: 'registration', round: 0, frozen: false,
     players: [], packs: [], droppedCards: [], picks: [], pickCursor: null, pause: null, decks: {}, matches: [],
-    packQueues: {}, pickDeadlines: {}, packsDealt: 0, pickReserves: {},
+    packQueues: {}, pickDeadlines: {}, packsDealt: 0, pickReserves: {}, pickAlternatives: {},
     phaseDeadline: null, pendingPhase: null, frozenTimers: null, competition: null,
   };
 }
@@ -143,6 +150,9 @@ function clone<T>(x: T): T {
 }
 
 export function apply(state: TournamentState, action: string, payload: any): void {
+  // Snapshots created before candidate-card support do not have this field.
+  // Normalize lazily so old tournaments remain replayable.
+  state.pickAlternatives ??= {};
   switch (action) {
     case 'phase': {
       state.status = payload.status;
@@ -181,6 +191,7 @@ export function apply(state: TournamentState, action: string, payload: any): voi
       delete state.packQueues[playerId];
       delete state.pickDeadlines[playerId];
       delete state.pickReserves[playerId];
+      delete state.pickAlternatives[playerId];
       break;
     }
     case 'player_dsq': {
@@ -227,10 +238,18 @@ export function apply(state: TournamentState, action: string, payload: any): voi
     case 'pick': {
       const p: PickState = payload;
       state.picks.push(p);
+      // 候选牌只服务于当前一次选择，实际选中后立即清除。
+      state.pickAlternatives[p.playerId] = null;
       // passing 模式：pick 事件携带选后队列/deadline/reserve 快照，回放与实时一致
       if (payload.queues) state.packQueues = clone(payload.queues);
       if (payload.deadlines) state.pickDeadlines = clone(payload.deadlines);
       if (payload.reserves) state.pickReserves = clone(payload.reserves);
+      break;
+    }
+    case 'alternative': {
+      if (payload?.playerId && payload.packIndex !== undefined && payload.card !== undefined) {
+        state.pickAlternatives[payload.playerId] = { packIndex: Number(payload.packIndex), card: Number(payload.card) };
+      }
       break;
     }
     case 'deadlines': {
@@ -241,6 +260,16 @@ export function apply(state: TournamentState, action: string, payload: any): voi
         if (payload.reserves) state.pickReserves = clone(payload.reserves);
       } else {
         state.pickDeadlines = payload ? clone(payload) : {};
+      }
+      break;
+    }
+    case 'reserve': {
+      // passing 模式管理员临时增加保留时间。事件携带全量快照，保证
+      // 重启、回放和硬回溯都恢复同一份余额与 deadline。
+      if (payload?.reserves) state.pickReserves = clone(payload.reserves);
+      if (payload?.deadlines) state.pickDeadlines = clone(payload.deadlines);
+      if (payload?.pausedDeadlines && state.pause?.pausedAt) {
+        state.pause.pausedDeadlines = clone(payload.pausedDeadlines);
       }
       break;
     }

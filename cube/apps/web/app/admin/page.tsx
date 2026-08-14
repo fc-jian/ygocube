@@ -14,6 +14,9 @@ interface AdminState {
   packs: { index: number; size: number; dropCard: number | null; order: number[] }[];
   picks: { playerId: string; packIndex: number; round: number; card: number; auto: boolean }[];
   pickCursor: { packIndex: number; round: number; playerId: string; deadlineAt: string } | null;
+  pickDeadlines?: Record<string, string | null>;
+  pickReserves?: Record<string, number>;
+  pickAlternatives?: Record<string, { packIndex: number; card: number } | null>;
   pendingPhase: string | null;
   pause: { pausedAt: string | null; proposer: string | null } | null;
   decks: Record<string, { main: number[]; extra: number[]; side: number[]; lockedAt: string | null }>;
@@ -82,13 +85,15 @@ export default function AdminPage() {
   const [shownToken, setShownToken] = useState<{ pid: string; token: string } | null>(null);
   const [shownAdminToken, setShownAdminToken] = useState<string | null>(null);
   const [matchInputs, setMatchInputs] = useState<Record<number, { a: string; b: string }>>({});
-  const [events, setEvents] = useState<{ seq: number; entity: string; action: string; summary: string; createdAt: string }[]>([]);
+  const [events, setEvents] = useState<{ seq: number; entity: string; action: string; summary: string; detail: string; createdAt: string }[]>([]);
   const [packCount, setPackCount] = useState<number | ''>('');
   const [dropPublic, setDropPublic] = useState(false);
   const [reseatEachRound, setReseatEachRound] = useState(true);
   const [evenPackCount, setEvenPackCount] = useState(true);
   const [limitDeckbuilding, setLimitDeckbuilding] = useState(false);
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null);
+  const [reserveInputs, setReserveInputs] = useState<Record<string, string>>({});
+  const [hoveredEvent, setHoveredEvent] = useState<number | null>(null);
   const [formatForm, setFormatForm] = useState({ matchFormat: 'round_robin', swissRoundCount: 4, playoffSize: 0 });
 
   useEffect(() => {
@@ -169,6 +174,8 @@ export default function AdminPage() {
   useEffect(() => {
     setEditing(false);
     setShownAdminToken(null);
+    setReserveInputs({});
+    setHoveredEvent(null);
   }, [tid]);
 
   // 控制台轮询刷新（dev_docs/06 §6）
@@ -238,6 +245,23 @@ export default function AdminPage() {
       showMsg('比赛管理 token 已重设；请立即保存新 token');
     } catch (e: any) {
       showMsg(`重设失败：${e.message}`);
+    }
+  };
+
+  const addReserve = async (playerId: string) => {
+    if (!state) return;
+    const seconds = Number(reserveInputs[playerId] ?? '');
+    if (!Number.isInteger(seconds) || seconds <= 0 || seconds > 3600) {
+      showMsg('请输入要增加的正整数秒数（最多 3600 秒）');
+      return;
+    }
+    try {
+      const result = await adminFetch(`/admin/t/${state.id}/players/${encodeURIComponent(playerId)}/reserve`, 'POST', { seconds });
+      setReserveInputs((values) => ({ ...values, [playerId]: '' }));
+      showMsg(`${playerId} 已增加 ${seconds} 秒保留时间（当前 ${Math.ceil(Number(result.reserveMs ?? 0) / 1000)} 秒）`);
+      await loadRef.current();
+    } catch (e: any) {
+      showMsg(`增加保留时间失败：${e.message}`);
     }
   };
 
@@ -589,17 +613,54 @@ export default function AdminPage() {
               )}
               {state.pendingPhase === 'deckbuilding' && <p className="mt-1 text-amber-300">已请求进入构筑：等待当前轮结束（进度将保留）</p>}
             </section>
+            <section className="rounded-lg border border-gold/25 bg-felt/60 p-3 text-xs">
+              <h3 className="mb-1 font-semibold text-gold">保留时间调整</h3>
+              <p className="mb-2 text-slate-400">选牌阶段可给指定玩家增加 reserve；不会刷新已消耗的时间。超时自动选择会优先使用该玩家最后点击的候选牌。</p>
+              <div className="space-y-1.5">
+                {state.players.map((p) => {
+                  const reserveMs = state.pickReserves?.[p.playerId];
+                  const alternative = state.pickAlternatives?.[p.playerId];
+                  return (
+                    <div key={p.playerId} className="flex flex-wrap items-center gap-2 rounded bg-felt-deep/50 px-2 py-1">
+                      <span className="min-w-[6rem] flex-1 truncate">{p.displayName || p.playerId}</span>
+                      <span className="font-mono text-amber-200">{reserveMs === undefined ? '—' : `${Math.ceil(reserveMs / 1000)} 秒`}</span>
+                      {alternative && <span className="text-slate-400">候选 #{alternative.card}</span>}
+                      <input
+                        aria-label={`给 ${p.playerId} 增加保留秒数`}
+                        type="number"
+                        min={1}
+                        max={3600}
+                        placeholder="秒数"
+                        className="w-16 rounded bg-felt-deep px-1.5 py-0.5 text-center"
+                        value={reserveInputs[p.playerId] ?? ''}
+                        onChange={(e) => setReserveInputs((values) => ({ ...values, [p.playerId]: e.target.value }))}
+                      />
+                      <button
+                        onClick={() => void addReserve(p.playerId)}
+                        disabled={state.status !== 'drafting' || state.frozen}
+                        className="rounded bg-gold px-2 py-0.5 font-semibold text-felt-deep hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        增加秒数
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+              {state.status !== 'drafting' && <p className="mt-2 text-slate-500">当前不在选牌阶段，调整按钮已禁用。</p>}
+            </section>
             <section className="rounded-lg border border-felt-edge bg-felt/60 p-3 text-xs">
               <h3 className="mb-2 font-semibold text-gold">事件时间线（点击选择回溯点）</h3>
               <div className="max-h-72 space-y-0.5 overflow-y-auto">
                 {events.map((e) => (
                   <div
                     key={e.seq}
-                    onClick={() => setSelectedSeq(e.seq)}
+                    onClick={() => { setSelectedSeq(e.seq); setHoveredEvent(e.seq); }}
+                    onMouseEnter={() => setHoveredEvent(e.seq)}
+                    onMouseLeave={() => setHoveredEvent(null)}
                     className={`flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 hover:bg-felt-deep ${
                       selectedSeq === e.seq ? 'bg-gold/20 ring-1 ring-gold' : ''
                     }`}
-                    title={`${e.action}（${e.entity}）`}
+                    title={e.detail}
                   >
                     <span className="w-14 shrink-0 font-mono text-slate-400">{e.seq}</span>
                     <span className="w-16 shrink-0 font-mono text-slate-500">{new Date(e.createdAt).toLocaleTimeString()}</span>
@@ -608,6 +669,11 @@ export default function AdminPage() {
                 ))}
                 {events.length === 0 && <p className="py-2 text-center text-slate-500">暂无事件</p>}
               </div>
+              {(() => {
+                const detailSeq = hoveredEvent ?? selectedSeq;
+                const detail = events.find((e) => e.seq === detailSeq)?.detail;
+                return detail ? <pre className="mt-2 max-h-36 overflow-y-auto whitespace-pre-wrap rounded bg-felt-deep/70 p-2 font-mono text-[0.625rem] leading-relaxed text-slate-300">{detail}</pre> : null;
+              })()}
               <div className="mt-2 flex items-center gap-2">
                 <span className="font-mono text-gold">{selectedSeq !== null ? `seq ${selectedSeq}` : '未选择'}</span>
                 <button

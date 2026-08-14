@@ -480,6 +480,8 @@ export class TournamentsService {
       poolInfo: { name: String(cfg.cardPool ?? 'full'), count: this.poolsCodes(cfg) },
       pack,
       draftReserveMs: passing ? (state.pickReserves[playerId] ?? cfg.reserveSeconds * 1000) : undefined,
+      // 仅返回本人的最后点击候选牌；其余玩家的候选牌保持私有。
+      pickAlternative: state.pickAlternatives?.[playerId]?.card ?? null,
       queueLengths,
       pause: state.pause,
       // Never disclose private initial drops through the player-facing state;
@@ -495,8 +497,10 @@ export class TournamentsService {
     };
   }
 
-  // 管理台事件时间线：完整事件列表（全局 seq + 可读摘要），供回溯选择
-  events(tid: number): { seq: number; entity: string; action: string; summary: string; createdAt: string }[] {
+  // 管理台事件时间线：完整事件列表（全局 seq + 可读摘要），供回溯选择。
+  // detail 用于前端 hover；保留关键字段（尤其是选中的 exact card code），
+  // 但不把 packs/decks 的超大完整 payload 直接塞进列表响应。
+  events(tid: number): { seq: number; entity: string; action: string; summary: string; detail: string; createdAt: string }[] {
     const rows = getDb()
       .prepare('SELECT seq, entity, action, payload_json, created_at FROM events WHERE tournament_id=? ORDER BY seq')
       .all(tid) as { seq: number; entity: string; action: string; payload_json: string; created_at: string }[];
@@ -512,14 +516,49 @@ export class TournamentsService {
       else if (e.entity === 'pack' && e.action === 'packs_created') summary = `牌堆生成（${(p.packs ?? []).length} 堆${p.droppedCards?.length ? `，弃置 ${p.droppedCards.length} 张` : ''}${p.queues ? '，传递式' : ''}）`;
       else if (e.entity === 'draft' && e.action === 'deadlines') summary = '选牌计时重设';
       else if (e.entity === 'draft' && e.action === 'cursor') summary = p ? `牌堆 ${p.packIndex} → ${p.playerId}` : '选牌结束';
-      else if (e.entity === 'draft' && e.action === 'pick') summary = `选牌 ${p.playerId} #${p.card}${p.auto ? '（超时自动）' : ''}`;
-      else if (e.entity === 'draft' && e.action === 'pause') summary = p?.pausedAt ? '暂停' : '恢复';
+      else if (e.entity === 'pick' && e.action === 'pick') summary = `选牌 ${p.playerId} #${p.card}${p.auto ? '（超时自动）' : ''}`;
+      else if (e.entity === 'draft' && e.action === 'alternative') summary = `候选牌 ${p.playerId} #${p.card}`;
+      else if (e.entity === 'draft' && e.action === 'reserve') summary = `保留时间 +${p.addedSeconds ?? Math.round(Number(p.deltaMs ?? 0) / 1000)} 秒（${p.playerId}）`;
+      else if (e.entity === 'pause' && e.action === 'pause') summary = p?.pausedAt ? '暂停' : '恢复';
       else if (e.entity === 'tournament' && e.action === 'phase') summary = `阶段 → ${p.status} r${p.round ?? ''}`;
       else if (e.entity === 'tournament' && e.action === 'config') summary = '参数修改';
       else if (e.entity === 'tournament' && e.action === 'frozen') summary = !p ? '解冻' : '冻结';
       else if (e.entity === 'deck' && e.action === 'deck') summary = `卡组 ${p.playerId}`;
       else if (e.entity === 'match' && e.action === 'match') summary = `对局 r${p.round}t${p.tableNo}${p.resultA !== null ? ` ${p.resultA}:${p.resultB}` : '（安排）'}`;
-      return { seq: e.seq, entity: e.entity, action: e.action, summary, createdAt: e.created_at };
+      let detail: string;
+      if (e.entity === 'pick' && e.action === 'pick') {
+        detail = [
+          `玩家：${p.playerId}`,
+          `选择卡牌：${p.card}`,
+          `牌堆：${p.packIndex} · 该堆第 ${Number(p.round ?? 0) + 1} 张`,
+          p.auto ? '来源：超时自动选择' : '来源：玩家选择',
+        ].join('\n');
+      } else if (e.entity === 'draft' && e.action === 'reserve') {
+        detail = [
+          `玩家：${p.playerId}`,
+          `增加：${p.addedSeconds ?? Math.round(Number(p.deltaMs ?? 0) / 1000)} 秒`,
+          `当前保留：${p.reserves?.[p.playerId] !== undefined ? `${Math.ceil(Number(p.reserves[p.playerId]) / 1000)} 秒` : '未知'}`,
+          `当前 deadline：${p.deadlines?.[p.playerId] ?? '无'}`,
+        ].join('\n');
+      } else if (e.entity === 'draft' && e.action === 'alternative') {
+        detail = `玩家：${p.playerId}\n候选牌：${p.card}\n牌堆：${p.packIndex}`;
+      } else if (e.entity === 'deck' && e.action === 'deck') {
+        detail = `玩家：${p.playerId}\n主卡组：${p.deck?.main?.length ?? 0} 张\n额外卡组：${p.deck?.extra?.length ?? 0} 张\n副卡组：${p.deck?.side?.length ?? 0} 张`;
+      } else if (e.entity === 'draft' && e.action === 'cursor') {
+        detail = p
+          ? `牌堆：${p.packIndex}\n轮次：${p.round}\n当前玩家：${p.playerId}\ndeadline：${p.deadlineAt ?? '无'}`
+          : '选牌已结束';
+      } else if (e.entity === 'pause' && e.action === 'pause') {
+        detail = p?.pausedAt ? `暂停发起人：${p.proposer ?? '未知'}\n冻结时间：${p.pausedAt}` : '暂停/投票状态已恢复';
+      } else {
+        try {
+          const raw = JSON.stringify(payload, null, 2);
+          detail = raw.length > 1600 ? `${raw.slice(0, 1597)}...` : raw;
+        } catch {
+          detail = String(payload);
+        }
+      }
+      return { seq: e.seq, entity: e.entity, action: e.action, summary, detail, createdAt: e.created_at };
     });
   }
 
@@ -546,6 +585,7 @@ export class TournamentsService {
       pickDeadlines: state.pickDeadlines,
       packsDealt: state.packsDealt,
       pickReserves: state.pickReserves,
+      pickAlternatives: state.pickAlternatives,
       pause: state.pause,
       decks: state.decks,
       matches: state.matches,

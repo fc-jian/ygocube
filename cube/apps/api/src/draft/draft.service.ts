@@ -510,6 +510,47 @@ export class DraftService implements OnModuleInit {
     this.armTimer(loadState(tid));
   }
 
+  // 管理员补充指定玩家的 passing 保留时间。余额是独立的事件状态：不刷新
+  // 已经消耗的时间，只把新增秒数加到当前 deadline（暂停时加到冻结快照）。
+  addReserveSeconds(tid: number, playerId: string, seconds: number, actor: string): { reserveMs: number; deadlineAt: string | null } {
+    const state = loadState(tid);
+    if (state.frozen) throw new Error('FROZEN');
+    if (state.status !== 'drafting') throw new Error('WRONG_PHASE');
+    if (!this.isPassing(state)) throw new Error('WRONG_DRAFT_MODE');
+    if (!state.players.some((p) => p.playerId === playerId)) throw new Error('PLAYER_NOT_FOUND');
+    if (!Number.isInteger(seconds) || seconds <= 0 || seconds > 3600) throw new Error('BAD_RESERVE_SECONDS');
+
+    const deltaMs = seconds * 1000;
+    const reserves: Record<string, number> = { ...state.pickReserves };
+    reserves[playerId] = Math.max(0, reserves[playerId] ?? 0) + deltaMs;
+    const deadlines: Record<string, string | null> = { ...state.pickDeadlines };
+    const queue = state.packQueues[playerId] ?? [];
+    if (queue.length) {
+      const currentDeadline = deadlines[playerId];
+      deadlines[playerId] = currentDeadline
+        ? new Date(new Date(currentDeadline).getTime() + deltaMs).toISOString()
+        : new Date(Date.now() + getConfig(state).pickSeconds * 1000 + reserves[playerId]).toISOString();
+    }
+
+    // 玩家投票暂停时 deadline 尚未重新建立，必须同步增加暂停快照，
+    // 否则恢复后新增的 reserve 会凭空丢失。
+    const pausedDeadlines = state.pause?.pausedAt ? { ...(state.pause.pausedDeadlines ?? {}) } : undefined;
+    if (pausedDeadlines && pausedDeadlines[playerId] !== undefined) pausedDeadlines[playerId] += deltaMs;
+
+    logEvent(tid, 'draft', 'reserve', {
+      playerId,
+      addedSeconds: seconds,
+      deltaMs,
+      reserves,
+      deadlines,
+      ...(pausedDeadlines ? { pausedDeadlines } : {}),
+    }, actor);
+    if (!state.pause?.pausedAt) this.armPassTimer(tid, playerId);
+    persistMeta(tid);
+    const next = loadState(tid);
+    return { reserveMs: next.pickReserves[playerId] ?? 0, deadlineAt: next.pickDeadlines[playerId] ?? null };
+  }
+
   // timeout -> server picks randomly (dev_docs/05 §3)
   private autoPick(tid: number): void {
     try {
@@ -540,7 +581,10 @@ export class DraftService implements OnModuleInit {
       this.advance(tid, 'system', false);
       return;
     }
-    const card = remaining[Math.floor(Math.random() * remaining.length)];
+    const alternative = state.pickAlternatives?.[state.pickCursor.playerId];
+    const card = alternative?.packIndex === state.pickCursor.packIndex && remaining.includes(alternative.card)
+      ? alternative.card
+      : remaining[Math.floor(Math.random() * remaining.length)];
     this.doPick(tid, state.pickCursor.playerId, card, true, 'system');
   }
 
@@ -566,6 +610,28 @@ export class DraftService implements OnModuleInit {
     const remaining = this.remainingInPack(state, state.pickCursor.packIndex);
     if (!remaining.includes(card)) throw new Error('CARD_NOT_AVAILABLE');
     this.doPick(tid, playerId, card, false, playerId, targetZone);
+  }
+
+  // 记录玩家最后点击的候选牌。它不会改变牌堆或卡组，只作为超时自动
+  // 选择的优先候选；候选牌名称由前端状态栏显示。
+  setPickAlternative(tid: number, playerId: string, card: number, actor: string): void {
+    const state = loadState(tid);
+    if (state.status !== 'drafting') throw new Error('WRONG_PHASE');
+    if (state.pause?.pausedAt) throw new Error('PAUSED');
+    let packIndex: number;
+    if (this.isPassing(state)) {
+      const queue = state.packQueues[playerId] ?? [];
+      if (!queue.length) throw new Error('NOT_YOUR_TURN');
+      packIndex = queue[0];
+    } else {
+      if (!state.pickCursor || state.pickCursor.playerId !== playerId) throw new Error('NOT_YOUR_TURN');
+      packIndex = state.pickCursor.packIndex;
+    }
+    if (!this.remainingInPack(state, packIndex).includes(card)) throw new Error('CARD_NOT_AVAILABLE');
+    const current = state.pickAlternatives?.[playerId];
+    if (current?.packIndex === packIndex && current.card === card) return;
+    logEvent(tid, 'draft', 'alternative', { playerId, packIndex, card }, actor);
+    persistMeta(tid);
   }
 
   // 选中的卡立即进入左侧对应区域：拖拽目标区优先，否则按卡类型进 main/extra（dev_docs/06 §2）
@@ -670,7 +736,10 @@ export class DraftService implements OnModuleInit {
     if (!queue.length) return;
     const remaining = this.remainingInPack(state, queue[0]);
     if (!remaining.length) return; // 队首堆已空属异常状态（正常流程空堆即消亡），不推进
-    const card = remaining[Math.floor(Math.random() * remaining.length)];
+    const alternative = state.pickAlternatives?.[playerId];
+    const card = alternative?.packIndex === queue[0] && remaining.includes(alternative.card)
+      ? alternative.card
+      : remaining[Math.floor(Math.random() * remaining.length)];
     this.doPassPick(tid, playerId, card, true, 'system');
   }
 

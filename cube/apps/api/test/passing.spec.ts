@@ -1,5 +1,5 @@
 import { useTestDb, makeTournaments } from './helpers';
-import { freeze, loadState, resetStateCache, TournamentState, unfreeze } from '../src/events/events.service';
+import { freeze, hardRevertTo, loadState, resetStateCache, TournamentState, unfreeze } from '../src/events/events.service';
 import { DraftService } from '../src/draft/draft.service';
 import { CardsService } from '../src/cards/cards.service';
 import { PoolsService } from '../src/pools/pools.service';
@@ -269,6 +269,39 @@ describe('passing draft: reserve time', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  it('uses the player\'s last clicked alternative when the timer auto-picks', () => {
+    jest.useFakeTimers();
+    try {
+      const { draft, tid } = setupPassing('alternative-timeout', 2, 8, 4, { pickSeconds: 1, reserveSeconds: 0 });
+      const state = loadState(tid);
+      const playerId = seatsOf(state)[0];
+      const packIndex = state.packQueues[playerId][0];
+      const alternative = remainingOf(state, packIndex)[2];
+      draft.setPickAlternative(tid, playerId, alternative, playerId);
+      jest.advanceTimersByTime(1100);
+      const picked = loadState(tid).picks.find((p) => p.playerId === playerId);
+      expect(picked?.auto).toBe(true);
+      expect(picked?.card).toBe(alternative);
+      expect(loadState(tid).pickAlternatives?.[playerId]).toBeNull();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('reverting restores the reserve balance from the selected event branch', () => {
+    const { draft, tid } = setupPassing('reserve-revert', 2, 8, 4, { reserveSeconds: 100 });
+    const playerId = seatsOf(loadState(tid))[0];
+    draft.addReserveSeconds(tid, playerId, 30, 'admin');
+    const db = getDb();
+    const target = (db.prepare('SELECT MAX(seq) AS seq FROM events WHERE tournament_id=?').get(tid) as { seq: number }).seq;
+    draft.addReserveSeconds(tid, playerId, 40, 'admin');
+    expect(loadState(tid).pickReserves[playerId]).toBe(170000);
+    const result = hardRevertTo(tid, target, 'admin');
+    expect(result.state.pickReserves[playerId]).toBe(130000);
+    resetStateCache();
+    expect(loadState(tid).pickReserves[playerId]).toBe(130000);
   });
 });
 

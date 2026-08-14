@@ -181,6 +181,21 @@ export class ApiController {
     return { ok: true };
   }
 
+  @Post('t/:tid/pick/alternative')
+  pickAlternative(@Req() req: AuthedRequest, @Body() body: Record<string, unknown>) {
+    const id = req.identity as Identity;
+    this.assertNotFrozen(id.tournamentId);
+    this.draft.setPickAlternative(id.tournamentId, id.playerId, Number(body.card_code), id.playerId);
+    const s = loadState(id.tournamentId);
+    this.realtime.emitPack(id.tournamentId, {
+      packIndex: s.pickCursor?.packIndex ?? null,
+      currentPicker: s.pickCursor?.playerId ?? null,
+      deadlineAt: s.pickCursor?.deadlineAt ?? null,
+      status: s.status,
+    });
+    return { ok: true, card: Number(body.card_code) };
+  }
+
   @Post('t/:tid/pause')
   pause(@Req() req: AuthedRequest, @Body() body: Record<string, string>) {
     const id = req.identity as Identity;

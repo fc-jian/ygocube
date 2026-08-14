@@ -64,6 +64,7 @@ swissRoundCount, playoffSize
 | `GET /t/:tid/cards?q=` / `?codes=` | 卡牌元数据/效果文本搜索或批量读取；`q` 按空白拆分为 AND 关键字，无隐含 30/50 条上限，结果按卡名命中数量及关键字顺序优先 |
 | `GET /t/:tid/cards/status?codes=` | 本玩家视角 `not_in_pool/dropped/picked/seen/unknown`；返回 exact 请求 code |
 | `POST /t/:tid/pick` | `{card_code,target_zone?}`，passing 队首选牌 |
+| `POST /t/:tid/pick/alternative` | `{card_code}`，记录本人最后点击的候选牌，超时自动选择优先使用 |
 | `POST /t/:tid/pause` | `{action:propose|vote_yes|vote_no|resume}` |
 | `POST /t/:tid/deck/move` | `{card_code,from,to,index?,from_index?}`，`to=pool` 可移出构筑 |
 | `POST /t/:tid/deck/sort` | YGOPro `deck_sort_lv` 逻辑，显式整理 main/extra/side |
@@ -77,7 +78,8 @@ swissRoundCount, playoffSize
 
 `state` 的 passing 视角按当前 seat 从左到右返回 players/queueLengths；本人队首
 牌面才会出现在 `pack.cards`。`cardsRemainingToDraft` 在整轮公平时是精确值，
-否则标记 `cardsRemainingExact=false`。
+否则标记 `cardsRemainingExact=false`。`pickAlternative` 只返回当前玩家最后点击
+的候选牌编号；它不会改变牌堆，超时自动选择时若仍可用则优先选中。
 
 ### 2.4 管理端点
 
@@ -94,6 +96,7 @@ swissRoundCount, playoffSize
 | `POST /admin/t/:tid/security` | `{require_token:false}` 关闭该比赛 token 鉴权 |
 | `POST /admin/t/:tid/admin-token` | 重设比赛 admin token，旧 token 立即失效 |
 | `POST /admin/t/:tid/players/:pid/token` | 重设玩家 token |
+| `POST /admin/t/:tid/players/:pid/reserve` | `{seconds}`：选牌阶段给指定玩家增加 reserve；事件保存余额/deadline 快照 |
 | `PUT /admin/settings/default-pool` | super 设置全局默认卡池 |
 | `GET/POST/PUT/DELETE /admin/pools...` | 卡池建立、编辑、随机采样、删除 |
 | `GET /admin/t/:tid/events` | 事件时间线 |

@@ -38,6 +38,8 @@ export interface DraftState {
     droppedCard?: number | null;
   } | null;
   draftReserveMs?: number;
+  // 本人最后点击的候选牌；超时自动选牌优先使用它。
+  pickAlternative?: number | null;
   // passing 模式：所有玩家的牌堆队列长度（仅数量，dev_docs/05 §3 信息隐藏）
   queueLengths?: { playerId: string; length: number }[];
   pause: { pausedAt: string | null; proposer: string | null; remainingMs: number } | null;
@@ -63,7 +65,7 @@ export function useNowTick(active: boolean): number {
   return now;
 }
 
-export function TopBar({ state, pid, token, tid }: { state: DraftState; pid: string; token: string; tid: string }) {
+export function TopBar({ state, pid, token, tid, alternativeName }: { state: DraftState; pid: string; token: string; tid: string; alternativeName?: string | null }) {
   const [showInfo, setShowInfo] = useState(false);
   const pack = state.pack;
   const cfg = state.config;
@@ -123,6 +125,11 @@ export function TopBar({ state, pid, token, tid }: { state: DraftState; pid: str
               <span className="shrink-0 rounded bg-felt-edge px-2 py-0.5 text-emerald-100">
                 {state.cardsRemainingExact ? '还可获得' : '预计还可获得'} <b>{state.cardsRemainingToDraft}</b> 张
               </span>
+              {state.pickAlternative !== null && state.pickAlternative !== undefined && (
+                <span className="shrink-0 rounded bg-amber-950 px-2 py-0.5 text-amber-200" title={`候选卡编号 ${state.pickAlternative}`}>
+                  备选：<b>{alternativeName ?? state.pickAlternative}</b>
+                </span>
+              )}
               {pack && secondsLeft !== null && (
                 pack.pausedRemainingMs !== undefined ? (
                   <span className="rounded bg-amber-950 px-2 py-0.5 font-mono text-amber-200">已暂停 · 剩余 {secondsLeft} 秒</span>
@@ -151,6 +158,11 @@ export function TopBar({ state, pid, token, tid }: { state: DraftState; pid: str
               <span>
                 正在选牌：<b className="text-gold">{pickerName}</b>
               </span>
+              {state.pickAlternative !== null && state.pickAlternative !== undefined && (
+                <span className="rounded bg-amber-950 px-2 py-0.5 text-amber-200" title={`候选卡编号 ${state.pickAlternative}`}>
+                  备选：<b>{alternativeName ?? state.pickAlternative}</b>
+                </span>
+              )}
               {pack.isMyTurn && secondsLeft !== null && (
                 <span className={`rounded px-2 py-0.5 font-mono ${secondsLeft <= 5 ? 'bg-red-900 text-red-100' : 'bg-felt-edge text-gold'}`}>
                   {secondsLeft} 秒

@@ -61,7 +61,7 @@ export default function DraftPage() {
     try {
       const s = await api<DraftState>(`/t/${tid}/state`, { identity });
       setState(s);
-      const codes = new Set<number>([...(s.pickedCards ?? []), ...(s.pack?.cards ?? []), ...(s.droppedCards ?? []), ...(s.deck?.main ?? []), ...(s.deck?.extra ?? []), ...(s.deck?.side ?? [])]);
+      const codes = new Set<number>([...(s.pickedCards ?? []), ...(s.pack?.cards ?? []), ...(s.droppedCards ?? []), ...(s.deck?.main ?? []), ...(s.deck?.extra ?? []), ...(s.deck?.side ?? []), ...(s.pickAlternative !== null && s.pickAlternative !== undefined ? [s.pickAlternative] : [])]);
       if (codes.size) {
         const cards = await api<CardInfo[]>(`/t/${tid}/cards?codes=${[...codes].join(',')}`, { identity });
         const map: Record<number, CardInfo> = {};
@@ -158,6 +158,19 @@ export default function DraftPage() {
     }
   };
 
+  const setAlternative = async (code: number) => {
+    const previous = state?.pickAlternative ?? null;
+    setState((current) => current ? { ...current, pickAlternative: code } : current);
+    try {
+      await api(`/t/${tid}/pick/alternative`, { method: 'POST', body: { card_code: code }, identity });
+    } catch (e: any) {
+      // The card may have been passed/selected between the click and request;
+      // keep the normal pick flow usable while surfacing other failures.
+      setState((current) => current ? { ...current, pickAlternative: previous } : current);
+      if (e.code !== 'CARD_NOT_AVAILABLE' && e.code !== 'NOT_YOUR_TURN') setError(e.code ?? String(e));
+    }
+  };
+
   const move = async (code: number, from: string, to: string, index?: number, fromIndex?: number) => {
     try {
       await api(`/t/${tid}/deck/move`, { method: 'POST', body: { card_code: code, from, to, ...(index !== undefined ? { index } : {}), ...(fromIndex !== undefined ? { from_index: fromIndex } : {}) }, identity });
@@ -234,7 +247,13 @@ export default function DraftPage() {
 
   return (
     <main className="flex min-h-screen flex-col md:h-screen">
-      <TopBar state={state} pid={pid} token={identity.token || '(已关闭鉴权)'} tid={tid} />
+      <TopBar
+        state={state}
+        pid={pid}
+        token={identity.token || '(已关闭鉴权)'}
+        tid={tid}
+        alternativeName={state.pickAlternative !== null && state.pickAlternative !== undefined ? cardMap[state.pickAlternative]?.name : null}
+      />
       {state.status === 'drafting' && (
         <div className="flex flex-1 flex-col gap-3 p-3 md:flex-row md:overflow-hidden">
           <div className="flex w-full flex-col gap-2 md:w-3/5 md:overflow-y-auto md:pr-1">
@@ -255,7 +274,14 @@ export default function DraftPage() {
             <CardSearchAll tid={tid} identity={identity} />
           </div>
           <div className="order-first min-h-0 md:order-none md:flex-1">
-            <PackZone pack={state.pack} cardMap={cardMap} droppedCards={state.droppedCards} onPick={pick} />
+            <PackZone
+              pack={state.pack}
+              cardMap={cardMap}
+              droppedCards={state.droppedCards}
+              alternativeCode={state.pickAlternative}
+              onAlternative={(code) => void setAlternative(code)}
+              onPick={pick}
+            />
           </div>
         </div>
       )}
