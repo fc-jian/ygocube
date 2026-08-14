@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { api, Identity } from '@/lib/api';
 import { CardInfo } from '@/lib/types';
 import { CardWithTooltip } from './CardImage';
+import { sortCardSearchResults } from '@/lib/cardInfo';
 
 // 卡牌搜索（dev_docs/06 §5.1）：按名称/代码查询，命中未使用选牌池的卡可一键加入副卡组。
 export function CardSearch({ tid, identity, pool, onAdd }: {
@@ -23,7 +24,7 @@ export function CardSearch({ tid, identity, pool, onAdd }: {
     }
     try {
       const r = await api<CardInfo[]>(`/t/${tid}/cards?q=${encodeURIComponent(q.trim())}`, { identity });
-      setResults(r);
+      setResults(sortCardSearchResults(r, q));
       setSearched(true);
     } catch {
       setResults([]);
@@ -36,7 +37,7 @@ export function CardSearch({ tid, identity, pool, onAdd }: {
       <div className="flex gap-2">
         <input
           className="flex-1 rounded bg-felt-deep px-2 py-1 text-xs outline-none ring-gold/50 focus:ring-2"
-          placeholder="搜索名称、编号、效果、字段或系列"
+          placeholder="搜索名称、编号、效果、字段或系列（空格分隔多个关键词）"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && void search()}

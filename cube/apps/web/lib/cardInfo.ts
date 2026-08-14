@@ -133,14 +133,53 @@ export function canonicalCardCode(code: number, cardMap: Record<number, CardInfo
   return Math.min(...visited);
 }
 
-export function matchesCardQuery(c: CardInfo | undefined, query: string): boolean {
-  const q = query.trim().toLowerCase();
-  if (!q) return true;
-  if (!c) return false;
+export function cardQueryTokens(query: string): string[] {
+  return [...new Set(query
+    .normalize('NFKC')
+    .toLowerCase()
+    .trim()
+    .split(/\s+/u)
+    .filter(Boolean))];
+}
+
+function searchableCardText(c: CardInfo): string {
   return [
     c.name, c.code, String(c.code).padStart(8, '0'), c.desc, typeLabel(c),
     raceAttrLine(c), statLine(c), atkDefLine(c), linkMarkerLine(c), setNameLine(c), setCodeLine(c), aliasLine(c),
-  ].join(' ').toLowerCase().includes(q);
+  ].join(' ').normalize('NFKC').toLowerCase();
+}
+
+/** Every whitespace-separated keyword must occur in the card's searchable data. */
+export function matchesCardQuery(c: CardInfo | undefined, query: string): boolean {
+  const tokens = cardQueryTokens(query);
+  if (!tokens.length) return true;
+  if (!c) return false;
+  const text = searchableCardText(c);
+  return tokens.every((token) => text.includes(token));
+}
+
+/**
+ * Keep all-card search ordering consistent even when a client is pointed at
+ * an older API. Name hits are ranked by count, then by the first keyword that
+ * appears in the literal name, with the original order as the final tie-break.
+ */
+export function sortCardSearchResults(cards: CardInfo[], query: string): CardInfo[] {
+  const tokens = cardQueryTokens(query);
+  if (!tokens.length) return cards;
+  return cards
+    .map((card, index) => {
+      const name = card.name.normalize('NFKC').toLowerCase();
+      const nameMatches = tokens.map((token) => name.includes(token));
+      return { card, index, nameMatches, count: nameMatches.filter(Boolean).length };
+    })
+    .sort((a, b) => {
+      if (a.count !== b.count) return b.count - a.count;
+      for (let i = 0; i < tokens.length; i++) {
+        if (a.nameMatches[i] !== b.nameMatches[i]) return a.nameMatches[i] ? -1 : 1;
+      }
+      return a.index - b.index;
+    })
+    .map(({ card }) => card);
 }
 
 // ---------- 排序（与 ygopro 客户端 DataManager::deck_sort_* 完全一致，dev_docs/06 §5.1） ----------

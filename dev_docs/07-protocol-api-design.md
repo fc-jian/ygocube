@@ -61,7 +61,7 @@ swissRoundCount, playoffSize
 | `POST /t/:tid/join` | 报名 `{player_id,display_name}`，返回一次性 token |
 | `GET /t/:tid/state` | 当前玩家视角完整状态（牌堆、队列、reserve、构筑、当前对局） |
 | `GET /t/:tid/pool` | 当前比赛 drop 前卡池（需玩家鉴权） |
-| `GET /t/:tid/cards?q=` / `?codes=` | 卡牌元数据/效果文本搜索或批量读取 |
+| `GET /t/:tid/cards?q=` / `?codes=` | 卡牌元数据/效果文本搜索或批量读取；`q` 按空白拆分为 AND 关键字，无隐含 30/50 条上限，结果按卡名命中数量及关键字顺序优先 |
 | `GET /t/:tid/cards/status?codes=` | 本玩家视角 `not_in_pool/dropped/picked/seen/unknown`；返回 exact 请求 code |
 | `POST /t/:tid/pick` | `{card_code,target_zone?}`，passing 队首选牌 |
 | `POST /t/:tid/pause` | `{action:propose|vote_yes|vote_no|resume}` |

@@ -317,20 +317,56 @@ export class CardsService {
     return c ? isExtraDeckType(c.type) : false;
   }
 
-  search(q: string, limit = 50): CardInfo[] {
+  /**
+   * Search literal card rows by an AND query and rank name hits first.
+   *
+   * The old implementation treated the whole query as one substring and
+   * applied a default LIMIT 50.  That made a normal space-separated query
+   * fail and silently hid cards after the first page (the draft UI then cut
+   * that result to 30 as well).  Search is intentionally uncapped by default;
+   * callers that need a bounded result can still pass an explicit limit.
+   *
+   * Ranking is deterministic:
+   *  1. cards matching more query tokens in the literal card name;
+   *  2. for ties, a name hit on an earlier token wins;
+   *  3. code order is the stable final tie-breaker.
+   * A card only enters the result when every token occurs somewhere in its
+   * indexed text (name, description, fields, type/stat labels, or code).
+   */
+  search(q: string, limit?: number): CardInfo[] {
     this.ensureLoaded();
-    const like = `%${q.toLowerCase()}%`;
-    // 全文本匹配：卡名/效果/编号以及所有前端展示的规范化标签。
+    const tokens = [...new Set(String(q ?? '')
+      .normalize('NFKC')
+      .toLowerCase()
+      .trim()
+      .split(/\s+/u)
+      .filter(Boolean))];
+    if (!tokens.length) return [];
+
+    // search_text is normalized at import time. Escape LIKE metacharacters so
+    // a user searching for '%' or '_' still gets literal matching semantics.
+    const escapeLike = (token: string) => token.replace(/[\\%_]/g, '\\$&');
+    const clauses = tokens.map(() => "search_text LIKE ? ESCAPE '\\'").join(' AND ');
     const rows = getDb()
-      .prepare('SELECT * FROM cards WHERE search_text LIKE ? ORDER BY code LIMIT ?')
-      .all(like, limit) as CardRow[];
-    // Preserve every exact row. The primary key already makes codes unique;
-    // alias must not deduplicate search results.
-    const dedup = new Map<number, CardInfo>();
-    for (const r of rows) {
-      dedup.set(r.code, this.toInfo(r));
-    }
-    return [...dedup.values()];
+      .prepare(`SELECT * FROM cards WHERE ${clauses}`)
+      .all(...tokens.map((token) => `%${escapeLike(token)}%`)) as CardRow[];
+
+    const ranked = rows.map((row) => {
+      const name = (row.name ?? '').normalize('NFKC').toLowerCase();
+      const nameMatches = tokens.map((token) => name.includes(token));
+      return { row, nameMatches, nameMatchCount: nameMatches.filter(Boolean).length };
+    });
+    ranked.sort((a, b) => {
+      if (a.nameMatchCount !== b.nameMatchCount) return b.nameMatchCount - a.nameMatchCount;
+      for (let i = 0; i < tokens.length; i++) {
+        if (a.nameMatches[i] !== b.nameMatches[i]) return a.nameMatches[i] ? -1 : 1;
+      }
+      return a.row.code - b.row.code;
+    });
+
+    const infos = ranked.map(({ row }) => this.toInfo(row));
+    if (limit === undefined || !Number.isFinite(limit)) return infos;
+    return infos.slice(0, Math.max(0, Math.floor(limit)));
   }
 
   // resolve a card image under a ygopro root: <root>/pics/<code>.jpg,

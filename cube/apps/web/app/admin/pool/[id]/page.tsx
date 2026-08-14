@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { CardInfo } from '@/lib/types';
 import { CardWithTooltip } from '@/components/CardImage';
-import { isExtraDeckType, sortCardCodes } from '@/lib/cardInfo';
+import { isExtraDeckType, sortCardCodes, sortCardSearchResults } from '@/lib/cardInfo';
 
 // 卡池编辑页（dev_docs/06 §5.7）：左侧按 main/extra 显示当前卡池，右侧搜索全卡，
 // 拖拽/点击增删；保存需要 super admin 令牌。
@@ -116,7 +116,7 @@ export default function PoolEditorPage() {
       return;
     }
     try {
-      setResults(await adminFetch(`/admin/cards?q=${encodeURIComponent(q.trim())}`));
+      setResults(sortCardSearchResults(await adminFetch(`/admin/cards?q=${encodeURIComponent(q.trim())}`), q));
     } catch {
       setResults([]);
     }
@@ -242,7 +242,7 @@ export default function PoolEditorPage() {
             <div className="flex gap-2">
               <input
                 className="flex-1 rounded bg-felt-deep px-2 py-1 text-xs outline-none ring-gold/50 focus:ring-2"
-                placeholder="按名称或编号搜索"
+                placeholder="按名称、编号、效果或字段搜索（空格分隔多个关键词）"
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && void search()}

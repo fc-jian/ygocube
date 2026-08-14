@@ -11,7 +11,7 @@ import { CardSearchAll } from '@/components/CardSearchAll';
 import { CardImage, CardWithTooltip } from '@/components/CardImage';
 import { setCardPreviewAction } from '@/components/CardPreview';
 import { CardInfo } from '@/lib/types';
-import { matchesCardQuery } from '@/lib/cardInfo';
+import { matchesCardQuery, sortCardSearchResults } from '@/lib/cardInfo';
 
 export default function DraftPage() {
   const params = useParams<{ tid: string; pid: string }>();
@@ -108,7 +108,7 @@ export default function DraftPage() {
     }
     try {
       const cards = await api<CardInfo[]>(`/t/${tid}/cards?q=${encodeURIComponent(poolSearch.trim())}`, { identity });
-      setPoolResults(cards.slice(0, 30));
+      setPoolResults(sortCardSearchResults(cards, poolSearch));
     } catch {
       setPoolResults([]);
     }
@@ -241,7 +241,7 @@ export default function DraftPage() {
             <div className="flex gap-2">
               <input
                 className="min-w-0 flex-1 rounded bg-felt-deep px-3 py-1.5 text-xs outline-none ring-gold/50 focus:ring-2"
-                placeholder="搜索名称、编号、效果、字段或系列"
+                placeholder="搜索名称、编号、效果、字段或系列（空格分隔多个关键词）"
                 value={cardFilter}
                 onChange={(e) => setCardFilter(e.target.value)}
               />
@@ -273,7 +273,7 @@ export default function DraftPage() {
             <div className="flex gap-2">
               <input
                 className="flex-1 rounded bg-felt-deep px-2 py-1 text-xs outline-none ring-gold/50 focus:ring-2"
-                placeholder="搜索名称、编号、效果、字段或系列"
+                placeholder="搜索名称、编号、效果、字段或系列（空格分隔多个关键词）"
                 value={poolSearch}
                 onChange={(e) => setPoolSearch(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && void searchPool()}

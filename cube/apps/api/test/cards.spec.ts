@@ -66,4 +66,38 @@ describe('ygopro card metadata decoding', () => {
     expect(cards.canonicalCode(700000010)).toBe(700000010);
     expect(cards.canonicalCode(700000011)).toBe(700000010);
   });
+
+  it('searches every keyword without an implicit result cap', () => {
+    const cards = new CardsService();
+    cards.poolCodes();
+    const insert = getDb().prepare(`INSERT OR REPLACE INTO cards
+      (code, name, type, desc, level, race, attribute, atk, def, alias, search_text, metadata_version)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
+    for (let i = 0; i < 60; i++) {
+      insert.run(710000000 + i, `未截断卡 ${i}`, 0x21, '', 4, 1, 1, 0, 0, 0, `uncapped ${i}`, 3);
+    }
+    expect(cards.search('uncapped')).toHaveLength(60);
+    expect(cards.search('uncapped').length).toBeGreaterThan(50);
+  });
+
+  it('requires all keywords and ranks literal name matches by count and keyword order', () => {
+    const cards = new CardsService();
+    cards.poolCodes();
+    const insert = getDb().prepare(`INSERT OR REPLACE INTO cards
+      (code, name, type, desc, level, race, attribute, atk, def, alias, search_text, metadata_version)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
+    insert.run(700000100, 'Alpha Beta', 0x21, '', 4, 1, 1, 0, 0, 0, 'alpha beta', 3);
+    insert.run(700000101, 'Alpha Card', 0x21, '', 4, 1, 1, 0, 0, 0, 'alpha card beta', 3);
+    insert.run(700000102, 'Beta Card', 0x21, '', 4, 1, 1, 0, 0, 0, 'beta card alpha', 3);
+    insert.run(700000103, 'Neutral Card', 0x21, 'alpha beta', 4, 1, 1, 0, 0, 0, 'neutral card alpha beta', 3);
+    insert.run(700000104, 'Alpha Only', 0x21, '', 4, 1, 1, 0, 0, 0, 'alpha only', 3);
+
+    expect(cards.search('alpha beta').map((card) => card.code)).toEqual([
+      700000100, // both keywords are in the literal name
+      700000101, // first keyword is in the name
+      700000102, // only the second keyword is in the name
+      700000103, // both keywords are non-name matches
+    ]);
+    expect(cards.search('alpha beta').some((card) => card.code === 700000104)).toBe(false);
+  });
 });

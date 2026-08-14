@@ -5,6 +5,7 @@ import type { CardVisibilityStatus } from '@ygocube/shared';
 import { api, Identity } from '@/lib/api';
 import { CardInfo } from '@/lib/types';
 import { CardWithTooltip } from './CardImage';
+import { sortCardSearchResults } from '@/lib/cardInfo';
 
 // 选牌期全卡牌搜索（dev_docs/06 §5.6）：搜索所有卡牌并标注每个玩家的已知状态。
 type Status = CardVisibilityStatus;
@@ -36,14 +37,19 @@ export function CardSearchAll({ tid, identity }: { tid: string; identity: Identi
       return;
     }
     try {
-      const cards = await api<CardInfo[]>(`/t/${tid}/cards?q=${encodeURIComponent(q.trim())}`, { identity });
+      const cards = sortCardSearchResults(await api<CardInfo[]>(`/t/${tid}/cards?q=${encodeURIComponent(q.trim())}`, { identity }), q);
       if (!cards.length) {
         setResults([]);
         setSearched(true);
         return;
       }
-      const codes = cards.map((c) => c.code).join(',');
-      const statuses = await api<{ code: number; status: Status }[]>(`/t/${tid}/cards/status?codes=${codes}`, { identity });
+      // Search is intentionally uncapped, so do not put every matching code
+      // into one URL (large pools would exceed proxy/request-line limits).
+      const statuses: { code: number; status: Status }[] = [];
+      for (let i = 0; i < cards.length; i += 500) {
+        const codes = cards.slice(i, i + 500).map((c) => c.code).join(',');
+        statuses.push(...await api<{ code: number; status: Status }[]>(`/t/${tid}/cards/status?codes=${codes}`, { identity }));
+      }
       const statusMap = new Map(statuses.map((s) => [s.code, s.status]));
       setResults(cards.map((c) => ({ ...c, status: statusMap.get(c.code) })));
       setSearched(true);
@@ -58,7 +64,7 @@ export function CardSearchAll({ tid, identity }: { tid: string; identity: Identi
       <div className="flex gap-2">
         <input
           className="flex-1 rounded bg-felt-deep px-2 py-1 text-xs outline-none ring-gold/50 focus:ring-2"
-          placeholder="搜索名称、编号、效果、字段或系列"
+          placeholder="搜索名称、编号、效果、字段或系列（空格分隔多个关键词）"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && void search()}
