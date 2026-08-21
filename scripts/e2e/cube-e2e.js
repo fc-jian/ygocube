@@ -244,7 +244,7 @@ function baseRoom(name, decks) {
   // runtime extra/side limit assertion.
   const cubeDeck = {
     main: main.slice(0, 40).concat(extra.slice(0, 31)),
-    side: main.slice(0, 31),
+    side: main.slice(40, 71),
   };
   const evCube = await play('carol$pw3', `CUBE#${sfx()}`, cubeDeck);
   check('R9 CUBE shorthand: extra 31->30, side 31->30 truncated', hsStatus(evCube) === 0x9, JSON.stringify(dumpEvents(evCube)));

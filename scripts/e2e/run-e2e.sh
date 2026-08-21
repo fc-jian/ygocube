@@ -19,8 +19,26 @@ import sqlite3, json, sys
 conn = sqlite3.connect(sys.argv[1])
 cur = conn.cursor()
 mask = 0x4802040  # TYPES_EXTRA_DECK in this codebase (FUSION|SYNCHRO|XYZ|LINK)
-main = [r[0] for r in cur.execute("SELECT id FROM datas WHERE (type & %d)=0 AND (type & 0x4000)=0 LIMIT 60" % mask)]
-extra = [r[0] for r in cur.execute("SELECT id FROM datas WHERE (type & %d)!=0 LIMIT 40" % mask)]
+aliases = {r[0]: r[1] for r in cur.execute("SELECT id, alias FROM datas")}
+def canonical(code):
+    seen = set()
+    while aliases.get(code, 0) and code not in seen:
+        seen.add(code)
+        code = aliases[code]
+    return code
+def unique_codes(sql, limit):
+    result, seen = [], set()
+    for (code,) in cur.execute(sql):
+        key = canonical(code)
+        if key in seen:
+            continue
+        result.append(code)
+        seen.add(key)
+        if len(result) >= limit:
+            break
+    return result
+main = unique_codes("SELECT id FROM datas WHERE (type & %d)=0 AND (type & 0x4000)=0" % mask, 80)
+extra = unique_codes("SELECT id FROM datas WHERE (type & %d)!=0" % mask, 40)
 json.dump({"main": main, "extra": extra}, open('/tmp/cube-cardcodes.json', 'w'))
 EOF
 
