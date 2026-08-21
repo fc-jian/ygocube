@@ -85,6 +85,7 @@ Linux 宿主由 `scripts/build-ygopro.sh` 构建；客户端构建使用
 MAIN40-60 / MN40-60
 EXTRA30   / EX30
 SIDE30    / SD30
+CUBE      （等价于 M,TM999,EX30,SD30；`CUBE#password` 保留 `#` 后密码）
 ```
 
 同时支持 `LP/TIME/START/DRAW/M/NOCHECK/...` 等旧 token。Cube/当前直接建房
