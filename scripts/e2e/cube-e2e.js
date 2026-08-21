@@ -63,6 +63,35 @@ function api(method, path, body) {
   });
 }
 
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// A successful close must terminate the per-room host, not only remove the
+// room from srvpro's registry.  Probe the host listener directly because the
+// HTTP room_status endpoint cannot observe an orphaned child process.
+async function waitPortClosed(port, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const result = await new Promise((resolve) => {
+      const sock = net.connect(port, SRVPRO_HOST);
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        sock.destroy();
+        resolve(value);
+      };
+      sock.once('connect', () => finish('open'));
+      sock.once('error', (err) => finish(err.code === 'ECONNREFUSED' ? 'closed' : 'error'));
+      sock.setTimeout(500, () => finish('timeout'));
+    });
+    if (result === 'closed') return true;
+    await wait(100);
+  }
+  return false;
+}
+
 // ---- one player session: join room, upload deck (client-side), ready ----
 function play(nameVpass, roomName, deck, timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
@@ -82,7 +111,6 @@ function play(nameVpass, roomName, deck, timeoutMs = 8000) {
         buf = buf.slice(2 + len);
       }
     });
-    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
     (async () => {
       await new Promise((r) => sock.once('connect', r));
       sock.write(playerInfo(nameVpass));
@@ -189,7 +217,18 @@ function baseRoom(name, decks) {
   check('R6 accepted (extra 12->10, side 8->5 truncated)', hsStatus(ev6) === 0x9, JSON.stringify(dumpEvents(ev6)));
   await api('POST', '/cube/close_room', { room_name: `${ROOM_BASE}-6` });
 
-  // 7. legacy rule-string tokens (room passwords are limited to 20 chars, so tokens
+  // 9. close an idle room before any player connects; this is the regression
+  // that previously left an orphaned ygopro host listening on its port.
+  const closeProbeName = `${ROOM_BASE}-close-probe`;
+  const closeProbe = await api('POST', '/cube/create_room', baseRoom(closeProbeName, {
+    alice: { main: validMain, side: extra.slice(0, 5) },
+  }));
+  check('R9 close probe create', closeProbe.ok === true, JSON.stringify(closeProbe));
+  await api('POST', '/cube/close_room', { room_name: closeProbeName });
+  const closeProbeStopped = closeProbe.ok && await waitPortClosed(closeProbe.port);
+  check('R9 close stops idle host', closeProbeStopped, `port ${closeProbe.port} still accepts connections`);
+
+  // 10. legacy rule-string tokens (room passwords are limited to 20 chars, so tokens
   //    are split across rooms): MAIN35-45 -> 37 main accepted (below default 40),
   //    34 rejected; EXTRA3,SIDE2 -> 5 extra / 6 side truncated to 3/2, accepted
   const sfx = () => Math.random().toString(36).slice(-2);
@@ -200,7 +239,7 @@ function baseRoom(name, decks) {
   const ev7c = await play('carol$pw3', `EXTRA3,SIDE2#${sfx()}`, { main: main.slice(0, 40).concat(extra.slice(0, 5)), side: main.slice(40, 46) });
   check('R7 token path: extra 5->3, side 6->2 truncated', hsStatus(ev7c) === 0x9, JSON.stringify(dumpEvents(ev7c)));
 
-  // 8. regression: no deck_size tokens + NC -> no forced check (39 main accepted);
+  // 11. regression: no deck_size tokens + NC -> no forced check (39 main accepted);
   //    NC + MAIN token -> deck_limits_set forces the check (39 rejected)
   const ev8a = await play('dave$pw4', `NC#${sfx()}`, { main: main.slice(0, 39), side: [] });
   check('R8 regression: NC without tokens -> 39 main accepted', hsStatus(ev8a) === 0x9, JSON.stringify(dumpEvents(ev8a)));
