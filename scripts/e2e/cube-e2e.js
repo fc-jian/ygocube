@@ -217,18 +217,18 @@ function baseRoom(name, decks) {
   check('R6 accepted (extra 12->10, side 8->5 truncated)', hsStatus(ev6) === 0x9, JSON.stringify(dumpEvents(ev6)));
   await api('POST', '/cube/close_room', { room_name: `${ROOM_BASE}-6` });
 
-  // 9. close an idle room before any player connects; this is the regression
+  // 7. close an idle room before any player connects; this is the regression
   // that previously left an orphaned ygopro host listening on its port.
   const closeProbeName = `${ROOM_BASE}-close-probe`;
   const closeProbe = await api('POST', '/cube/create_room', baseRoom(closeProbeName, {
     alice: { main: validMain, side: extra.slice(0, 5) },
   }));
-  check('R9 close probe create', closeProbe.ok === true, JSON.stringify(closeProbe));
+  check('R7 close probe create', closeProbe.ok === true, JSON.stringify(closeProbe));
   await api('POST', '/cube/close_room', { room_name: closeProbeName });
   const closeProbeStopped = closeProbe.ok && await waitPortClosed(closeProbe.port);
-  check('R9 close stops idle host', closeProbeStopped, `port ${closeProbe.port} still accepts connections`);
+  check('R7 close stops idle host', closeProbeStopped, `port ${closeProbe.port} still accepts connections`);
 
-  // 10. legacy rule-string tokens (room passwords are limited to 20 chars, so tokens
+  // 8. legacy rule-string tokens (room passwords are limited to 20 chars, so tokens
   //    are split across rooms): MAIN35-45 -> 37 main accepted (below default 40),
   //    34 rejected; EXTRA3,SIDE2 -> 5 extra / 6 side truncated to 3/2, accepted
   const sfx = () => Math.random().toString(36).slice(-2);
@@ -239,12 +239,22 @@ function baseRoom(name, decks) {
   const ev7c = await play('carol$pw3', `EXTRA3,SIDE2#${sfx()}`, { main: main.slice(0, 40).concat(extra.slice(0, 5)), side: main.slice(40, 46) });
   check('R7 token path: extra 5->3, side 6->2 truncated', hsStatus(ev7c) === 0x9, JSON.stringify(dumpEvents(ev7c)));
 
-  // 11. regression: no deck_size tokens + NC -> no forced check (39 main accepted);
+  // 9. CUBE is the compact match profile: M, TM999, EX30 and SD30.  Use
+  // distinct cards so the regular deck legality check does not mask the
+  // runtime extra/side limit assertion.
+  const cubeDeck = {
+    main: main.slice(0, 40).concat(extra.slice(0, 31)),
+    side: main.slice(0, 31),
+  };
+  const evCube = await play('carol$pw3', `CUBE#${sfx()}`, cubeDeck);
+  check('R9 CUBE shorthand: extra 31->30, side 31->30 truncated', hsStatus(evCube) === 0x9, JSON.stringify(dumpEvents(evCube)));
+
+  // 10. regression: no deck_size tokens + NC -> no forced check (39 main accepted);
   //    NC + MAIN token -> deck_limits_set forces the check (39 rejected)
   const ev8a = await play('dave$pw4', `NC#${sfx()}`, { main: main.slice(0, 39), side: [] });
-  check('R8 regression: NC without tokens -> 39 main accepted', hsStatus(ev8a) === 0x9, JSON.stringify(dumpEvents(ev8a)));
+  check('R10 regression: NC without tokens -> 39 main accepted', hsStatus(ev8a) === 0x9, JSON.stringify(dumpEvents(ev8a)));
   const ev8b = await play('dave$pw4', `NC,MAIN40-50#${sfx()}`, { main: main.slice(0, 39), side: [] });
-  check('R8 regression: NC + MAIN40-50 -> 39 main rejected', hsStatus(ev8b) === 0xa, JSON.stringify(dumpEvents(ev8b)));
+  check('R10 regression: NC + MAIN40-50 -> 39 main rejected', hsStatus(ev8b) === 0xa, JSON.stringify(dumpEvents(ev8b)));
 
   console.log(`\n== ${pass} passed, ${fail} failed ==`);
   process.exit(fail ? 1 : 0);

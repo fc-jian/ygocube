@@ -20,7 +20,7 @@ conn = sqlite3.connect(sys.argv[1])
 cur = conn.cursor()
 mask = 0x4802040  # TYPES_EXTRA_DECK in this codebase (FUSION|SYNCHRO|XYZ|LINK)
 main = [r[0] for r in cur.execute("SELECT id FROM datas WHERE (type & %d)=0 AND (type & 0x4000)=0 LIMIT 60" % mask)]
-extra = [r[0] for r in cur.execute("SELECT id FROM datas WHERE (type & %d)!=0 LIMIT 12" % mask)]
+extra = [r[0] for r in cur.execute("SELECT id FROM datas WHERE (type & %d)!=0 LIMIT 40" % mask)]
 json.dump({"main": main, "extra": extra}, open('/tmp/cube-cardcodes.json', 'w'))
 EOF
 
