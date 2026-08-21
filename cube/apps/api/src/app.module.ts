@@ -72,6 +72,11 @@ export class AppModule {
           // passing 模式计时重设（暂停/恢复/冻结/解冻）/ 新一轮发堆：通知客户端 refetch
           realtime.emitPack(tid, { deadlines: true });
           break;
+        case 'player_rename':
+          // Names are public tournament metadata; clients refetch their state
+          // instead of putting the new value in a broadcast payload.
+          realtime.emitNotice(tid, '玩家显示名称已更新');
+          break;
         case 'pause':
           realtime.emitPause(tid, payload);
           break;

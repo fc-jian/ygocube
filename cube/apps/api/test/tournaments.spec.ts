@@ -67,6 +67,30 @@ describe('tournament card pool validation', () => {
 describe('admin player management', () => {
   beforeEach(() => useTestDb());
 
+  it('allows a player to change display name during registration and replays it', () => {
+    const tournaments = makeTournaments();
+    const tid = tournaments.create({ name: 'rename', maxPlayers: 4, cardPool: TEST_POOL }, 'test').tid;
+    tournaments.join(tid, 'p1', '旧名称');
+
+    expect(tournaments.updateDisplayName(tid, 'p1', '新名称', 'p1')).toEqual({ playerId: 'p1', displayName: '新名称' });
+    expect(loadState(tid).players.find((p) => p.playerId === 'p1')?.displayName).toBe('新名称');
+    expect(require('../src/db').getDb().prepare('SELECT display_name FROM tournament_players WHERE tournament_id=? AND player_id=?').get(tid, 'p1').display_name).toBe('新名称');
+
+    const { resetStateCache } = require('../src/events/events.service');
+    resetStateCache();
+    expect(loadState(tid).players.find((p) => p.playerId === 'p1')?.displayName).toBe('新名称');
+  });
+
+  it('blocks display name changes after drafting starts and rejects invalid names', () => {
+    const tournaments = makeTournaments();
+    const tid = tournaments.create({ name: 'rename-phase', maxPlayers: 4, cardPool: TEST_POOL }, 'test').tid;
+    tournaments.join(tid, 'p1', 'P1');
+    expect(() => tournaments.updateDisplayName(tid, 'p1', '', 'p1')).toThrow('BAD_DISPLAY_NAME');
+    expect(() => tournaments.updateDisplayName(tid, 'p1', 'x\nname', 'p1')).toThrow('BAD_DISPLAY_NAME');
+    tournaments.setPhase(tid, 'drafting', undefined, 'admin');
+    expect(() => tournaments.updateDisplayName(tid, 'p1', 'P1-new', 'p1')).toThrow('WRONG_PHASE');
+  });
+
   it('removePlayer clears player, picks and deck; blocked during matches', () => {
     const tournaments = makeTournaments();
     const tid = tournaments.create({ name: 'x', maxPlayers: 4, cardPool: TEST_POOL }, 'test').tid;

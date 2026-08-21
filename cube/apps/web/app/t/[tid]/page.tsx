@@ -1,11 +1,12 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { api, setIdentityCookie, readIdentity } from '@/lib/api';
 
 export default function 报名参加Page() {
   const params = useParams<{ tid: string }>();
+  const router = useRouter();
   const tid = params.tid;
   const [info, setInfo] = useState<any>(null);
   const [playerId, setPlayerId] = useState('');
@@ -18,16 +19,52 @@ export default function 报名参加Page() {
   }, [tid]);
 
   const join = async () => {
+    const normalizedPlayerId = playerId.trim();
+    if (!normalizedPlayerId) {
+      setError('请输入玩家 ID');
+      return;
+    }
     // 进房昵称即玩家 ID（YGOPro 协议仅支持 ASCII 文本），非 ASCII 无法进入游戏，前端先行拦截
-    if (!/^[\x20-\x7E]+$/.test(playerId)) {
+    if (!/^[\x20-\x7E]+$/.test(normalizedPlayerId)) {
       setError('玩家 ID 只能包含 ASCII 字符（字母/数字/符号），中文等字符将无法进入游戏');
       return;
     }
+
+    // A player changing devices has no token cookie, but the public tournament
+    // summary still knows that the ID is already registered. Do not call join
+    // (which correctly rejects duplicates/full rooms); send them to the player
+    // page where the token prompt can authenticate the existing registration.
+    let currentInfo = info;
+    if (!currentInfo) {
+      try {
+        currentInfo = await api(`/t/${tid}`);
+      } catch {
+        currentInfo = null;
+      }
+    }
+    if (currentInfo?.players?.some((p: { playerId: string }) => p.playerId === normalizedPlayerId)) {
+      router.push(`/t/${tid}/draft/${encodeURIComponent(normalizedPlayerId)}`);
+      return;
+    }
+
     try {
-      const r = await api<{ token: string }>(`/t/${tid}/join`, { method: 'POST', body: { player_id: playerId, display_name: displayName || playerId } });
+      const r = await api<{ token: string }>(`/t/${tid}/join`, { method: 'POST', body: { player_id: normalizedPlayerId, display_name: displayName || normalizedPlayerId } });
       setToken(r.token);
-      setIdentityCookie(tid, playerId, r.token);
+      setIdentityCookie(tid, normalizedPlayerId, r.token);
     } catch (e: any) {
+      // Handle a race where another view registered the same ID after the
+      // public summary was loaded. Refresh once and use the same recovery path.
+      if (e.code === 'ALREADY_JOINED' || e.code === 'TOURNAMENT_FULL') {
+        try {
+          const latest = await api<{ players?: { playerId: string }[] }>(`/t/${tid}`);
+          if (latest.players?.some((p) => p.playerId === normalizedPlayerId)) {
+            router.push(`/t/${tid}/draft/${encodeURIComponent(normalizedPlayerId)}`);
+            return;
+          }
+        } catch {
+          // Keep the original API error below when the refresh fails.
+        }
+      }
       setError(e.code ?? String(e));
     }
   };
@@ -45,7 +82,7 @@ export default function 报名参加Page() {
           <div className="space-y-3">
             <p className="text-sm text-emerald-300">报名成功！请保存你的令牌（已同时保存到 cookie）：</p>
             <code className="block break-all rounded bg-felt-deep p-3 font-mono text-xs text-gold">{token}</code>
-            <a href={`/t/${tid}/draft/${playerId}`} className="block rounded bg-gold px-4 py-2 text-center font-semibold text-felt-deep">
+            <a href={`/t/${tid}/draft/${encodeURIComponent(playerId.trim())}`} className="block rounded bg-gold px-4 py-2 text-center font-semibold text-felt-deep">
               进入我的页面
             </a>
           </div>
@@ -54,7 +91,7 @@ export default function 报名参加Page() {
             <p className="text-sm text-slate-300">
               已以 <b>{existing.pid}</b>.
             </p>
-            <a href={`/t/${tid}/draft/${existing.pid}`} className="block rounded bg-gold px-4 py-2 text-center font-semibold text-felt-deep">
+            <a href={`/t/${tid}/draft/${encodeURIComponent(existing.pid)}`} className="block rounded bg-gold px-4 py-2 text-center font-semibold text-felt-deep">
               进入我的页面
             </a>
           </div>

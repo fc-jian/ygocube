@@ -178,6 +178,11 @@ export function apply(state: TournamentState, action: string, payload: any): voi
       state.decks[p.playerId] = { main: [], extra: [], side: [], lockedAt: null, status: 'building' };
       break;
     }
+    case 'player_rename': {
+      const player = state.players.find((p) => p.playerId === payload?.playerId);
+      if (player && typeof payload?.displayName === 'string') player.displayName = payload.displayName;
+      break;
+    }
     case 'seat_assign': {
       const map: Record<string, number> = payload;
       for (const pl of state.players) if (map[pl.playerId] !== undefined) pl.seat = map[pl.playerId];

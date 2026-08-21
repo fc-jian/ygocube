@@ -192,6 +192,26 @@ export class TournamentsService {
     return { token };
   }
 
+  updateDisplayName(tid: number, playerId: string, displayName: string, actor: string): { playerId: string; displayName: string } {
+    const state = loadState(tid);
+    if (state.frozen) throw new Error('FROZEN');
+    // Names are deliberately mutable only until the first draft action. Once
+    // seats/pack history are public, changing them would make reports and
+    // replays ambiguous.
+    if (state.status !== 'registration') throw new Error('WRONG_PHASE');
+    const player = state.players.find((p) => p.playerId === playerId);
+    if (!player) throw new Error('PLAYER_NOT_FOUND');
+    const next = displayName.trim();
+    if (!next || [...next].length > 64 || /[\u0000-\u001f\u007f]/u.test(next)) throw new Error('BAD_DISPLAY_NAME');
+    if (next === player.displayName) return { playerId, displayName: next };
+    getDb()
+      .prepare('UPDATE tournament_players SET display_name=? WHERE tournament_id=? AND player_id=? AND active=1')
+      .run(next, tid, playerId);
+    logEvent(tid, 'player', 'player_rename', { playerId, displayName: next }, actor);
+    persistMeta(tid);
+    return { playerId, displayName: next };
+  }
+
   setSeats(tid: number, order: string[], actor: string): void {
     const state = loadState(tid);
     if (state.frozen) throw new Error('FROZEN');
@@ -510,6 +530,7 @@ export class TournamentsService {
       const p = payload as Record<string, any>;
       let summary = e.action;
       if (e.entity === 'player' && e.action === 'player_join') summary = `报名 ${p.playerId}`;
+      else if (e.entity === 'player' && e.action === 'player_rename') summary = `昵称修改 ${p.playerId} → ${p.displayName}`;
       else if (e.entity === 'player' && e.action === 'player_remove') summary = `删除玩家 ${p}`;
       else if (e.entity === 'player' && e.action === 'seat_assign') summary = '座位分配';
       else if (e.entity === 'player' && e.action === 'player_dsq') summary = `DSQ ${p.playerId}（${p.reason ?? '卡组不合规'}）`;
@@ -548,6 +569,8 @@ export class TournamentsService {
         detail = p
           ? `牌堆：${p.packIndex}\n轮次：${p.round}\n当前玩家：${p.playerId}\ndeadline：${p.deadlineAt ?? '无'}`
           : '选牌已结束';
+      } else if (e.entity === 'player' && e.action === 'player_rename') {
+        detail = `玩家：${p.playerId}\n新显示名称：${p.displayName}`;
       } else if (e.entity === 'pause' && e.action === 'pause') {
         detail = p?.pausedAt ? `暂停发起人：${p.proposer ?? '未知'}\n冻结时间：${p.pausedAt}` : '暂停/投票状态已恢复';
       } else {

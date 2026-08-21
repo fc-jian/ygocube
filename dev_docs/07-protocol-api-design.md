@@ -59,6 +59,7 @@ swissRoundCount, playoffSize
 | `GET /meta` | 公共 srvpro `host/gamePort` |
 | `GET /t/:tid` | 阶段、配置摘要、玩家、`authRequired` |
 | `POST /t/:tid/join` | 报名 `{player_id,display_name}`，返回一次性 token |
+| `POST /t/:tid/player/name` | 报名阶段由本人修改 `{display_name}`；需要玩家身份，记录 `player_rename` 事件 |
 | `GET /t/:tid/state` | 当前玩家视角完整状态（牌堆、队列、reserve、构筑、当前对局） |
 | `GET /t/:tid/pool` | 当前比赛 drop 前卡池（需玩家鉴权） |
 | `GET /t/:tid/cards?q=` / `?codes=` | 卡牌元数据/效果文本搜索或批量读取；`q` 按空白拆分为 AND 关键字，无隐含 30/50 条上限，结果按卡名命中数量及关键字顺序优先 |
@@ -199,6 +200,7 @@ room name 幂等记录，成功响应 `{ack:true}`。未知 room、非法 payloa
 | --- | --- |
 | `AUTH_REQUIRED` | token/admin/create token 缺失或无效 |
 | `WRONG_PHASE` / `FROZEN` | 当前阶段或冻结状态不允许 |
+| `BAD_DISPLAY_NAME` | 显示名称为空、过长或包含控制字符 |
 | `NOT_YOUR_TURN` / `CARD_NOT_AVAILABLE` | 选牌状态冲突 |
 | `DECK_INVALID` / `WRONG_ZONE` / `CARD_NOT_IN_POOL` | 构筑不合规 |
 | `PACKCOUNT_NOT_MULTIPLE` | 牌堆数违反 `evenPackCount` |

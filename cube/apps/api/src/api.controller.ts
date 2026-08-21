@@ -108,6 +108,13 @@ export class ApiController {
     return this.tournaments.join(Number(req.params.tid), playerId, String(body.display_name ?? playerId));
   }
 
+  @Post('t/:tid/player/name')
+  updatePlayerName(@Req() req: AuthedRequest, @Body() body: Record<string, unknown>) {
+    const id = req.identity as Identity;
+    const displayName = typeof body.display_name === 'string' ? body.display_name : '';
+    return this.tournaments.updateDisplayName(id.tournamentId, id.playerId, displayName, id.playerId);
+  }
+
   @Get('t/:tid/state')
   state(@Req() req: AuthedRequest) {
     const id = req.identity as Identity;

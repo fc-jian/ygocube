@@ -80,6 +80,23 @@ export default function DraftPage() {
     }
   }, [tid, identity]);
 
+  const updateDisplayName = useCallback(async (displayName: string) => {
+    if (!identity) return;
+    const result = await api<{ playerId: string; displayName: string }>(`/t/${tid}/player/name`, {
+      method: 'POST',
+      body: { display_name: displayName },
+      identity,
+    });
+    setState((current) => current
+      ? {
+          ...current,
+          players: current.players.map((player) => player.playerId === pid
+            ? { ...player, displayName: result.displayName }
+            : player),
+        }
+      : current);
+  }, [identity, pid, tid]);
+
   useEffect(() => {
     void load();
   }, [load]);
@@ -115,7 +132,7 @@ export default function DraftPage() {
   };
 
   useTournamentStream(tid, identity, useCallback((event: string) => {
-    if (event === 'pack' || event === 'pick' || event === 'pause' || event === 'phase' || event === 'deck') void load();
+    if (event === 'pack' || event === 'pick' || event === 'pause' || event === 'phase' || event === 'deck' || event === 'notice') void load();
   }, [load]));
 
   // 倒计时归零时立即刷新（超时自动选牌可能已发生），选牌期间每 5 秒兜底轮询
@@ -253,6 +270,7 @@ export default function DraftPage() {
         token={identity.token || '(已关闭鉴权)'}
         tid={tid}
         alternativeName={state.pickAlternative !== null && state.pickAlternative !== undefined ? cardMap[state.pickAlternative]?.name : null}
+        onDisplayNameChange={updateDisplayName}
       />
       {state.status === 'drafting' && (
         <div className="flex flex-1 flex-col gap-3 p-3 md:flex-row md:overflow-hidden">

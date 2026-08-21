@@ -20,6 +20,9 @@
 玩家 token 存在 `localStorage` 的 `yc_token_<tid>_<pid>`，缺失时显示输入框；
 关闭该比赛 token 鉴权后只需 tid+pid。super token 可以作为调试用万能玩家 token。
 顶栏还提供退出登录、本地卡图目录授权和字体大小设置。
+报名阶段右上角的身份区域允许玩家修改自己的显示名称；修改需要玩家 token，
+写入 `player_rename` 事件，进入选牌后按钮隐藏。报名页输入已存在的 player ID
+时不再重复调用 join，而是直接跳转到该玩家页面，由页面提示输入原 token。
 
 ## 2. 选牌页
 

@@ -50,7 +50,7 @@ class ApiExceptionFilter implements ExceptionFilter {
       details = (exception as Error & { details?: unknown }).details;
       if (code === 'PLAYER_NOT_FOUND') status = 404;
       else if (code === 'MATCH_NOT_FOUND') status = 404;
-      else if (code === 'BAD_PLAYER_ID' || code === 'BAD_RESULT' || code === 'BAD_PAYLOAD' || code === 'BAD_POOL_IMPORT' || code === 'REVERT_CONFIRMATION_MISMATCH') status = 400;
+      else if (code === 'BAD_PLAYER_ID' || code === 'BAD_DISPLAY_NAME' || code === 'BAD_RESULT' || code === 'BAD_PAYLOAD' || code === 'BAD_POOL_IMPORT' || code === 'REVERT_CONFIRMATION_MISMATCH') status = 400;
       else if (code === 'REVERT_EVENT_NOT_FOUND') status = 404;
       else if (code.startsWith('REVERT_ROOM_CLOSE_FAILED')) status = 503;
       else if (code === 'DRAFT_NOT_STARTED') status = 409;

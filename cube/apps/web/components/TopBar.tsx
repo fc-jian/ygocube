@@ -65,7 +65,21 @@ export function useNowTick(active: boolean): number {
   return now;
 }
 
-export function TopBar({ state, pid, token, tid, alternativeName }: { state: DraftState; pid: string; token: string; tid: string; alternativeName?: string | null }) {
+export function TopBar({
+  state,
+  pid,
+  token,
+  tid,
+  alternativeName,
+  onDisplayNameChange,
+}: {
+  state: DraftState;
+  pid: string;
+  token: string;
+  tid: string;
+  alternativeName?: string | null;
+  onDisplayNameChange?: (displayName: string) => Promise<void>;
+}) {
   const [showInfo, setShowInfo] = useState(false);
   const pack = state.pack;
   const cfg = state.config;
@@ -170,7 +184,14 @@ export function TopBar({ state, pid, token, tid, alternativeName }: { state: Dra
               )}
             </div>
           ) : null}
-          <IdentityWidget tid={tid} pid={pid} token={token} />
+          <IdentityWidget
+            tid={tid}
+            pid={pid}
+            token={token}
+            displayName={state.players.find((p) => p.playerId === pid)?.displayName ?? pid}
+            canEditDisplayName={state.status === 'registration'}
+            onDisplayNameChange={onDisplayNameChange}
+          />
           <LocalPicsSetting />
           <FontSizeSetting />
         </div>
