@@ -37,7 +37,8 @@ export interface CreateTournamentInput {
   // 牌堆构成策略：stratify（默认，主/额外按比例均匀每堆）| random | main_then_extra
   packStrategy?: 'stratify' | 'random' | 'main_then_extra';
   // 牌堆总数（轮数）：≤ floor(池卡数/packSize) = 固定堆数，剩余卡全部随机丢弃；
-  // > 该上限 = 推断为"用全部卡池"（堆数 = ceil(池卡数/packSize)，末堆可不满，不丢弃）；缺省按 dropMode 自动
+  // > 该上限 = 推断为"用全部卡池"（堆数 = ceil(池卡数/packSize)，末堆可不满，不丢弃）；
+  // 新建比赛缺省为 4×玩家数，卡池不足时减少完整轮数；显式 legacy dropMode 仍可使用旧自动规则
   packCount?: number;
   // 丢弃的卡牌是否公开（默认公开；false 时只移除不展示）
   dropPublic?: boolean;
@@ -47,7 +48,7 @@ export interface CreateTournamentInput {
   // passing 每轮结束后随机重排玩家座位（默认开）
   reseatEachRound?: boolean;
   evenPackCount?: boolean;
-  // passing 模式每玩家保留时间（秒，默认 300）：单选超时先扣 reserve，耗尽才自动选
+  // passing 模式每玩家保留时间（秒，默认 400）：单选超时先扣 reserve，耗尽才自动选
   reserveSeconds?: number;
   cardPool?: string;
   matchFormat?: 'round_robin' | 'swiss' | 'double_elimination';
@@ -56,8 +57,10 @@ export interface CreateTournamentInput {
 }
 
 export function recommendedMatchFormat(n: number): { matchFormat: 'round_robin' | 'swiss'; swissRoundCount?: number; playoffSize?: number } {
-  if (n <= 5) return { matchFormat: 'round_robin' };
-  if (n <= 8) return { matchFormat: 'swiss', swissRoundCount: 4, playoffSize: 0 };
+  // Two players cannot have three Swiss rounds without repeating the only
+  // opponent, so recommend the complete round-robin schedule for that edge.
+  if (n <= 2) return { matchFormat: 'round_robin' };
+  if (n <= 8) return { matchFormat: 'swiss', swissRoundCount: 3, playoffSize: 0 };
   if (n <= 16) return { matchFormat: 'swiss', swissRoundCount: 4, playoffSize: 4 };
   return { matchFormat: 'swiss', swissRoundCount: Math.ceil(Math.log2(n)) + 1, playoffSize: 8 };
 }
@@ -102,6 +105,20 @@ export class TournamentsService {
   }
 
   create(input: CreateTournamentInput, actor: string): { tid: number; url: string; admin_token: string } {
+    const cardPool = this.assertCardPool(input.cardPool);
+    // New tournaments default to four complete pack rounds. If the selected
+    // pool is smaller, reduce the count to the available full packs (and keep
+    // the player-count multiple whenever a full round is possible).
+    const effectivePackSize = input.packSize
+      ?? (input.packSizeMultiple === undefined ? defaults.packSize : input.maxPlayers * (input.packSizeMultiple ?? defaults.packSizeMultiple));
+    const poolCount = this.pools.codesByName(cardPool)?.length ?? 0;
+    const targetPackCount = Math.max(1, input.maxPlayers * 4);
+    const availablePackCount = Math.max(1, Math.floor(poolCount / Math.max(1, effectivePackSize)));
+    let defaultPackCount = Math.min(targetPackCount, availablePackCount);
+    if (input.evenPackCount !== false && defaultPackCount >= input.maxPlayers) {
+      defaultPackCount -= defaultPackCount % input.maxPlayers;
+    }
+    defaultPackCount = Math.max(1, defaultPackCount);
     const recommended = recommendedMatchFormat(input.maxPlayers);
     const match = {
       matchFormat: input.matchFormat ?? recommended.matchFormat,
@@ -126,7 +143,13 @@ export class TournamentsService {
             ? 'drop_leftover_exact'
             : 'use_all'),
       packStrategy: input.packStrategy ?? 'stratify',
-      packCount: input.packCount,
+      // Keep an automatically generated short partial round implicit. This
+      // lets DraftService apply legacy dropMode/use_all semantics without
+      // treating the unavoidable sub-round as an invalid explicit count.
+      packCount: input.packCount
+        ?? (input.dropMode === undefined && input.dropLeftover === undefined && availablePackCount >= input.maxPlayers
+          ? defaultPackCount
+          : undefined),
       dropPublic: input.dropPublic === true, // 默认不公开丢弃列表
       // 仅 serial 需要落配置（缺省 passing 由 defaults 提供；startDraft 只认 rawCfg.draftMode==='serial'）
       draftMode: input.draftMode === 'serial' ? 'serial' : undefined,
@@ -139,7 +162,7 @@ export class TournamentsService {
       sideMax: input.sideMax ?? defaults.sideMax,
       maxCopies: input.maxCopies ?? defaults.maxCopies,
       timeLimit: input.timeLimit ?? defaults.timeLimit,
-      cardPool: this.assertCardPool(input.cardPool),
+      cardPool,
       ...match,
     };
     // per-tournament admin token (dev_docs/07 §5.1): manages this tournament only
@@ -164,7 +187,7 @@ export class TournamentsService {
       config: getConfig(state),
       status: state.status,
       round: state.round,
-      players: state.players.map((p) => ({ playerId: p.playerId, displayName: p.displayName, seat: p.seat, eliminated: p.eliminated, withdrawn: p.withdrawn === true })),
+      players: state.players.map((p) => ({ playerId: p.playerId, displayName: p.displayName, seat: p.seat, eliminated: p.eliminated, withdrawn: p.withdrawn === true, ready: p.ready === true })),
       playerCount: state.players.length,
       frozen: state.frozen,
       authRequired: row ? row.auth_required !== 0 : true,
@@ -188,8 +211,18 @@ export class TournamentsService {
                   display_name=excluded.display_name, token_hash=excluded.token_hash, seat=NULL,
                   joined_at=excluded.joined_at, eliminated=0, active=1`)
       .run(tid, playerId, displayName, sha256(token), null, new Date().toISOString());
-    logEvent(tid, 'player', 'player_join', { playerId, displayName, seat: -1, eliminated: false, withdrawn: false }, playerId);
+    logEvent(tid, 'player', 'player_join', { playerId, displayName, seat: -1, eliminated: false, withdrawn: false, ready: false }, playerId);
     return { token };
+  }
+
+  setPlayerReady(tid: number, playerId: string, ready: boolean, actor: string): { playerId: string; ready: boolean } {
+    const state = loadState(tid);
+    if (state.frozen) throw new Error('FROZEN');
+    if (state.status !== 'registration') throw new Error('WRONG_PHASE');
+    if (!state.players.some((p) => p.playerId === playerId)) throw new Error('PLAYER_NOT_FOUND');
+    logEvent(tid, 'player', 'player_ready', { playerId, ready: ready === true }, actor);
+    persistMeta(tid);
+    return { playerId, ready: ready === true };
   }
 
   updateDisplayName(tid: number, playerId: string, displayName: string, actor: string): { playerId: string; displayName: string } {
@@ -492,7 +525,7 @@ export class TournamentsService {
       round: state.round,
       frozen: state.frozen,
       config: cfg,
-      players: orderedPlayers.map((p) => ({ playerId: p.playerId, displayName: p.displayName, seat: p.seat, eliminated: p.eliminated, withdrawn: p.withdrawn === true })),
+      players: orderedPlayers.map((p) => ({ playerId: p.playerId, displayName: p.displayName, seat: p.seat, eliminated: p.eliminated, withdrawn: p.withdrawn === true, ready: p.ready === true })),
       pickedCards: picks.map((p) => p.card),
       cardsRemainingToDraft: Math.max(0, targetCards - picks.length),
       cardsRemainingExact: fullFairRounds,

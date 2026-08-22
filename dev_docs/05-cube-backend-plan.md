@@ -30,8 +30,8 @@ src/
 `config.ts` 的默认值为：
 
 ```text
-packSize=18, packSizeMultiple=3（旧配置兼容）
-draftMode=passing, pickSeconds=30, reserveSeconds=300
+packSize=24, packSizeMultiple=3（旧配置兼容）
+draftMode=passing, pickSeconds=40, reserveSeconds=400
 evenPackCount=true, reseatEachRound=true
 deckbuildingSeconds=null
 mainMin=40, mainMax=60, extraMax=30, sideMax=30, maxCopies=1
@@ -51,8 +51,9 @@ timeLimit=180
 - 未显式设置：`dropMode=use_all` 使用全部卡，`drop_leftover` 丢整堆余数，
   `drop_leftover_exact` 还会向下取到人数整数倍。
 
-`evenPackCount=true` 时显式非倍数直接返回 `PACKCOUNT_NOT_MULTIPLE`，自动计算
-向下取到最大完整轮（池子不足一整轮时保留兜底堆）。`dropPublic` 决定被丢弃
+新建比赛未显式设置 `packCount` 时，目标为 `4×玩家数` 堆（四轮）；若卡池不足，
+按可生成的完整堆数向下减少轮数。`evenPackCount=true` 时显式非倍数直接返回
+`PACKCOUNT_NOT_MULTIPLE`，自动计算向下取到最大完整轮（池子不足一整轮时保留兜底堆）。`dropPublic` 决定被丢弃
 编号是否写入公开状态；默认不公开。`packStrategy` 为：
 
 - `stratify`（默认）：main/extra 按整体比例分层到各堆；
@@ -60,7 +61,7 @@ timeLimit=180
 - `main_then_extra`：先放完主卡再放额外卡。
 
 passing 模式按轮发堆，每个玩家有 FIFO 队列；队首堆选一张后顺时针传递，整轮
-全部清空才发下一轮。每个玩家自己的 deadline = 基础 30 秒 + 尚未使用的
+全部清空才发下一轮。每个玩家自己的 deadline = 基础 40 秒 + 尚未使用的
 reserve；超出基础时间只扣 reserve，reserve 耗尽后才自动随机选，事件记录
 `auto=true`。玩家点击牌查看详情时会记录本人当前堆的最后一张候选牌；超时
 自动选牌优先使用仍在堆中的候选牌，候选牌仅对本人可见。管理员可通过

@@ -28,13 +28,13 @@ export interface CardInfo {
 export interface TournamentConfig {
   maxPlayers: number;
   mode: 'single' | 'match'; // BO1 / BO3 with side
-  packSize?: number; // cards per pack (any positive integer, default 18)
+  packSize?: number; // cards per pack (any positive integer, default 24)
   packSizeMultiple: number; // legacy: pack size = players * multiple (used when packSize absent)
-  packCount?: number; // explicit total pack count; <= floor(pool/packSize) = fixed count, rest discarded; > that = use ALL pool cards (count = ceil(pool/packSize), last pack may be partial); absent = auto by legacy dropMode
+  packCount?: number; // explicit total pack count; <= floor(pool/packSize) = fixed count, rest discarded; > that = use ALL pool cards (count = ceil(pool/packSize), last pack may be partial); new create defaults target 4×players, reduced when the pool is smaller
   packStrategy?: 'stratify' | 'random' | 'main_then_extra'; // discarded subset is always main/extra proportional before this layout strategy
   dropPublic?: boolean; // whether dropped cards are exposed (default false)
   dropLast: boolean; // public dropped card list per pack
-  pickSeconds: number; // default 30
+  pickSeconds: number; // default 40
   pauseSeconds: number; // default 300 (5 min)
   deckbuildingSeconds?: number | null; // null/default = unlimited; admin advances manually
   mainMin: number;
@@ -47,7 +47,7 @@ export interface TournamentConfig {
   draftMode?: 'passing' | 'serial'; // default 'passing' (per-player pack queues); 'serial' = legacy one-pack-at-a-time
   evenPackCount?: boolean; // default true: pack count must be a multiple of player count (explicit packCount rejected otherwise; computed counts round down)
   reseatEachRound?: boolean; // passing: shuffle player seats before each round (default true)
-  reserveSeconds?: number; // passing mode: per-player reserve time bank (default 300); pick overrun deducts from it, auto-pick only when exhausted
+  reserveSeconds?: number; // passing mode: per-player reserve time bank (default 400); pick overrun deducts from it, auto-pick only when exhausted
   matchFormat?: MatchFormat; // absent only for legacy tournaments using the historical automatic policy
   swissRoundCount?: number;
   playoffSize?: number; // 0 or a power of two

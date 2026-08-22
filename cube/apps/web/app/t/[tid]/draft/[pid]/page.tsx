@@ -97,6 +97,28 @@ export default function DraftPage() {
       : current);
   }, [identity, pid, tid]);
 
+  const updateReady = useCallback(async (ready: boolean) => {
+    if (!identity) return;
+    try {
+      const result = await api<{ playerId: string; ready: boolean }>(`/t/${tid}/player/ready`, {
+        method: 'POST',
+        body: { ready },
+        identity,
+      });
+      setState((current) => current
+        ? {
+            ...current,
+            players: current.players.map((player) => player.playerId === pid
+              ? { ...player, ready: result.ready }
+              : player),
+          }
+        : current);
+    } catch (e: any) {
+      setError(e?.code === 'WRONG_PHASE' ? '报名已结束，无法修改准备状态' : (e?.code ?? String(e)));
+      throw e;
+    }
+  }, [identity, pid, tid]);
+
   useEffect(() => {
     void load();
   }, [load]);
@@ -271,6 +293,7 @@ export default function DraftPage() {
         tid={tid}
         alternativeName={state.pickAlternative !== null && state.pickAlternative !== undefined ? cardMap[state.pickAlternative]?.name : null}
         onDisplayNameChange={updateDisplayName}
+        onReadyChange={state.status === 'registration' ? updateReady : undefined}
       />
       {state.status === 'drafting' && (
         <div className="flex flex-1 flex-col gap-3 p-3 md:flex-row md:overflow-hidden">
@@ -307,7 +330,7 @@ export default function DraftPage() {
         <div className="flex flex-1 flex-col gap-3 p-3 md:flex-row md:overflow-hidden">
           <div className="flex w-full flex-col gap-2 md:w-3/5 md:overflow-y-auto md:pr-1">
             <header className="mb-2 text-xs text-slate-400">
-              卡池预览（drop 前，共 {poolCodes.length} 张）—— 选牌尚未开始，等待管理员启动
+              卡池预览（drop 前，共 {poolCodes.length} 张）—— 选牌尚未开始；请点击顶部“准备”按钮确认参加，点击“玩家”可查看报名与准备情况
             </header>
             <DeckZone title="主卡组" zone="main" codes={poolCodes.filter((c) => cardMap[c] && !(cardMap[c].type & 0x4802040))} cardMap={cardMap} />
             <DeckZone title="额外卡组" zone="extra" codes={poolCodes.filter((c) => cardMap[c] && !!(cardMap[c].type & 0x4802040))} cardMap={cardMap} />

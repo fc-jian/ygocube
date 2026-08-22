@@ -39,13 +39,19 @@ describe('tournament card pool validation', () => {
     const { tid } = tournaments.create({ name: 'ok', maxPlayers: 4, cardPool: TEST_POOL }, 'test');
     expect(tid).toBeGreaterThan(0);
     const cfg = JSON.parse(loadState(tid).configJson);
-    expect(cfg.packSize).toBe(18);
+    expect(cfg.packSize).toBe(24);
+    expect(cfg.pickSeconds).toBe(40);
+    expect(cfg.reserveSeconds).toBe(400);
+    expect(cfg.packCount).toBe(16); // four default rounds for four players
     expect(cfg.deckbuildingSeconds).toBeNull();
-    expect(cfg.matchFormat).toBe('round_robin');
+    expect(cfg.matchFormat).toBe('swiss');
+    expect(cfg.swissRoundCount).toBe(3);
   });
 
   it('materializes recommended Swiss settings and validates manual settings', () => {
     const tournaments = makeTournaments();
+    const small = tournaments.create({ name: 'recommended-small', maxPlayers: 8, cardPool: TEST_POOL }, 'test').tid;
+    expect(JSON.parse(loadState(small).configJson)).toMatchObject({ matchFormat: 'swiss', swissRoundCount: 3, playoffSize: 0 });
     const tid = tournaments.create({ name: 'recommended', maxPlayers: 12, cardPool: TEST_POOL }, 'test').tid;
     expect(JSON.parse(loadState(tid).configJson)).toMatchObject({ matchFormat: 'swiss', swissRoundCount: 4, playoffSize: 4 });
     expect(() => tournaments.create({ name: 'bad', maxPlayers: 8, cardPool: TEST_POOL, matchFormat: 'swiss', swissRoundCount: 4, playoffSize: 16 }, 'test')).toThrow('FORMAT_PLAYER_COUNT');
@@ -79,6 +85,24 @@ describe('admin player management', () => {
     const { resetStateCache } = require('../src/events/events.service');
     resetStateCache();
     expect(loadState(tid).players.find((p) => p.playerId === 'p1')?.displayName).toBe('新名称');
+  });
+
+  it('tracks registration readiness for every player and replays it', () => {
+    const tournaments = makeTournaments();
+    const tid = tournaments.create({ name: 'ready', maxPlayers: 4, cardPool: TEST_POOL }, 'test').tid;
+    tournaments.join(tid, 'p1', 'P1');
+    tournaments.join(tid, 'p2', 'P2');
+
+    expect(loadState(tid).players.map((p) => p.ready)).toEqual([false, false]);
+    expect(tournaments.setPlayerReady(tid, 'p1', true, 'p1')).toEqual({ playerId: 'p1', ready: true });
+    expect(tournaments.get(tid).players.find((p) => p.playerId === 'p1')?.ready).toBe(true);
+    expect(tournaments.stateForPlayer(tid, 'p2').players.find((p) => p.playerId === 'p1')?.ready).toBe(true);
+
+    const { resetStateCache } = require('../src/events/events.service');
+    resetStateCache();
+    expect(loadState(tid).players.find((p) => p.playerId === 'p1')?.ready).toBe(true);
+    tournaments.setPlayerReady(tid, 'p1', false, 'p1');
+    expect(loadState(tid).players.find((p) => p.playerId === 'p1')?.ready).toBe(false);
   });
 
   it('blocks display name changes after drafting starts and rejects invalid names', () => {

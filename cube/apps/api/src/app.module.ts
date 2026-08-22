@@ -77,6 +77,11 @@ export class AppModule {
           // instead of putting the new value in a broadcast payload.
           realtime.emitNotice(tid, '玩家显示名称已更新');
           break;
+        case 'player_ready':
+          // Readiness is public registration metadata; clients refetch the
+          // player list so every view shows the same status.
+          realtime.emitNotice(tid, '玩家准备状态已更新');
+          break;
         case 'pause':
           realtime.emitPause(tid, payload);
           break;

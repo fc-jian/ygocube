@@ -22,6 +22,7 @@ export function IdentityWidget({
   onDisplayNameChange?: (displayName: string) => Promise<void>;
 }) {
   const [showToken, setShowToken] = useState(false);
+  const [tokenCopied, setTokenCopied] = useState(false);
   const [loggedOut, setLoggedOut] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(displayName ?? '');
@@ -59,6 +60,29 @@ export function IdentityWidget({
       setNameError(code === 'WRONG_PHASE' ? '选牌已开始，无法再修改显示名称' : code === 'AUTH_REQUIRED' ? '身份已失效，请重新输入令牌' : code === 'BAD_DISPLAY_NAME' ? '显示名称格式不合法' : (code ?? '名称修改失败'));
     } finally {
       setSavingName(false);
+    }
+  };
+
+  const copyToken = async () => {
+    if (!token || token === '(已关闭鉴权)') return;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(token);
+      } else {
+        const input = document.createElement('textarea');
+        input.value = token;
+        input.style.position = 'fixed';
+        input.style.opacity = '0';
+        document.body.appendChild(input);
+        input.focus();
+        input.select();
+        document.execCommand('copy');
+        input.remove();
+      }
+      setTokenCopied(true);
+      window.setTimeout(() => setTokenCopied(false), 1500);
+    } catch {
+      setTokenCopied(false);
     }
   };
 
@@ -126,8 +150,20 @@ export function IdentityWidget({
         )
       )}
       {token ? (
-        <button onClick={() => setShowToken((v) => !v)} className="rounded bg-felt px-2 py-1 hover:bg-felt-edge" title="显示/隐藏令牌">
+        <button
+          onClick={() => {
+            if (!showToken) {
+              setShowToken(true);
+              setTokenCopied(false);
+            } else {
+              void copyToken();
+            }
+          }}
+          className="rounded bg-felt px-2 py-1 hover:bg-felt-edge"
+          title={showToken ? '再次点击复制令牌' : '点击显示令牌'}
+        >
           令牌：<span className="font-mono">{showToken ? token : '••••••••'}</span>
+          {showToken && token !== '(已关闭鉴权)' && <span className="ml-1 text-gold">{tokenCopied ? '已复制' : '点击复制'}</span>}
         </button>
       ) : (
         <span className="text-slate-500">无身份信息</span>

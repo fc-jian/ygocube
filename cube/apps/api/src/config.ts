@@ -96,13 +96,13 @@ function loadConfig(): AppConfig {
 export const config = loadConfig();
 
 export const defaults = {
-  packSize: 18, // 每堆卡牌数（任意正整数，不再要求是人数整数倍）
+  packSize: 24, // 每堆卡牌数（任意正整数，不再要求是人数整数倍）
   packSizeMultiple: 3, // 旧配置兼容（packSize 缺失时每堆 = 人数 × 该倍数）
   draftMode: 'passing', // passing=每玩家牌堆队列传递式；serial=旧全局串行（仅 raw config 可设）
   evenPackCount: true, // 牌堆数须为人数整数倍（显式 packCount 非倍数拒绝；自动计算向下取整）
-  reserveSeconds: 300, // passing 模式每玩家保留时间（单选超时先扣 reserve，耗尽才自动选）
+  reserveSeconds: 400, // passing 模式每玩家保留时间（单选超时先扣 reserve，耗尽才自动选）
   reseatEachRound: true, // passing 每轮结束后随机重排玩家座位（默认开）
-  pickSeconds: 30,
+  pickSeconds: 40,
   pauseSeconds: 300,
   deckbuildingSeconds: null as number | null, // 默认无限；管理员手动进入对战阶段
   mainMin: 40,

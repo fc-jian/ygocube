@@ -94,13 +94,13 @@ export default function AdminPage() {
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null);
   const [reserveInputs, setReserveInputs] = useState<Record<string, string>>({});
   const [hoveredEvent, setHoveredEvent] = useState<number | null>(null);
-  const [formatForm, setFormatForm] = useState({ matchFormat: 'round_robin', swissRoundCount: 4, playoffSize: 0 });
+  const [formatForm, setFormatForm] = useState({ matchFormat: 'swiss', swissRoundCount: 3, playoffSize: 0 });
 
   useEffect(() => {
     if (!state) return;
     setFormatForm({
-      matchFormat: String(state.config.matchFormat ?? (state.players.length <= 5 ? 'round_robin' : 'swiss')),
-      swissRoundCount: Number(state.config.swissRoundCount ?? 4),
+      matchFormat: String(state.config.matchFormat ?? 'swiss'),
+      swissRoundCount: Number(state.config.swissRoundCount ?? 3),
       playoffSize: Number(state.config.playoffSize ?? 0),
     });
   }, [state?.id, state?.config.matchFormat, state?.config.swissRoundCount, state?.config.playoffSize]);
@@ -313,7 +313,7 @@ export default function AdminPage() {
       maxCopies: (state.config.maxCopies as number) ?? 3,
       timeLimit: (state.config.timeLimit as number) ?? 180,
       pickSeconds: state.config.pickSeconds as number,
-      reserveSeconds: (state.config.reserveSeconds as number) ?? 300,
+      reserveSeconds: (state.config.reserveSeconds as number) ?? 400,
       deckbuildingSeconds: (state.config.deckbuildingSeconds as number | null) ?? 600,
       packStrategy: (state.config.packStrategy as string) ?? 'stratify',
     });
@@ -340,7 +340,7 @@ export default function AdminPage() {
         maxCopies: Number(editForm.maxCopies),
         timeLimit: Number(editForm.timeLimit),
         pickSeconds: Number(editForm.pickSeconds),
-        reserveSeconds: Number(editForm.reserveSeconds ?? 300),
+        reserveSeconds: Number(editForm.reserveSeconds ?? 400),
         deckbuildingSeconds: limitDeckbuilding ? Number(editForm.deckbuildingSeconds) : null,
         packStrategy: String(editForm.packStrategy === 'random' || editForm.packStrategy === 'main_then_extra' ? editForm.packStrategy : 'stratify'),
         packCount: packCount === '' ? null : Number(packCount), // null = 恢复自动（后端删除该键语义）
@@ -392,7 +392,7 @@ export default function AdminPage() {
   };
 
   const editPlayers = Math.max(1, Number(editForm.maxPlayers) || 1);
-  const editPackSize = Math.max(1, Number(editForm.packSize) || 18);
+  const editPackSize = Math.max(1, Number(editForm.packSize) || 24);
   const editPoolCount = pools.find((p) => p.name === String(editForm.cardPool ?? ''))?.count ?? 0;
   const editRawPacks = Math.max(1, Math.floor(editPoolCount / editPackSize));
   const editAutoPacks = evenPackCount && editRawPacks >= editPlayers ? editRawPacks - (editRawPacks % editPlayers) : editRawPacks;
@@ -769,7 +769,7 @@ export default function AdminPage() {
                   <option value="single">单局</option>
                 </select>
               </label>
-              <label className="flex items-center gap-2">每堆卡数 <input type="number" min={1} max={60} className="w-14 rounded bg-felt-deep px-2 py-1" value={Number(editForm.packSize) || 18} onChange={(e) => setEditForm((f) => ({ ...f, packSize: Number(e.target.value) }))} /></label>
+              <label className="flex items-center gap-2">每堆卡数 <input type="number" min={1} max={60} className="w-14 rounded bg-felt-deep px-2 py-1" value={Number(editForm.packSize) || 24} onChange={(e) => setEditForm((f) => ({ ...f, packSize: Number(e.target.value) }))} /></label>
               <label className="flex items-center gap-2">牌堆总数（轮数）
                 <input type="number" min={1} className="w-14 rounded bg-felt-deep px-2 py-1" placeholder="自动" value={packCount} onChange={(e) => setPackCount(e.target.value === '' ? '' : Math.max(1, Number(e.target.value)))} />
                 {evenPackCount && packCount !== '' && Number(packCount) % (Number(editForm.maxPlayers) || 2) !== 0 && <span className="text-red-300">须为人数整数倍</span>}
@@ -778,7 +778,7 @@ export default function AdminPage() {
                 每位玩家可获得：{editCardsLow === editCardsHigh ? <b className="text-gold">{editCardsLow} 张</b> : <b className="text-amber-300">{editCardsLow}–{editCardsHigh} 张</b>}（实际使用 {editDraftedCards} 张）
               </div>
               <label className="flex items-center gap-2"><input type="checkbox" checked={evenPackCount} onChange={(e) => setEvenPackCount(e.target.checked)} /> 牌堆数为人数整数倍</label>
-              <label className="flex items-center gap-2">保留时间（秒） <input type="number" min={0} max={3600} className="w-16 rounded bg-felt-deep px-2 py-1" value={Number(editForm.reserveSeconds) ?? 300} onChange={(e) => setEditForm((f) => ({ ...f, reserveSeconds: Math.max(0, Number(e.target.value)) }))} /></label>
+              <label className="flex items-center gap-2">保留时间（秒） <input type="number" min={0} max={3600} className="w-16 rounded bg-felt-deep px-2 py-1" value={Number(editForm.reserveSeconds) ?? 400} onChange={(e) => setEditForm((f) => ({ ...f, reserveSeconds: Math.max(0, Number(e.target.value)) }))} /></label>
               <label className="flex items-center gap-2"><input type="checkbox" checked={dropPublic} onChange={(e) => setDropPublic(e.target.checked)} /> 公开被丢弃的卡牌</label>
               <label className="flex items-center gap-2"><input type="checkbox" checked={reseatEachRound} onChange={(e) => setReseatEachRound(e.target.checked)} /> 每轮结束后随机重排玩家座位</label>
               <label className="flex items-center gap-2">卡池

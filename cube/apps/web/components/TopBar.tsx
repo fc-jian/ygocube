@@ -14,7 +14,7 @@ export interface DraftState {
   round: number;
   frozen: boolean;
   config: Record<string, unknown>;
-  players: { playerId: string; displayName: string; seat: number }[];
+  players: { playerId: string; displayName: string; seat: number; ready?: boolean }[];
   pickedCards: number[];
   cardsRemainingToDraft: number;
   cardsRemainingExact: boolean;
@@ -72,6 +72,7 @@ export function TopBar({
   tid,
   alternativeName,
   onDisplayNameChange,
+  onReadyChange,
 }: {
   state: DraftState;
   pid: string;
@@ -79,10 +80,15 @@ export function TopBar({
   tid: string;
   alternativeName?: string | null;
   onDisplayNameChange?: (displayName: string) => Promise<void>;
+  onReadyChange?: (ready: boolean) => Promise<void>;
 }) {
   const [showInfo, setShowInfo] = useState(false);
+  const [showPlayers, setShowPlayers] = useState(false);
+  const [readyBusy, setReadyBusy] = useState(false);
   const pack = state.pack;
   const cfg = state.config;
+  const me = state.players.find((p) => p.playerId === pid);
+  const readyCount = state.players.filter((p) => p.ready === true).length;
   const formatText = cfg.matchFormat === 'round_robin' ? '单循环' : cfg.matchFormat === 'double_elimination' ? '双败淘汰' : cfg.matchFormat === 'swiss' ? `瑞士 ${String(cfg.swissRoundCount ?? '-')} 轮${Number(cfg.playoffSize ?? 0) ? ` + Top ${String(cfg.playoffSize)} 淘汰` : ''}` : '历史自动赛制';
   const now = useNowTick(!!pack?.isMyTurn && !!pack?.deadlineAt);
 
@@ -184,6 +190,28 @@ export function TopBar({
               )}
             </div>
           ) : null}
+          <button
+            type="button"
+            onClick={() => setShowPlayers((v) => !v)}
+            className="rounded bg-felt-edge px-2 py-1 text-xs hover:brightness-110"
+            title="展开查看报名玩家与准备情况"
+          >
+            玩家 {readyCount}/{state.players.length}
+          </button>
+          {state.status === 'registration' && onReadyChange && (
+            <button
+              type="button"
+              disabled={readyBusy}
+              onClick={() => {
+                setReadyBusy(true);
+                void onReadyChange(me?.ready !== true).catch(() => undefined).finally(() => setReadyBusy(false));
+              }}
+              className={`rounded px-2.5 py-1 text-xs font-semibold transition-colors disabled:opacity-60 ${me?.ready === true ? 'bg-emerald-900 text-emerald-200 hover:bg-red-900 hover:text-red-200' : 'bg-gold text-felt-deep hover:brightness-110'}`}
+              title={me?.ready === true ? '点击取消准备' : '准备参加本场比赛'}
+            >
+              {me?.ready === true ? '已准备 ✓' : '准备'}
+            </button>
+          )}
           <IdentityWidget
             tid={tid}
             pid={pid}
@@ -196,6 +224,30 @@ export function TopBar({
           <FontSizeSetting />
         </div>
       </div>
+      {showPlayers && (
+        <div className="border-t border-felt-edge/80 bg-felt-deep/70 px-4 py-2">
+          <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+            <span className="font-semibold text-slate-200">报名玩家</span>
+            <span className={readyCount === state.players.length && state.players.length > 0 ? 'text-emerald-300' : 'text-slate-400'}>
+              {readyCount}/{state.players.length} 已准备
+            </span>
+          </div>
+          <div className="grid max-h-40 grid-cols-1 gap-1 overflow-y-auto sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            {state.players.map((player, index) => (
+              <div key={player.playerId} className="flex min-w-0 items-center justify-between gap-2 rounded bg-felt px-2 py-1 text-xs">
+                <span className="min-w-0 truncate text-slate-200" title={player.displayName || player.playerId}>
+                  <span className="mr-1 text-slate-500">#{index + 1}</span>
+                  {player.displayName || player.playerId}
+                  {player.playerId === pid && <span className="ml-1 text-gold">（你）</span>}
+                </span>
+                <span className={`shrink-0 rounded px-1.5 py-0.5 ${player.ready === true ? 'bg-emerald-950 text-emerald-300' : 'bg-slate-800 text-slate-400'}`}>
+                  {player.ready === true ? '已准备' : '未准备'}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </header>
   );
 }

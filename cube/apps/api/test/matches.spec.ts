@@ -22,13 +22,13 @@ class FakeSrvpro {
   }
 }
 
-function setupMatches(n: number) {
+function setupMatches(n: number, matchFormat?: 'round_robin' | 'swiss') {
   const tournaments = makeTournaments();
   const cards = new CardsService();
   const decks = new DecksService(cards);
   const fake = new FakeSrvpro();
   const matches = new MatchesService(fake as any);
-  const tid = tournaments.create({ name: 'm', maxPlayers: n, cardPool: TEST_POOL }, 'test').tid;
+  const tid = tournaments.create({ name: 'm', maxPlayers: n, cardPool: TEST_POOL, ...(matchFormat ? { matchFormat, ...(matchFormat === 'swiss' && n <= 8 ? { swissRoundCount: 4, playoffSize: 0 } : {}) } : {}) }, 'test').tid;
   for (let i = 0; i < n; i++) tournaments.join(tid, `p${i}`, `P${i}`);
   tournaments.setPhase(tid, 'drafting', undefined, 'test');
   tournaments.setPhase(tid, 'deckbuilding', undefined, 'test');
@@ -53,7 +53,7 @@ describe('pairing engine', () => {
   beforeEach(() => useTestDb());
 
   it('4 players round robin: one match per player per round, all pairs exactly once', () => {
-    const { matches, tid } = setupMatches(4);
+    const { matches, tid } = setupMatches(4, 'round_robin');
     const seen = new Set<string>();
     for (let r = 1; r <= 3; r++) {
       matches.startRound(tid, r, 'test');
@@ -81,7 +81,7 @@ describe('pairing engine', () => {
   });
 
   it('5 players round robin schedules every pair once with one bye per round', () => {
-    const { matches, tid } = setupMatches(5);
+    const { matches, tid } = setupMatches(5, 'round_robin');
     const seen = new Set<string>();
     for (let round = 1; round <= 5; round++) {
       matches.startRound(tid, round, 'test');
@@ -118,7 +118,7 @@ describe('pairing engine', () => {
   });
 
   it('6 players: 4 swiss rounds, no repeated pairings within a round', () => {
-    const { matches, tid } = setupMatches(6);
+    const { matches, tid } = setupMatches(6, 'swiss');
     const seen = new Set<string>();
     for (let r = 1; r <= 4; r++) {
       matches.startRound(tid, r, 'test');
@@ -143,7 +143,7 @@ describe('pairing engine', () => {
   });
 
   it('backtracks across the whole swiss round instead of repeating the final leftover pair', () => {
-    const { matches, tid } = setupMatches(6);
+    const { matches, tid } = setupMatches(6, 'swiss');
     const { logEvent } = require('../src/events/events.service');
     // Everyone drew in round 1, so standings remain p0..p5. A greedy scheduler
     // would choose p0-p1 and p2-p3, then leave the already-played p4-p5 pair.

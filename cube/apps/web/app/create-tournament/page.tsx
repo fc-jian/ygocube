@@ -13,16 +13,17 @@ interface PoolInfo {
 
 type MatchFormat = 'round_robin' | 'swiss' | 'double_elimination';
 const recommendFormat = (n: number): { matchFormat: MatchFormat; swissRoundCount: number; playoffSize: number } =>
-  n <= 5 ? { matchFormat: 'round_robin', swissRoundCount: 1, playoffSize: 0 }
-    : n <= 8 ? { matchFormat: 'swiss', swissRoundCount: 4, playoffSize: 0 }
+  n <= 2 ? { matchFormat: 'round_robin', swissRoundCount: 1, playoffSize: 0 }
+    : n <= 8 ? { matchFormat: 'swiss', swissRoundCount: 3, playoffSize: 0 }
       : n <= 16 ? { matchFormat: 'swiss', swissRoundCount: 4, playoffSize: 4 }
         : { matchFormat: 'swiss', swissRoundCount: Math.ceil(Math.log2(n)) + 1, playoffSize: 8 };
 
 export default function CreateTournamentPage() {
   const [name, setName] = useState('');
   const [maxPlayers, setMaxPlayers] = useState(4);
-  const [packSize, setPackSize] = useState(18);
-  const [packCount, setPackCount] = useState<number | ''>('');
+  const [packSize, setPackSize] = useState(24);
+  const [packCount, setPackCount] = useState<number | ''>(16);
+  const [packCountTouched, setPackCountTouched] = useState(false);
   const [dropPublic, setDropPublic] = useState(false);
   const [mode, setMode] = useState<'single' | 'match'>('match');
   const [pools, setPools] = useState<PoolInfo[]>([]);
@@ -33,13 +34,13 @@ export default function CreateTournamentPage() {
   const [sideMax, setSideMax] = useState(30);
   const [maxCopies, setMaxCopies] = useState(1);
   const [timeLimit, setTimeLimit] = useState(999);
-  const [pickSeconds, setPickSeconds] = useState(30);
+  const [pickSeconds, setPickSeconds] = useState(40);
   const [deckbuildingSeconds, setDeckbuildingSeconds] = useState(600);
   const [limitDeckbuilding, setLimitDeckbuilding] = useState(false);
   const [packStrategy, setPackStrategy] = useState('stratify');
   const [evenPackCount, setEvenPackCount] = useState(true);
   const [reseatEachRound, setReseatEachRound] = useState(true);
-  const [reserveSeconds, setReserveSeconds] = useState(300);
+  const [reserveSeconds, setReserveSeconds] = useState(400);
   const [confirmFairness, setConfirmFairness] = useState(false);
   const [createToken, setCreateToken] = useState('');
   const [created, setCreated] = useState<{ url: string; adminToken: string } | null>(null);
@@ -66,19 +67,27 @@ export default function CreateTournamentPage() {
       .catch(() => setPools([]));
   }, []);
 
-  // 牌堆数上限/估算（与后端 startDraft 逻辑一致；evenPackCount 开时向下取整到人数倍数）
-  // 留空 = 自动（maxPacks）；超过整除上限时：evenPackCount 关 = 用尽卡池（末堆可能不满），开 = 向下取整到人数倍数
+  // 默认牌堆总数为四轮（4 × 玩家数）；卡池不足时按可用完整牌堆减少轮数。
+  // 用户手动编辑后保留其值，超过卡池上限时沿用后端的 use-all/取整规则。
   const poolCount = pools.find((p) => p.name === cardPool)?.count ?? 0;
   const rawMaxPacks = Math.max(1, Math.floor(poolCount / Math.max(1, packSize)));
   const roundedMax = rawMaxPacks - (rawMaxPacks % maxPlayers);
   const maxPacks = evenPackCount ? (roundedMax >= maxPlayers ? roundedMax : rawMaxPacks) : rawMaxPacks;
-  const autoEstimate = maxPacks;
+  const targetPackCount = Math.max(1, maxPlayers * 4);
+  const availableDefaultPacks = poolCount > 0 ? Math.max(1, Math.floor(poolCount / Math.max(1, packSize))) : targetPackCount;
+  const defaultPackCountRaw = Math.min(targetPackCount, availableDefaultPacks);
+  const defaultPackCount = evenPackCount && defaultPackCountRaw >= maxPlayers
+    ? Math.max(maxPlayers, defaultPackCountRaw - (defaultPackCountRaw % maxPlayers))
+    : defaultPackCountRaw;
+  useEffect(() => {
+    if (!packCountTouched) setPackCount(defaultPackCount);
+  }, [defaultPackCount, packCountTouched]);
   const overLimit = packCount !== '' && Number(packCount) > rawMaxPacks;
   // 超过整除上限时与后端一致：先用尽卡池（ceil），evenPackCount 开再向下取整到人数倍数（>= 人数才取整）
   const ceilPacks = Math.max(1, Math.ceil(poolCount / Math.max(1, packSize)));
   const ceilRounded = ceilPacks - (ceilPacks % maxPlayers);
   const overLimitEffective = evenPackCount && ceilRounded >= maxPlayers ? ceilRounded : ceilPacks;
-  const effectivePacks = packCount === '' ? autoEstimate : overLimit ? overLimitEffective : Number(packCount);
+  const effectivePacks = packCount === '' ? defaultPackCount : overLimit ? overLimitEffective : Number(packCount);
   const draftedCards = Math.min(poolCount, Math.max(0, effectivePacks * packSize));
   const cardsPerPlayerLow = Math.floor(draftedCards / Math.max(1, maxPlayers));
   const cardsPerPlayerHigh = Math.ceil(draftedCards / Math.max(1, maxPlayers));
@@ -252,8 +261,12 @@ export default function CreateTournamentPage() {
                 className="w-16 rounded bg-felt-deep px-2 py-1"
                 placeholder="自动"
                 value={packCount}
-                onChange={(e) => setPackCount(e.target.value === '' ? '' : Math.max(1, Number(e.target.value)))}
+                onChange={(e) => {
+                  setPackCountTouched(true);
+                  setPackCount(e.target.value === '' ? '' : Math.max(1, Number(e.target.value)));
+                }}
               />
+              <span className="text-xs text-slate-400">默认 {defaultPackCount} 堆（{Math.max(1, Math.ceil(defaultPackCount / Math.max(1, maxPlayers)))} 轮）</span>
               {cardPool ? (
                 overLimit && !evenPackCount ? (
                   <span className="text-xs text-amber-300">

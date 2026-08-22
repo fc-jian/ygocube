@@ -44,10 +44,11 @@ matchFormat(round_robin|swiss|double_elimination)
 swissRoundCount, playoffSize
 ```
 
-默认 `packSize=18`、`deckbuildingSeconds=null`、`extraMax=30`、`sideMax=30`、
+默认 `packSize=24`、`pickSeconds=40`、`reserveSeconds=400`、`deckbuildingSeconds=null`、`extraMax=30`、`sideMax=30`、
 `maxCopies=1`。`cardPool` 必须是已存在的卡池名；新写入接口拒绝缺省或 `full`。
-创建时按人数写入推荐赛制：2--5 单循环，6--8 瑞士 4 轮无淘汰，9--16 瑞士
-4 轮 Top 4，17+ 瑞士 `ceil(log2(n))+1` 轮 Top 8。首场对局生成后赛制锁定。
+创建时默认生成 `4×玩家数` 个牌堆（卡池不足时按完整堆数减少轮数），并按人数写入推荐赛制：
+3--8 人为瑞士 3 轮无淘汰（2 人因无法安排三轮不重复对手而推荐单循环），9--16 瑞士 4 轮 Top 4，17+ 瑞士
+`ceil(log2(n))+1` 轮 Top 8。首场对局生成后赛制锁定。
 
 ### 2.3 玩家端点
 
@@ -60,6 +61,7 @@ swissRoundCount, playoffSize
 | `GET /t/:tid` | 阶段、配置摘要、玩家、`authRequired` |
 | `POST /t/:tid/join` | 报名 `{player_id,display_name}`，返回一次性 token |
 | `POST /t/:tid/player/name` | 报名阶段由本人修改 `{display_name}`；需要玩家身份，记录 `player_rename` 事件 |
+| `POST /t/:tid/player/ready` | 报名阶段由本人设置 `{ready:true|false}`；记录 `player_ready` 事件，准备状态对所有报名玩家公开 |
 | `GET /t/:tid/state` | 当前玩家视角完整状态（牌堆、队列、reserve、构筑、当前对局） |
 | `GET /t/:tid/pool` | 当前比赛 drop 前卡池（需玩家鉴权） |
 | `GET /t/:tid/cards?q=` / `?codes=` | 卡牌元数据/效果文本搜索或批量读取；`q` 按空白拆分为 AND 关键字，无隐含 30/50 条上限，结果按卡名命中数量及关键字顺序优先 |

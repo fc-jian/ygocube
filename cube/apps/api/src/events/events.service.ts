@@ -12,6 +12,8 @@ export interface PlayerState {
   seat: number;
   eliminated: boolean;
   withdrawn?: boolean;
+  // 报名阶段由玩家自行确认；旧事件/快照缺失时按未准备处理。
+  ready?: boolean;
 }
 
 export interface PackState {
@@ -174,8 +176,14 @@ export function apply(state: TournamentState, action: string, payload: any): voi
     }
     case 'player_join': {
       const p: PlayerState = payload;
+      p.ready ??= false;
       state.players.push(p);
       state.decks[p.playerId] = { main: [], extra: [], side: [], lockedAt: null, status: 'building' };
+      break;
+    }
+    case 'player_ready': {
+      const player = state.players.find((p) => p.playerId === payload?.playerId);
+      if (player && typeof payload?.ready === 'boolean') player.ready = payload.ready;
       break;
     }
     case 'player_rename': {
