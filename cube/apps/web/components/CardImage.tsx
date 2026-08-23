@@ -13,6 +13,8 @@ export function CardImage({ code, name, className = '' }: { code: number; name?:
 
   useEffect(() => {
     let cancelled = false;
+    let objectUrl: string | null = null;
+    setSrc(null);
     const fallback = async () => {
       const candidates: string[] = [];
       const root = localStorage.getItem('yc_local_pics');
@@ -46,7 +48,12 @@ export function CardImage({ code, name, className = '' }: { code: number; name?:
           if (await requestDirPermission(handle)) {
             const url = await readCardImageUrl(handle, code);
             if (url) {
-              if (!cancelled) setSrc(url);
+              if (!cancelled) {
+                objectUrl = url;
+                setSrc(url);
+              } else {
+                URL.revokeObjectURL(url);
+              }
               return;
             }
           }
@@ -58,6 +65,7 @@ export function CardImage({ code, name, className = '' }: { code: number; name?:
     })();
     return () => {
       cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [code]);
 
@@ -86,9 +94,18 @@ export function CardWithTooltip({ code, card, className = '', pinOnClick = true 
   return (
     <div
       className={`group relative ${className}`}
+      role={pinOnClick ? 'button' : undefined}
+      tabIndex={pinOnClick ? 0 : undefined}
+      aria-label={pinOnClick ? `查看${card?.name ?? code}详情` : undefined}
       onMouseEnter={(e) => card && showCardPreview(card, e)}
       onMouseMove={(e) => card && moveCardPreview(e)}
       onClick={(e) => card && pinOnClick && pinCardPreview(card, e)}
+      onKeyDown={(e) => {
+        if (card && pinOnClick && (e.key === 'Enter' || e.key === ' ')) {
+          e.preventDefault();
+          pinCardPreview(card, { clientX: window.innerWidth / 2, clientY: window.innerHeight / 2 });
+        }
+      }}
       onMouseLeave={() => hideCardPreview()}
     >
       <CardImage code={code} name={card?.name} className="aspect-[7/10] w-full" />

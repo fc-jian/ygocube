@@ -12,15 +12,16 @@ export interface Identity {
 
 export function getCookie(name: string): string | undefined {
   if (typeof document === 'undefined') return undefined;
-  const m = document.cookie.match(new RegExp(`(?:^|; )${name}=([^;]*)`));
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const m = document.cookie.match(new RegExp(`(?:^|; )${escaped}=([^;]*)`));
   return m ? decodeURIComponent(m[1]) : undefined;
 }
 
 // 身份 cookie 按 tournament 隔离（yc_pid_<tid>/yc_token_<tid>），
 // 避免同机多比赛时互相串号导致报名页误判"已登录"（dev_docs/06 §2.1）
 export function setIdentityCookie(tid: string, pid: string, token: string): void {
-  document.cookie = `yc_pid_${tid}=${encodeURIComponent(pid)}; path=/; max-age=86400`;
-  document.cookie = `yc_token_${tid}=${encodeURIComponent(token)}; path=/; max-age=86400`;
+  document.cookie = `yc_pid_${tid}=${encodeURIComponent(pid)}; path=/; max-age=86400; SameSite=Lax`;
+  document.cookie = `yc_token_${tid}=${encodeURIComponent(token)}; path=/; max-age=86400; SameSite=Lax`;
 }
 
 export function clearIdentityCookies(tid?: string): void {
@@ -89,7 +90,7 @@ function identityHeaders(id: Identity | null): Record<string, string> {
 
 export async function api<T = any>(
   path: string,
-  opts: { method?: string; body?: unknown; identity?: Identity | null; createUsername?: string; createToken?: string; adminToken?: string } = {},
+  opts: { method?: string; body?: unknown; identity?: Identity | null; createUsername?: string; createToken?: string; adminToken?: string; signal?: AbortSignal } = {},
 ): Promise<T> {
   const id = opts.identity !== undefined ? opts.identity : manualIdentity ?? readIdentity();
   const headers = identityHeaders(id);
@@ -99,7 +100,9 @@ export async function api<T = any>(
   const res = await fetch(`/api${path}`, {
     method: opts.method ?? 'GET',
     headers,
+    credentials: 'same-origin',
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+    signal: opts.signal,
   });
   let data: any = null;
   try {
@@ -126,8 +129,11 @@ export async function apiDownload(path: string, identity: Identity | null): Prom
   const a = document.createElement('a');
   a.href = url;
   a.download = filename;
+  a.hidden = true;
+  document.body.appendChild(a);
   a.click();
-  URL.revokeObjectURL(url);
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 // resolve identity for a player page: pid from URL, token from store/cookie.

@@ -7,12 +7,14 @@ export type PicsDirHandle = FileSystemDirectoryHandle;
 const DB_NAME = 'yc-pics';
 const STORE = 'handles';
 const KEY = 'root';
+let cachedHandle: PicsDirHandle | null | undefined;
+let handleLoad: Promise<PicsDirHandle | null> | null = null;
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, 1);
     req.onupgradeneeded = () => {
-      req.result.createObjectStore(STORE);
+      if (!req.result.objectStoreNames.contains(STORE)) req.result.createObjectStore(STORE);
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -28,21 +30,32 @@ export async function saveDirHandle(handle: PicsDirHandle): Promise<void> {
     tx.onerror = () => reject(tx.error);
   });
   db.close();
+  cachedHandle = handle;
 }
 
 export async function getDirHandle(): Promise<PicsDirHandle | null> {
+  if (cachedHandle !== undefined) return cachedHandle;
+  if (handleLoad) return handleLoad;
+  handleLoad = (async () => {
+    try {
+      const db = await openDb();
+      const result = await new Promise<PicsDirHandle | null>((resolve, reject) => {
+        const tx = db.transaction(STORE, 'readonly');
+        const req = tx.objectStore(STORE).get(KEY);
+        req.onsuccess = () => resolve((req.result as PicsDirHandle) ?? null);
+        req.onerror = () => reject(req.error);
+      });
+      db.close();
+      return result;
+    } catch {
+      return null;
+    }
+  })();
   try {
-    const db = await openDb();
-    const result = await new Promise<PicsDirHandle | null>((resolve, reject) => {
-      const tx = db.transaction(STORE, 'readonly');
-      const req = tx.objectStore(STORE).get(KEY);
-      req.onsuccess = () => resolve((req.result as PicsDirHandle) ?? null);
-      req.onerror = () => reject(req.error);
-    });
-    db.close();
-    return result;
-  } catch {
-    return null;
+    cachedHandle = await handleLoad;
+    return cachedHandle;
+  } finally {
+    handleLoad = null;
   }
 }
 
@@ -56,6 +69,7 @@ export async function removeDirHandle(): Promise<void> {
       tx.onerror = () => reject(tx.error);
     });
     db.close();
+    cachedHandle = null;
   } catch {
     // ignore
   }
@@ -67,20 +81,30 @@ interface PermissibleDirHandle extends PicsDirHandle {
   requestPermission(opts: { mode: string }): Promise<string>;
 }
 
+const permissionChecks = new WeakMap<object, Promise<boolean>>();
+
 export async function requestDirPermission(handle: PicsDirHandle): Promise<boolean> {
-  try {
-    const p = handle as PermissibleDirHandle;
-    if ((await p.queryPermission({ mode: 'read' })) === 'granted') return true;
-    return (await p.requestPermission({ mode: 'read' })) === 'granted';
-  } catch {
-    return false;
-  }
+  const existing = permissionChecks.get(handle);
+  if (existing) return existing;
+  const check = (async () => {
+    try {
+      const p = handle as PermissibleDirHandle;
+      if ((await p.queryPermission({ mode: 'read' })) === 'granted') return true;
+      return (await p.requestPermission({ mode: 'read' })) === 'granted';
+    } catch {
+      return false;
+    }
+  })();
+  permissionChecks.set(handle, check);
+  if (!(await check)) permissionChecks.delete(handle);
+  return check;
 }
 
-let expansionsCache: string[] | null = null;
+const expansionsCache = new WeakMap<object, string[]>();
 
 async function listExpansionDirs(handle: PicsDirHandle): Promise<string[]> {
-  if (expansionsCache) return expansionsCache;
+  const cached = expansionsCache.get(handle);
+  if (cached) return cached;
   const dirs: string[] = [];
   try {
     const expansions = await handle.getDirectoryHandle('expansions', { create: false });
@@ -90,7 +114,7 @@ async function listExpansionDirs(handle: PicsDirHandle): Promise<string[]> {
   } catch {
     // no expansions dir
   }
-  expansionsCache = dirs;
+  expansionsCache.set(handle, dirs);
   return dirs;
 }
 

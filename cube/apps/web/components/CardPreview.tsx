@@ -105,8 +105,18 @@ export function CardPreviewHost() {
         setPreview(null);
       }
     };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setPinned(false);
+        setPreview(null);
+      }
+    };
     window.addEventListener('mousedown', onDown);
-    return () => window.removeEventListener('mousedown', onDown);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('mousedown', onDown);
+      window.removeEventListener('keydown', onKeyDown);
+    };
   }, [pinned]);
 
   if (!preview) return null;
@@ -123,13 +133,27 @@ export function CardPreviewHost() {
       >
         <div
           data-card-preview
-          className="mx-2 max-h-[min(90dvh,90vh)] w-[min(420px,calc(100vw-1rem))] max-w-[92vw] overflow-y-auto rounded-lg border border-gold/50 bg-felt-deep p-3 shadow-2xl select-text sm:mx-4 sm:p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="card-preview-title"
+          className="relative mx-2 max-h-[min(90dvh,90vh)] w-[min(420px,calc(100vw-1rem))] max-w-[92vw] overflow-y-auto rounded-lg border border-gold/50 bg-felt-deep p-3 shadow-2xl select-text sm:mx-4 sm:p-4"
           onClick={(e) => e.stopPropagation()}
         >
+          <button
+            type="button"
+            aria-label="关闭卡牌详情"
+            onClick={() => {
+              setPinned(false);
+              setPreview(null);
+            }}
+            className="absolute right-2 top-2 z-10 flex h-8 w-8 items-center justify-center rounded-full bg-black/60 text-lg text-slate-200 hover:bg-black/80 focus:outline-none focus:ring-2 focus:ring-gold"
+          >
+            ×
+          </button>
           <div className="flex gap-4">
             <CardImage code={card.code} name={card.name} className="h-[clamp(9rem,32vh,13rem)] w-[clamp(6.5rem,24vw,9.5rem)] shrink-0" />
             <div className="min-w-0 flex-1">
-              <p className="text-base font-bold leading-snug text-gold">{card.name}</p>
+              <p id="card-preview-title" className="pr-7 text-base font-bold leading-snug text-gold">{card.name}</p>
               <p className="mt-1 font-mono text-xs text-slate-500">[{String(card.code).padStart(8, '0')}]</p>
               <CardMeta card={card} />
             </div>

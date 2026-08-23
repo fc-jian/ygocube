@@ -25,8 +25,8 @@ export default function 报名参加Page() {
       return;
     }
     // 进房昵称即玩家 ID（YGOPro 协议仅支持 ASCII 文本），非 ASCII 无法进入游戏，前端先行拦截
-    if (!/^[\x20-\x7E]+$/.test(normalizedPlayerId)) {
-      setError('玩家 ID 只能包含 ASCII 字符（字母/数字/符号），中文等字符将无法进入游戏');
+    if (!/^[\x20-\x7E]{1,19}$/.test(normalizedPlayerId) || normalizedPlayerId.includes('$')) {
+      setError('玩家 ID 需为 1–19 个 ASCII 字符，且不能包含 $（YGOPro 协议限制）');
       return;
     }
 
@@ -100,12 +100,14 @@ export default function 报名参加Page() {
             <input
               className="w-full rounded bg-felt-deep px-3 py-2 outline-none ring-gold/50 focus:ring-2"
               placeholder="玩家 ID"
+              maxLength={19}
               value={playerId}
               onChange={(e) => setPlayerId(e.target.value)}
             />
             <input
               className="w-full rounded bg-felt-deep px-3 py-2 outline-none ring-gold/50 focus:ring-2"
               placeholder="显示名称（可选）"
+              maxLength={64}
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
             />
