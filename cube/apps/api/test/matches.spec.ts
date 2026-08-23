@@ -3,12 +3,15 @@ import { loadState } from '../src/events/events.service';
 import { MatchesService } from '../src/matches/matches.service';
 import { DecksService } from '../src/decks/decks.service';
 import { CardsService } from '../src/cards/cards.service';
+import { cubeDeckFileBase } from '../src/decks/deck-filename';
 import { getDb } from '../src/db';
 
 // In-memory fake srvpro: records createRoom calls, lets tests resolve rooms.
 class FakeSrvpro {
   rooms: Record<string, { players: string[]; scores: Record<string, number>; request: any }> = {};
+  requests: any[] = [];
   async createRoom(req: any) {
+    this.requests.push(req);
     this.rooms[req.room_name] = { players: req.players.map((p: any) => p.player_id), scores: {}, request: req };
     return { ok: true, room_name: req.room_name, port: 12345 };
   }
@@ -273,6 +276,27 @@ describe('pairing engine', () => {
     for (const playerId of created.players) {
       expect(created.request.cube_decks[playerId].filename).toMatch(new RegExp(`^cube-deck-${tid}-${playerId}-\\d{14}$`));
     }
+  });
+
+  it('reuses the match start timestamp when room creation is retried', async () => {
+    const { matches, tid, fake } = setupMatches(2);
+    matches.startRound(tid, 1, 'test');
+    await waitRooms();
+    const state = loadState(tid);
+    const match = state.matches.find((x) => x.round === 1 && x.playerB !== '(bye)')!;
+    expect(match.startedAt).toBeTruthy();
+    expect(fake.requests).toHaveLength(1);
+    const first = fake.requests[0].cube_decks.p0.filename;
+
+    // Simulate a failed state update/retry after srvpro accepted the first
+    // request. The second room must reuse the same per-match deck filename.
+    (matches as any).patchMatch(tid, match.id, { roomName: null });
+    await (matches as any).createRoomsForRound(tid, 1);
+
+    expect(fake.requests).toHaveLength(2);
+    const second = fake.requests[1].cube_decks.p0.filename;
+    expect(second).toBe(first);
+    expect(first).toBe(cubeDeckFileBase(tid, 'p0', new Date(match.startedAt!)));
   });
 });
 

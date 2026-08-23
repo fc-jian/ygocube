@@ -161,6 +161,10 @@ swissRoundCount, playoffSize
 }
 ```
 
+`filename` 的 timestamp 取该 match 的 `startedAt`（旧状态缺失时取已锁定卡组的
+`lockedAt`），由服务端在对局生成时固定。房间建立重试或玩家重新加入同一房间不得
+按当前时间重新命名，以保证一场对局每名玩家只对应一个同步卡组文件。
+
 成功返回 `{ok:true,room_name,port}`；重复 room name 返回已有房间。srvpro 会强制
 `no_check_deck=true`、保存 replay，并等待宿主端口，超时返回 `ROOM_TIMEOUT`。
 

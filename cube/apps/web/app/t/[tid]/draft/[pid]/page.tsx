@@ -234,7 +234,16 @@ export default function DraftPage() {
       const inSide = state.deck?.side?.includes(card.code);
       const inMain = state.deck?.main?.includes(card.code);
       const inExtra = state.deck?.extra?.includes(card.code);
-      if (inSide) return { label: '移动到主卡组', run: () => void move(card.code, 'side', 'main') };
+      if (inSide) {
+        // Extra-deck cards placed in side must be returned to extra, not main.
+        // The previous action always targeted main, so clicking a side Fusion/
+        // Synchro/XYZ/Link card never offered the valid extra-destination action.
+        const destination = (card.type & 0x4802040) !== 0 ? 'extra' : 'main';
+        return {
+          label: destination === 'extra' ? '移动到额外卡组' : '移动到主卡组',
+          run: () => void move(card.code, 'side', destination),
+        };
+      }
       if (inMain || inExtra) return { label: '移动到副卡组', run: () => void move(card.code, inExtra ? 'extra' : 'main', 'side') };
       return null;
     });

@@ -142,7 +142,10 @@ main 仍低于下限的玩家记录 `player_dsq` 并从后续排表排除。
 
 每桌调用 srvpro `/cube/create_room`，房间名为
 `CUBE-<tid>-<round>-<table>-<random-word>`；deck payload 包含 main+extra、
-side 和 `cube-deck-<tid>-<pid>-<timestamp>` 文件名。房间信息通过玩家状态接口
+side 和 `cube-deck-<tid>-<pid>-<timestamp>` 文件名。timestamp 在该桌对局生成时
+写入 match 的 `startedAt`，重试建房、玩家重新加入同一房间都复用它，不按每次请求
+重新生成，避免同一场比赛产生多个卡组文件；旧回放缺失时回退到卡组 `lockedAt`。
+房间信息通过玩家状态接口
 返回，玩家端再用 `/meta` 显示 srvpro host/game port；当前协议不另设密码字段。
 
 结果有两条路径：srvpro webhook `POST /cube/result`（`X-Cube-Api-Key`，幂等）

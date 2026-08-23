@@ -333,8 +333,12 @@ export class MatchesService implements OnModuleInit {
       'INSERT INTO matches (tournament_id, round, player_a, player_b, table_no, room_name, player_a_pass, player_b_pass, result_a, result_b, source, started_at, finished_at, stage, bracket_round, bracket_match_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
     );
     for (const m of matches) {
-      const row = insert.run(tid, m.round, m.playerA, m.playerB, m.tableNo, null, m.playerAPass, m.playerBPass, m.resultA, m.resultB, m.source, now, m.finishedAt, m.stage ?? null, m.bracketRound ?? null, m.bracketMatchId ?? null);
-      logEvent(tid, 'match', 'match', { ...m, id: Number(row.lastInsertRowid) }, actor);
+      // Keep the match start timestamp in the event state as well as the SQL
+      // projection. Room retries/re-entry must reuse this value for the cube
+      // deck filename instead of creating a new timestamped file each time.
+      const persisted = { ...m, startedAt: m.startedAt ?? now };
+      const row = insert.run(tid, persisted.round, persisted.playerA, persisted.playerB, persisted.tableNo, null, persisted.playerAPass, persisted.playerBPass, persisted.resultA, persisted.resultB, persisted.source, persisted.startedAt, persisted.finishedAt, persisted.stage ?? null, persisted.bracketRound ?? null, persisted.bracketMatchId ?? null);
+      logEvent(tid, 'match', 'match', { ...persisted, id: Number(row.lastInsertRowid) }, actor);
     }
     if (state.round !== round) {
       logEvent(tid, 'tournament', 'phase', { status: 'matches', round }, actor);
@@ -352,7 +356,7 @@ export class MatchesService implements OnModuleInit {
     for (const m of state.matches.filter((x) => x.round === round && x.roomName === null && x.playerB !== '(bye)')) {
       try {
         const roomName = `CUBE-${tid}-${round}-${m.tableNo}-${ROOM_WORDS[crypto.randomInt(ROOM_WORDS.length)]}`;
-        const syncedAt = new Date();
+        const syncedAt = this.deckSyncAt(state, m);
         const deckA = state.decks[m.playerA];
         const deckB = state.decks[m.playerB];
         const res = await this.srvpro.createRoom({
@@ -392,6 +396,26 @@ export class MatchesService implements OnModuleInit {
         console.error('srvpro create_room error', m.id, (e as Error).message);
       }
     }
+  }
+
+  /**
+   * Choose the immutable timestamp for a match's server-synchronized decks.
+   * New matches carry startedAt in the event log; lockedAt keeps old/reverted
+   * match records deterministic. The final fallback is only for legacy data
+   * where neither timestamp was recorded.
+   */
+  private deckSyncAt(state: ReturnType<typeof loadState>, match: MatchState): Date {
+    const candidates = [
+      match.startedAt,
+      state.decks[match.playerA]?.lockedAt,
+      state.decks[match.playerB]?.lockedAt,
+    ];
+    for (const raw of candidates) {
+      if (!raw) continue;
+      const value = new Date(raw);
+      if (Number.isFinite(value.getTime())) return value;
+    }
+    return new Date();
   }
 
   private patchMatch(tid: number, id: number, patch: Partial<MatchState>): void {
@@ -553,8 +577,9 @@ export class MatchesService implements OnModuleInit {
       'INSERT INTO matches (tournament_id, round, player_a, player_b, table_no, room_name, player_a_pass, player_b_pass, result_a, result_b, source, started_at, finished_at, stage, bracket_round, bracket_match_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
     );
     for (const m of matches) {
-      const row = insert.run(tid, m.round, m.playerA, m.playerB, m.tableNo, null, null, null, m.resultA, m.resultB, m.source, now, null, m.stage, m.bracketRound, m.bracketMatchId);
-      logEvent(tid, 'match', 'match', { ...m, id: Number(row.lastInsertRowid) }, 'system');
+      const persisted = { ...m, startedAt: m.startedAt ?? now };
+      const row = insert.run(tid, persisted.round, persisted.playerA, persisted.playerB, persisted.tableNo, null, null, null, persisted.resultA, persisted.resultB, persisted.source, persisted.startedAt, null, persisted.stage, persisted.bracketRound, persisted.bracketMatchId);
+      logEvent(tid, 'match', 'match', { ...persisted, id: Number(row.lastInsertRowid) }, 'system');
     }
     if (state.round !== round) {
       logEvent(tid, 'tournament', 'phase', { status: 'matches', round }, 'system');
