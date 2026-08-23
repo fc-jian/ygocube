@@ -1,7 +1,7 @@
-import { Body, Controller, Get, Param, Post, Query, Req, Res, SetMetadata, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
 import type { CardVisibilityStatus } from '@ygocube/shared';
 import { Response } from 'express';
-import { AuthGuard, AuthedRequest, Identity } from './auth/auth.guard';
+import { AuthGuard, AuthedRequest, Identity, Public } from './auth/auth.guard';
 import { TournamentsService } from './tournaments/tournaments.service';
 import { DraftService } from './draft/draft.service';
 import { DecksService } from './decks/decks.service';
@@ -14,8 +14,6 @@ import { loadState } from './events/events.service';
 import { CreateTournamentInput } from './tournaments/tournaments.service';
 import { cubeDeckFileBase } from './decks/deck-filename';
 import { cardStatusForDeckbuilding, cardsSeenByPlayer } from './cards/card-visibility';
-
-export const Public = () => SetMetadata('public', true);
 
 @Controller()
 @UseGuards(AuthGuard)

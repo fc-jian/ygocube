@@ -12,13 +12,16 @@ import { PoolsService } from './pools/pools.service';
 import { RealtimeService } from './realtime/realtime.service';
 import { config } from './config';
 import { setEventHook } from './events/events.service';
+import { SmallWorldController } from './small-world/small-world.controller';
+import { SmallWorldService } from './small-world/small-world.service';
 
 @Module({
-  controllers: [ApiController, AdminController],
+  controllers: [ApiController, AdminController, SmallWorldController],
   providers: [
     { provide: APP_GUARD, useClass: AuthGuard },
     TournamentsService,
     CardsService,
+    SmallWorldService,
     PoolsService,
     DraftService,
     DecksService,

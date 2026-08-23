@@ -79,6 +79,28 @@ swissRoundCount, playoffSize
 | `GET /t/:tid/stream` | SSE，需玩家身份 query 参数 |
 | `POST /cube/result` | srvpro webhook；需 `X-Cube-Api-Key`，幂等处理 |
 
+小世界独立工具不属于比赛玩家接口，不需要 tournament/player/token 鉴权：
+
+| 方法/路径 | 说明 |
+| --- | --- |
+| `POST /tools/small-world/calculate` | body `{deckCodes:number[],handCodes:number[]}`；从 `cards.cdb` 元数据计算所有合法的手牌→中间怪兽→检索目标路径 |
+
+响应结构：
+
+```text
+{
+  cards: CardInfo[],
+  paths: [{handCode, bridgeCode, targetCode, handBridgeShared, bridgeTargetShared}],
+  unknownCodes: number[],
+  summary: {deckCount, handCount, eligibleDeckCount, eligibleHandCount, pathCount}
+}
+```
+
+`handBridgeShared` 与 `bridgeTargetShared` 取 `race|attribute|level|atk|def`。
+`deckCodes` 按主卡组处理；非怪兽卡和额外卡静默跳过，未知 code 返回在
+`unknownCodes`。路径按 code 三元组去重，但中间卡与目标卡相同 code 时必须有至少
+两张实体副本。请求数组只接受正整数 code；格式错误返回 `BAD_SMALL_WORLD_INPUT`。
+
 `state` 的 passing 视角按当前 seat 从左到右返回 players/queueLengths；本人队首
 牌面才会出现在 `pack.cards`。`cardsRemainingToDraft` 在整轮公平时是精确值，
 否则标记 `cardsRemainingExact=false`。`pickAlternative` 只返回当前玩家最后点击

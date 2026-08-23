@@ -27,6 +27,34 @@ export interface CardInfo {
   setNames: string[];
 }
 
+export type SmallWorldSharedProperty = 'race' | 'attribute' | 'level' | 'atk' | 'def';
+
+export interface SmallWorldCalculateRequest {
+  deckCodes: number[];
+  handCodes: number[];
+}
+
+export interface SmallWorldPath {
+  handCode: number;
+  bridgeCode: number;
+  targetCode: number;
+  handBridgeShared: SmallWorldSharedProperty;
+  bridgeTargetShared: SmallWorldSharedProperty;
+}
+
+export interface SmallWorldCalculationResponse {
+  cards: CardInfo[];
+  paths: SmallWorldPath[];
+  unknownCodes: number[];
+  summary: {
+    deckCount: number;
+    handCount: number;
+    eligibleDeckCount: number;
+    eligibleHandCount: number;
+    pathCount: number;
+  };
+}
+
 export interface TournamentConfig {
   maxPlayers: number;
   mode: 'single' | 'match'; // BO1 / BO3 with side

@@ -1,4 +1,4 @@
-import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
+import { CanActivate, ExecutionContext, Injectable, SetMetadata, UnauthorizedException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Request } from 'express';
 import crypto from 'crypto';
@@ -21,6 +21,8 @@ export interface Identity {
 export interface AuthedRequest extends Request {
   identity?: Identity;
 }
+
+export const Public = () => SetMetadata('public', true);
 
 export function sha256(s: string): string {
   return crypto.createHash('sha256').update(s).digest('hex');
