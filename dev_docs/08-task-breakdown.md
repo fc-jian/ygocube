@@ -123,6 +123,7 @@ git -C ygopro diff --check
 - `srvpro` 的 Cube fork 与 `origin/mercury@a252923` 已长期结构分叉（审计时
   391 个本地提交、75 个上游提交，整分支试合并有 13 组核心冲突），不适合机械
   merge。本轮逐项核对并移植了与当前架构有关的踢人房间状态、最大玩家数和
-  超长聊天日志抑制修复；
+  超长聊天日志抑制修复；同时移植了 cloud replay 关闭时不再创建无用 recorder
+  连接的资源修复。
   已有的 room cap、版本读取和 Node socket 兼容实现保留。后续同步继续按提交审计、
   小批移植和 Cube API 回归测试进行。
