@@ -9,6 +9,10 @@ import { PoolsService } from '../src/pools/pools.service';
 export function useTestDb(): void {
   const unique = require('crypto').randomUUID();
   config.server.dbPath = `/tmp/ygocube-test-${process.pid}-${unique}.sqlite`;
+  // Unit tests exercise metadata behavior with explicit fixtures. Importing a
+  // deployment-sized cards.cdb for every isolated database made the suite
+  // slow and environment-dependent; force the deterministic synthetic catalog.
+  config.server.cardsCdb = `/tmp/ygocube-no-test-cards-${process.pid}.cdb`;
   const { closeDb, getDb } = require('../src/db');
   closeDb();
   // eslint-disable-next-line @typescript-eslint/no-var-requires

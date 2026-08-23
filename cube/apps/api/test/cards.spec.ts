@@ -51,6 +51,13 @@ describe('ygopro card metadata decoding', () => {
     });
   });
 
+  it('batch-loads exact codes in request order and removes duplicates/unknowns', () => {
+    const cards = new CardsService();
+    const [first, second] = cards.poolCodes().slice(0, 2);
+    expect(cards.getMany([second, first, second, -1, 999_999_999]).map((card) => card.code))
+      .toEqual([second, first]);
+  });
+
   it('resolves alias chains and terminates cyclic alias data deterministically', () => {
     const cards = new CardsService();
     cards.poolCodes();
@@ -63,8 +70,12 @@ describe('ygopro card metadata decoding', () => {
     insert.run(700000012, '链三', 0x21, '', 4, 1, 1, 0, 0, 0, '链三', 3);
     expect(cards.canonicalCode(700000010)).toBe(700000012);
     insert.run(700000012, '链三', 0x21, '', 4, 1, 1, 0, 0, 700000010, '链三', 3);
-    expect(cards.canonicalCode(700000010)).toBe(700000010);
-    expect(cards.canonicalCode(700000011)).toBe(700000010);
+    // Card metadata is immutable after startup in production, so canonical
+    // chains are cached per service instance. A fresh instance models a
+    // metadata reload after this direct test-fixture mutation.
+    const reloaded = new CardsService();
+    expect(reloaded.canonicalCode(700000010)).toBe(700000010);
+    expect(reloaded.canonicalCode(700000011)).toBe(700000010);
   });
 
   it('searches every keyword without an implicit result cap', () => {

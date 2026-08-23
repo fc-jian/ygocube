@@ -1,5 +1,14 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
-import { loadState, logEvent, getConfig, persistMeta, TournamentState, PickState } from '../events/events.service';
+import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import {
+  afterEventCommit,
+  loadState,
+  logEvent,
+  getConfig,
+  persistMeta,
+  TournamentState,
+  PickState,
+  withEventTransaction,
+} from '../events/events.service';
 import { CardsService } from '../cards/cards.service';
 import { normalizeExtraRatioPercent, TournamentsService } from '../tournaments/tournaments.service';
 import { PoolsService } from '../pools/pools.service';
@@ -13,7 +22,7 @@ import { DecksService } from '../decks/decks.service';
 //  - serial（旧兼容）：全局单光标蛇形轮转。运行时按状态形状分派
 //    （packs_created 事件带 queues 即 passing），旧比赛回放/进行中行为不变。
 @Injectable()
-export class DraftService implements OnModuleInit {
+export class DraftService implements OnModuleInit, OnModuleDestroy {
   private timers = new Map<number, NodeJS.Timeout>();
   private passTimers = new Map<string, NodeJS.Timeout>(); // passing 模式：key = `${tid}:${playerId}`
   private deckbuildingTimers = new Map<number, NodeJS.Timeout>();
@@ -24,6 +33,7 @@ export class DraftService implements OnModuleInit {
     private tournaments: TournamentsService,
     private pools: PoolsService,
     private matches: MatchesService,
+    private decks?: DecksService,
   ) {}
 
   // passing 模式判定：packs_created 事件携带 queues 即启用（与配置无关，回放安全）
@@ -66,7 +76,29 @@ export class DraftService implements OnModuleInit {
     }
   }
 
+  onModuleDestroy(): void {
+    for (const timer of this.timers.values()) clearTimeout(timer);
+    for (const timer of this.passTimers.values()) clearTimeout(timer);
+    for (const timer of this.deckbuildingTimers.values()) clearTimeout(timer);
+    for (const timer of this.pauseTimers.values()) clearTimeout(timer);
+    this.timers.clear();
+    this.passTimers.clear();
+    this.deckbuildingTimers.clear();
+    this.pauseTimers.clear();
+  }
+
   startDraft(tid: number, actor: string): void {
+    try {
+      withEventTransaction(tid, () => this.startDraftCommand(tid, actor));
+    } catch (error) {
+      // A timer may have been armed after an event was applied to the
+      // speculative in-memory state. Never let it outlive a rolled-back start.
+      this.haltAllTimers(tid);
+      throw error;
+    }
+  }
+
+  private startDraftCommand(tid: number, actor: string): void {
     const state = loadState(tid);
     if (state.frozen) throw new Error('FROZEN');
     if (state.status !== 'registration') throw new Error('WRONG_PHASE');
@@ -74,23 +106,24 @@ export class DraftService implements OnModuleInit {
     const rawCfg = JSON.parse(state.configJson) as Record<string, unknown>;
     const n = state.players.length;
     if (n < 2) throw new Error('NOT_ENOUGH_PLAYERS');
-    // seats: join order unless admin assigned
-    const seats = state.players.map((p) => (p.seat >= 0 ? p.seat : -1));
-    let next = 0;
-    const order: string[] = [];
-    for (let i = 0; i < n; i++) {
-      if (seats[i] < 0) {
-        while (order.includes(state.players[next].playerId)) next++;
-        order.push(state.players[next].playerId);
-      }
-    }
+    // Preserve valid administrator assignments and fill only genuinely free
+    // seats in join order. Partial assignments used to be re-indexed from zero,
+    // which could silently give two players the same seat.
+    const occupied = new Set<number>();
     const seatMap: Record<string, number> = {};
-    // 注意：order 只含未分配座位的玩家；管理员预分配 seat>=0 的玩家不在其中，
-    // 不得用 indexOf（会得到 -1 覆盖其座位）——只为 order 内的玩家写 seatMap
-    state.players.forEach((p) => {
-      const idx = order.indexOf(p.playerId);
-      if (idx >= 0) seatMap[p.playerId] = idx;
-    });
+    for (const player of state.players) {
+      if (player.seat < 0) continue;
+      if (!Number.isInteger(player.seat) || player.seat >= n || occupied.has(player.seat)) {
+        throw new Error('BAD_SEAT_ASSIGNMENT');
+      }
+      occupied.add(player.seat);
+      seatMap[player.playerId] = player.seat;
+    }
+    const freeSeats = Array.from({ length: n }, (_, index) => index).filter((seat) => !occupied.has(seat));
+    let freeIndex = 0;
+    for (const player of state.players) {
+      if (player.seat < 0) seatMap[player.playerId] = freeSeats[freeIndex++];
+    }
     // packs: shuffled pool (card pool or full card table), pack size = n * multiple, drop last (public)
     const poolCodes = this.pools.resolve(cfg.cardPool as string | undefined).slice();
     for (let i = poolCodes.length - 1; i > 0; i--) {
@@ -269,7 +302,9 @@ export class DraftService implements OnModuleInit {
       const deadlines: Record<string, string | null> = {};
       for (const p of seatsArr) deadlines[p.playerId] = queues[p.playerId].length ? deadlineAt : null;
       logEvent(tid, 'pack', 'packs_created', { packs, droppedCards, queues, deadlines, reserves, dealt }, actor);
-      for (const p of seatsArr) this.armPassTimer(tid, p.playerId);
+      afterEventCommit(tid, () => {
+        for (const player of seatsArr) this.armPassTimer(tid, player.playerId);
+      });
     }
     persistMeta(tid);
   }
@@ -328,7 +363,7 @@ export class DraftService implements OnModuleInit {
             logEvent(tid, 'draft', 'cursor', null, actor);
           }
           this.tournaments.enterDeckbuilding(tid, actor);
-          this.armDeckbuildingTimer(tid);
+          afterEventCommit(tid, () => this.armDeckbuildingTimer(tid));
           return;
         }
         packIndex = cur.packIndex + 1;
@@ -344,19 +379,19 @@ export class DraftService implements OnModuleInit {
       // drafting complete
       logEvent(tid, 'draft', 'cursor', null, actor);
       this.tournaments.enterDeckbuilding(tid, actor);
-      this.armDeckbuildingTimer(tid);
+      afterEventCommit(tid, () => this.armDeckbuildingTimer(tid));
       return;
     }
     const cfg = getConfig(state);
     const deadlineAt = new Date(Date.now() + cfg.pickSeconds * 1000).toISOString();
     logEvent(tid, 'draft', 'cursor', { packIndex, round, playerId, deadlineAt }, actor);
-    this.armTimer(loadState(tid));
+    afterEventCommit(tid, () => this.armTimer(loadState(tid)));
     persistMeta(tid);
   }
 
   // 恢复（解冻）时：构筑倒计时按持久化 deadline 重新武装
   resumeDeckbuildingTimer(tid: number): void {
-    this.armDeckbuildingTimer(tid);
+    afterEventCommit(tid, () => this.armDeckbuildingTimer(tid));
   }
 
   // ---------- deckbuilding deadline (dev_docs/05 §4) ----------
@@ -378,35 +413,37 @@ export class DraftService implements OnModuleInit {
 
   // 时限到：未锁定的卡组随机补/删至合法，然后进入对战
   private deckbuildingTimeout(tid: number): void {
-    let state: TournamentState;
+    this.deckbuildingTimers.delete(tid);
     try {
-      state = loadState(tid);
-    } catch {
-      return; // 比赛已被删除
-    }
-    if (state.status !== 'deckbuilding') return;
-    if (state.frozen) {
-      // 暂停期间构筑倒计时冻结：挂起，恢复后重新计时
-      const t = setTimeout(() => this.deckbuildingTimeout(tid), 5000);
-      t.unref();
-      this.deckbuildingTimers.set(tid, t);
-      return;
-    }
-    const decks = new DecksService(this.cards);
-    for (const p of state.players.filter((player) => !player.eliminated && !player.withdrawn)) decks.repairForMatches(tid, p.playerId);
-    // A previous admin transition may already have persisted round 1 before
-    // returning the tournament to deckbuilding. In that recovery path the
-    // existing matches are authoritative even if later deck repairs leave no
-    // eligible player for a fresh-format validation.
-    const hasRoundOne = loadState(tid).matches.some((match) => match.round === 1);
-    if (!hasRoundOne) this.matches.validateStart(tid);
-    this.tournaments.setPhase(tid, 'matches', 1, 'system');
-    try {
-      this.matches.startRound(tid, 1, 'system');
-    } catch (e) {
-      // round 1 已安排过（如管理员先进过对战又回退到构筑）：startRound 抛 ROUND_EXISTS。
-      // 阶段已切到 matches 且对阵已存在，视为正常完成；定时器回调抛异常会导致 Node 进程崩溃。
-      console.warn('deckbuilding timeout: round 1 already scheduled, skipping startRound', tid, (e as Error).message);
+      withEventTransaction(tid, () => {
+        const state = loadState(tid);
+        if (state.status !== 'deckbuilding') return;
+        if (state.frozen) {
+          // Frozen deadlines are restored explicitly on unfreeze. The short
+          // watchdog only protects legacy states that lack a frozen snapshot.
+          afterEventCommit(tid, () => {
+            const timer = setTimeout(() => this.deckbuildingTimeout(tid), 5000);
+            timer.unref();
+            this.deckbuildingTimers.set(tid, timer);
+          });
+          return;
+        }
+        const decks = this.decks ?? new DecksService(this.cards);
+        for (const player of state.players.filter((candidate) => !candidate.eliminated && !candidate.withdrawn)) {
+          decks.repairForMatches(tid, player.playerId);
+        }
+        // A previous admin transition may already have persisted round 1 before
+        // returning the tournament to deckbuilding. In that recovery path the
+        // existing matches are authoritative.
+        const hasRoundOne = loadState(tid).matches.some((match) => match.round === 1);
+        if (!hasRoundOne) this.matches.validateStart(tid);
+        this.tournaments.setPhase(tid, 'matches', 1, 'system');
+        if (!hasRoundOne) this.matches.startRound(tid, 1, 'system');
+      });
+    } catch (error) {
+      // Timer callbacks must never create an unhandled exception. Keep the
+      // tournament in its last committed phase and surface a useful diagnostic.
+      console.error('deckbuilding timeout failed', tid, (error as Error).message);
     }
   }
 
@@ -438,6 +475,10 @@ export class DraftService implements OnModuleInit {
   // 管理员冻结：先把当前剩余时间写入事件日志，再挂起定时器。
   // 这样短暂停不会继续消耗时间，进程重启后也能精确恢复。
   freezeTimers(tid: number): void {
+    withEventTransaction(tid, () => this.freezeTimersCommand(tid));
+  }
+
+  private freezeTimersCommand(tid: number): void {
     const state = loadState(tid);
     const now = Date.now();
     const frozen: { passing?: Record<string, number>; serial?: number; deckbuilding?: number } = {};
@@ -460,15 +501,21 @@ export class DraftService implements OnModuleInit {
       frozen.deckbuilding = Math.max(0, new Date(state.phaseDeadline).getTime() - now);
     }
     logEvent(tid, 'tournament', 'timer_freeze', frozen, 'system');
-    this.haltPickTimer(tid);
-    const deckbuilding = this.deckbuildingTimers.get(tid);
-    if (deckbuilding) clearTimeout(deckbuilding);
-    this.deckbuildingTimers.delete(tid);
+    afterEventCommit(tid, () => {
+      this.haltPickTimer(tid);
+      const deckbuilding = this.deckbuildingTimers.get(tid);
+      if (deckbuilding) clearTimeout(deckbuilding);
+      this.deckbuildingTimers.delete(tid);
+    });
     persistMeta(tid);
   }
 
   // 管理员解冻：严格恢复冻结瞬间的剩余时间；旧冻结事件无快照时走兼容逻辑。
   resumeFrozenTimers(tid: number): void {
+    withEventTransaction(tid, () => this.resumeFrozenTimersCommand(tid));
+  }
+
+  private resumeFrozenTimersCommand(tid: number): void {
     let state = loadState(tid);
     const frozen = state.frozenTimers;
     const now = Date.now();
@@ -499,7 +546,7 @@ export class DraftService implements OnModuleInit {
     persistMeta(tid);
     state = loadState(tid);
     if (state.status === 'drafting') this.resumePickTimer(tid);
-    if (state.status === 'deckbuilding') this.armDeckbuildingTimer(tid);
+    if (state.status === 'deckbuilding') afterEventCommit(tid, () => this.armDeckbuildingTimer(tid));
   }
 
   haltAllTimers(tid: number): void {
@@ -513,6 +560,10 @@ export class DraftService implements OnModuleInit {
   }
 
   resumePickTimer(tid: number): void {
+    withEventTransaction(tid, () => this.resumePickTimerCommand(tid));
+  }
+
+  private resumePickTimerCommand(tid: number): void {
     const s = loadState(tid);
     if (s.status !== 'drafting' || s.pause?.pausedAt) return;
     if (this.isPassing(s)) {
@@ -534,7 +585,9 @@ export class DraftService implements OnModuleInit {
         logEvent(tid, 'draft', 'deadlines', { deadlines, reserves }, 'system');
         persistMeta(tid);
       }
-      for (const p of s.players) this.armPassTimer(tid, p.playerId);
+      afterEventCommit(tid, () => {
+        for (const player of s.players) this.armPassTimer(tid, player.playerId);
+      });
       return;
     }
     if (!s.pickCursor?.deadlineAt) return;
@@ -547,12 +600,16 @@ export class DraftService implements OnModuleInit {
       }, 'system');
       persistMeta(tid);
     }
-    this.armTimer(loadState(tid));
+    afterEventCommit(tid, () => this.armTimer(loadState(tid)));
   }
 
   // 管理员补充指定玩家的 passing 保留时间。余额是独立的事件状态：不刷新
   // 已经消耗的时间，只把新增秒数加到当前 deadline（暂停时加到冻结快照）。
   addReserveSeconds(tid: number, playerId: string, seconds: number, actor: string): { reserveMs: number; deadlineAt: string | null } {
+    return withEventTransaction(tid, () => this.addReserveSecondsCommand(tid, playerId, seconds, actor));
+  }
+
+  private addReserveSecondsCommand(tid: number, playerId: string, seconds: number, actor: string): { reserveMs: number; deadlineAt: string | null } {
     const state = loadState(tid);
     if (state.frozen) throw new Error('FROZEN');
     if (state.status !== 'drafting') throw new Error('WRONG_PHASE');
@@ -585,7 +642,7 @@ export class DraftService implements OnModuleInit {
       deadlines,
       ...(pausedDeadlines ? { pausedDeadlines } : {}),
     }, actor);
-    if (!state.pause?.pausedAt) this.armPassTimer(tid, playerId);
+    if (!state.pause?.pausedAt) afterEventCommit(tid, () => this.armPassTimer(tid, playerId));
     persistMeta(tid);
     const next = loadState(tid);
     return { reserveMs: next.pickReserves[playerId] ?? 0, deadlineAt: next.pickDeadlines[playerId] ?? null };
@@ -594,7 +651,7 @@ export class DraftService implements OnModuleInit {
   // timeout -> server picks randomly (dev_docs/05 §3)
   private autoPick(tid: number): void {
     try {
-      this.doAutoPick(tid);
+      withEventTransaction(tid, () => this.doAutoPick(tid));
     } catch (e) {
       // 定时器回调异常不可冒泡（会杀进程）：记录并继续
       console.error('autoPick failed', tid, (e as Error).message);
@@ -629,6 +686,10 @@ export class DraftService implements OnModuleInit {
   }
 
   pick(tid: number, playerId: string, card: number, targetZone?: 'main' | 'extra' | 'side'): void {
+    withEventTransaction(tid, () => this.pickCommand(tid, playerId, card, targetZone));
+  }
+
+  private pickCommand(tid: number, playerId: string, card: number, targetZone?: 'main' | 'extra' | 'side'): void {
     const state = loadState(tid);
     if (state.status !== 'drafting') throw new Error('WRONG_PHASE');
     if (state.pause?.pausedAt) throw new Error('PAUSED');
@@ -655,6 +716,10 @@ export class DraftService implements OnModuleInit {
   // 记录玩家最后点击的候选牌。它不会改变牌堆或卡组，只作为超时自动
   // 选择的优先候选；候选牌名称由前端状态栏显示。
   setPickAlternative(tid: number, playerId: string, card: number, actor: string): void {
+    withEventTransaction(tid, () => this.setPickAlternativeCommand(tid, playerId, card, actor));
+  }
+
+  private setPickAlternativeCommand(tid: number, playerId: string, card: number, actor: string): void {
     const state = loadState(tid);
     if (state.status !== 'drafting') throw new Error('WRONG_PHASE');
     if (state.pause?.pausedAt) throw new Error('PAUSED');
@@ -749,7 +814,7 @@ export class DraftService implements OnModuleInit {
 
   private passAutoPick(tid: number, playerId: string): void {
     try {
-      this.doPassAutoPick(tid, playerId);
+      withEventTransaction(tid, () => this.doPassAutoPick(tid, playerId));
     } catch (e) {
       // 定时器回调异常不可冒泡（会杀进程）：记录并继续
       console.error('passAutoPick failed', tid, playerId, (e as Error).message);
@@ -823,8 +888,10 @@ export class DraftService implements OnModuleInit {
     deadlines[playerId] = queues[playerId].length ? deadlineFor(playerId) : null;
     logEvent(tid, 'pick', 'pick', { ...pick, queues, deadlines, reserves }, actor);
     this.applyPickToDeck(tid, playerId, card, actor, targetZone);
-    this.armPassTimer(tid, playerId);
-    if (receiver) this.armPassTimer(tid, receiver);
+    afterEventCommit(tid, () => {
+      this.armPassTimer(tid, playerId);
+      if (receiver) this.armPassTimer(tid, receiver);
+    });
     // 一轮全部选空：pendingPhase 优先（管理台提前进构筑，不发下一轮）；
     // 否则还有未发堆 → 发下一轮；全部发完 → 进入构筑
     const s = loadState(tid);
@@ -832,12 +899,12 @@ export class DraftService implements OnModuleInit {
       if (s.pendingPhase === 'deckbuilding') {
         logEvent(tid, 'draft', 'pending', null, actor);
         this.tournaments.enterDeckbuilding(tid, actor);
-        this.armDeckbuildingTimer(tid);
+        afterEventCommit(tid, () => this.armDeckbuildingTimer(tid));
       } else if (s.packsDealt < s.packs.length) {
         this.dealRound(tid, actor);
       } else {
         this.tournaments.enterDeckbuilding(tid, actor);
-        this.armDeckbuildingTimer(tid);
+        afterEventCommit(tid, () => this.armDeckbuildingTimer(tid));
       }
     }
     persistMeta(tid);
@@ -888,16 +955,25 @@ export class DraftService implements OnModuleInit {
     }
     const dealt = state.packsDealt + count;
     logEvent(tid, 'draft', 'deal', { queues, deadlines, reserves, dealt }, actor);
-    for (let k = 0; k < count; k++) this.armPassTimer(tid, recipients[k].playerId);
+    afterEventCommit(tid, () => {
+      for (let k = 0; k < count; k++) this.armPassTimer(tid, recipients[k].playerId);
+    });
     persistMeta(tid);
   }
 
   // ---------- pause voting (dev_docs/05 §3) ----------
 
   proposePause(tid: number, playerId: string): void {
+    withEventTransaction(tid, () => this.proposePauseCommand(tid, playerId));
+  }
+
+  private proposePauseCommand(tid: number, playerId: string): void {
     const state = loadState(tid);
     if (state.status !== 'drafting') throw new Error('WRONG_PHASE');
     if (state.pause) throw new Error('PAUSE_EXISTS');
+    if (!state.players.some((player) => player.playerId === playerId && !player.eliminated && !player.withdrawn)) {
+      throw new Error('PLAYER_NOT_FOUND');
+    }
     const cfg = getConfig(state);
     logEvent(tid, 'pause', 'pause', {
       remainingMs: cfg.pauseSeconds * 1000,
@@ -909,8 +985,15 @@ export class DraftService implements OnModuleInit {
   }
 
   votePause(tid: number, playerId: string, yes: boolean): void {
+    withEventTransaction(tid, () => this.votePauseCommand(tid, playerId, yes));
+  }
+
+  private votePauseCommand(tid: number, playerId: string, yes: boolean): void {
     const state = loadState(tid);
     if (!state.pause) throw new Error('NO_PAUSE');
+    if (!state.players.some((player) => player.playerId === playerId && !player.eliminated && !player.withdrawn)) {
+      throw new Error('PLAYER_NOT_FOUND');
+    }
     if (state.pause.votes[playerId] !== undefined) throw new Error('ALREADY_VOTED');
     const votes = { ...state.pause.votes, [playerId]: yes };
     logEvent(tid, 'pause', 'pause', { ...state.pause, votes }, playerId);
@@ -920,8 +1003,11 @@ export class DraftService implements OnModuleInit {
   private checkPauseVotes(tid: number): void {
     const state = loadState(tid);
     if (!state.pause || state.pause.pausedAt) return;
-    const n = state.players.length;
-    const yes = Object.values(state.pause.votes).filter(Boolean).length;
+    const active = new Set(state.players
+      .filter((player) => !player.eliminated && !player.withdrawn)
+      .map((player) => player.playerId));
+    const n = active.size;
+    const yes = Object.entries(state.pause.votes).filter(([playerId, vote]) => vote && active.has(playerId)).length;
     if (yes > n / 2) {
       if (this.isPassing(state)) {
         // passing：无"当前选牌者"，多数通过即冻结所有人的剩余选牌时间
@@ -937,7 +1023,6 @@ export class DraftService implements OnModuleInit {
     const state = loadState(tid);
     if (!state.pause) return;
     if (this.isPassing(state)) {
-      this.clearPassTimers(tid);
       // 冻结各玩家剩余选牌时间，恢复时按此重设 deadline
       const now = Date.now();
       const pausedDeadlines: Record<string, number> = {};
@@ -947,10 +1032,12 @@ export class DraftService implements OnModuleInit {
       logEvent(tid, 'pause', 'pause', { ...state.pause, pausedDeadlines, pausedAt: new Date().toISOString() }, 'system');
       persistMeta(tid);
       // 暂停时长上限（默认 5 分钟）：到期自动恢复（dev_docs/05 §3）
-      this.armPauseTimer(tid, state.pause.remainingMs);
+      afterEventCommit(tid, () => {
+        this.clearPassTimers(tid);
+        this.armPauseTimer(tid, state.pause!.remainingMs);
+      });
       return;
     }
-    this.clearTimer(tid);
     // serial：分别保存允许暂停的时长和当前选牌剩余时间，禁止两个计时器互相污染。
     const pausedPickRemainingMs = state.pickCursor?.deadlineAt
       ? Math.max(0, new Date(state.pickCursor.deadlineAt).getTime() - Date.now())
@@ -958,7 +1045,10 @@ export class DraftService implements OnModuleInit {
     logEvent(tid, 'pause', 'pause', { ...state.pause, pausedPickRemainingMs, pausedAt: new Date().toISOString() }, 'system');
     persistMeta(tid);
     // 暂停时长上限（默认 5 分钟）：到期自动恢复（dev_docs/05 §3）
-    this.armPauseTimer(tid, state.pause.remainingMs);
+    afterEventCommit(tid, () => {
+      this.clearTimer(tid);
+      this.armPauseTimer(tid, state.pause!.remainingMs);
+    });
   }
 
   private armPauseTimer(tid: number, ms: number): void {
@@ -971,25 +1061,29 @@ export class DraftService implements OnModuleInit {
   }
 
   private pauseExpired(tid: number): void {
-    const state = loadState(tid);
     this.pauseTimers.delete(tid);
-    if (!state.pause?.pausedAt) return;
-    const proposer = state.pause.proposer;
-    if (!proposer) return;
     try {
+      const state = loadState(tid);
+      if (!state.pause?.pausedAt) return;
+      const proposer = state.pause.proposer;
+      if (!proposer) return;
       this.resume(tid, proposer);
-    } catch {
-      // 已恢复或状态变化：忽略
+    } catch (error) {
+      // Tournament deletion and a concurrent/manual resume are both benign.
+      if ((error as Error).message !== 'NOT_PAUSED') {
+        console.error('pause expiry failed', tid, (error as Error).message);
+      }
     }
   }
 
   resume(tid: number, playerId: string): void {
+    withEventTransaction(tid, () => this.resumeCommand(tid, playerId));
+  }
+
+  private resumeCommand(tid: number, playerId: string): void {
     const state = loadState(tid);
     if (!state.pause?.pausedAt) throw new Error('NOT_PAUSED');
     if (playerId !== state.pause.proposer) throw new Error('FORBIDDEN');
-    const old = this.pauseTimers.get(tid);
-    if (old) clearTimeout(old);
-    this.pauseTimers.delete(tid);
     if (this.isPassing(state)) {
       // 恢复：严格恢复暂停瞬间冻结的剩余时间，reserve 余额不变。
       const cfg = getConfig(state);
@@ -1006,7 +1100,12 @@ export class DraftService implements OnModuleInit {
       }
       logEvent(tid, 'pause', 'pause', null, playerId);
       logEvent(tid, 'draft', 'deadlines', { deadlines, reserves }, playerId);
-      for (const p of state.players) this.armPassTimer(tid, p.playerId);
+      afterEventCommit(tid, () => {
+        const old = this.pauseTimers.get(tid);
+        if (old) clearTimeout(old);
+        this.pauseTimers.delete(tid);
+        for (const player of state.players) this.armPassTimer(tid, player.playerId);
+      });
       persistMeta(tid);
       return;
     }
@@ -1018,8 +1117,13 @@ export class DraftService implements OnModuleInit {
     if (s.pickCursor) {
       const deadlineAt = new Date(Date.now() + pickLeft).toISOString();
       logEvent(tid, 'draft', 'cursor', { ...s.pickCursor, deadlineAt }, playerId);
-      this.armTimer(loadState(tid));
     }
+    afterEventCommit(tid, () => {
+      const old = this.pauseTimers.get(tid);
+      if (old) clearTimeout(old);
+      this.pauseTimers.delete(tid);
+      this.armTimer(loadState(tid));
+    });
     persistMeta(tid);
   }
 

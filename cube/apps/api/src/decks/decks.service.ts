@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { loadState, logEvent, getConfig, pickedCards, persistMeta, DeckState } from '../events/events.service';
+import { loadState, logEvent, getConfig, pickedCards, persistMeta, DeckState, withEventTransaction } from '../events/events.service';
 import { CardInfo, CardsService } from '../cards/cards.service';
 import { MatchesService } from '../matches/matches.service';
 import { getDb } from '../db';
@@ -263,6 +263,10 @@ export class DecksService {
   // undersized main decks are disqualified. Zone overflow is randomly moved to
   // side while capacity remains, then returned to the unused pool.
   repairForMatches(tid: number, playerId: string): { disqualified: boolean; movedToSide: number; returnedToPool: number } {
+    return withEventTransaction(tid, () => this.repairForMatchesCommand(tid, playerId));
+  }
+
+  private repairForMatchesCommand(tid: number, playerId: string): { disqualified: boolean; movedToSide: number; returnedToPool: number } {
     const state = loadState(tid);
     if (state.frozen) throw new Error('FROZEN');
     const cfg = getConfig(state);
@@ -338,8 +342,10 @@ export class DecksService {
   }
 
   private save(tid: number, playerId: string, deck: DeckState, actor?: string): void {
-    logEvent(tid, 'deck', 'deck', { playerId, deck }, actor ?? playerId);
-    persistMeta(tid);
+    withEventTransaction(tid, () => {
+      logEvent(tid, 'deck', 'deck', { playerId, deck }, actor ?? playerId);
+      persistMeta(tid);
+    });
   }
 
   ydk(tid: number, playerId: string): string {

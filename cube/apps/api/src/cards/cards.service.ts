@@ -67,8 +67,9 @@ interface CardRow {
   metadata_version: number;
 }
 
-interface CountRow {
+interface CardCacheVersionRow {
   c: number;
+  current: number;
 }
 
 // Re-index existing card caches when the imported search/field metadata shape
@@ -167,12 +168,16 @@ function isExtraDeckType(type: number): boolean {
 @Injectable()
 export class CardsService {
   private loaded = false;
+  private readonly canonicalCodes = new Map<number, number>();
+  private expansionPicDirs: string[] | null = null;
 
   private ensureLoaded(): void {
     if (this.loaded) return;
     const db = getDb();
-    const count = (db.prepare('SELECT count(*) AS c FROM cards WHERE metadata_version>=?').get(CARD_METADATA_VERSION) as CountRow).c;
-    if (count > 0) {
+    const cache = db.prepare(
+      'SELECT count(*) AS c, sum(CASE WHEN metadata_version>=? THEN 1 ELSE 0 END) AS current FROM cards',
+    ).get(CARD_METADATA_VERSION) as CardCacheVersionRow;
+    if (cache.c > 0 && cache.current === cache.c) {
       this.loaded = true;
       return;
     }
@@ -198,6 +203,10 @@ export class CardsService {
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         );
         db.transaction(() => {
+          // A metadata rebuild is a snapshot replacement, not an upsert. If a
+          // newer cards.cdb removed an entry, retaining the stale old row would
+          // make it searchable and eligible for future pools indefinitely.
+          db.prepare('DELETE FROM cards').run();
           for (const d of datas) {
             const t = nameByRow.get(d.id);
             const { level, lscale, rscale, linkMarkers, defense } = decodeCardFields(d.type, d.level, d.def);
@@ -228,7 +237,8 @@ export class CardsService {
         (code, name, type, desc, level, race, attribute, atk, def, alias, search_text, metadata_version)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
       db.transaction(() => {
-        for (let i = 0; i < 300; i++) {
+        db.prepare('DELETE FROM cards').run();
+        for (let i = 0; i < 500; i++) {
           // every 10th card is an extra-deck monster (XYZ 0x800000) for zone tests
           const type = i % 10 === 0 ? 0x800021 : 0x21;
           insert.run(10000 + i, `测试卡牌 ${i + 1}`, type, '测试用效果文本', 4, 0, 0, 1500, 1000, 0,
@@ -249,6 +259,22 @@ export class CardsService {
     const r = getDb().prepare('SELECT * FROM cards WHERE code=?').get(code) as CardRow | undefined;
     if (!r) return null;
     return this.toInfo(r);
+  }
+
+  /** Batch exact-code lookup while preserving first-seen request order. */
+  getMany(codes: readonly number[]): CardInfo[] {
+    this.ensureLoaded();
+    const requested = [...new Set(codes.filter((code) => Number.isSafeInteger(code) && code > 0))];
+    if (requested.length === 0) return [];
+    const byCode = new Map<number, CardRow>();
+    // Stay below conservative SQLite bind-variable limits used by older builds.
+    for (let offset = 0; offset < requested.length; offset += 500) {
+      const batch = requested.slice(offset, offset + 500);
+      const placeholders = batch.map(() => '?').join(',');
+      const rows = getDb().prepare(`SELECT * FROM cards WHERE code IN (${placeholders})`).all(...batch) as CardRow[];
+      for (const row of rows) byCode.set(row.code, row);
+    }
+    return requested.map((code) => byCode.get(code)).filter((row): row is CardRow => !!row).map((row) => this.toInfo(row));
   }
 
   /** Exact card-table row for a submitted code, without applying datas.alias. */
@@ -291,30 +317,32 @@ export class CardsService {
   // the visited set prevents malformed cycles from looping forever.
   canonicalCode(code: number): number {
     this.ensureLoaded();
+    const cached = this.canonicalCodes.get(code);
+    if (cached !== undefined) return cached;
     let current = code;
     const visited = new Set<number>();
     while (!visited.has(current)) {
       visited.add(current);
       const r = getDb().prepare('SELECT alias FROM cards WHERE code=?').get(current) as { alias: number } | undefined;
-      if (!r || !r.alias || r.alias === current) return current;
+      if (!r || !r.alias || r.alias === current) {
+        for (const visitedCode of visited) this.canonicalCodes.set(visitedCode, current);
+        return current;
+      }
       current = r.alias;
     }
     // Malformed cyclic alias data still needs one stable rules key so that
     // copy-limit accounting cannot depend on which member was queried first.
-    return Math.min(...visited);
+    const canonical = Math.min(...visited);
+    for (const visitedCode of visited) this.canonicalCodes.set(visitedCode, canonical);
+    return canonical;
   }
 
   // Card-pool identity is the exact printed code. `datas.alias` is a rules
   // relationship, not a reason to remove a physical card from a cube.
   poolCodes(): number[] {
-    const out: number[] = [];
-    for (const code of this.allCodes()) {
-      const info = this.get(code);
-      if (!info) continue;
-      if (info.type & 0x4000) continue; // token 不允许进入卡池
-      out.push(code);
-    }
-    return out;
+    this.ensureLoaded();
+    return (getDb().prepare('SELECT code FROM cards WHERE (type & 0x4000)=0 ORDER BY code').all() as { code: number }[])
+      .map((row) => row.code);
   }
 
   isExtraDeck(code: number): boolean {
@@ -383,16 +411,20 @@ export class CardsService {
       path.join(root, 'pics', `${code}.jpg`),
       path.join(root, 'expansions', 'pics', `${code}.jpg`),
     ];
-    const expansions = path.join(root, 'expansions');
-    if (fs.existsSync(expansions)) {
-      try {
-        for (const entry of fs.readdirSync(expansions)) {
-          candidates.push(path.join(expansions, entry, 'pics', `${code}.jpg`));
+    if (this.expansionPicDirs === null) {
+      const expansions = path.join(root, 'expansions');
+      this.expansionPicDirs = [];
+      if (fs.existsSync(expansions)) {
+        try {
+          this.expansionPicDirs = fs.readdirSync(expansions)
+            .map((entry) => path.join(expansions, entry, 'pics'));
+        } catch {
+          // Ignore unreadable expansion dirs. This immutable deployment asset
+          // list is rebuilt when the process restarts.
         }
-      } catch {
-        // ignore unreadable expansion dirs
       }
     }
+    for (const dir of this.expansionPicDirs) candidates.push(path.join(dir, `${code}.jpg`));
     return candidates.find((c) => fs.existsSync(c)) ?? null;
   }
 

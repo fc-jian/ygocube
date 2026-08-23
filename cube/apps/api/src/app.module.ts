@@ -25,23 +25,26 @@ import { SmallWorldService } from './small-world/small-world.service';
     CardPickStatsService,
     SmallWorldService,
     PoolsService,
-    DraftService,
-    DecksService,
     RealtimeService,
     {
       provide: MatchesService,
       useFactory: () => new MatchesService(new RealSrvproClient(config.srvpro.url, config.srvpro.apiKey)),
     },
     {
-      provide: DraftService,
-      inject: [CardsService, TournamentsService, PoolsService, MatchesService],
-      useFactory: (cards: CardsService, tournaments: TournamentsService, pools: PoolsService, matches: MatchesService) =>
-        new DraftService(cards, tournaments, pools, matches),
-    },
-    {
       provide: DecksService,
       inject: [CardsService, MatchesService],
       useFactory: (cards: CardsService, matches: MatchesService) => new DecksService(cards, matches),
+    },
+    {
+      provide: DraftService,
+      inject: [CardsService, TournamentsService, PoolsService, MatchesService, DecksService],
+      useFactory: (
+        cards: CardsService,
+        tournaments: TournamentsService,
+        pools: PoolsService,
+        matches: MatchesService,
+        decks: DecksService,
+      ) => new DraftService(cards, tournaments, pools, matches, decks),
     },
   ],
 })

@@ -22,4 +22,17 @@ describe('startup security validation', () => {
     config.srvpro.apiKey = '';
     expect(() => validateStartupSecurity()).toThrow(/srvpro\.api_key/);
   });
+
+  it('still validates ports and exact CORS origins when insecure dev tokens are allowed', () => {
+    config.server.allowInsecureDefaults = true;
+    config.admin.superToken = 'change-me-super-token';
+    config.srvpro.apiKey = 'key';
+    config.server.port = 0;
+    expect(() => validateStartupSecurity()).toThrow(/server\.port/);
+    config.server.port = original.server.port;
+    config.server.allowedOrigins = ['https://example.com/path'];
+    expect(() => validateStartupSecurity()).toThrow(/allowed_origins/);
+    config.server.allowedOrigins = ['https://example.com'];
+    expect(() => validateStartupSecurity()).not.toThrow();
+  });
 });

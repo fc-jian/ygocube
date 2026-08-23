@@ -10,6 +10,7 @@ import { getDb } from '../src/db';
 class FakeSrvpro {
   rooms: Record<string, { players: string[]; scores: Record<string, number>; request: any }> = {};
   requests: any[] = [];
+  closedRooms: string[] = [];
   async createRoom(req: any) {
     this.requests.push(req);
     this.rooms[req.room_name] = { players: req.players.map((p: any) => p.player_id), scores: {}, request: req };
@@ -20,7 +21,8 @@ class FakeSrvpro {
     if (!r) throw Object.assign(new Error('room gone'), { response: { status: 404 } });
     return { ok: true, finished: true, scores: r.scores };
   }
-  async closeRoom() {
+  async closeRoom(roomName: string) {
+    this.closedRooms.push(roomName);
     return { ok: true };
   }
 }
@@ -257,7 +259,7 @@ describe('pairing engine', () => {
     expect(matches.onWebhook(body).ack).toBe(true); // idempotent, no double-advance
     const s2 = loadState(tid);
     expect(s2.matches.find((x) => x.id === m.id)!.resultA).toBe(2);
-    expect(matches.onWebhook({ ...body, room_name: `CUBE-${tid}-1-${m.tableNo}-stale` }).ack).toBe(false);
+    expect(matches.onWebhook({ ...body, room_name: 'CUBE-00000000000000' }).ack).toBe(false);
   });
 
   it('create_room sends recorded decks and deck limits', async () => {
@@ -266,13 +268,15 @@ describe('pairing engine', () => {
     await new Promise((r) => setTimeout(r, 300));
     const state = loadState(tid);
     const m = state.matches.find((x) => x.round === 1 && x.playerB !== '(bye)')!;
-    expect(m.roomName).toMatch(new RegExp(`^CUBE-${tid}-1-${m.tableNo}-[a-z]+$`));
+    expect(m.roomName).toMatch(/^CUBE-[0-9a-z]{14}$/);
+    expect(m.roomName!.length).toBeLessThanOrEqual(19);
     const room = fake.rooms[m.roomName!];
     expect(room).toBeDefined();
     const created = Object.values(fake.rooms)[0];
     // the srvpro request body captured decks & limits via createRoom arg
     expect(Object.keys(fake.rooms).length).toBe(1);
     expect(created.players.length).toBe(2);
+    expect(created.request.request_id).toMatch(new RegExp(`^t:${tid}:m:${m.id}:[0-9a-z]{14}$`));
     for (const playerId of created.players) {
       expect(created.request.cube_decks[playerId].filename).toMatch(new RegExp(`^cube-deck-${tid}-${playerId}-\\d{14}$`));
     }
@@ -296,7 +300,55 @@ describe('pairing engine', () => {
     expect(fake.requests).toHaveLength(2);
     const second = fake.requests[1].cube_decks.p0.filename;
     expect(second).toBe(first);
+    expect(fake.requests[1].room_name).toBe(fake.requests[0].room_name);
+    expect(fake.requests[1].request_id).toBe(fake.requests[0].request_id);
     expect(first).toBe(cubeDeckFileBase(tid, 'p0', new Date(match.startedAt!)));
+  });
+
+  it('does not close a room when concurrent retries resolve the same idempotent request', async () => {
+    const { matches, tid, fake } = setupMatches(2);
+    matches.startRound(tid, 1, 'test');
+    await waitRooms();
+    const match = loadState(tid).matches.find((candidate) => candidate.playerB !== '(bye)')!;
+    (matches as any).patchMatch(tid, match.id, { roomName: null });
+    fake.closedRooms.length = 0;
+
+    await Promise.all([
+      (matches as any).createRoomsForRound(tid, 1),
+      (matches as any).createRoomsForRound(tid, 1),
+    ]);
+
+    const current = loadState(tid).matches.find((candidate) => candidate.id === match.id)!;
+    expect(current.roomName).toBeTruthy();
+    expect(fake.closedRooms).toEqual([]);
+  });
+
+  it('requires a grand-final reset when the one-loss finalist wins', () => {
+    const tournaments = makeTournaments();
+    const matches = new MatchesService(new FakeSrvpro() as any);
+    const tid = tournaments.create({ name: 'de-reset', maxPlayers: 4, cardPool: TEST_POOL, matchFormat: 'double_elimination' }, 'test').tid;
+    for (let i = 0; i < 4; i++) tournaments.join(tid, `p${i}`, `P${i}`);
+    tournaments.setPhase(tid, 'matches', 1, 'test');
+    matches.startRound(tid, 1, 'test');
+    for (let round = 1; round <= 3; round++) {
+      for (const match of loadState(tid).matches.filter((candidate) => candidate.round === round)) {
+        matches.setMatchResult(tid, round, match.tableNo, 2, 0);
+      }
+      matches.advanceRound(tid, 'test');
+    }
+    const state = loadState(tid);
+    const grandFinal = state.matches.find((match) => match.round === 4)!;
+    expect(grandFinal.stage).toBe('grand_final');
+    const seeds = state.competition!.seeds!;
+    const losses = (matches as any).doubleEliminationLosses(state, seeds) as Record<string, number>;
+    const aIsOneLoss = losses[grandFinal.playerA] === 1;
+    matches.setMatchResult(tid, 4, grandFinal.tableNo, aIsOneLoss ? 2 : 0, aIsOneLoss ? 0 : 2);
+    expect(loadState(tid).status).toBe('matches');
+    matches.advanceRound(tid, 'test');
+    const reset = loadState(tid).matches.find((match) => match.round === 5)!;
+    expect(reset.stage).toBe('grand_final_reset');
+    matches.setMatchResult(tid, 5, reset.tableNo, 2, 0);
+    expect(loadState(tid).status).toBe('finished');
   });
 });
 
@@ -333,6 +385,47 @@ describe('manual results & fault detection', () => {
     const m = loadState(tid).matches.find((x) => x.round === 1)!;
     expect(() => matches.setMatchResult(tid, 1, m.tableNo, 3, 0)).toThrow('BAD_RESULT');
     expect(() => matches.setMatchResult(tid, 9, 1, 1, 0)).toThrow('MATCH_NOT_FOUND');
+  });
+
+  it('rolls back a recorded result when round-finalization fails', () => {
+    const { matches, tid } = setupMatches(2);
+    matches.startRound(tid, 1, 'test');
+    const match = loadState(tid).matches.find((candidate) => candidate.playerB !== '(bye)')!;
+    const original = (matches as any).maybeAdvance;
+    (matches as any).maybeAdvance = () => { throw new Error('FINALIZE_FAILED'); };
+    try {
+      expect(() => matches.setMatchResult(tid, 1, match.tableNo, 2, 0)).toThrow('FINALIZE_FAILED');
+    } finally {
+      (matches as any).maybeAdvance = original;
+    }
+    expect(loadState(tid).matches.find((candidate) => candidate.id === match.id)).toMatchObject({ resultA: null, resultB: null });
+    expect(getDb().prepare('SELECT result_a, result_b FROM matches WHERE id=?').get(match.id))
+      .toEqual({ result_a: null, result_b: null });
+  });
+
+  it('rejects malformed srvpro scores and locks historical results after advancement', async () => {
+    const { matches, tid } = setupMatches(4);
+    matches.startRound(tid, 1, 'test');
+    await waitRooms();
+    const first = loadState(tid).matches.find((match) => match.round === 1)!;
+    expect(matches.onWebhook({
+      room_name: first.roomName,
+      players: [
+        { player_id: first.playerA, score: 999 },
+        { player_id: first.playerB, score: 0 },
+      ],
+    }).ack).toBe(true);
+    expect(loadState(tid).matches.find((match) => match.id === first.id)).toMatchObject({
+      resultA: null,
+      resultB: null,
+      source: 'invalid_result',
+    });
+
+    for (const match of loadState(tid).matches.filter((candidate) => candidate.round === 1)) {
+      matches.setMatchResult(tid, 1, match.tableNo, 2, 0);
+    }
+    matches.advanceRound(tid, 'test');
+    expect(() => matches.setMatchResult(tid, 1, first.tableNo, 0, 2)).toThrow('RESULT_ROUND_LOCKED');
   });
 
   it('pollAll marks room-gone-without-result as faulted and stops polling it', async () => {

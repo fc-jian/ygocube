@@ -10,7 +10,11 @@ export function getDb(): Database.Database {
   if (db) return db;
   fs.mkdirSync(path.dirname(config.server.dbPath), { recursive: true });
   db = new Database(config.server.dbPath);
+  db.pragma('busy_timeout = 5000');
+  db.pragma('foreign_keys = ON');
   db.pragma('journal_mode = WAL');
+  db.pragma('synchronous = NORMAL');
+  db.pragma('wal_autocheckpoint = 1000');
   db.exec(`
     CREATE TABLE IF NOT EXISTS tournaments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,6 +89,7 @@ export function getDb(): Database.Database {
       ,stage TEXT
       ,bracket_round INTEGER
       ,bracket_match_id TEXT
+      ,UNIQUE(tournament_id, round, table_no)
     );
     CREATE TABLE IF NOT EXISTS events (
       seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -222,6 +227,20 @@ function migrate(d: Database.Database): void {
   }
   d.exec('CREATE INDEX IF NOT EXISTS idx_cards_search_text ON cards(search_text)');
   d.exec('CREATE INDEX IF NOT EXISTS idx_events_tid_seq ON events(tournament_id, seq)');
+  d.exec('CREATE INDEX IF NOT EXISTS idx_tournaments_status ON tournaments(status)');
+  d.exec('CREATE INDEX IF NOT EXISTS idx_tournaments_pool_status ON tournaments(card_pool_id, status)');
+  d.exec('CREATE INDEX IF NOT EXISTS idx_players_tid_active ON tournament_players(tournament_id, active)');
+  d.exec('CREATE INDEX IF NOT EXISTS idx_matches_pending ON matches(tournament_id, result_a, room_name)');
+  d.exec('CREATE INDEX IF NOT EXISTS idx_matches_room_name ON matches(room_name)');
+  d.exec('CREATE INDEX IF NOT EXISTS idx_picks_tid_pack_round ON picks(tournament_id, pack_index, pick_round)');
+  d.exec('CREATE INDEX IF NOT EXISTS idx_snapshots_tid_event ON tournament_snapshots(tournament_id, event_seq)');
+  try {
+    d.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_matches_tid_round_table ON matches(tournament_id, round, table_no)');
+  } catch (error) {
+    // Do not make an existing deployment unbootable. Historical duplicates are
+    // surfaced for administrator repair; all new databases enforce uniqueness.
+    console.error('cannot enforce unique match tables: historical duplicates exist', error);
+  }
 }
 
 export function closeDb() {

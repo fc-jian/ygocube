@@ -60,11 +60,12 @@ function loadConfig(): AppConfig {
     const rawValue = v ?? envV ?? fallback;
     return path.isAbsolute(rawValue) ? rawValue : path.resolve(base, rawValue);
   };
-  const cardsCdb = resolvePath(server.cards_cdb as string | undefined, process.env.CARDS_CDB, '../../srvpro/ygopro/cards.cdb');
+  const cardsCdb = resolvePath(server.cards_cdb as string | undefined, process.env.CARDS_CDB, 'srvpro/ygopro/cards.cdb');
   const originsRaw = server.allowed_origins ?? process.env.CUBE_ALLOWED_ORIGINS ?? ['http://localhost:3000', 'http://127.0.0.1:3000'];
   const allowedOrigins = Array.isArray(originsRaw)
     ? originsRaw.map(String)
     : String(originsRaw).split(',').map((x) => x.trim()).filter(Boolean);
+  const rawYgoproRoot = String(pics.ygopro_root ?? process.env.PICS_YGOPRO_ROOT ?? '').trim();
   return {
     admin: {
       superToken: String(admin.super_token ?? process.env.CUBE_SUPER_TOKEN ?? 'change-me-super-token'),
@@ -84,7 +85,10 @@ function loadConfig(): AppConfig {
       allowInsecureDefaults: server.allow_insecure_defaults === true || process.env.CUBE_ALLOW_INSECURE_DEFAULTS === '1',
     },
     pics: {
-      ygoproRoot: resolvePath(pics.ygopro_root as string | undefined, process.env.PICS_YGOPRO_ROOT, ''),
+      // Empty disables the original-image proxy. Resolving an empty string
+      // would otherwise turn it into the config directory and unintentionally
+      // enable filesystem lookups there.
+      ygoproRoot: rawYgoproRoot ? resolvePath(rawYgoproRoot, undefined, rawYgoproRoot) : '',
       // low-res avif thumbnails stored server-side (assets/pics_avif), served via GET /pics/:code.avif
       avifDir: resolvePath(pics.avif_dir as string | undefined, process.env.PICS_AVIF_DIR, 'assets/pics_avif'),
     },
@@ -113,10 +117,25 @@ export const defaults = {
 };
 
 export function validateStartupSecurity(): void {
-  if (config.server.allowInsecureDefaults) return;
   const bad = new Set(['', 'change-me-super-token']);
-  if (bad.has(config.admin.superToken)) {
+  if (!config.server.allowInsecureDefaults && bad.has(config.admin.superToken)) {
     throw new Error('insecure admin token configuration; set a non-placeholder super token or server.allow_insecure_defaults=true');
   }
   if (!config.srvpro.apiKey) throw new Error('srvpro.api_key must not be empty');
+  if (!Number.isSafeInteger(config.server.port) || config.server.port < 1 || config.server.port > 65535) {
+    throw new Error('server.port must be an integer between 1 and 65535');
+  }
+  if (!Number.isSafeInteger(config.srvpro.gamePort) || config.srvpro.gamePort < 1 || config.srvpro.gamePort > 65535) {
+    throw new Error('srvpro.game_port must be an integer between 1 and 65535');
+  }
+  if (config.server.allowedOrigins.length === 0 || config.server.allowedOrigins.some((origin) => {
+    try {
+      const parsed = new URL(origin);
+      return parsed.origin !== origin || !['http:', 'https:'].includes(parsed.protocol);
+    } catch {
+      return true;
+    }
+  })) {
+    throw new Error('server.allowed_origins must contain exact http(s) origins without paths or trailing slashes');
+  }
 }

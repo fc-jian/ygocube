@@ -53,4 +53,24 @@ describe('admin match transition preflight', () => {
     expect(state.matches).toHaveLength(1);
     expect(state.matches[0].playerB).toBe('(bye)');
   });
+
+  it('rolls back a name change when another config field is invalid', () => {
+    const cards = new CardsService();
+    const pools = new PoolsService(cards);
+    const tournaments = makeTournaments();
+    const matches = new MatchesService(fakeSrvpro as any);
+    const decks = new DecksService(cards, matches);
+    const draft = new DraftService(cards, tournaments, pools, matches, decks);
+    const realtime = { emitPhase: jest.fn(), emitPause: jest.fn(), emitNotice: jest.fn() };
+    const controller = new AdminController(tournaments, draft, decks, matches, pools, cards, realtime as any);
+    const tid = tournaments.create({ name: 'original', maxPlayers: 4, cardPool: TEST_POOL }, 'test').tid;
+    const req = { params: { tid: String(tid) }, identity: { isSuper: true } } as any;
+
+    expect(() => controller.updateTournamentConfig(req, {
+      name: 'should-not-stick',
+      mainMin: 100,
+      mainMax: 80,
+    })).toThrow('BAD_PAYLOAD');
+    expect(loadState(tid).name).toBe('original');
+  });
 });

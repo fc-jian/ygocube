@@ -1,6 +1,5 @@
 import { Injectable } from '@nestjs/common';
 import { getDb } from '../db';
-import { loadState, TournamentState } from '../events/events.service';
 import { CardPool, PoolsService } from '../pools/pools.service';
 
 export interface CardPickStat {
@@ -20,9 +19,19 @@ export interface CardPickStat {
 interface TournamentRow {
   id: number;
   name: string;
-  config_json: string;
-  card_pool_id: number | null;
+  status: string;
   updated_at: string;
+}
+
+interface StatisticalPack {
+  index: number;
+  order: number[];
+}
+
+interface StatisticalPick {
+  packIndex: number;
+  round: number;
+  card: number;
 }
 
 interface Aggregate {
@@ -46,6 +55,7 @@ interface CacheEntry {
  */
 @Injectable()
 export class CardPickStatsService {
+  private static readonly CACHE_LIMIT = 32;
   private cache = new Map<number, CacheEntry>();
 
   constructor(private pools: PoolsService) {}
@@ -62,33 +72,24 @@ export class CardPickStatsService {
     pool = currentPool;
     const version = this.version(pool);
     const cached = this.cache.get(pool.id);
-    if (cached?.version === version) return cached.stats;
+    if (cached?.version === version) {
+      this.cache.delete(pool.id);
+      this.cache.set(pool.id, cached);
+      return cached.stats;
+    }
 
     const totals = new Map<number, Aggregate>();
     const rows = getDb()
-      .prepare('SELECT id, name, config_json, card_pool_id, updated_at FROM tournaments ORDER BY id')
-      .all() as TournamentRow[];
+      .prepare('SELECT id, name, status, updated_at FROM tournaments WHERE card_pool_id=? ORDER BY id')
+      .all(pool.id) as TournamentRow[];
     for (const row of rows) {
       if (/^test/i.test(row.name)) continue;
-      let cfg: Record<string, unknown>;
-      try {
-        cfg = JSON.parse(row.config_json) as Record<string, unknown>;
-      } catch {
-        continue;
-      }
-      // The database column is the immutable pool identity. Legacy records
-      // without it are intentionally excluded so a deleted/recreated name
-      // cannot be mistaken for the original pool.
-      if (row.card_pool_id !== pool.id) continue;
-      let state: TournamentState;
-      try {
-        state = loadState(row.id);
-      } catch {
-        continue;
-      }
-      if (!this.isCompleteDraft(state)) continue;
-      for (const pick of state.picks) {
-        const pack = state.packs.find((candidate) => candidate.index === pick.packIndex);
+      if (row.status === 'registration' || row.status === 'drafting') continue;
+      const draft = this.rebuildDraft(row.id);
+      if (!draft || !this.isCompleteDraft(draft.packs, draft.picks)) continue;
+      const packByIndex = new Map(draft.packs.map((pack) => [pack.index, pack]));
+      for (const pick of draft.picks) {
+        const pack = packByIndex.get(pick.packIndex);
         if (!pack || pack.order.length <= 0) continue;
         const position = Number(pick.round) + 1;
         const current = totals.get(pick.card) ?? {
@@ -108,8 +109,9 @@ export class CardPickStatsService {
     }
 
     const stats = new Map<number, CardPickStat>();
+    const poolCodes = new Set(pool.codes);
     for (const [code, total] of totals) {
-      if (!pool.codes.includes(code) || total.count <= 0) continue;
+      if (!poolCodes.has(code) || total.count <= 0) continue;
       stats.set(code, {
         poolId: pool.id,
         poolName: pool.name,
@@ -120,7 +122,13 @@ export class CardPickStatsService {
         sampleCount: total.count,
       });
     }
+    this.cache.delete(pool.id);
     this.cache.set(pool.id, { version, stats });
+    while (this.cache.size > CardPickStatsService.CACHE_LIMIT) {
+      const oldest = this.cache.keys().next().value as number | undefined;
+      if (oldest === undefined) break;
+      this.cache.delete(oldest);
+    }
     return stats;
   }
 
@@ -147,19 +155,47 @@ export class CardPickStatsService {
 
   private version(pool: CardPool): string {
     const db = getDb();
-    const event = db.prepare('SELECT COALESCE(MAX(seq), 0) AS max_seq FROM events').get() as { max_seq: number };
     const tournaments = db
-      .prepare('SELECT count(*) AS count, COALESCE(MAX(updated_at), \'\') AS updated_at FROM tournaments')
-      .get() as { count: number; updated_at: string };
-    return `${event.max_seq}:${tournaments.count}:${tournaments.updated_at}:${JSON.stringify(pool.codes)}`;
+      .prepare(`SELECT count(DISTINCT t.id) AS count,
+        COALESCE(MAX(t.updated_at), '') AS updated_at,
+        COALESCE(MAX(e.seq), 0) AS max_seq
+        FROM tournaments t LEFT JOIN events e ON e.tournament_id=t.id
+        WHERE t.card_pool_id=?`)
+      .get(pool.id) as { count: number; updated_at: string; max_seq: number };
+    return `${tournaments.max_seq}:${tournaments.count}:${tournaments.updated_at}:${JSON.stringify(pool.codes)}`;
   }
 
-  private isCompleteDraft(state: TournamentState): boolean {
-    if (state.status === 'registration' || state.status === 'drafting' || state.packs.length === 0) return false;
-    const expected = state.packs.reduce((sum, pack) => sum + pack.order.length, 0);
-    if (state.picks.length !== expected) return false;
-    for (const pack of state.packs) {
-      const picks = state.picks.filter((pick) => pick.packIndex === pack.index);
+  private rebuildDraft(tid: number): { packs: StatisticalPack[]; picks: StatisticalPick[] } | null {
+    const rows = getDb()
+      .prepare("SELECT action, payload_json FROM events WHERE tournament_id=? AND action IN ('packs_created','pick') ORDER BY seq")
+      .all(tid) as { action: string; payload_json: string }[];
+    let packs: StatisticalPack[] = [];
+    const picks: StatisticalPick[] = [];
+    try {
+      for (const row of rows) {
+        const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+        if (row.action === 'packs_created') {
+          if (!Array.isArray(payload.packs)) return null;
+          packs = payload.packs.map((raw) => {
+            const pack = raw as Record<string, unknown>;
+            return { index: Number(pack.index), order: Array.isArray(pack.order) ? pack.order.map(Number) : [] };
+          });
+        } else {
+          picks.push({ packIndex: Number(payload.packIndex), round: Number(payload.round), card: Number(payload.card) });
+        }
+      }
+    } catch {
+      return null;
+    }
+    return packs.length ? { packs, picks } : null;
+  }
+
+  private isCompleteDraft(packs: StatisticalPack[], allPicks: StatisticalPick[]): boolean {
+    const expected = packs.reduce((sum, pack) => sum + pack.order.length, 0);
+    if (allPicks.length !== expected) return false;
+    for (const pack of packs) {
+      if (!Number.isSafeInteger(pack.index) || pack.order.some((code) => !Number.isSafeInteger(code) || code <= 0)) return false;
+      const picks = allPicks.filter((pick) => pick.packIndex === pack.index);
       if (picks.length !== pack.order.length) return false;
       const rounds = new Set<number>();
       const orderCounts = new Map<number, number>();

@@ -1,6 +1,7 @@
 import { useTestDb } from './helpers';
 import { CardsService } from '../src/cards/cards.service';
 import { PoolsService } from '../src/pools/pools.service';
+import { TournamentsService } from '../src/tournaments/tournaments.service';
 
 describe('card pools', () => {
   beforeEach(() => useTestDb());
@@ -19,16 +20,18 @@ describe('card pools', () => {
 
   it('keeps an aliased card exact while exposing its rules identity separately', () => {
     const cards = new CardsService();
+    cards.poolCodes();
     const db = require('../src/db').getDb();
-    const alt = db.prepare('SELECT code, alias FROM cards WHERE alias != 0 LIMIT 1').get() as { code: number; alias: number } | undefined;
-    if (!alt) {
-      // synthetic pool has no aliases; skip
-      expect(true).toBe(true);
-      return;
-    }
-    expect(cards.canonicalCode(alt.code)).toBe(alt.alias);
-    const info = cards.get(alt.code);
-    expect(info!.code).toBe(alt.code);
+    const baseCode = 68468459;
+    const aliasCode = 73819701;
+    const insert = db.prepare(`INSERT OR REPLACE INTO cards
+      (code, name, type, desc, level, race, attribute, atk, def, alias, search_text, metadata_version)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
+    insert.run(baseCode, '阿不思的落胤', 0x21, '', 4, 1, 0x10, 1800, 0, 0, '阿不思的落胤', 3);
+    insert.run(aliasCode, '白龙之落胤', 0x21, '', 4, 1, 0x10, 1800, 0, baseCode, '白龙之落胤', 3);
+    expect(cards.canonicalCode(aliasCode)).toBe(baseCode);
+    const info = cards.get(aliasCode);
+    expect(info!.code).toBe(aliasCode);
   });
 
   it('keeps both alias-related cards in a pool and in search results', () => {
@@ -59,21 +62,42 @@ describe('card pools', () => {
   it('rejects duplicate names and removes pools', () => {
     const cards = new CardsService();
     const pools = new PoolsService(cards);
-    pools.create('dup', [1, 2, 3]);
-    expect(() => pools.create('dup', [4])).toThrow('POOL_EXISTS');
+    const codes = cards.poolCodes();
+    pools.create('dup', codes.slice(0, 3));
+    expect(() => pools.create('dup', codes.slice(3, 4))).toThrow('POOL_EXISTS');
     const id = pools.list()[0].id;
     pools.remove(id);
     expect(pools.list().length).toBe(0);
   });
 
   it('accepts URL-safe pool names and rejects spaces/path/query/control characters', () => {
-    const pools = new PoolsService(new CardsService());
+    const cards = new CardsService();
+    const pools = new PoolsService(cards);
+    const code = cards.poolCodes()[0];
     for (const name of ['A1', 'cube.v2', 'cube_v2', 'cube-v2']) {
-      expect(pools.create(name, [10001]).pool.name).toBe(name);
+      expect(pools.create(name, [code]).pool.name).toBe(name);
     }
     for (const name of ['', ' leading', 'trailing ', 'has space', 'a/b', 'a?b', 'a#b', 'a\nnew', 'x'.repeat(65)]) {
-      expect(() => pools.create(name, [10001])).toThrow('BAD_POOL_NAME');
+      expect(() => pools.create(name, [code])).toThrow('BAD_POOL_NAME');
     }
+  });
+
+  it('rejects empty/random-invalid pools and protects pools used by active tournaments', () => {
+    const cards = new CardsService();
+    const pools = new PoolsService(cards);
+    expect(() => pools.create('empty', [999_999_999])).toThrow('BAD_POOL_IMPORT');
+    expect(() => pools.createRandom('random-zero', 0)).toThrow('BAD_PAYLOAD');
+    expect(() => pools.createRandom('random-fraction', 1.5)).toThrow('BAD_PAYLOAD');
+
+    const pool = pools.create('active-pool', cards.poolCodes().slice(0, 8)).pool;
+    const tournaments = new TournamentsService(pools);
+    const tid = tournaments.create({ name: 'active', maxPlayers: 2, cardPool: pool.name }, 'test').tid;
+    expect(() => pools.remove(pool.id)).toThrow('POOL_IN_USE');
+    tournaments.setPhase(tid, 'drafting', undefined, 'test');
+    tournaments.setPhase(tid, 'deckbuilding', undefined, 'test');
+    tournaments.setPhase(tid, 'finished', undefined, 'test');
+    expect(() => pools.remove(pool.id)).not.toThrow();
+    expect(() => pools.remove(pool.id)).toThrow('POOL_NOT_FOUND');
   });
 
   it('persists one default pool and clears the setting when that pool is removed', () => {
@@ -91,18 +115,17 @@ describe('card pools', () => {
 
   it('token cards are filtered out with a warning count', () => {
     const cards = new CardsService();
+    cards.poolCodes();
     const pools = new PoolsService(cards);
-    const tokenCode = 10000 + Math.floor(Math.random() * 300);
-    // synthetic pool has no tokens; with the real cdb there are token-typed cards
     const db = require('../src/db').getDb();
-    const token = db.prepare('SELECT code FROM cards WHERE (type & 0x4000) != 0 LIMIT 1').get() as { code: number } | undefined;
-    if (!token) {
-      expect(true).toBe(true);
-      return;
-    }
-    const { pool, filtered } = pools.create('tok', [token.code, cards.poolCodes()[0]]);
+    const tokenCode = 799999999;
+    db.prepare(`INSERT OR REPLACE INTO cards
+      (code, name, type, desc, level, race, attribute, atk, def, alias, search_text, metadata_version)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(tokenCode, '测试衍生物', 0x4011, '', 1, 1, 1, 0, 0, 0, '测试衍生物', 3);
+    const { pool, filtered } = pools.create('tok', [tokenCode, cards.poolCodes()[0]]);
     expect(filtered).toBeGreaterThan(0);
-    expect(pool.codes.includes(token.code)).toBe(false);
+    expect(pool.codes.includes(tokenCode)).toBe(false);
   });
 
   it('reports every unique unknown submitted code instead of silently dropping it', () => {

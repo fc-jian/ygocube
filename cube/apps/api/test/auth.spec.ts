@@ -87,8 +87,23 @@ describe('auth model', () => {
     expect(guard.canActivate(ctx)).toBe(true);
     expect(ctx.switchToHttp().getRequest().identity.playerId).toBe('alice');
     expectUnauthorized(() => guard.canActivate(makeCtx(`/t/${t.tid}/state`, {})));
+    expectUnauthorized(() => guard.canActivate(makeCtx(`/t/${t.tid}/state`, { 'x-player-id': 'unknown' })));
     tournaments.setAuthRequired(t.tid, true, 'test');
     expectUnauthorized(() => guard.canActivate(makeCtx(`/t/${t.tid}/state`, { 'x-player-id': 'alice' })));
+  });
+
+  it('accepts tournament-scoped cookies without exposing the token in an SSE URL', () => {
+    const tournaments = makeTournaments();
+    const created = tournaments.create({ name: 'scoped-cookie', maxPlayers: 3, cardPool: TEST_POOL }, 'test');
+    const player = tournaments.join(created.tid, 'alice', 'Alice');
+    const ctx = makeCtx(`/t/${created.tid}/events`, {});
+    const request = ctx.switchToHttp().getRequest();
+    request.cookies = {
+      [`yc_pid_${created.tid}`]: 'alice',
+      [`yc_token_${created.tid}`]: player.token,
+    };
+    expect(new AuthGuard(new Reflector()).canActivate(ctx)).toBe(true);
+    expect(request.identity.playerId).toBe('alice');
   });
 
   it('creation returns a unique admin token, stored hashed', () => {

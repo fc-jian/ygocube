@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
 import type { CardVisibilityStatus } from '@ygocube/shared';
 import { Response } from 'express';
-import { AuthGuard, AuthedRequest, Identity, Public } from './auth/auth.guard';
+import { AuthGuard, AuthedRequest, Identity, Public, safeSecretEqual } from './auth/auth.guard';
 import { TournamentsService } from './tournaments/tournaments.service';
 import { DraftService } from './draft/draft.service';
 import { DecksService } from './decks/decks.service';
@@ -66,20 +66,19 @@ export class ApiController {
     const pool = this.pools.getByName(name);
     if (!pool) throw new Error('POOL_NOT_FOUND');
     const rows = codes
-      ? [...new Set(String(codes).split(',').map(Number).filter(Number.isInteger))]
-        .map((code) => this.cards.get(code))
-        .filter((card) => card !== null)
+      ? this.cards.getMany(String(codes).split(',').map(Number))
       : q
         ? this.cards.search(q)
-        : pool.codes.map((code) => this.cards.get(code)).filter((card) => card !== null);
+        : this.cards.getMany(pool.codes);
     const stats = this.cardStats?.forPool(pool) ?? new Map();
+    const poolCodeSet = new Set(pool.codes);
     return rows.map((card) => {
-      const inPool = pool.codes.includes(card!.code);
+      const inPool = poolCodeSet.has(card.code);
       return {
         ...card,
         inPool,
         poolStatus: inPool ? 'in_pool' : 'not_in_pool',
-        ...(stats.has(card!.code) ? { pickStats: [stats.get(card!.code)!] } : { pickStats: [] }),
+        ...(stats.has(card.code) ? { pickStats: [stats.get(card.code)!] } : { pickStats: [] }),
       };
     });
   }
@@ -178,14 +177,7 @@ export class ApiController {
     const stats = pool && this.cardStats ? this.cardStats.forPool(pool) : new Map();
     const attach = (card: any) => ({ ...card, ...(stats.has(card.code) ? { pickStats: [stats.get(card.code)] } : { pickStats: [] }) });
     if (codes) {
-      return [...new Set(codes
-        .split(',')
-        .map(Number)
-        .filter(Number.isInteger)
-      )]
-        .map((c) => this.cards.get(c))
-        .filter((c) => c !== null)
-        .map(attach);
+      return this.cards.getMany(codes.split(',').map(Number)).map(attach);
     }
     return this.cards.search(q ?? '').map(attach);
   }
@@ -365,16 +357,10 @@ export class ApiController {
   result(@Req() req: AuthedRequest, @Body() body: Record<string, unknown>) {
     // 结果上报鉴权：srvpro 必须携带与 config.yaml srvpro.api_key 一致的 X-Cube-Api-Key（防伪造比分）
     const key = Array.isArray(req.headers['x-cube-api-key']) ? req.headers['x-cube-api-key'][0] : req.headers['x-cube-api-key'];
-    if (key !== config.srvpro.apiKey) throw new Error('FORBIDDEN');
-    const r = this.matches.onWebhook(body);
-    if (r.ack && typeof body.room_name === 'string') {
-      const m = body.room_name.match(/^CUBE-(\d+)-(\d+)-(\d+)(?:-[A-Za-z0-9]+)?$/);
-      if (m) {
-        const players = body.players as Record<string, unknown>[] | undefined;
-        this.realtime.emitMatch(Number(m[1]), { round: Number(m[2]), tableNo: Number(m[3]), resultA: players?.[0]?.score, resultB: players?.[1]?.score });
-      }
-    }
-    return r;
+    if (typeof key !== 'string' || !safeSecretEqual(key, config.srvpro.apiKey)) throw new Error('FORBIDDEN');
+    // The match event emitted from the committed event log is authoritative.
+    // Do not broadcast the unvalidated request body or depend on player order.
+    return this.matches.onWebhook(body);
   }
 
   @Get('t/:tid/stream')

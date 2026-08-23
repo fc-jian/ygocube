@@ -58,7 +58,7 @@ export interface MatchState {
   faultedAt: string | null;
   startedAt: string | null;
   finishedAt: string | null;
-  stage?: 'round_robin' | 'swiss' | 'playoff' | 'winners' | 'losers' | 'grand_final';
+  stage?: 'round_robin' | 'swiss' | 'playoff' | 'winners' | 'losers' | 'grand_final' | 'grand_final_reset';
   bracketRound?: number;
   bracketMatchId?: string;
 }
@@ -125,7 +125,28 @@ export interface TournamentState {
   competition?: CompetitionState | null;
 }
 
+const STATE_CACHE_LIMIT = 64;
 const stateCache = new Map<number, TournamentState>();
+
+function cachedState(tid: number): TournamentState | undefined {
+  const state = stateCache.get(tid);
+  if (state) {
+    // Map insertion order provides a small LRU without another dependency.
+    stateCache.delete(tid);
+    stateCache.set(tid, state);
+  }
+  return state;
+}
+
+function cacheState(tid: number, state: TournamentState): void {
+  stateCache.delete(tid);
+  stateCache.set(tid, state);
+  while (stateCache.size > STATE_CACHE_LIMIT) {
+    const oldest = stateCache.keys().next().value as number | undefined;
+    if (oldest === undefined) break;
+    stateCache.delete(oldest);
+  }
+}
 
 // Test hook: drop in-memory state so a fresh DB is replayed on next load.
 export function resetStateCache(): void {
@@ -137,6 +158,83 @@ type EventHook = (tid: number, action: string, payload: any) => void;
 let eventHook: EventHook | null = null;
 export function setEventHook(hook: EventHook): void {
   eventHook = hook;
+}
+
+interface EventTransactionContext {
+  tid: number;
+  deferred: { action: string; payload: any; seq: number }[];
+  afterCommit: (() => void)[];
+}
+
+let eventTransaction: EventTransactionContext | null = null;
+
+/** Run an external side effect only after the surrounding event transaction commits. */
+export function afterEventCommit(tid: number, operation: () => void): void {
+  if (!eventTransaction) {
+    operation();
+    return;
+  }
+  if (eventTransaction.tid !== tid) throw new Error('CROSS_TOURNAMENT_TRANSACTION');
+  eventTransaction.afterCommit.push(operation);
+}
+
+function emitEventSafely(tid: number, action: string, payload: any): void {
+  try {
+    eventHook?.(tid, action, payload);
+  } catch (error) {
+    console.error('event hook failed', tid, action, error);
+  }
+}
+
+/**
+ * Atomically execute a synchronous tournament command. Event hooks and
+ * snapshots run only after commit; an exception restores the prior cache so a
+ * failed SQL transaction cannot leak speculative state to later requests.
+ */
+export function withEventTransaction<T>(tid: number, operation: () => T): T {
+  if (eventTransaction) {
+    if (eventTransaction.tid !== tid) throw new Error('CROSS_TOURNAMENT_TRANSACTION');
+    return operation();
+  }
+  const hadCached = stateCache.has(tid);
+  const before = hadCached ? clone(stateCache.get(tid)!) : undefined;
+  const context: EventTransactionContext = { tid, deferred: [], afterCommit: [] };
+  eventTransaction = context;
+  let result: T;
+  try {
+    result = getDb().transaction(operation)();
+  } catch (error) {
+    if (before) cacheState(tid, before);
+    else stateCache.delete(tid);
+    throw error;
+  } finally {
+    eventTransaction = null;
+  }
+  for (const event of context.deferred) emitEventSafely(tid, event.action, event.payload);
+  const committedCount = eventCount(tid);
+  const crossedSnapshotBoundary = context.deferred.length > 0
+    && Math.floor((committedCount - context.deferred.length) / 100) < Math.floor(committedCount / 100);
+  if (crossedSnapshotBoundary) {
+    try {
+      // A multi-event transaction can move from 99 to 101. Requiring the final
+      // count itself to be divisible by 100 would then skip snapshots forever
+      // for commands with a fixed stride.
+      snapshotNow(tid);
+    } catch (error) {
+      console.error('post-commit snapshot failed', tid, error);
+    }
+  }
+  for (const operation of context.afterCommit) {
+    try {
+      operation();
+    } catch (error) {
+      // The database commit is authoritative. A failed timer/room scheduling
+      // side effect is retried by the owning service and must not invite the
+      // caller to repeat an already committed command.
+      console.error('post-commit operation failed', tid, error);
+    }
+  }
+  return result;
 }
 
 function emptyState(id: number, name: string, configJson: string, createdBy = 'unknown'): TournamentState {
@@ -173,6 +271,10 @@ export function apply(state: TournamentState, action: string, payload: any): voi
     }
     case 'config': {
       state.configJson = JSON.stringify(payload);
+      break;
+    }
+    case 'tournament_name': {
+      if (typeof payload === 'string') state.name = payload;
       break;
     }
     case 'player_join': {
@@ -324,15 +426,25 @@ export function logEvent(tid: number, entity: string, action: string, payload: a
     .prepare('INSERT INTO events (tournament_id, entity, action, payload_json, created_at, actor) VALUES (?,?,?,?,?,?)')
     .run(tid, entity, action, JSON.stringify(payload), new Date().toISOString(), actor);
   const seq = Number(row.lastInsertRowid);
-  const state = stateCache.get(tid);
+  const state = cachedState(tid);
   if (state) apply(state, action, payload);
-  if (eventHook) eventHook(tid, action, payload);
-  maybeSnapshot(tid, seq);
+  if (eventTransaction?.tid === tid) {
+    eventTransaction.deferred.push({ action, payload, seq });
+  } else {
+    emitEventSafely(tid, action, payload);
+    try {
+      maybeSnapshot(tid, seq);
+    } catch (error) {
+      // The event itself is already committed. Snapshot failure must not make
+      // clients retry and duplicate the command.
+      console.error('snapshot failed', tid, seq, error);
+    }
+  }
   return seq;
 }
 
 export function loadState(tid: number): TournamentState {
-  const cached = stateCache.get(tid);
+  const cached = cachedState(tid);
   if (cached) return cached;
   const row = tournamentRow(tid);
   const state = emptyState(row.id, row.name, row.config_json, row.created_by ?? 'unknown');
@@ -353,12 +465,12 @@ export function loadState(tid: number): TournamentState {
     .prepare('SELECT seq, tournament_id, entity, action, payload_json, created_at, actor FROM events WHERE tournament_id=? AND seq>? ORDER BY seq')
     .all(tid, startSeq) as EventRow[];
   for (const e of rows) apply(state, e.action, JSON.parse(e.payload_json));
-  stateCache.set(tid, state);
+  cacheState(tid, state);
   return state;
 }
 
 export function persistMeta(tid: number): void {
-  const s = stateCache.get(tid);
+  const s = cachedState(tid);
   if (!s) return;
   getDb().prepare('UPDATE tournaments SET status=?, round=?, updated_at=? WHERE id=?').run(s.status, s.round, new Date().toISOString(), tid);
 }
@@ -396,7 +508,7 @@ interface SnapRow {
 
 function tournamentRow(tid: number): TournamentRow {
   const row = getDb().prepare('SELECT * FROM tournaments WHERE id=?').get(tid) as TournamentRow | undefined;
-  if (!row) throw new Error('tournament not found');
+  if (!row) throw new Error('TOURNAMENT_NOT_FOUND');
   return row;
 }
 
@@ -407,18 +519,15 @@ function eventCount(tid: number): number {
 function maybeSnapshot(tid: number, globalSeq: number): void {
   const count = eventCount(tid);
   if (count % 100 === 0) {
-    const s = stateCache.get(tid);
-    if (s) {
-      getDb()
-        .prepare('INSERT INTO tournament_snapshots (tournament_id, seq, event_seq, state_json, created_at) VALUES (?,?,?,?,?)')
-        .run(tid, count, globalSeq, JSON.stringify(s), new Date().toISOString());
-    }
+    const s = cachedState(tid) ?? loadState(tid);
+    getDb()
+      .prepare('INSERT INTO tournament_snapshots (tournament_id, seq, event_seq, state_json, created_at) VALUES (?,?,?,?,?)')
+      .run(tid, count, globalSeq, JSON.stringify(s), new Date().toISOString());
   }
 }
 
 export function snapshotNow(tid: number): void {
-  const s = stateCache.get(tid);
-  if (!s) return;
+  const s = cachedState(tid) ?? loadState(tid);
   const count = eventCount(tid);
   const last = getDb().prepare('SELECT MAX(seq) m FROM events WHERE tournament_id=?').get(tid) as { m: number | null };
   getDb()
@@ -566,7 +675,7 @@ export function hardRevertTo(tid: number, seq: number, actor: string): HardRever
     db.prepare('INSERT INTO admin_actions (tournament_id, actor, action, detail_json, created_at) VALUES (?,?,?,?,?)')
       .run(tid, actor, 'hard_revert', JSON.stringify({ seq, deletedEvents: preview.deleteEvents }), now);
   })();
-  stateCache.set(tid, state);
+  cacheState(tid, state);
   return { state, deletedEvents: preview.deleteEvents, replacementTokens };
 }
 
@@ -581,22 +690,20 @@ export function dropState(tid: number): void {
   stateCache.delete(tid);
 }
 
-export function unfreeze(tid: number): void {
-  const s = stateCache.get(tid);
-  if (s) {
-    s.frozen = false;
-    logEvent(tid, 'tournament', 'frozen', false, 'admin');
-  }
-  getDb().prepare('UPDATE tournaments SET frozen=0 WHERE id=?').run(tid);
+export function unfreeze(tid: number, actor = 'admin'): void {
+  loadState(tid);
+  withEventTransaction(tid, () => {
+    logEvent(tid, 'tournament', 'frozen', false, actor);
+    getDb().prepare('UPDATE tournaments SET frozen=0, updated_at=? WHERE id=?').run(new Date().toISOString(), tid);
+  });
 }
 
 export function freeze(tid: number, actor: string): void {
-  const s = stateCache.get(tid);
-  if (s) {
-    s.frozen = true;
+  loadState(tid);
+  withEventTransaction(tid, () => {
     logEvent(tid, 'tournament', 'frozen', true, actor);
-  }
-  getDb().prepare('UPDATE tournaments SET frozen=1 WHERE id=?').run(tid);
+    getDb().prepare('UPDATE tournaments SET frozen=1, updated_at=? WHERE id=?').run(new Date().toISOString(), tid);
+  });
 }
 
 export function getConfig(state: TournamentState) {

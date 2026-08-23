@@ -107,15 +107,17 @@ describe('deck validation', () => {
   it('counts alias-related codes toward the same rules copy limit', () => {
     const { cards, decks, tid } = setupDeckbuilding(45, { maxCopies: 1 });
     const db = require('../src/db').getDb();
-    const alt = db.prepare('SELECT code, alias FROM cards WHERE alias != 0 LIMIT 1').get() as { code: number; alias: number } | undefined;
-    if (!alt) {
-      expect(true).toBe(true);
-      return;
-    }
-    logPick(tid, 'p0', alt.code, 100);
-    logPick(tid, 'p0', alt.alias, 101);
-    decks.move(tid, 'p0', alt.code, 'pool', 'main');
-    expect(() => decks.move(tid, 'p0', alt.alias, 'pool', 'side')).toThrow('CARD_NOT_IN_POOL');
+    const baseCode = 68468459;
+    const aliasCode = 73819701;
+    const insert = db.prepare(`INSERT OR REPLACE INTO cards
+      (code, name, type, desc, level, race, attribute, atk, def, alias, search_text, metadata_version)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
+    insert.run(baseCode, '阿不思的落胤', 0x21, '', 4, 1, 0x10, 1800, 0, 0, '阿不思的落胤', 3);
+    insert.run(aliasCode, '白龙之落胤', 0x21, '', 4, 1, 0x10, 1800, 0, baseCode, '白龙之落胤', 3);
+    logPick(tid, 'p0', aliasCode, 100);
+    logPick(tid, 'p0', baseCode, 101);
+    decks.move(tid, 'p0', aliasCode, 'pool', 'main');
+    expect(() => decks.move(tid, 'p0', baseCode, 'pool', 'side')).toThrow('CARD_NOT_IN_POOL');
   });
 
   it('match preparation moves random zone overflow to side and DSQs an undersized main deck', () => {

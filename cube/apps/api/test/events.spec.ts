@@ -1,5 +1,13 @@
 import { useTestDb, makeTournaments, TEST_POOL } from './helpers';
-import { loadState, revertTo, hardRevertTo, resetStateCache, logEvent } from '../src/events/events.service';
+import {
+  afterEventCommit,
+  loadState,
+  revertTo,
+  hardRevertTo,
+  resetStateCache,
+  logEvent,
+  withEventTransaction,
+} from '../src/events/events.service';
 
 describe('event log & revert', () => {
   beforeEach(() => useTestDb());
@@ -70,5 +78,53 @@ describe('event log & revert', () => {
     logEvent(tid, 'tournament', 'frozen', true, 'test');
     const count2 = (db.prepare('SELECT count(*) AS c FROM events WHERE tournament_id=?').get(tid) as { c: number }).c;
     expect(count2).toBe(3);
+  });
+
+  it('rolls back SQL, event rows, and speculative cached state as one command', () => {
+    const tournaments = makeTournaments();
+    const tid = tournaments.create({ name: 'atomic', maxPlayers: 2, cardPool: TEST_POOL }, 'test').tid;
+    const db = require('../src/db').getDb();
+    const before = (db.prepare('SELECT count(*) AS c FROM events WHERE tournament_id=?').get(tid) as { c: number }).c;
+    expect(() => withEventTransaction(tid, () => {
+      logEvent(tid, 'tournament', 'phase', { status: 'drafting', round: 0 }, 'test');
+      db.prepare('UPDATE tournaments SET status=? WHERE id=?').run('drafting', tid);
+      throw new Error('ROLLBACK_TEST');
+    })).toThrow('ROLLBACK_TEST');
+    expect((db.prepare('SELECT count(*) AS c FROM events WHERE tournament_id=?').get(tid) as { c: number }).c).toBe(before);
+    expect((db.prepare('SELECT status FROM tournaments WHERE id=?').get(tid) as { status: string }).status).toBe('registration');
+    expect(loadState(tid).status).toBe('registration');
+    resetStateCache();
+    expect(loadState(tid).status).toBe('registration');
+  });
+
+  it('runs external side effects only after commit and discards them on rollback', () => {
+    const tid = makeTournaments().create({ name: 'after-commit', maxPlayers: 2, cardPool: TEST_POOL }, 'test').tid;
+    const calls: string[] = [];
+    withEventTransaction(tid, () => {
+      afterEventCommit(tid, () => calls.push('committed'));
+      expect(calls).toEqual([]);
+    });
+    expect(calls).toEqual(['committed']);
+
+    expect(() => withEventTransaction(tid, () => {
+      afterEventCommit(tid, () => calls.push('rolled-back'));
+      throw new Error('ROLLBACK_SIDE_EFFECT');
+    })).toThrow('ROLLBACK_SIDE_EFFECT');
+    expect(calls).toEqual(['committed']);
+  });
+
+  it('writes a snapshot when a multi-event transaction crosses the 100-event boundary', () => {
+    const tournaments = makeTournaments();
+    const tid = tournaments.create({ name: 'snapshot-boundary', maxPlayers: 2, cardPool: TEST_POOL }, 'test').tid;
+    for (let i = 0; i < 98; i++) logEvent(tid, 'test', 'round_complete', { i }, 'test');
+    const db = require('../src/db').getDb();
+    expect((db.prepare('SELECT count(*) AS c FROM events WHERE tournament_id=?').get(tid) as { c: number }).c).toBe(99);
+    withEventTransaction(tid, () => {
+      logEvent(tid, 'test', 'round_complete', { i: 98 }, 'test');
+      logEvent(tid, 'test', 'round_complete', { i: 99 }, 'test');
+    });
+    const latestEvent = (db.prepare('SELECT max(seq) AS seq FROM events WHERE tournament_id=?').get(tid) as { seq: number }).seq;
+    expect(db.prepare('SELECT event_seq FROM tournament_snapshots WHERE tournament_id=? ORDER BY id DESC LIMIT 1').get(tid))
+      .toEqual({ event_seq: latestEvent });
   });
 });

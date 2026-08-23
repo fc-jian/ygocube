@@ -154,6 +154,9 @@ export class PoolsService {
   create(name: string, codes: number[]): { pool: CardPool } & PoolImportReport {
     name = normalizePoolName(name);
     const { unique, filtered, missingCodes, entryWarnings } = this.filterCodes(codes);
+    if (unique.length === 0) {
+      throw Object.assign(new Error('BAD_POOL_IMPORT'), { details: { missingCodes, entryWarnings } });
+    }
     const exists = getDb().prepare('SELECT 1 FROM card_pools WHERE name=?').get(name) as PoolRow | undefined;
     if (exists) throw new Error('POOL_EXISTS');
     const row = getDb()
@@ -202,6 +205,7 @@ export class PoolsService {
 
   createRandom(name: string, size = 1000): { pool: CardPool } & PoolImportReport {
     name = normalizePoolName(name);
+    if (!Number.isSafeInteger(size) || size < 1) throw new Error('BAD_PAYLOAD');
     const pool = this.cards.poolCodes();
     const shuffled = [...pool];
     for (let i = shuffled.length - 1; i > 0; i--) {
@@ -237,13 +241,23 @@ export class PoolsService {
     const row = getDb().prepare('SELECT id, name, codes_json, created_at FROM card_pools WHERE id=?').get(id) as PoolRow | undefined;
     if (!row) throw new Error('POOL_NOT_FOUND');
     const { unique, filtered, missingCodes, entryWarnings } = this.filterCodes(codes);
+    if (unique.length === 0) {
+      throw Object.assign(new Error('BAD_POOL_IMPORT'), { details: { missingCodes, entryWarnings } });
+    }
     getDb().prepare('UPDATE card_pools SET codes_json=? WHERE id=?').run(JSON.stringify(unique), id);
     return { pool: { id, name: row.name, codes: unique, createdAt: row.created_at }, filtered, missingCodes, entryWarnings };
   }
 
   remove(id: number): void {
-    getDb().prepare("DELETE FROM app_settings WHERE key='default_pool_id' AND value=?").run(String(id));
-    getDb().prepare('DELETE FROM card_pools WHERE id=?').run(id);
+    if (!Number.isSafeInteger(id) || id <= 0) throw new Error('BAD_PAYLOAD');
+    const db = getDb();
+    if (!this.get(id)) throw new Error('POOL_NOT_FOUND');
+    const active = db.prepare("SELECT 1 FROM tournaments WHERE card_pool_id=? AND status!='finished' LIMIT 1").get(id);
+    if (active) throw new Error('POOL_IN_USE');
+    db.transaction(() => {
+      db.prepare("DELETE FROM app_settings WHERE key='default_pool_id' AND value=?").run(String(id));
+      db.prepare('DELETE FROM card_pools WHERE id=?').run(id);
+    })();
   }
 
   codesByName(name: string): number[] | null {

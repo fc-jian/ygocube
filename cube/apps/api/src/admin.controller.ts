@@ -7,7 +7,16 @@ import { MatchesService } from './matches/matches.service';
 import { PoolsService } from './pools/pools.service';
 import { CardsService } from './cards/cards.service';
 import { RealtimeService } from './realtime/realtime.service';
-import { loadState, hardRevertTo, previewRevert, unfreeze, freeze, dropState, getConfig } from './events/events.service';
+import {
+  loadState,
+  hardRevertTo,
+  previewRevert,
+  unfreeze,
+  freeze,
+  dropState,
+  getConfig,
+  withEventTransaction,
+} from './events/events.service';
 import { randomToken, validateMatchFormat } from './tournaments/tournaments.service';
 import { CardPickStatsService } from './cards/card-pick-stats.service';
 import { getDb } from './db';
@@ -86,6 +95,12 @@ export class AdminController {
     this.superOnly(req);
     const tid = Number(req.params.tid);
     const state = loadState(tid);
+    // Stop every in-process writer before awaiting external room shutdown.
+    // Otherwise a draft timeout/poller can append a new event halfway through
+    // deletion and leave an orphaned cache or srvpro room.
+    this.matches.invalidateTournament(tid);
+    this.draft.haltAllTimers(tid);
+    if (!state.frozen) freeze(tid, this.adminActor(req));
     // 尽力关闭 srvpro 房间
     for (const m of state.matches) {
       if (m.roomName && m.resultA === null) {
@@ -110,8 +125,10 @@ export class AdminController {
   @Post('t/:tid/pause')
   pauseTournament(@Req() req: AuthedRequest) {
     const tid = Number(req.params.tid);
-    this.draft.freezeTimers(tid);
-    freeze(tid, this.adminActor(req));
+    withEventTransaction(tid, () => {
+      this.draft.freezeTimers(tid);
+      freeze(tid, this.adminActor(req));
+    });
     return { ok: true };
   }
 
@@ -133,23 +150,28 @@ export class AdminController {
       if (invalid.length > 0 && body.confirm_invalid_decks !== true) {
         return { ok: false, requires_confirmation: true, invalid_decks: invalid };
       }
-      const repairs = loadState(tid).players
-        .filter((p) => !p.eliminated && !p.withdrawn)
-        .map((p) => ({ playerId: p.playerId, ...this.decks.repairForMatches(tid, p.playerId) }));
-      const eligible = loadState(tid).players.filter((p) => !p.eliminated && !p.withdrawn).length;
-      if (eligible < 1) throw new Error('FORMAT_PLAYER_COUNT');
-      if (eligible >= 2) validateMatchFormat(getConfig(loadState(tid)), eligible);
-      this.tournaments.setPhase(tid, status, body.round !== undefined ? Number(body.round) : 1, this.adminActor(req));
-      const round = body.round !== undefined ? Number(body.round) : loadState(tid).round || 1;
-      this.matches.startRound(tid, round, this.adminActor(req));
+      const repairs = withEventTransaction(tid, () => {
+        const result = loadState(tid).players
+          .filter((player) => !player.eliminated && !player.withdrawn)
+          .map((player) => ({ playerId: player.playerId, ...this.decks.repairForMatches(tid, player.playerId) }));
+        const eligible = loadState(tid).players.filter((player) => !player.eliminated && !player.withdrawn).length;
+        if (eligible < 1) throw new Error('FORMAT_PLAYER_COUNT');
+        if (eligible >= 2) validateMatchFormat(getConfig(loadState(tid)), eligible);
+        this.tournaments.setPhase(tid, status, body.round !== undefined ? Number(body.round) : 1, this.adminActor(req));
+        const round = body.round !== undefined ? Number(body.round) : loadState(tid).round || 1;
+        this.matches.startRound(tid, round, this.adminActor(req));
+        return result;
+      });
       const s = loadState(tid);
       this.realtime.emitPhase(tid, s.status, s.round);
       return { ok: true, repairs };
     }
-    this.tournaments.setPhase(tid, status, body.round !== undefined ? Number(body.round) : undefined, this.adminActor(req));
-    // 阶段切换后重新武装对应定时器（setPhase 只写状态；定时器由这里/推进链路负责）
-    if (status === 'drafting') this.draft.resumePickTimer(tid);
-    else if (status === 'deckbuilding') this.draft.resumeDeckbuildingTimer(tid);
+    withEventTransaction(tid, () => {
+      this.tournaments.setPhase(tid, status, body.round !== undefined ? Number(body.round) : undefined, this.adminActor(req));
+      // 阶段切换后重新武装对应定时器（setPhase 只写状态；定时器由这里/推进链路负责）
+      if (status === 'drafting') this.draft.resumePickTimer(tid);
+      else if (status === 'deckbuilding') this.draft.resumeDeckbuildingTimer(tid);
+    });
     const s = loadState(tid);
     this.realtime.emitPhase(tid, s.status, s.round);
     return { ok: true };
@@ -160,18 +182,18 @@ export class AdminController {
     const tid = Number(req.params.tid);
     if (loadState(tid).frozen) throw new Error('FROZEN');
     const patch: Record<string, unknown> = {};
-    for (const key of ['name', 'maxPlayers', 'mode', 'packSize', 'packSizeMultiple', 'cardPool', 'mainMin', 'mainMax', 'extraMax', 'sideMax', 'maxCopies', 'timeLimit', 'pickSeconds', 'deckbuildingSeconds', 'dropMode', 'packStrategy', 'extraRatioPercent', 'packCount', 'dropPublic', 'draftMode', 'evenPackCount', 'reserveSeconds', 'reseatEachRound']) {
+    for (const key of ['name', 'maxPlayers', 'mode', 'packSize', 'packSizeMultiple', 'cardPool', 'mainMin', 'mainMax', 'extraMax', 'sideMax', 'maxCopies', 'timeLimit', 'pickSeconds', 'pauseSeconds', 'deckbuildingSeconds', 'dropMode', 'packStrategy', 'extraRatioPercent', 'packCount', 'dropPublic', 'draftMode', 'evenPackCount', 'reserveSeconds', 'reseatEachRound']) {
       if (body[key] !== undefined) patch[key] = body[key];
     }
     if (Object.keys(patch).length === 0) throw new Error('BAD_PAYLOAD');
-    if (patch.name !== undefined) {
-      getDb().prepare('UPDATE tournaments SET name=?, updated_at=? WHERE id=?').run(String(patch.name), new Date().toISOString(), tid);
-      const state = loadState(tid);
-      state.name = String(patch.name);
-      delete patch.name;
-    }
-    if (Object.keys(patch).length === 0) return { ok: true, config: getConfig(loadState(tid)) };
-    const cfg = this.tournaments.updateConfig(tid, patch, this.adminActor(req));
+    const cfg = withEventTransaction(tid, () => {
+      if (patch.name !== undefined) {
+        this.tournaments.updateName(tid, patch.name, this.adminActor(req));
+        delete patch.name;
+      }
+      if (Object.keys(patch).length === 0) return getConfig(loadState(tid));
+      return this.tournaments.updateConfig(tid, patch, this.adminActor(req));
+    });
     return { ok: true, config: cfg };
   }
 
@@ -201,7 +223,8 @@ export class AdminController {
   @Post('t/:tid/security')
   security(@Req() req: AuthedRequest, @Body() body: Record<string, unknown>) {
     const tid = Number(req.params.tid);
-    this.tournaments.setAuthRequired(tid, body.require_token !== false, this.adminActor(req));
+    if (typeof body.require_token !== 'boolean') throw new Error('BAD_PAYLOAD');
+    this.tournaments.setAuthRequired(tid, body.require_token, this.adminActor(req));
     return { ok: true };
   }
 
@@ -287,9 +310,11 @@ export class AdminController {
   @Post('t/:tid/unfreeze')
   unfreeze(@Req() req: AuthedRequest) {
     const tid = Number(req.params.tid);
-    unfreeze(tid);
-    this.draft.resumeFrozenTimers(tid);
-    this.matches.resumeAfterRevert(tid);
+    withEventTransaction(tid, () => {
+      unfreeze(tid, this.adminActor(req));
+      this.draft.resumeFrozenTimers(tid);
+      this.matches.resumeAfterRevert(tid);
+    });
     return { ok: true };
   }
 
@@ -364,7 +389,10 @@ export class AdminController {
       const { pool, filtered, missingCodes, entryWarnings } = this.pools.createFromText(name, body.importText);
       return { ...pool, filtered, missingCodes, entryWarnings };
     }
-    const codes = Array.isArray(body.codes) ? (body.codes as unknown[]).map(Number).filter(Number.isInteger) : [];
+    if (!Array.isArray(body.codes) || body.codes.some((code) => typeof code !== 'number' || !Number.isSafeInteger(code))) {
+      throw new Error('BAD_PAYLOAD');
+    }
+    const codes = body.codes as number[];
     const { pool, filtered, missingCodes, entryWarnings } = this.pools.create(name, codes);
     return { ...pool, filtered, missingCodes, entryWarnings };
   }
@@ -373,7 +401,7 @@ export class AdminController {
   createRandomPool(@Req() req: AuthedRequest, @Body() body: Record<string, unknown>) {
     this.superOnly(req);
     const name = String(body.name ?? '');
-    const size = body.size !== undefined ? Number(body.size) : 1000;
+    const size = body.size === undefined ? 1000 : body.size as number;
     const { pool, filtered, missingCodes, entryWarnings } = this.pools.createRandom(name, size);
     return { ...pool, filtered, missingCodes, entryWarnings };
   }
@@ -381,13 +409,18 @@ export class AdminController {
   @Get('pools/:id')
   poolDetail(@Req() req: AuthedRequest, @Param('id') id: string) {
     this.superOnly(req);
-    return this.pools.get(Number(id));
+    const pool = this.pools.get(Number(id));
+    if (!pool) throw new Error('POOL_NOT_FOUND');
+    return pool;
   }
 
   @Put('pools/:id')
   updatePool(@Req() req: AuthedRequest, @Param('id') id: string, @Body() body: Record<string, unknown>) {
     this.superOnly(req);
-    const codes = Array.isArray(body.codes) ? (body.codes as unknown[]).map(Number).filter(Number.isInteger) : [];
+    if (!Array.isArray(body.codes) || body.codes.some((code) => typeof code !== 'number' || !Number.isSafeInteger(code))) {
+      throw new Error('BAD_PAYLOAD');
+    }
+    const codes = body.codes as number[];
     const { pool, filtered, missingCodes, entryWarnings } = this.pools.update(Number(id), codes);
     return { ...pool, filtered, missingCodes, entryWarnings };
   }
@@ -400,13 +433,7 @@ export class AdminController {
     const stats = pool && this.cardStats ? this.cardStats.forPool(pool) : new Map();
     const attach = (card: any) => ({ ...card, ...(stats.has(card.code) ? { pickStats: [stats.get(card.code)] } : { pickStats: [] }) });
     if (codes) {
-      return codes
-        .split(',')
-        .map(Number)
-        .filter(Number.isInteger)
-        .map((c) => this.cards.get(c))
-        .filter((c) => c !== null)
-        .map(attach);
+      return this.cards.getMany(codes.split(',').map(Number)).map(attach);
     }
     return this.cards.search(q ?? '').map(attach);
   }

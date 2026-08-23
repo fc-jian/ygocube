@@ -199,6 +199,24 @@ describe('draft engine', () => {
     expect(Array.isArray(me.pack!.cards)).toBe(true);
   });
 
+  it('preserves partial administrator seats and rejects duplicate legacy assignments', () => {
+    const tournaments = makeTournaments();
+    const cards = new CardsService();
+    const pools = new PoolsService(cards);
+    const draft = new DraftService(cards, tournaments, pools, new MatchesService(fakeSrvpro as any));
+    const tid = tournaments.create({ name: 'partial-seats', maxPlayers: 3, cardPool: TEST_POOL, draftMode: 'serial' }, 'test').tid;
+    for (let i = 0; i < 3; i++) tournaments.join(tid, `p${i}`, `P${i}`);
+    logEvent(tid, 'player', 'seat_assign', { p0: 2 }, 'test');
+    draft.startDraft(tid, 'test');
+    expect(Object.fromEntries(loadState(tid).players.map((player) => [player.playerId, player.seat]))).toEqual({ p0: 2, p1: 0, p2: 1 });
+
+    const badTid = tournaments.create({ name: 'bad-seats', maxPlayers: 3, cardPool: TEST_POOL, draftMode: 'serial' }, 'test').tid;
+    for (let i = 0; i < 3; i++) tournaments.join(badTid, `q${i}`, `Q${i}`);
+    logEvent(badTid, 'player', 'seat_assign', { q0: 0, q1: 0 }, 'test');
+    expect(() => draft.startDraft(badTid, 'test')).toThrow('BAD_SEAT_ASSIGNMENT');
+    expect(loadState(badTid).status).toBe('registration');
+  });
+
   it('pause: majority vote pauses after current picker finishes; proposer resumes', () => {
     const { draft, tid } = setupDraft(3);
     const state = loadState(tid);

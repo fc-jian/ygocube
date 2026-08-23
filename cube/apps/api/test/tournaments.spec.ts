@@ -82,10 +82,33 @@ describe('tournament card pool validation', () => {
     expect(tournaments.updateConfig(tid, { extraRatioPercent: null }, 'test').extraRatioPercent).toBeNull();
     expect(() => tournaments.updateConfig(tid, { extraRatioPercent: 101 }, 'test')).toThrow('BAD_EXTRA_RATIO');
   });
+
+  it('rejects unknown keys, unsafe bounds, and invalid cross-field limits', () => {
+    const tournaments = makeTournaments();
+    expect(() => tournaments.create({ name: 'unknown', maxPlayers: 4, cardPool: TEST_POOL, typoField: true } as any, 'test')).toThrow('BAD_PAYLOAD');
+    expect(() => tournaments.create({ name: 'too-many', maxPlayers: 33, cardPool: TEST_POOL }, 'test')).toThrow('BAD_PAYLOAD');
+    expect(() => tournaments.create({ name: 'huge-pack', maxPlayers: 4, cardPool: TEST_POOL, packSize: 1001 }, 'test')).toThrow('BAD_PAYLOAD');
+    expect(() => tournaments.create({ name: 'huge-legacy-pack', maxPlayers: 32, cardPool: TEST_POOL, packSizeMultiple: 100 }, 'test')).toThrow('BAD_PAYLOAD');
+    expect(() => tournaments.create({ name: 'bad-zones', maxPlayers: 4, cardPool: TEST_POOL, mainMin: 81, mainMax: 80 }, 'test')).toThrow('BAD_PAYLOAD');
+    expect(() => tournaments.create({ name: 'bad-default-cross', maxPlayers: 4, cardPool: TEST_POOL, mainMin: 100 }, 'test')).toThrow('BAD_PAYLOAD');
+    const tid = tournaments.create({ name: 'valid', maxPlayers: 4, cardPool: TEST_POOL }, 'test').tid;
+    expect(() => tournaments.updateConfig(tid, { pickSeconds: Number.NaN }, 'test')).toThrow('BAD_PAYLOAD');
+    expect(() => tournaments.updateConfig(tid, { unexpected: 1 }, 'test')).toThrow('BAD_PAYLOAD');
+    expect(() => tournaments.updateMatchFormat(tid, { matchFormat: 'swiss', swissRoundCount: 3, playoffSize: 8 }, 'test')).toThrow('FORMAT_PLAYER_COUNT');
+    expect(() => tournaments.updateMatchFormat(tid, { matchFormat: 'swiss', swissRoundCount: '3', playoffSize: 0 }, 'test')).toThrow('BAD_PAYLOAD');
+  });
 });
 
 describe('admin player management', () => {
   beforeEach(() => useTestDb());
+
+  it('enforces the YGOPro player-name protocol limit at registration', () => {
+    const tournaments = makeTournaments();
+    const tid = tournaments.create({ name: 'player-id-limit', maxPlayers: 4, cardPool: TEST_POOL }, 'test').tid;
+    expect(() => tournaments.join(tid, '12345678901234567890', 'too long')).toThrow('BAD_PLAYER_ID');
+    expect(() => tournaments.join(tid, 'contains$dollar', 'separator')).toThrow('BAD_PLAYER_ID');
+    expect(tournaments.join(tid, '1234567890123456789', 'valid').token).toBeTruthy();
+  });
 
   it('allows a player to change display name during registration and replays it', () => {
     const tournaments = makeTournaments();

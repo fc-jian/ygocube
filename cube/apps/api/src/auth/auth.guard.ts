@@ -58,6 +58,19 @@ function headerToken(req: AuthedRequest): string | undefined {
   return headerValue(req, 'x-admin-token');
 }
 
+export function safeSecretEqual(value: string, expected: string): boolean {
+  const left = crypto.createHash('sha256').update(value).digest();
+  const right = crypto.createHash('sha256').update(expected).digest();
+  return crypto.timingSafeEqual(left, right);
+}
+
+function safeHashEqual(value: string, expectedHash: string | null | undefined): boolean {
+  if (!expectedHash || !/^[0-9a-f]{64}$/i.test(expectedHash)) return false;
+  const actual = Buffer.from(sha256(value), 'hex');
+  const expected = Buffer.from(expectedHash, 'hex');
+  return crypto.timingSafeEqual(actual, expected);
+}
+
 export const CREATE_USERNAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/;
 
 export function normalizeCreateUsername(value: unknown): string {
@@ -68,16 +81,16 @@ export function normalizeCreateUsername(value: unknown): string {
 }
 
 function isSuper(token: string): boolean {
-  return token === config.admin.superToken;
+  return safeSecretEqual(token, config.admin.superToken);
 }
 
 function isTournamentAdmin(token: string, hash: string | null): boolean {
-  return hash !== null && hash !== '' && sha256(token) === hash;
+  return safeHashEqual(token, hash);
 }
 
 function isCreateUser(username: string, token: string): boolean {
   const row = getDb().prepare('SELECT token_hash FROM create_users WHERE username=? AND active=1').get(username) as { token_hash: string } | undefined;
-  return !!row && sha256(token) === row.token_hash;
+  return !!row && safeHashEqual(token, row.token_hash);
 }
 
 function cookiesOf(req: AuthedRequest): Record<string, string> {
@@ -87,6 +100,7 @@ function cookiesOf(req: AuthedRequest): Record<string, string> {
 export function extractIdentity(req: AuthedRequest): Identity | null {
   const cookies = cookiesOf(req);
   const headers = req.headers as Record<string, string | string[] | undefined>;
+  const pathTid = req.path.match(/^\/(?:admin\/)?t\/(\d+)/)?.[1];
   // header values must be ISO-8859-1; non-ASCII player ids are percent-encoded by the client
   const hget = (name: string): string | undefined => {
     const v = headers[name];
@@ -103,6 +117,8 @@ export function extractIdentity(req: AuthedRequest): Identity | null {
   const get = (...keys: string[]): string | undefined => {
     for (const k of keys) {
       const v =
+        (pathTid && k === 'yc_pid' ? cookies[`yc_pid_${pathTid}`] : undefined) ??
+        (pathTid && k === 'yc_token' ? cookies[`yc_token_${pathTid}`] : undefined) ??
         cookies[k] ??
         hget(`x-${k.replace('yc_', '').replace('tid', 'tournament-id').replace('pid', 'player-id')}`) ??
         hget(k) ??
@@ -112,20 +128,23 @@ export function extractIdentity(req: AuthedRequest): Identity | null {
     }
     return undefined;
   };
-  const tid = get('yc_tid', 'tid');
+  // Tournament routes carry the authoritative id in the path. Scoped cookies
+  // intentionally omit the legacy global yc_tid cookie so concurrent browser
+  // tabs for different tournaments cannot overwrite one another.
+  const tid = pathTid ?? get('yc_tid', 'tid');
   const pid = get('yc_pid', 'pid');
   const token = get('yc_token', 'token');
   if (!tid || !pid || !token) return null;
   const tournamentId = Number(tid);
-  if (!Number.isInteger(tournamentId)) return null;
+  if (!Number.isSafeInteger(tournamentId) || tournamentId <= 0) return null;
   // super admin token doubles as a universal player token (dev_docs/07 §2.1)
-  if (token === config.admin.superToken) {
+  if (isSuper(token)) {
     return { tournamentId, playerId: pid, isAdmin: false, isSuper: true };
   }
   const row = getDb()
-    .prepare('SELECT 1 AS found FROM tournament_players WHERE tournament_id=? AND player_id=? AND token_hash=? AND active=1')
-    .get(tournamentId, pid, sha256(token)) as PlayerRow | undefined;
-  if (!row) return null;
+    .prepare('SELECT token_hash FROM tournament_players WHERE tournament_id=? AND player_id=? AND active=1')
+    .get(tournamentId, pid) as { token_hash: string } | undefined;
+  if (!row || !safeHashEqual(token, row.token_hash)) return null;
   return { tournamentId, playerId: pid, isAdmin: false, isSuper: false };
 }
 
@@ -202,8 +221,11 @@ export class AuthGuard implements CanActivate {
     if (tid !== null) {
       const row = tournamentRow(tid);
       if (row && row.auth_required === 0) {
+        const cookies = cookiesOf(req);
         const rawPid =
-          (req.headers['x-player-id'] as string) ??
+          headerValue(req, 'x-player-id') ??
+          cookies[`yc_pid_${tid}`] ??
+          cookies.yc_pid ??
           (req.query as Record<string, string>).pid ??
           (req.body as Record<string, string> | undefined)?.pid;
         let pid = rawPid;
@@ -215,6 +237,10 @@ export class AuthGuard implements CanActivate {
           }
         }
         if (!pid) throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields: ['pid'] });
+        const player = getDb()
+          .prepare('SELECT 1 AS found FROM tournament_players WHERE tournament_id=? AND player_id=? AND active=1')
+          .get(tid, pid) as PlayerRow | undefined;
+        if (!player) throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields: ['pid'] });
         req.identity = { tournamentId: tid, playerId: pid, isAdmin: false, isSuper: false };
         return true;
       }
@@ -224,10 +250,11 @@ export class AuthGuard implements CanActivate {
     if (!identity) {
       const body = req.body as Record<string, unknown> | undefined;
       const cookies = cookiesOf(req);
+      const pathTid = req.path.match(/^\/(?:admin\/)?t\/(\d+)/)?.[1];
       const fields: string[] = [];
-      if (!cookies.yc_tid && !req.query.tid && !body?.tid) fields.push('tid');
-      if (!cookies.yc_pid && !req.query.pid && !body?.pid) fields.push('pid');
-      if (!cookies.yc_token && !req.query.token && !body?.token) fields.push('token');
+      if (!pathTid && !cookies.yc_tid && !req.query.tid && !body?.tid) fields.push('tid');
+      if (!(pathTid && cookies[`yc_pid_${pathTid}`]) && !cookies.yc_pid && !req.query.pid && !body?.pid) fields.push('pid');
+      if (!(pathTid && cookies[`yc_token_${pathTid}`]) && !cookies.yc_token && !req.query.token && !body?.token) fields.push('token');
       throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields });
     }
     req.identity = identity;
