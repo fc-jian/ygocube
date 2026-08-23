@@ -1,6 +1,6 @@
 # 08 - 实施状态、验收与待办
 
-> 状态核对：2026-08-09。✅ 表示代码已在当前 checkout 实现并有自动化覆盖；
+> 状态核对：2026-08-24。✅ 表示代码已在当前 checkout 实现并有自动化覆盖；
 > “待实测”表示需要真实 srvpro/客户端/部署环境，不能仅凭单元测试宣称完成。
 
 ## 1. 当前里程碑
@@ -8,8 +8,8 @@
 | 里程碑 | 状态 | 当前结果 |
 | --- | --- | --- |
 | M0 环境与分支 | ✅ | 根仓库 + `fc-jian` 两个 fork submodule；配置、构建和 E2E 脚本在仓库内 |
-| M1 ygopro | ✅ | 13--16 运行时 deck limit、`LoadSide` 运行时化、长密码、`STOC_CUBE_DECK`、客户端锁定 |
-| M2 srvpro | ✅ | Cube HTTP API、deck size token/spawn、开局覆盖/siding 校验、长密码严格解析、结果 webhook |
+| M1 ygopro | ✅ | marker + 运行时 deck limit、严格 seed 解析、长密码、`STOC_CUBE_DECK`、`-cube` 版本后缀 |
+| M2 srvpro | ✅ | 严格/限流 Cube HTTP API、幂等建房、开局覆盖/siding 校验、长密码、精简 webhook |
 | M3 后端核心 | ✅ | passing/serial 回放、整轮发堆、reserve/暂停冻结、构筑校验/修复、卡池/事件/回溯 |
 | M4 对局编排 | ✅* | 单循环/瑞士无重复对手约束、手动赛制、webhook+轮询、DSQ/bye；双败 bracket 需真机复核 |
 | M5 玩家前端 | ✅ | 独立玩家 URL、脱敏 SSE、六列牌堆、整理/随机排序、卡图 fallback、对战刷新提示 |
@@ -27,6 +27,10 @@
   `assets/expansions` 等个人路径符号链接；`.gitignore` 排除整个运行时 `assets/`。
 - `config.yaml` 不入 Git；默认拒绝占位/重复 admin token 和空 srvpro API key。
 - 玩家、管理员、srvpro webhook 均有独立鉴权路径；SSE 不广播卡组内容或其他桌房间名。
+- 玩家 token 比较使用恒定时间摘要比较；SSE 用按比赛隔离 cookie，不再把 token
+  放进 URL。关闭 token 鉴权仍拒绝未报名 pid。
+- 比赛命令使用 SQLite 事务同步事件和投影，提交后再广播；状态/抓位缓存采用有界
+  LRU，服务销毁时清理 draft/deckbuilding/pause/match/SSE 定时器与连接。
 
 ### 2.2 选牌与构筑
 
@@ -76,11 +80,15 @@ bash scripts/e2e/run-e2e.sh
 bash scripts/e2e/run-full-sim.sh
 ```
 
+本地宿主若链接 `envs/ygocube/lib` 的 libevent，启动 srvpro 时需把该目录加入
+`LD_LIBRARY_PATH`；部署镜像则由 `srvpro/Dockerfile.lite` 提供对应运行库。
+
 宿主/协议回归：
 
 ```bash
 bash scripts/build-ygopro.sh
-(cd srvpro && npx coffee -c ygopro-server.coffee cube.coffee)
+(cd srvpro && npm test && npm run build)
+(c++ -std=c++14 -Wall -Wextra -Werror ygopro/tests/server_args_test.cpp -o /tmp/server_args_test && /tmp/server_args_test)
 git -C srvpro diff --check
 git -C ygopro diff --check
 ```
@@ -106,3 +114,15 @@ git -C ygopro diff --check
 - CoffeeScript 和生成的 JS 必须同一提交；submodule 指针只在对应 fork 分支更新后 bump。
 - 运行时卡牌资源、数据库、日志、缩略图和符号链接不提交；根仓库保持可复现的
   最小控制端源码和文档。
+
+## 6. 上游同步审计（2026-08-24）
+
+- `ygopro` 已把 `origin/server@04f0bc5f` 无冲突合入功能分支，并同步其
+  `ocgcore@c87afdda`；上游网络版本仍为 `0x1362`/`1.036.2`，Cube 只追加
+  `-cube` 展示后缀。
+- `srvpro` 的 Cube fork 与 `origin/mercury@a252923` 已长期结构分叉（审计时
+  391 个本地提交、75 个上游提交，整分支试合并有 13 组核心冲突），不适合机械
+  merge。本轮逐项核对并移植了与当前架构有关的踢人房间状态、最大玩家数和
+  超长聊天日志抑制修复；
+  已有的 room cap、版本读取和 Node socket 兼容实现保留。后续同步继续按提交审计、
+  小批移植和 Cube API 回归测试进行。

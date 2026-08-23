@@ -154,9 +154,10 @@ exact code；历史非法名称不自动改名，也不生成公开链接。卡�
 对应牌包的实际卡数（末堆也按实际大小）再乘 100，alias 不合并，初始弃牌和未进入
 牌堆的卡没有样本。每条统计同时返回原始平均抓位、平均抓位百分比、参与统计的牌包数、
 比赛数和抓牌样本数。卡池删除后不再统计，旧比赛没有 `cardPoolId` 也不计入。
-`CardPickStatsService` 以事件最大序号、比赛更新时间和卡池 exact code 内容作为
-缓存版本，完成比赛、回溯或卡池编辑后下一次读取自动重建；平均值由前端固定显示
-两位小数，所有带卡池上下文的卡片接口都可附加该字段。
+`CardPickStatsService` 直接读取目标卡池相关比赛的 `packs_created/pick` 事件，
+不再为历史比赛填充完整状态缓存；以该池事件最大序号、比赛更新时间和 exact code
+内容作为缓存版本，完成比赛、回溯或卡池编辑后下一次读取自动重建。派生缓存最多
+保留 32 个池；平均值由前端固定显示两位小数。
 
 ## 5. 排表、srvpro 与结果
 
@@ -165,8 +166,10 @@ exact code；历史非法名称不自动改名，也不生成公开链接。卡�
 排除；无完整解返回 `NO_VALID_PAIRING`，不使用重复对手兜底。积分为胜 3、平 1、
 负 0，排序依次考虑净胜局、OMW、历史对手积分。
 
-每桌调用 srvpro `/cube/create_room`，房间名为
-`CUBE-<tid>-<round>-<table>-<random-word>`；deck payload 包含 main+extra、
+每桌调用 srvpro `/cube/create_room`，房间名为 19 字符的
+`CUBE-<14位base36稳定摘要>`，适配标准 `CTOS_JoinGame.pass[20]`；webhook 通过
+数据库内的精确 room name 反查 match，不解析外部字符串中的比赛编号。同一 match
+的 room name 与 `request_id` 在重试时保持一致。deck payload 包含 main+extra、
 side 和 `cube-deck-<tid>-<pid>-<timestamp>` 文件名。timestamp 在该桌对局生成时
 写入 match 的 `startedAt`，重试建房、玩家重新加入同一房间都复用它，不按每次请求
 重新生成，避免同一场比赛产生多个卡组文件；旧回放缺失时回退到卡组 `lockedAt`。
@@ -180,6 +183,10 @@ side 和 `cube-deck-<tid>-<pid>-<timestamp>` 文件名。timestamp 在该桌对�
 ## 6. 事件、快照与回溯
 
 比赛状态由 append-only `events` 驱动；内存状态和重启回放使用同一 `apply()`。
+单个同步命令通过 SQLite transaction 原子更新事件和 SQL 投影，事务失败会恢复
+此前缓存，SSE hook 和快照只在 commit 后执行，避免客户端看到已回滚状态。状态
+缓存是最多 64 场比赛的 LRU；Nest 销毁时清理 draft/deckbuilding/pause timer、
+match poller 与 SSE 连接，避免热重载/重复 provider 造成后台任务累积。
 每 100 条事件或管理员需要时写 `tournament_snapshots`，快照以 `event_seq` 标记
 全局事件位置。回溯流程：预览 → 冻结 → 关闭未完成 srvpro 房间 → 删除目标事件
 之后的事件和投影 → 保持 frozen，管理员显式 `unfreeze` 后才恢复计时/建房。
@@ -210,8 +217,10 @@ app_settings(key, value, updated_at)
 create_users(id, username, token_hash, created_at, active)
 ```
 
-token 只存 SHA-256 哈希；卡图不入库。数据库路径默认 `data/cube.sqlite`，启动
-时启用 WAL，已有数据库通过 `db.ts:migrate()` 补充新字段。
+token 只存 SHA-256 哈希；比较时使用恒定时间摘要比较。卡图不入库。数据库路径
+默认 `data/cube.sqlite`，启动时启用 WAL、busy timeout 和必要索引；新库强制
+`matches(tournament_id,round,table_no)` 唯一，旧库若有重复会记录诊断并继续启动，
+由管理员先修复数据再补唯一索引。
 
 ## 8. 配置安全
 
@@ -223,8 +232,8 @@ token 只存 SHA-256 哈希；卡图不入库。数据库路径默认 `data/cube
 token 只保存 SHA-256，明文只在创建/重新生成响应显示一次。创建比赛的普通请求必须
 同时带 `X-Create-User` 和 `X-Create-Token`；super token 仍可直接创建。比赛保存
 `created_by` 与不可变 `card_pool_id`，管理列表、状态和初始事件显示创建者。
-默认拒绝占位 token、相同 admin token 和空 srvpro API key；只有明确开启
-`server.allow_insecure_defaults=true` 才允许本地临时启动。`assets/` 不属于 Git，
+默认拒绝占位 token 和空 srvpro API key；`allow_insecure_defaults` 只放宽本地占位
+super token，不会跳过端口、API key 和精确 http(s) origin 校验。`assets/` 不属于 Git，
 部署脚本必须先准备外部卡牌资源。
 
 ## 9. 验收命令

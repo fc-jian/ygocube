@@ -86,7 +86,7 @@ srvpro services and configured test credentials.
 Do not commit `config.yaml`, administrator tokens, srvpro API keys, database
 files, or production card-image directories. Use `config.example.yaml` as the
 starting point and configure an exact CORS allowlist for the deployed web
-origin. The API rejects placeholder or duplicate administrator tokens unless
+origin. The API rejects placeholder super-administrator tokens and empty srvpro API keys unless
 the explicitly local-only insecure-default switch is enabled.
 
 ## Licensing

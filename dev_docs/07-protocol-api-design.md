@@ -19,13 +19,15 @@
 
 ### 2.1 鉴权
 
-- 玩家默认需要 `tid + pid + token`，可从 cookie（`yc_tid/yc_pid/yc_token`）、
-  `X-Tournament-Id/X-Player-Id/X-Token` 或 query/body 传递。
+- 玩家默认需要 `tid + pid + token`。比赛路由以 path 中的 `tid` 为准；浏览器使用
+  按比赛隔离的 `yc_pid_<tid>/yc_token_<tid>` cookie，普通 fetch 也可使用
+  `X-Tournament-Id/X-Player-Id/X-Token`。旧全局 cookie/query/body 仅作兼容入口。
 - `/admin/*` 使用 `X-Admin-Token`：super token 管全部比赛/卡池，per-tournament
   admin token 只管对应比赛。
 - `POST /tournaments` 普通创建者必须同时使用 `X-Create-User` 与 `X-Create-Token`；
   super token 仍可直接创建。创建响应只返回一次明文 per-tournament admin token。
-- 比赛关闭 token 鉴权后只校验 tid+pid；super token 仍可作万能玩家 token。
+- 比赛关闭 token 鉴权后仍要求 pid 对应一名已报名且 active 的玩家；super token
+  仍可作万能玩家 token。
 - 失败统一为 `401 {ok:false, code:"AUTH_REQUIRED", fields:[...]}`。token 只存
   SHA-256 哈希，无法读取旧值，只能重置。
 
@@ -42,7 +44,7 @@ ASCII 字母、数字、`.`、`_`、`-`；数据库只保存 token 哈希。比�
 name, maxPlayers, mode(single|match), cardPool
 packSize, packSizeMultiple(legacy), packCount, packStrategy, extraRatioPercent
 dropMode(legacy), dropPublic, draftMode, evenPackCount
-pickSeconds, reserveSeconds, reseatEachRound
+pickSeconds, pauseSeconds, reserveSeconds, reseatEachRound
 deckbuildingSeconds(null=无限), mainMin, mainMax, extraMax, sideMax, maxCopies
 timeLimit
 matchFormat(round_robin|swiss|double_elimination)
@@ -54,6 +56,10 @@ swissRoundCount, playoffSize
 创建时默认生成 `4×玩家数` 个牌堆（卡池不足时按完整堆数减少轮数），并按人数写入推荐赛制：
 3--8 人为瑞士 3 轮无淘汰（2 人因无法安排三轮不重复对手而推荐单循环），9--16 瑞士 4 轮 Top 4，17+ 瑞士
 `ceil(log2(n))+1` 轮 Top 8。首场对局生成后赛制锁定。
+
+所有写入字段都做运行时白名单、整数/布尔/枚举与交叉约束校验；当前硬上限为
+32 名玩家、1000 张/堆、10000 堆、单区 250 张和 7 天计时。未知字段与 NaN/小数
+等非预期数值返回 `BAD_PAYLOAD`，不会直接写入事件日志。
 
 `extraRatioPercent` 为可选整数 `0--100`。非空时每堆额外卡数按实际堆大小四舍五入，
 主卡/额外卡分别随机取出后合并混洗，并覆盖 `packStrategy`；最后短堆按实际大小计算。
@@ -89,7 +95,7 @@ swissRoundCount, playoffSize
 | `GET /t/:tid/deck.ydk` | 下载 `cube-deck-<tid>-<pid>-<timestamp>.ydk` |
 | `GET /t/:tid/matches` | 当前玩家全部对局和本桌 room info |
 | `GET /t/:tid/ranking` | 公开积分/净胜局/OMW 排名 |
-| `GET /t/:tid/stream` | SSE，需玩家身份 query 参数 |
+| `GET /t/:tid/stream` | SSE，使用按比赛隔离的身份 cookie；token 不写入 URL |
 | `POST /cube/result` | srvpro webhook；需 `X-Cube-Api-Key`，幂等处理 |
 
 小世界独立工具不属于比赛玩家接口，不需要 tournament/player/token 鉴权：
@@ -168,12 +174,16 @@ swissRoundCount, playoffSize
 
 ```json
 {
-  "room_name": "CUBE-1-1-1-ember",
+  "room_name": "CUBE-01a2b3c4d5e6f7",
+  "request_id": "t:1:m:10:01a2b3c4d5e6f7",
   "hostinfo": {"mode": 1, "rule": 5, "lflist": -1, "duel_rule": 5,
     "start_lp": 8000, "start_hand": 5, "draw_count": 1, "time_limit": 180},
   "deck_size": {"main_min": 40, "main_max": 60, "extra_max": 30, "side_max": 30},
-  "players": [{"player_id":"alice","name_vpass":"alice"}],
-  "cube_decks": {"alice": {"main": [123], "side": [], "filename":"cube-deck-1-alice-20260809120000"}}
+  "players": [{"player_id":"alice","name_vpass":"alice"}, {"player_id":"bob","name_vpass":"bob"}],
+  "cube_decks": {
+    "alice": {"main": [123], "side": [], "filename":"cube-deck-1-alice-20260809120000"},
+    "bob": {"main": [456], "side": [], "filename":"cube-deck-1-bob-20260809120000"}
+  }
 }
 ```
 
@@ -181,8 +191,12 @@ swissRoundCount, playoffSize
 `lockedAt`），由服务端在对局生成时固定。房间建立重试或玩家重新加入同一房间不得
 按当前时间重新命名，以保证一场对局每名玩家只对应一个同步卡组文件。
 
-成功返回 `{ok:true,room_name,port}`；重复 room name 返回已有房间。srvpro 会强制
-`no_check_deck=true`、保存 replay，并等待宿主端口，超时返回 `ROOM_TIMEOUT`。
+`room_name` 是 `CUBE-` 加 14 位 base36 稳定摘要，总长 19 个 ASCII 字符，以兼容
+标准协议的 `pass[20]`；match 归属由 API 按数据库中的精确值反查，webhook 不解析
+其中的 tid/round/table。成功返回 `{ok:true,room_name,port}`。`room_name`/`request_id` 与规范化请求指纹共同
+保证重试幂等（并发重试也等待同一宿主）；同名不同请求或 request id 复用返回 409。srvpro 会强制 `no_check_deck=true`、保存
+replay，并等待宿主端口，超时返回 `ROOM_TIMEOUT`。请求体最大 1 MiB；玩家数为
+2--4，字符串/卡号/hostinfo/deck size 均在建房前严格校验。
 
 ### 3.2 `GET /cube/room_status`
 
@@ -195,10 +209,10 @@ body `{room_name}`。srvpro 调用 `room.delete()`；结果 webhook 仍会按配
 
 ### 3.4 `POST /cube/result` webhook
 
-srvpro 发送 `room_name/start/end/players/first/wins/replays`；每个 player 含
-`player_id/name_vpass/score/deck/deck_history`。cube API 要求相同 API key，按
-room name 幂等记录，成功响应 `{ack:true}`。未知 room、非法 payload 和重复结果
-分别返回明确错误，不应重复结算。
+srvpro 发送精简的 `room_name/start/end/players/first/wins`；每个 player 只含
+结算所需的 `player_id/name_vpass/score`，不携带 deck、history 或 replay。cube API
+要求相同 API key，按 room name 幂等记录，成功响应 `{ack:true}`。未知 room、
+非法/超界比分会拒绝或标记房间故障，不能写入异常积分；重复结果不重复结算。
 
 ## 4. srvpro ↔ ygopro
 
@@ -206,20 +220,23 @@ room name 幂等记录，成功响应 `{ack:true}`。未知 room、非法 payloa
 
 ```text
 1..12 传统参数
-13    main_min
-14    main_max
-15    extra_max
-16    side_max
-17..  replay seed（如有）
+13    --cube-deck-limits
+14    main_min
+15    main_max
+16    extra_max
+17    side_max
+18..  replay seed（如有）
 ```
 
-第 13--16 项仅 Cube 房间追加；四项必须全为数字。扩展值缺失或非法时宿主回退
-40/60/15/15。
+显式 marker 仅 Cube 房间追加；四项必须是 `0--250` 的十进制整数且
+`main_min<=main_max`，缺失或非法时宿主拒绝启动。旧的第 13--16 项纯数字布局继续
+兼容。seed 解码长度必须精确，非法 seed 被忽略并记录不含 secret 的诊断。
 
 ### 4.2 `STOC_CUBE_DECK (0xA)`
 
 消息 body 为 `uint32 main_count`（含额外）、`uint32 side_count`、code 数组，
-后接可选 `uint16 filename_len + ASCII filename`。安全文件名必须匹配
+后接可选 `uint16 filename_len + ASCII filename`。玩家 `player_id/name_vpass` 必须为
+1--19 位可打印 ASCII 且不含 `$`，对应 `CTOS_PlayerInfo.name[20]` 的协议上限。安全文件名必须匹配
 `cube-deck-<tid>-<pid>-<timestamp>`；客户端写 `.ydk`、选择并锁定。旧客户端
 忽略新增消息，但仍可由 srvpro 开局覆盖。
 
@@ -255,8 +272,10 @@ tournamentCount,sampleCount}[]` 按 exact code 返回；抓位从 1 开始，百
 | `DECK_INVALID` / `WRONG_ZONE` / `CARD_NOT_IN_POOL` | 构筑不合规 |
 | `PACKCOUNT_NOT_MULTIPLE` | 牌堆数违反 `evenPackCount` |
 | `NO_VALID_PAIRING` | 瑞士无法生成无重复对手的完整配对 |
+| `PAIRING_SEARCH_LIMIT` | 瑞士回溯达到时间/节点保护上限，HTTP 503，可重试或调整赛制 |
+| `RESULT_ROUND_LOCKED` | 后续轮已存在，历史赛果只能通过回溯修改 |
 | `FORMAT_LOCKED` / `BAD_MATCH_FORMAT` | 赛制已锁定或参数非法 |
-| `POOL_EXISTS` / `POOL_NOT_FOUND` / `BAD_POOL_IMPORT` / `BAD_POOL_NAME` | 卡池操作错误 |
+| `POOL_EXISTS` / `POOL_NOT_FOUND` / `BAD_POOL_IMPORT` / `BAD_POOL_NAME` / `POOL_IN_USE` | 卡池操作错误 |
 | `BAD_CREATE_USERNAME` / `CREATE_USER_EXISTS` / `CREATE_USER_NOT_FOUND` | 创建权限用户错误 |
 | `INVALID_API_KEY` / `SRVPRO_ERROR` | srvpro 连接或鉴权失败 |
 

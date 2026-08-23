@@ -21,6 +21,7 @@ node_modules/
 cube/apps/api/dist/
 cube/apps/web/.next/
 cube/apps/web/out/
+cube/packages/*/dist/
 *.tsbuildinfo
 
 # Local card database, scripts, expansions, pictures, and generated thumbnails.

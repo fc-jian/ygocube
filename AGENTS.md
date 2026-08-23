@@ -15,8 +15,8 @@ ygocube/
 
 ## 架构要点（必须先读）
 
-- srvpro 每房间 spawn 一个 ygopro 无头宿主进程（`ygopro-server.coffee:1287`，参数 12 位 + cube 扩展 4 位，端口从 stdout 读），srvpro 代理玩家流量并追踪比分/卡组。
-- deck size 限制在 ygopro 侧是编译期常量（`gframe/deck_manager.h:17-20`），cube 需求 = 运行时化（宿主 spawn 参数位 13~16：main_min/main_max/extra_max/side_max）。
+- srvpro 每房间 spawn 一个 ygopro 无头宿主进程（传统参数 12 位；Cube 追加 `--cube-deck-limits` + 4 个限制，端口从 stdout 读），srvpro 代理玩家流量并追踪比分/卡组。
+- deck size 上限由 ygopro 宿主运行时化；新协议参数位 13 为 marker、14~17 为 `main_min/main_max/extra_max/side_max`，旧 13~16 纯数字布局仍兼容。
 - srvpro 房间名即规则字符串（Room 构造器解析 token：LP/TIME/START/DRAW/NOCHECK 等）；结果上报走 `room.delete()` webhook（arena_mode.post_score 先例，axios + 重试 10 次）。
 - 断线重连 srvpro 已有（`settings.modules.reconnect` + UPDATE_DECK 卡组比对）。
 - ygopro 协议 struct 定义在 `gframe/network.h`（带 static_assert），srvpro 侧对应 `data/proto_structs.json`，**两侧必须同步**。
@@ -32,7 +32,7 @@ ygocube/
 - **协议兼容**：ygopro 消息结构只增不改；宿主新增参数追加在 spawn 参数尾部；老组合必须行为不变。
 - **接口契约**：三侧接口以 `dev_docs/07-protocol-api-design.md` + `cube/packages/shared` 为准，改任何一侧先更新契约。
 - **选牌信息隐藏**：玩家只能看到自己当前可选牌堆的卡牌内容，其余只有数量；**SSE 广播事件一律不含卡牌/卡组内容与其他对局的房间名**（客户端 refetch 本人状态）。
-- **选牌模式（draftMode）**：默认 `passing`（每玩家 FIFO 牌堆队列，**按轮发堆**：一轮全空才发下一轮；队首堆选 1 张顺时针传递；各自独立计时 + 每玩家保留时间 `reserveSeconds` 默认 300s，超时先扣 reserve 耗尽才自动选；`evenPackCount` 默认开 = 堆数须为人数整数倍）；`serial` 为旧全局串行（仅 raw config 可设）。运行时按 `packs_created` 事件是否带 `queues` 分派，旧比赛回放行为不变。
+- **选牌模式（draftMode）**：默认 `passing`（每玩家 FIFO 牌堆队列，**按轮发堆**：一轮全空才发下一轮；队首堆选 1 张顺时针传递；各自独立计时 + 每玩家保留时间 `reserveSeconds` 默认 400s，超时先扣 reserve 耗尽才自动选；`evenPackCount` 默认开 = 堆数须为人数整数倍）；`serial` 为旧全局串行（仅 raw config 可设）。运行时按 `packs_created` 事件是否带 `queues` 分派，旧比赛回放行为不变。
 - **每玩家独立 URL**：玩家页路由为 `/t/:tid/{draft,deck,matches}/:pid`；token 按 `localStorage yc_token_<tid>_<pid>` 存储；缺失弹输入框；super token 可作万能玩家 token；tournament 关闭鉴权（`/admin/t/:tid/security`）则不校验。
 - **超时自动处理**：选牌超时 = 服务器随机选（记 `auto_picked`）；构筑默认不限时，由管理员手动进入对战，显式设置构筑限时时超时 = 随机补/删至合法（记日志）。暂停/冻结必须保存并原样恢复剩余倒计时。
 
@@ -40,7 +40,7 @@ ygocube/
 
 | 场景 | 文件 |
 |---|---|
-| ygopro 宿主参数解析 | `ygopro/gframe/gframe.cpp`（server 分支 main，argc>=17 解析扩展参数） |
+| ygopro 宿主参数解析 | `ygopro/gframe/gframe.cpp`、`server_args.h`（marker/legacy 限制参数与 seed） |
 | ygopro deck 校验 | `ygopro/gframe/deck_manager.cpp` CheckDeck/LoadDeck；常量在 deck_manager.h |
 | ygopro 协议 | `ygopro/gframe/network.h`（含 cube 自定义 STOC_CUBE_DECK=0xA，卡组推送） |
 | ygopro 客户端卡组锁定 | `ygopro/gframe/duelclient.cpp`（STOC_CUBE_DECK case）、`menu_handler.cpp`/`deck_con.cpp`（锁定与 siding 自检） |
@@ -58,6 +58,8 @@ ygocube/
 bash scripts/build-ygopro.sh            # 无头宿主：产物 ygopro/bin/release/ygopro → 放 srvpro/ygopro/
 bash scripts/build-ygopro.sh --client --no-audio --build-freetype --build-png --build-jpeg --max-extra=30 --max-side=30
                                         # GUI 客户端：产物 ygopro/bin/release/YGOPro（GUI 依赖源码需按 .github/workflows/build.yml 下载到 ygopro/{irrlicht,freetype,png,jpeg}）
+bash scripts/build-ygopro.sh --client --build-freetype --build-png --build-jpeg --build-opus-vorbis
+                                        # Linux 有声 GUI：另需上游指定版本的 miniaudio/Ogg/Opus/Opusfile/Vorbis 源码
 
 # srvpro（cube 分支）
 npm install && npx coffee -c ygopro-server.coffee cube.coffee   # 编译；node ygopro-server.js 启动

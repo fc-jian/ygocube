@@ -6,18 +6,21 @@
 
 ## 1. 宿主参数与运行时 deck limit
 
-传统宿主参数为 12 项。Cube srvpro 在末尾追加：
+传统宿主参数为 12 项。新版 Cube srvpro 在末尾追加显式 marker 与四个限制：
 
 | 参数 | 含义 | 默认 |
 | --- | --- | ---: |
-| 13 | `main_min` | 40 |
-| 14 | `main_max` | 60 |
-| 15 | `extra_max` | 15（Cube API 可传 30） |
-| 16 | `side_max` | 15（Cube API 可传 30） |
+| 13 | `--cube-deck-limits` | - |
+| 14 | `main_min` | 40 |
+| 15 | `main_max` | 60 |
+| 16 | `extra_max` | 15（Cube API 可传 30） |
+| 17 | `side_max` | 15（Cube API 可传 30） |
 
-`gframe.cpp` 只在参数 13--16 全部为数字时调用
-`deckManager.SetDeckLimits()`，replay seed 从第 17 项开始；旧版 spawn 或
-普通房间不带扩展时保持编译期默认值。
+`gframe/server_args.h` 负责纯函数解析并校验整数范围 `0--250` 与
+`main_min<=main_max`；显式 marker 缺项或非法时宿主拒绝启动，不能静默退回默认值。
+replay seed 从第 18 项开始。为滚动升级兼容，旧版“四个纯数字”布局仍可用，seed
+从第 17 项开始；普通房间不带扩展时保持编译期默认值。seed 必须解码为精确长度，
+并以相对 seed 下标写入，避免扩展参数导致越界。
 
 `DeckManager` 的当前语义：
 
@@ -77,10 +80,14 @@ bash scripts/build-ygopro.sh
 `ygopro/bin/release/ygopro`；部署时复制到 `srvpro/ygopro/ygopro`。启动示例：
 
 ```text
-./ygopro 0 -1 0 1 5 T F 8000 5 1 180 1 40 60 30 30
+./ygopro 0 -1 0 1 5 T F 8000 5 1 180 1 --cube-deck-limits 40 60 30 30
 ```
 
 宿主应打印动态端口，且通过 12 项旧参数启动时行为不变。
+
+版本协议号 `PRO_VERSION` 始终保持与合入的上游一致；Cube 身份只追加显示/文件
+版本后缀。本轮基于上游 `1.036.2`，客户端标题与 Windows 字符串版本为
+`1.036.2-cube`，数值 `FILEVERSION/PRODUCTVERSION` 和网络主版本不另起分叉。
 
 ### 4.2 Windows GUI 客户端
 
@@ -95,6 +102,12 @@ bash scripts/build-ygopro.sh
 4. 启动、加入普通房间、加入 Cube 长密码房间、接收 `STOC_CUBE_DECK` 和 BO3
    siding 都做一次烟测。
 
+Linux 有声 GUI 联调使用 `scripts/build-ygopro.sh --client --build-freetype
+--build-png --build-jpeg --build-opus-vorbis`；需要与上游 CI 一致的 miniaudio、
+Ogg/Opus/Opusfile/Vorbis 源码。验收生成的 `YGOPro.make` 必须同时含
+`YGOPRO_USE_AUDIO`、`YGOPRO_USE_MINIAUDIO` 和
+`YGOPRO_MINIAUDIO_SUPPORT_OPUS_VORBIS`，不能仅凭产物文件名判断声音已启用。
+
 ### 4.3 协议回归
 
 - `network.h` 结构大小检查必须通过；srvpro `data/proto_structs.json` 不应
@@ -108,7 +121,7 @@ bash scripts/build-ygopro.sh
 
 | 文件 | 责任 |
 | --- | --- |
-| `gframe/gframe.cpp` | 解析参数 13--16、区分 replay seed |
+| `gframe/gframe.cpp`、`server_args.h` | 解析显式/legacy 限制参数、校验 replay seed |
 | `gframe/deck_manager.h/.cpp` | 运行时限制、LoadDeck/LoadSide |
 | `gframe/network.h` | `STOC_CUBE_DECK` ID |
 | `gframe/duelclient.cpp` | 长密码、同步卡组、锁定与 siding 快照 |

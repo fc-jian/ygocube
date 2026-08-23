@@ -81,8 +81,8 @@ main 不足下限则标为 DSQ。
 
 ## 4. 对局与排名页
 
-对局页只显示当前玩家相关桌号、对手、房间名、连接状态和比分。房间名含随机
-单词，玩家从 `/meta` 取得 srvpro 公网 host/game port，复制房间名后用 YGOPro
+对局页只显示当前玩家相关桌号、对手、房间名、连接状态和比分。房间名使用
+`CUBE-` 加稳定短摘要，玩家从 `/meta` 取得 srvpro 公网 host/game port，复制房间名后用 YGOPro
 客户端加入；不向玩家广播其他桌的房间名或 deck。
 
 排名页显示胜 3、平 1、负 0、净胜局和 OMW 等公开排名字段。SSE 收到对局事件后
@@ -142,7 +142,9 @@ Link 标记、字段名称以及 alias 规则关系。字段 code 仍保留在�
 ## 7. 实时性与脱敏
 
 `useTournamentStream()` 监听 `phase`、`pack`、`pick`、`pause`、`deck`、`match`、
-`notice`，断线指数退避重连。事件只包含状态摘要：
+`notice`，断线指数退避重连且卸载时取消待执行重试。SSE 使用
+`yc_pid_<tid>/yc_token_<tid>` cookie，不把 token 拼入 URL；回调放在 ref 中，页面
+render 不会反复重建连接。事件只包含状态摘要：
 
 - `pick` 不含 card code；
 - `deck` 不含卡组内容；

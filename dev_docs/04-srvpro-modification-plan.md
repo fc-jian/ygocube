@@ -15,13 +15,13 @@ SIDE<max>       / SD<max>
 ```
 
 缺省值是 40/60/15/15；部分 token 会经过 `normalizeDeckSize()` 补齐其余字段。
-`Room.spawn()` 在传统 12 项参数后追加四个数值 deck limit，顺序必须与
+`Room.spawn()` 在传统 12 项参数后追加 `--cube-deck-limits` 与四个数值，顺序必须与
 `dev_docs/03` 和 `gframe.cpp` 一致。只有含 `deck_size` 的 Cube 房间追加参数，
 普通旧房间不受影响。
 
-当前分支还把房间最终规则统一为 `lflist=-1`、`duel_rule=5`（新大师规则布局），
-轮抽环境不使用禁限卡表；若部署需要传统 srvpro 规则，应使用未合入 Cube 扩展
-的上游构建或另行回滚该策略。
+Cube 控制器直建房强制 `lflist=-1`、`duel_rule=5`（新大师规则布局），轮抽环境
+不使用禁限卡表；普通 srvpro 房间继续保留自身规则。密码中的 `CUBE` shorthand
+只展开为 `M,TM999,EX30,SD30`，不会冒充控制器房间触发 webhook/固定卡组逻辑。
 
 ## 2. Cube HTTP API
 
@@ -34,8 +34,17 @@ SIDE<max>       / SD<max>
 | `GET /cube/room_status?room_name=` | 返回 established、port、duel stage、连接玩家和 scores |
 | `POST /cube/close_room` | 关闭房间并走 `Room.delete()` 结果流程 |
 
+请求体上限 1 MiB，未知字段、超界 hostinfo/deck size、非法卡号/文件名、重复玩家
+都会在 spawn 前返回 `BAD_PAYLOAD`。`room_name` 必须使用 `CUBE-` 开头的 ASCII
+分段格式且不超过 19 个字符（兼容标准 `CTOS_JoinGame.pass[20]`），当前 API 生成
+`CUBE-<14位base36稳定摘要>`；`request_id` 必填。同一 request/name 与
+相同指纹会等待同一宿主建立后幂等返回，冲突 payload 或复用 request id 返回 409，
+不会重复 spawn。直接建房同样受 `max_mem_percentage` 与 `max_rooms_count` 保护，
+容量不足时在 spawn 前返回 `SERVER_BUSY`（HTTP 503）。
+
 `create_room` 中 `players[].name_vpass` 是 YGOPro 客户端实际输入的昵称，必须是
-ASCII 且与客户端一致；服务器根据 `cube_player_id_by_name` 将其映射到 Cube
+1--19 位 ASCII、不得包含密码分隔符 `$`，且与客户端一致（`CTOS_PlayerInfo.name[20]`
+需保留结尾 NUL）；服务器根据 `cube_player_id_by_name` 将其映射到 Cube
 player id。Cube 创建会强制 `no_check_deck=true`、开启 replay 保存，并在
 宿主层仍执行运行时 deck limit/未知卡检查。
 
@@ -81,16 +90,19 @@ cube-deck-<tid>-<pid>-<timestamp>
 任一步失败都向客户端发送诊断错误并取消加入。这样超限房间密码不会悄悄
 失效，也不会因多个可见相同前缀产生错误路由。
 
+控制器比赛房间仍主动限制为 19 个 ASCII 字符，使未实现扩展包的标准客户端也能
+准确加入；长密码扩展仅用于普通自定义房间，不作为控制器标识的必要条件。
+
 ## 5. 结果 webhook 与重试
 
 Cube 房间删除时，如果 `settings.modules.cube.enabled`，srvpro POST 到
-`webhook_url`：房间时间、Cube player id、`name_vpass`、score、当前 deck、
-deck history、first/wins 和 replay base64。请求带 `X-Cube-Api-Key`，沿用
-`utility.retry` 最多重试 10 次；cube API 以 room name 幂等处理重复结果。
+`webhook_url`：只含房间起止时间与 Cube player id、`name_vpass`、score 等结算
+所需字段，不发送 deck、deck history 或 replay base64。请求带 `X-Cube-Api-Key`，
+带超时和 128 KiB 响应上限，沿用 `utility.retry` 最多重试 10 次；cube API 以
+room name 幂等处理重复结果。
 
-未启用 Cube 模块时不调用该 webhook。普通 srvpro 的 arena/challonge/云回放
-逻辑保持原分支行为，但要注意当前 `cube` 分支对房间规则的 MR5/no-banlist
-归一化是全局代码路径的一部分。
+未启用 Cube 模块时不调用该 webhook。普通 srvpro 的房间规则、arena/challonge/
+云回放逻辑保持原分支行为。
 
 ## 6. 配置与构建
 
@@ -101,7 +113,8 @@ deck history、first/wins 和 replay base64。请求带 `X-Cube-Api-Key`，沿�
   "enabled": false,
   "api_key": "",
   "webhook_url": "",
-  "room_wait_ms": 10000
+  "room_wait_ms": 10000,
+  "webhook_timeout_ms": 5000
 }
 ```
 
@@ -117,8 +130,8 @@ npx coffee -c ygopro-server.coffee cube.coffee
 
 ## 7. 验收清单
 
-1. 使用 `/cube/create_room` 建房，响应含动态端口，宿主参数含 13--16 四个
-   deck limit。
+1. 使用 `/cube/create_room` 建房，响应含动态端口，宿主参数含 marker 与四个
+   deck limit；相同 `request_id` 重试只存在一个宿主进程。
 2. 用普通、长密码和错误长密码各加入一次；错误输入必须有明确错误。
 3. 开局上传任意卡组都被固定卡组替换；siding 合法换区成功，添加未知卡失败。
 4. 客户端收到 `STOC_CUBE_DECK` 后生成命名 ydk、锁定选组；旧客户端仍能靠
