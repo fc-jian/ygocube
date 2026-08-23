@@ -20,6 +20,8 @@ const CREATE = process.env.CUBE_CREATE_TOKEN || SUPER;
 const CREATE_USER = process.env.CUBE_CREATE_USER;
 const PROTO_VERSION = 0x1362;
 const PLAYERS = Array.from({ length: parseInt(process.env.SIM_PLAYERS || '8', 10) }, (_, i) => `bot${i + 1}`);
+const SIM_POOL = process.env.SIM_POOL || `test-fullsim-pool-${process.pid}-${Date.now().toString(36)}`;
+const SIM_POOL_SIZE = parseInt(process.env.SIM_POOL_SIZE || String(Math.max(PLAYERS.length * 4 * 24, 120)), 10);
 // tournament config overrides, e.g. SIM_CONFIG='{"mainMax":120,"timeLimit":999}'
 const SIM_CONFIG = JSON.parse(process.env.SIM_CONFIG || '{}');
 // SIM_FILL=max fills every main deck up to mainMax (oversized-deck testing)
@@ -386,8 +388,9 @@ async function playMatches(tid, outDir) {
     const matches = admin.matches.filter((m) => m.round === round);
     const pending = matches.filter((m) => m.playerB !== '(bye)' && m.resultA === null);
     if (pending.length === 0) {
-      log(`round ${round} complete`);
-      await sleep(2000);
+      log(`round ${round} complete; administrator confirms advancement`);
+      await apiCall('POST', `/admin/t/${tid}/matches/advance`, { admin: true });
+      await sleep(1000);
       continue;
     }
     // wait for room names (rooms are created async by the api)
@@ -417,7 +420,12 @@ async function playMatches(tid, outDir) {
       360000,
       4000,
     );
-    await Promise.race([Promise.all(bots), sleep(30000)]);
+    let botWaitTimer;
+    await Promise.race([
+      Promise.all(bots),
+      new Promise((resolve) => { botWaitTimer = setTimeout(resolve, 30000); }),
+    ]);
+    if (botWaitTimer) clearTimeout(botWaitTimer);
     log(`round ${round} results collected`);
   }
 }
@@ -429,22 +437,36 @@ async function playMatches(tid, outDir) {
   await apiCall('GET', '/health');
   log('api healthy');
 
+  const pools = await apiCall('GET', '/admin/pools', { admin: true });
+  if (!pools.some((pool) => pool.name === SIM_POOL)) {
+    await apiCall('POST', '/admin/pools/random', {
+      admin: true,
+      body: { name: SIM_POOL, size: SIM_POOL_SIZE },
+    });
+    log(`created isolated random pool ${SIM_POOL} (${SIM_POOL_SIZE} cards)`);
+  }
+
   const created = await apiCall('POST', '/tournaments', {
     create: true,
     body: {
-      name: `fullsim-${Date.now().toString(36)}`,
+      name: `test-fullsim-${Date.now().toString(36)}`,
       maxPlayers: PLAYERS.length,
       mode: 'match',
-      cardPool: 'kuro750',
-      packSizeMultiple: 3,
+      cardPool: SIM_POOL,
+      packSize: 24,
+      packCount: PLAYERS.length * 4,
       pickSeconds: 30,
-      deckbuildingSeconds: 600,
+      reserveSeconds: 400,
+      deckbuildingSeconds: null,
       mainMin: 40,
       mainMax: 60,
-      extraMax: 15,
-      sideMax: 15,
+      extraMax: 30,
+      sideMax: 30,
       maxCopies: 3,
-      dropLeftover: true,
+      dropMode: 'drop_leftover',
+      matchFormat: 'swiss',
+      swissRoundCount: Math.min(3, Math.max(1, PLAYERS.length - 1)),
+      playoffSize: 0,
       ...SIM_CONFIG,
     },
   });
@@ -456,8 +478,12 @@ async function playMatches(tid, outDir) {
   try {
     for (const pid of PLAYERS) {
       await apiCall('POST', `/t/${tid}/join`, { body: { player_id: pid, display_name: pid } });
+      await apiCall('POST', `/t/${tid}/player/ready`, {
+        player: { tid, pid },
+        body: { ready: true },
+      });
     }
-    log(`${PLAYERS.length} players joined`);
+    log(`${PLAYERS.length} players joined and ready`);
     await apiCall('POST', `/admin/t/${tid}/start_draft`, { admin: true });
 
     const afterDraft = await runDraft(tid);
@@ -468,6 +494,11 @@ async function playMatches(tid, outDir) {
       }, 60000);
     }
     await buildDecks(tid);
+    await apiCall('POST', `/admin/t/${tid}/phase`, {
+      admin: true,
+      body: { status: 'matches', round: 1, confirm_invalid_decks: true },
+    });
+    log('administrator advanced deckbuilding to matches');
 
     const finalState = await playMatches(tid, outDir);
 
@@ -483,7 +514,7 @@ async function playMatches(tid, outDir) {
     const lines = [];
     lines.push(`# 模拟赛结果：tournament ${tid} (${finalState.name})`);
     lines.push('');
-    lines.push(`- 卡池: kuro750 · 8 人 · BO3 (match) · 瑞士轮`);
+    lines.push(`- 卡池: ${SIM_POOL} · ${PLAYERS.length} 人 · BO3 (match) · 瑞士轮`);
     lines.push(`- 耗时: ${Math.round((Date.now() - t0) / 1000)}s`);
     lines.push('');
     lines.push('## 最终排名');

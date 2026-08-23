@@ -10,7 +10,18 @@ const SRVPRO_PORT = parseInt(process.argv[3] || '7911', 10);
 const HTTP_PORT = parseInt(process.argv[4] || '7922', 10);
 const API_KEY = process.argv[5] || 'cube-test-key';
 const VERSION = 4962; // must match srvpro settings.version (PRO_VERSION 0x1362)
-const ROOM_BASE = 'CUBE-E2E-' + Date.now().toString(36);
+const TEST_TID = Date.now();
+let roomSequence = 0;
+function controllerRoom(label) {
+  roomSequence += 1;
+  // CTOS_JoinGame pass[20] permits 19 visible UTF-16 code units. Include the
+  // label in the digest input, but keep the wire room name compact.
+  const key = require('crypto').createHash('sha256')
+    .update(`${TEST_TID}:${roomSequence}:${label}`)
+    .digest('hex')
+    .slice(0, 14);
+  return `CUBE-${key}`;
+}
 
 const { main, extra } = JSON.parse(fs.readFileSync('/tmp/cube-cardcodes.json', 'utf8'));
 
@@ -93,13 +104,28 @@ async function waitPortClosed(port, timeoutMs = 5000) {
 }
 
 // ---- one player session: join room, upload deck (client-side), ready ----
-function play(nameVpass, roomName, deck, timeoutMs = 8000) {
+function play(nameVpass, roomName, deck, timeoutMs = 3000) {
   return new Promise((resolve, reject) => {
     const sock = net.connect(SRVPRO_PORT, SRVPRO_HOST);
     const events = [];
     let buf = Buffer.alloc(0);
-    let failed = false;
-    const fail = (e) => { if (!failed) { failed = true; sock.destroy(); reject(e); } };
+    let settled = false;
+    let readySent = false;
+    let completionTimer = null;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (completionTimer) clearTimeout(completionTimer);
+      sock.destroy();
+      resolve(events);
+    };
+    const fail = (e) => {
+      if (settled) return;
+      settled = true;
+      if (completionTimer) clearTimeout(completionTimer);
+      sock.destroy();
+      reject(e);
+    };
     sock.on('error', fail);
     sock.on('data', (chunk) => {
       buf = Buffer.concat([buf, chunk]);
@@ -107,8 +133,14 @@ function play(nameVpass, roomName, deck, timeoutMs = 8000) {
         const len = buf.readUInt16LE(0);
         if (buf.length < 2 + len) break;
         const type = buf.readUInt8(2);
-        events.push({ type, body: buf.slice(3, 2 + len) });
+        const event = { type, body: buf.slice(3, 2 + len) };
+        events.push(event);
         buf = buf.slice(2 + len);
+        if (readySent && type === 0x21 && [0x9, 0xa].includes(event.body.readUInt8(0) & 0xf)) {
+          // Rejections send ERROR_MSG immediately after HS_PLAYER_CHANGE; leave
+          // a short drain window so diagnostics retain both packets.
+          setTimeout(finish, 50);
+        }
       }
     });
     (async () => {
@@ -119,10 +151,9 @@ function play(nameVpass, roomName, deck, timeoutMs = 8000) {
       await wait(300);
       sock.write(updateDeck(deck.main, deck.side));
       await wait(100);
+      readySent = true;
       sock.write(READY);
-      await wait(timeoutMs);
-      sock.destroy();
-      resolve(events);
+      completionTimer = setTimeout(finish, timeoutMs);
     })().catch(fail);
   });
 }
@@ -151,12 +182,23 @@ const deckTruncated = { main: main.slice(0, 55), side: [] };
 const deckUnknown = { main: validMain.slice(0, 39).concat([99999999]), side: [] };
 
 function baseRoom(name, decks) {
+  const players = ['alice', 'bob'];
+  const normalizedDecks = {};
+  for (const playerId of players) {
+    const source = decks[playerId] || { main: validMain, side: [] };
+    normalizedDecks[playerId] = {
+      main: source.main,
+      side: source.side,
+      filename: `cube-deck-e2e-${playerId}-${TEST_TID}`,
+    };
+  }
   return {
     room_name: name,
+    request_id: `e2e:${name}`,
     hostinfo: { mode: 1, rule: 5, lflist: -1, duel_rule: 3, start_lp: 8000, start_hand: 5, draw_count: 1, time_limit: 180 },
     deck_size: { main_min: 40, main_max: 50, extra_max: 10, side_max: 5 },
-    players: [{ player_id: 'alice', name_vpass: 'alice$pw1' }],
-    cube_decks: decks,
+    players: players.map((playerId) => ({ player_id: playerId, name_vpass: playerId })),
+    cube_decks: normalizedDecks,
   };
 }
 
@@ -168,36 +210,44 @@ function baseRoom(name, decks) {
   };
 
   // 1. valid recorded deck; client uploads garbage -> overridden, ready accepted
-  let room = baseRoom(`${ROOM_BASE}-1`, { alice: { main: validMain, side: extra.slice(0, 5) } });
+  const room1Name = controllerRoom('valid');
+  let room = baseRoom(room1Name, { alice: { main: validMain, side: extra.slice(0, 5) } });
   let r = await api('POST', '/cube/create_room', room);
   check('R1 create', r.ok === true, JSON.stringify(r));
-  const ev1 = await play('alice$pw1', `${ROOM_BASE}-1`, { main: [8964, 8964, 8964], side: [] });
+  const retry = await api('POST', '/cube/create_room', room);
+  check('R1 idempotent retry reuses host', retry.ok === true && retry.port === r.port, JSON.stringify(retry));
+  const conflict = await api('POST', '/cube/create_room', { ...room, deck_size: { ...room.deck_size, main_max: 51 } });
+  check('R1 conflicting retry rejected', conflict.ok === false && conflict.code === 'ROOM_CONFLICT', JSON.stringify(conflict));
+  const ev1 = await play('alice', room1Name, { main: [8964, 8964, 8964], side: [] });
   check('R1 ready accepted (deck overridden)', hsStatus(ev1) === 0x9, JSON.stringify(dumpEvents(ev1)));
-  await api('POST', '/cube/close_room', { room_name: `${ROOM_BASE}-1` });
+  await api('POST', '/cube/close_room', { room_name: room1Name });
 
   // 2. recorded deck 39 main (< main_min 40) -> rejected even with no_check_deck=T
-  room = baseRoom(`${ROOM_BASE}-2`, { alice: { main: deck39.main, side: [] } });
+  const room2Name = controllerRoom('short');
+  room = baseRoom(room2Name, { alice: { main: deck39.main, side: [] } });
   r = await api('POST', '/cube/create_room', room);
   check('R2 create', r.ok === true, JSON.stringify(r));
-  const ev2 = await play('alice$pw1', `${ROOM_BASE}-2`, { main: [8964], side: [] });
+  const ev2 = await play('alice', room2Name, { main: [8964], side: [] });
   check('R2 rejected (MAINCOUNT)', hsStatus(ev2) === 0xa, JSON.stringify(dumpEvents(ev2)));
-  await api('POST', '/cube/close_room', { room_name: `${ROOM_BASE}-2` });
+  await api('POST', '/cube/close_room', { room_name: room2Name });
 
   // 3. recorded deck 55 main -> truncated to main_max=50 and accepted (runtime upper limit)
-  room = baseRoom(`${ROOM_BASE}-3`, { alice: { main: deckTruncated.main, side: [] } });
+  const room3Name = controllerRoom('truncate');
+  room = baseRoom(room3Name, { alice: { main: deckTruncated.main, side: [] } });
   r = await api('POST', '/cube/create_room', room);
   check('R3 create', r.ok === true, JSON.stringify(r));
-  const ev3 = await play('alice$pw1', `${ROOM_BASE}-3`, { main: [8964], side: [] });
+  const ev3 = await play('alice', room3Name, { main: [8964], side: [] });
   check('R3 accepted (truncated to 50)', hsStatus(ev3) === 0x9, JSON.stringify(dumpEvents(ev3)));
-  await api('POST', '/cube/close_room', { room_name: `${ROOM_BASE}-3` });
+  await api('POST', '/cube/close_room', { room_name: room3Name });
 
   // 4. recorded deck contains unknown card id -> rejected (ID validation)
-  room = baseRoom(`${ROOM_BASE}-4`, { alice: { main: deckUnknown.main, side: [] } });
+  const room4Name = controllerRoom('unknown');
+  room = baseRoom(room4Name, { alice: { main: deckUnknown.main, side: [] } });
   r = await api('POST', '/cube/create_room', room);
   check('R4 create', r.ok === true, JSON.stringify(r));
-  const ev4 = await play('alice$pw1', `${ROOM_BASE}-4`, { main: [8964], side: [] });
+  const ev4 = await play('alice', room4Name, { main: [8964], side: [] });
   check('R4 rejected (UNKNOWNCARD)', hsStatus(ev4) === 0xa, JSON.stringify(dumpEvents(ev4)));
-  await api('POST', '/cube/close_room', { room_name: `${ROOM_BASE}-4` });
+  await api('POST', '/cube/close_room', { room_name: room4Name });
 
   // 5. API auth: no key -> 401
   const noKey = await new Promise((resolve) => {
@@ -209,17 +259,15 @@ function baseRoom(name, decks) {
   });
   check('R5 401 without api key', noKey.status === 401, JSON.stringify(noKey));
 
-  // 6. extra/side over runtime limits -> truncated, accepted (extra_max=10, side_max=5)
-  room = baseRoom(`${ROOM_BASE}-6`, { alice: { main: validMain.concat(extra), side: main.slice(40, 48) } });
+  // 6. Controller payloads larger than the configured zones are rejected
+  // before spawn; ordinary rule-string rooms below still exercise host truncation.
+  room = baseRoom(controllerRoom('oversize'), { alice: { main: validMain.concat(extra), side: main.slice(40, 48) } });
   r = await api('POST', '/cube/create_room', room);
-  check('R6 create', r.ok === true, JSON.stringify(r));
-  const ev6 = await play('alice$pw1', `${ROOM_BASE}-6`, { main: [8964], side: [] });
-  check('R6 accepted (extra 12->10, side 8->5 truncated)', hsStatus(ev6) === 0x9, JSON.stringify(dumpEvents(ev6)));
-  await api('POST', '/cube/close_room', { room_name: `${ROOM_BASE}-6` });
+  check('R6 oversized controller deck rejected before spawn', r.ok === false && r.code === 'BAD_PAYLOAD', JSON.stringify(r));
 
   // 7. close an idle room before any player connects; this is the regression
   // that previously left an orphaned ygopro host listening on its port.
-  const closeProbeName = `${ROOM_BASE}-close-probe`;
+  const closeProbeName = controllerRoom('closeprobe');
   const closeProbe = await api('POST', '/cube/create_room', baseRoom(closeProbeName, {
     alice: { main: validMain, side: extra.slice(0, 5) },
   }));

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # srvpro cube integration E2E test (dev_docs/08 M2 DoD).
 # Prereqs: srvpro running with modules.cube enabled (config/config.json), webhook catcher
-# optional. Generates a card pool from the deployed cards.cdb, then drives the cube API
-# and the game protocol end-to-end. Exit 0 = all checks passed.
+# optional. When the host was linked against envs/ygocube, start srvpro with that lib
+# directory in LD_LIBRARY_PATH. Generates a card pool from the deployed cards.cdb, then
+# drives the cube API and game protocol end-to-end. Exit 0 = all checks passed.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
