@@ -7,10 +7,12 @@ import { DraftService } from './draft/draft.service';
 import { DecksService } from './decks/decks.service';
 import { MatchesService } from './matches/matches.service';
 import { CardsService } from './cards/cards.service';
-import { PoolsService } from './pools/pools.service';
+import { CardPickStatsService } from './cards/card-pick-stats.service';
+import { normalizePoolName, PoolsService } from './pools/pools.service';
 import { RealtimeService } from './realtime/realtime.service';
 import { config } from './config';
 import { loadState } from './events/events.service';
+import { getDb } from './db';
 import { CreateTournamentInput } from './tournaments/tournaments.service';
 import { cubeDeckFileBase } from './decks/deck-filename';
 import { cardStatusForDeckbuilding, cardsSeenByPlayer } from './cards/card-visibility';
@@ -26,6 +28,7 @@ export class ApiController {
     private cards: CardsService,
     private pools: PoolsService,
     private realtime: RealtimeService,
+    private cardStats?: CardPickStatsService,
   ) {}
 
   @Public()
@@ -45,6 +48,40 @@ export class ApiController {
   @Get('pools')
   listPools() {
     return this.pools.list();
+  }
+
+  @Public()
+  @Get('pools/:name')
+  poolPreview(@Param('name') rawName: string) {
+    const name = normalizePoolName(rawName);
+    const pool = this.pools.getByName(name);
+    if (!pool) throw new Error('POOL_NOT_FOUND');
+    return { id: pool.id, name: pool.name, count: pool.codes.length, createdAt: pool.createdAt, codes: pool.codes };
+  }
+
+  @Public()
+  @Get('pools/:name/cards')
+  poolCards(@Param('name') rawName: string, @Query('q') q: string, @Query('codes') codes: string) {
+    const name = normalizePoolName(rawName);
+    const pool = this.pools.getByName(name);
+    if (!pool) throw new Error('POOL_NOT_FOUND');
+    const rows = codes
+      ? [...new Set(String(codes).split(',').map(Number).filter(Number.isInteger))]
+        .map((code) => this.cards.get(code))
+        .filter((card) => card !== null)
+      : q
+        ? this.cards.search(q)
+        : pool.codes.map((code) => this.cards.get(code)).filter((card) => card !== null);
+    const stats = this.cardStats?.forPool(pool) ?? new Map();
+    return rows.map((card) => {
+      const inPool = pool.codes.includes(card!.code);
+      return {
+        ...card,
+        inPool,
+        poolStatus: inPool ? 'in_pool' : 'not_in_pool',
+        ...(stats.has(card!.code) ? { pickStats: [stats.get(card!.code)!] } : { pickStats: [] }),
+      };
+    });
   }
 
   // low-res avif thumbnails stored server-side (config.yaml pics.avif_dir, default
@@ -87,10 +124,11 @@ export class ApiController {
     res.sendFile(file);
   }
 
-  // requires X-Create-Token (or super admin token); returns a per-tournament admin token
+  // requires X-Create-User + X-Create-Token (or super admin token); returns a per-tournament admin token
   @Post('tournaments')
-  create(@Body() body: CreateTournamentInput) {
-    return this.tournaments.create(body, 'admin');
+  create(@Req() req: AuthedRequest, @Body() body: CreateTournamentInput) {
+    const identity = req.identity as Identity;
+    return this.tournaments.create(body, identity.createUsername ?? (identity.isSuper ? 'super-admin' : 'unknown'));
   }
 
   @Public()
@@ -126,7 +164,19 @@ export class ApiController {
   }
 
   @Get('t/:tid/cards')
-  cardsSearch(@Query('q') q: string, @Query('codes') codes: string) {
+  cardsSearch(@Req() req: AuthedRequest, @Query('q') q: string, @Query('codes') codes: string) {
+    const id = req.identity as Identity;
+    const state = loadState(id.tournamentId);
+    const cfg = JSON.parse(state.configJson) as Record<string, unknown>;
+    // Prefer the immutable database pool id. Falling back to the name keeps
+    // legacy tournaments readable, while preventing a deleted/recreated pool
+    // with the same name from receiving historical statistics.
+    const row = getDb().prepare('SELECT card_pool_id FROM tournaments WHERE id=?').get(id.tournamentId) as { card_pool_id: number | null } | undefined;
+    const pool = row?.card_pool_id !== null && row?.card_pool_id !== undefined
+      ? this.pools.get(row.card_pool_id)
+      : (typeof cfg.cardPool === 'string' ? this.pools.getByName(cfg.cardPool) : null);
+    const stats = pool && this.cardStats ? this.cardStats.forPool(pool) : new Map();
+    const attach = (card: any) => ({ ...card, ...(stats.has(card.code) ? { pickStats: [stats.get(card.code)] } : { pickStats: [] }) });
     if (codes) {
       return [...new Set(codes
         .split(',')
@@ -134,9 +184,10 @@ export class ApiController {
         .filter(Number.isInteger)
       )]
         .map((c) => this.cards.get(c))
-        .filter((c) => c !== null);
+        .filter((c) => c !== null)
+        .map(attach);
     }
-    return this.cards.search(q ?? '');
+    return this.cards.search(q ?? '').map(attach);
   }
 
   // drop 前卡池（报名/未开始选牌时展示给玩家；选牌开始后也可查看）

@@ -24,8 +24,8 @@ ygocube/
 ## 硬性约定（Do / Don't）
 
 - **分支纪律**：禁止直接改 ygopro/srvpro 的 master/主分支；开发一律走 `cube-server` / `cube` 特性分支。
-- **统一配置**：启动前配置全部走仓库根 `config.yaml`（admin.super_token / admin.create_token / srvpro / server 路径），可用 `CONFIG_FILE` 覆盖；相对路径以 config.yaml 所在目录为基准。
-- **admin token 三层**：super token 管所有 tournament + 卡池；create token 管创建（创建返回 per-tournament `admin_token`，仅管该 tournament，存哈希）；玩家仍为 `tournamentId + playerId + token` 三要素（管理员可按 tournament 关闭 token 鉴权，`POST /admin/t/:tid/security`）。
+- **统一配置**：启动前配置全部走仓库根 `config.yaml`（admin.super_token / srvpro / server 路径），可用 `CONFIG_FILE` 覆盖；相对路径以 config.yaml 所在目录为基准。create token 不再写入配置文件。
+- **admin token 三层**：super token 管所有 tournament + 卡池；super admin 通过 `/admin/create-users` 管理数据库创建权限用户，创建者用 `X-Create-User` + `X-Create-Token` 创建比赛（比赛记录 `created_by`）；per-tournament `admin_token` 仅管该 tournament，均存哈希；玩家仍为 `tournamentId + playerId + token` 三要素（管理员可按 tournament 关闭 token 鉴权，`POST /admin/t/:tid/security`）。
 - **鉴权三要素**：cube 后端所有入口（REST/SSE/ydk）默认校验 `tournamentId + playerId + token`（cookie 或 header 或参数），缺一即 401。
 - **卡图原图不落服务器**：cube 后端不存储原始 pics（不入库）；前端依次尝试本地 ygopro 根目录（`pics/`、`expansions/pics/`）→ 服务端低清 avif `GET /pics/:code.avif`（`pics.avif_dir`，默认 `assets/pics_avif/`，vips 批量生成）→ 服务端原图只读代理 `GET /pics/:code`（config.yaml `pics.ygopro_root`，可选）→ 空白卡。卡牌效果文本（desc）随卡片元数据下发。
 - **所有状态在服务器**：cube 变更先写 append-only 事件日志再执行；支持快照恢复与管理员时间回溯（`POST /admin/t/:id/revert`）。

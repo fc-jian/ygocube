@@ -1,7 +1,7 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { loadState, logEvent, getConfig, persistMeta, TournamentState, PickState } from '../events/events.service';
 import { CardsService } from '../cards/cards.service';
-import { TournamentsService } from '../tournaments/tournaments.service';
+import { normalizeExtraRatioPercent, TournamentsService } from '../tournaments/tournaments.service';
 import { PoolsService } from '../pools/pools.service';
 import { MatchesService } from '../matches/matches.service';
 import { DecksService } from '../decks/decks.service';
@@ -133,10 +133,9 @@ export class DraftService implements OnModuleInit {
       const m = packCount - (packCount % n);
       if (m >= n) packCount = m;
     }
-    // Before arranging packs, choose the drafted subset with proportional
-    // stratification. Therefore any initial random discard preserves the
-    // pool's main/extra ratio (within unavoidable integer rounding), regardless
-    // of the later pack display strategy.
+    // Before arranging packs, choose the drafted subset. The optional explicit
+    // extra ratio is authoritative and is handled separately below; legacy
+    // tournaments retain the historical proportional subset and pack strategy.
     const shuffle = <T>(items: T[]): T[] => {
       const out = [...items];
       for (let i = out.length - 1; i > 0; i--) {
@@ -151,50 +150,91 @@ export class DraftService implements OnModuleInit {
       const info = this.cards.get(code);
       ((info && info.type & 0x4802040) ? allExtra : allMain).push(code);
     }
-    const draftedCount = Math.min(poolCodes.length, packSize * packCount);
-    const idealExtra = Math.round(draftedCount * (allExtra.length / Math.max(1, poolCodes.length)));
-    const draftedExtraCount = Math.max(
-      Math.max(0, draftedCount - allMain.length),
-      Math.min(allExtra.length, idealExtra),
-    );
-    const draftedMainCount = draftedCount - draftedExtraCount;
-    const draftedMain = allMain.slice(0, draftedMainCount);
-    const draftedExtra = allExtra.slice(0, draftedExtraCount);
-    const discardedPoolCodes = [...allMain.slice(draftedMainCount), ...allExtra.slice(draftedExtraCount)];
-
-    // 牌堆构成策略（packStrategy）：
-    //  stratify（默认）   = 主卡/额外卡按整体比例均匀分布到每一堆（各池先洗牌再按比例取）
-    //  random             = 全卡池随机洗牌后顺序切堆
-    //  main_then_extra    = 先排完全部主卡（跨堆），再接额外卡
-    const strategy = cfg.packStrategy === 'random' || cfg.packStrategy === 'main_then_extra' ? cfg.packStrategy : 'stratify';
+    const extraRatioPercent = normalizeExtraRatioPercent(rawCfg.extraRatioPercent);
+    let discardedPoolCodes: number[];
     let codes: number[];
-    if (strategy === 'random') {
-      codes = shuffle([...draftedMain, ...draftedExtra]);
-    } else if (strategy === 'main_then_extra') {
-      codes = [...draftedMain, ...draftedExtra];
-    } else {
-      // stratify: dynamically apportion every pack from the remaining drafted
-      // main/extra cards, with bounds that always fill the requested pack.
-      let mi = 0;
-      let ei = 0;
-      const per: number[][] = [];
-      for (let k = 0; k < packCount; k++) {
-        const size = Math.min(packSize, draftedCount - k * packSize);
-        const remMain = draftedMain.length - mi;
-        const remExtra = draftedExtra.length - ei;
-        const minExtra = Math.max(0, size - remMain);
-        const maxExtra = Math.min(size, remExtra);
-        const proportionalExtra = Math.round(size * (remExtra / Math.max(1, remMain + remExtra)));
-        const extraCount = Math.max(minExtra, Math.min(maxExtra, proportionalExtra));
-        const mainCount = size - extraCount;
-        per.push(shuffle([
-          ...draftedMain.slice(mi, mi + mainCount),
-          ...draftedExtra.slice(ei, ei + extraCount),
-        ]));
-        mi += mainCount;
-        ei += extraCount;
+    if (extraRatioPercent !== null) {
+      // Each pack gets its own rounded target. This also handles a short final
+      // pack using its actual size rather than the configured full pack size.
+      const packSizes = Array.from({ length: packCount }, (_, k) => Math.max(0, Math.min(packSize, poolCodes.length - k * packSize)));
+      const targetExtraByPack = packSizes.map((size) => Math.round(size * extraRatioPercent / 100));
+      const requiredExtra = targetExtraByPack.reduce((sum, count) => sum + count, 0);
+      const requiredMain = packSizes.reduce((sum, size, index) => sum + size - targetExtraByPack[index], 0);
+      if (requiredExtra > allExtra.length || requiredMain > allMain.length) {
+        throw Object.assign(new Error('INSUFFICIENT_PACK_RATIO'), {
+          details: {
+            extraRatioPercent,
+            packSize,
+            packCount,
+            requiredMain,
+            availableMain: allMain.length,
+            requiredExtra,
+            availableExtra: allExtra.length,
+          },
+        });
       }
-      codes = per.flat();
+      const shuffledMain = shuffle(allMain);
+      const shuffledExtra = shuffle(allExtra);
+      let mainIndex = 0;
+      let extraIndex = 0;
+      const perPack: number[][] = [];
+      for (let k = 0; k < packSizes.length; k++) {
+        const extraCount = targetExtraByPack[k];
+        const mainCount = packSizes[k] - extraCount;
+        perPack.push(shuffle([
+          ...shuffledMain.slice(mainIndex, mainIndex + mainCount),
+          ...shuffledExtra.slice(extraIndex, extraIndex + extraCount),
+        ]));
+        mainIndex += mainCount;
+        extraIndex += extraCount;
+      }
+      codes = perPack.flat();
+      discardedPoolCodes = [...shuffledMain.slice(mainIndex), ...shuffledExtra.slice(extraIndex)];
+    } else {
+      const draftedCount = Math.min(poolCodes.length, packSize * packCount);
+      const idealExtra = Math.round(draftedCount * (allExtra.length / Math.max(1, poolCodes.length)));
+      const draftedExtraCount = Math.max(
+        Math.max(0, draftedCount - allMain.length),
+        Math.min(allExtra.length, idealExtra),
+      );
+      const draftedMainCount = draftedCount - draftedExtraCount;
+      const draftedMain = allMain.slice(0, draftedMainCount);
+      const draftedExtra = allExtra.slice(0, draftedExtraCount);
+      discardedPoolCodes = [...allMain.slice(draftedMainCount), ...allExtra.slice(draftedExtraCount)];
+
+      // 牌堆构成策略（packStrategy）：
+      //  stratify（默认）   = 主卡/额外卡按整体比例均匀分布到每一堆（各池先洗牌再按比例取）
+      //  random             = 全卡池随机洗牌后顺序切堆
+      //  main_then_extra    = 先排完全部主卡（跨堆），再接额外卡
+      const strategy = cfg.packStrategy === 'random' || cfg.packStrategy === 'main_then_extra' ? cfg.packStrategy : 'stratify';
+      if (strategy === 'random') {
+        codes = shuffle([...draftedMain, ...draftedExtra]);
+      } else if (strategy === 'main_then_extra') {
+        codes = [...draftedMain, ...draftedExtra];
+      } else {
+        // stratify: dynamically apportion every pack from the remaining drafted
+        // main/extra cards, with bounds that always fill the requested pack.
+        let mi = 0;
+        let ei = 0;
+        const per: number[][] = [];
+        for (let k = 0; k < packCount; k++) {
+          const size = Math.min(packSize, draftedCount - k * packSize);
+          const remMain = draftedMain.length - mi;
+          const remExtra = draftedExtra.length - ei;
+          const minExtra = Math.max(0, size - remMain);
+          const maxExtra = Math.min(size, remExtra);
+          const proportionalExtra = Math.round(size * (remExtra / Math.max(1, remMain + remExtra)));
+          const extraCount = Math.max(minExtra, Math.min(maxExtra, proportionalExtra));
+          const mainCount = size - extraCount;
+          per.push(shuffle([
+            ...draftedMain.slice(mi, mi + mainCount),
+            ...draftedExtra.slice(ei, ei + extraCount),
+          ]));
+          mi += mainCount;
+          ei += extraCount;
+        }
+        codes = per.flat();
+      }
     }
     const droppedCards: number[] = dropPublic ? shuffle(discardedPoolCodes) : [];
     const draftMode = (rawCfg.draftMode as string | undefined) === 'serial' ? 'serial' : 'passing';

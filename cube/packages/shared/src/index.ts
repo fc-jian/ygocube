@@ -25,6 +25,19 @@ export interface CardInfo {
   alias: number;
   setCodes: number[];
   setNames: string[];
+  inPool?: boolean;
+  poolStatus?: 'in_pool' | 'not_in_pool';
+  pickStats?: CardPickStat[];
+}
+
+export interface CardPickStat {
+  poolId: number;
+  poolName: string;
+  averagePickPosition: number;
+  averagePickPercentage: number;
+  packCount: number;
+  tournamentCount: number;
+  sampleCount: number;
 }
 
 export type SmallWorldSharedProperty = 'race' | 'attribute' | 'level' | 'atk' | 'def';
@@ -62,6 +75,7 @@ export interface TournamentConfig {
   packSizeMultiple: number; // legacy: pack size = players * multiple (used when packSize absent)
   packCount?: number; // explicit total pack count; <= floor(pool/packSize) = fixed count, rest discarded; > that = use ALL pool cards (count = ceil(pool/packSize), last pack may be partial); new create defaults target 4×players, reduced when the pool is smaller
   packStrategy?: 'stratify' | 'random' | 'main_then_extra'; // discarded subset is always main/extra proportional before this layout strategy
+  extraRatioPercent?: number | null; // optional per-pack extra-deck percentage (0-100); null keeps packStrategy
   dropPublic?: boolean; // whether dropped cards are exposed (default false)
   dropLast: boolean; // public dropped card list per pack
   pickSeconds: number; // default 40
@@ -73,6 +87,7 @@ export interface TournamentConfig {
   sideMax: number;
   maxCopies?: number; // picked code may be used this many times across main/extra/side
   cardPool: string; // must be an existing card_pools name ('full' is rejected on write paths; legacy configs may still contain it)
+  cardPoolId?: number; // immutable pool identity used by historical statistics
   timeLimit?: number; // per-turn seconds for the duel host (default 180; 999 ≈ unlimited)
   draftMode?: 'passing' | 'serial'; // default 'passing' (per-player pack queues); 'serial' = legacy one-pack-at-a-time
   evenPackCount?: boolean; // default true: pack count must be a multiple of player count (explicit packCount rejected otherwise; computed counts round down)

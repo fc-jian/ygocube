@@ -12,7 +12,6 @@ describe('startup security validation', () => {
   it('rejects placeholder credentials by default', () => {
     config.server.allowInsecureDefaults = false;
     config.admin.superToken = 'change-me-super-token';
-    config.admin.createToken = 'different';
     config.srvpro.apiKey = 'key';
     expect(() => validateStartupSecurity()).toThrow(/insecure admin token/);
   });
@@ -20,7 +19,6 @@ describe('startup security validation', () => {
   it('rejects an empty srvpro API key', () => {
     config.server.allowInsecureDefaults = false;
     config.admin.superToken = 'unique-super';
-    config.admin.createToken = 'unique-create';
     config.srvpro.apiKey = '';
     expect(() => validateStartupSecurity()).toThrow(/srvpro\.api_key/);
   });

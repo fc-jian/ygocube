@@ -66,6 +66,16 @@ describe('card pools', () => {
     expect(pools.list().length).toBe(0);
   });
 
+  it('accepts URL-safe pool names and rejects spaces/path/query/control characters', () => {
+    const pools = new PoolsService(new CardsService());
+    for (const name of ['A1', 'cube.v2', 'cube_v2', 'cube-v2']) {
+      expect(pools.create(name, [10001]).pool.name).toBe(name);
+    }
+    for (const name of ['', ' leading', 'trailing ', 'has space', 'a/b', 'a?b', 'a#b', 'a\nnew', 'x'.repeat(65)]) {
+      expect(() => pools.create(name, [10001])).toThrow('BAD_POOL_NAME');
+    }
+  });
+
   it('persists one default pool and clears the setting when that pool is removed', () => {
     const cards = new CardsService();
     const pools = new PoolsService(cards);

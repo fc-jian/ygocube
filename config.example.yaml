@@ -3,8 +3,6 @@
 admin:
   # super admin: can view/manage all tournaments and card pools
   super_token: "change-me-super-token"
-  # required to create tournaments; creation returns a per-tournament admin token
-  create_token: "change-me-create-token"
 srvpro:
   url: "http://127.0.0.1:7922"
   # 玩家端显示的对局服务器地址（公网部署填公网 IP，如 "39.96.220.91"）

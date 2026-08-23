@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { getDb } from '../db';
 import { config } from '../config';
+import type { CardPickStat } from './card-pick-stats.service';
 
 // Card metadata: imported from cards.cdb (itself a sqlite db with datas/texts tables,
 // aligned by rowid) — dev_docs/05 §8. Pics never stored here (dev_docs/06 §5).
@@ -22,6 +23,10 @@ export interface CardInfo {
   alias: number;
   setCodes: number[];
   setNames: string[];
+  /** Only populated by public pool-card responses; false means search hit is outside the pool. */
+  inPool?: boolean;
+  poolStatus?: 'in_pool' | 'not_in_pool';
+  pickStats?: CardPickStat[];
 }
 
 interface DataRow {

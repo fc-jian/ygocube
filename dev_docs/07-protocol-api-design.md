@@ -23,11 +23,16 @@
   `X-Tournament-Id/X-Player-Id/X-Token` 或 query/body 传递。
 - `/admin/*` 使用 `X-Admin-Token`：super token 管全部比赛/卡池，per-tournament
   admin token 只管对应比赛。
-- `POST /tournaments` 使用 `X-Create-Token` 或 super token；创建响应只返回一次
-  明文 admin token。
+- `POST /tournaments` 普通创建者必须同时使用 `X-Create-User` 与 `X-Create-Token`；
+  super token 仍可直接创建。创建响应只返回一次明文 per-tournament admin token。
 - 比赛关闭 token 鉴权后只校验 tid+pid；super token 仍可作万能玩家 token。
 - 失败统一为 `401 {ok:false, code:"AUTH_REQUIRED", fields:[...]}`。token 只存
   SHA-256 哈希，无法读取旧值，只能重置。
+
+`create_users` 由 super admin 管理：`GET/POST /admin/create-users` 列表/创建，
+`DELETE /admin/create-users/:username` 撤销。用户名规范化为小写，允许 1--32 位
+ASCII 字母、数字、`.`、`_`、`-`；数据库只保存 token 哈希。比赛记录 `created_by`
+（权限用户名或 `super-admin`）和不可变 `card_pool_id`。
 
 ### 2.2 创建参数
 
@@ -35,7 +40,7 @@
 
 ```text
 name, maxPlayers, mode(single|match), cardPool
-packSize, packSizeMultiple(legacy), packCount, packStrategy
+packSize, packSizeMultiple(legacy), packCount, packStrategy, extraRatioPercent
 dropMode(legacy), dropPublic, draftMode, evenPackCount
 pickSeconds, reserveSeconds, reseatEachRound
 deckbuildingSeconds(null=无限), mainMin, mainMax, extraMax, sideMax, maxCopies
@@ -44,11 +49,17 @@ matchFormat(round_robin|swiss|double_elimination)
 swissRoundCount, playoffSize
 ```
 
-默认 `packSize=24`、`pickSeconds=40`、`reserveSeconds=400`、`deckbuildingSeconds=null`、`extraMax=30`、`sideMax=30`、
+默认 `packSize=24`、`pickSeconds=40`、`reserveSeconds=400`、`deckbuildingSeconds=null`、`extraRatioPercent=null`、`extraMax=30`、`sideMax=30`、
 `maxCopies=1`。`cardPool` 必须是已存在的卡池名；新写入接口拒绝缺省或 `full`。
 创建时默认生成 `4×玩家数` 个牌堆（卡池不足时按完整堆数减少轮数），并按人数写入推荐赛制：
 3--8 人为瑞士 3 轮无淘汰（2 人因无法安排三轮不重复对手而推荐单循环），9--16 瑞士 4 轮 Top 4，17+ 瑞士
 `ceil(log2(n))+1` 轮 Top 8。首场对局生成后赛制锁定。
+
+`extraRatioPercent` 为可选整数 `0--100`。非空时每堆额外卡数按实际堆大小四舍五入，
+主卡/额外卡分别随机取出后合并混洗，并覆盖 `packStrategy`；最后短堆按实际大小计算。
+资源不足时 `start_draft` 返回 HTTP 400 的 `INSUFFICIENT_PACK_RATIO`，详情包含
+`requiredMain/availableMain/requiredExtra/availableExtra`，不会产生牌堆或阶段事件。
+传入 `null`（或旧比赛缺少字段）表示沿用 `packStrategy`。
 
 ### 2.3 玩家端点
 
@@ -56,7 +67,9 @@ swissRoundCount, playoffSize
 | --- | --- |
 | `GET /health` | 公共健康检查 |
 | `GET /tournaments` | 公共比赛简表 |
-| `GET /pools` | 公共卡池名称/数量/`isDefault`，不含 code |
+| `GET /pools` | 公共卡池名称/数量/`isDefault` 和合法池的 `url`，不含 code |
+| `GET /pools/:name` | 公共卡池元数据与 exact code 列表；name 必须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` |
+| `GET /pools/:name/cards?q=&codes=` | 公共卡牌元数据、卡池内状态和该池 exact-code 抓位统计 |
 | `GET /meta` | 公共 srvpro `host/gamePort` |
 | `GET /t/:tid` | 阶段、配置摘要、玩家、`authRequired` |
 | `POST /t/:tid/join` | 报名 `{player_id,display_name}`，返回一次性 token |
@@ -128,6 +141,9 @@ swissRoundCount, playoffSize
 | `GET /admin/t/:tid/revert/preview?seq=` | 回溯影响预览 |
 | `POST /admin/t/:tid/revert` | `{seq,confirm_name}` 硬回溯并保持冻结 |
 | `POST /admin/t/:tid/unfreeze` | 回溯后恢复计时/房间编排 |
+| `GET /admin/create-users` | super admin 列出创建权限用户（不返回 token） |
+| `POST /admin/create-users` | super admin 创建用户名并生成一次性随机 create token |
+| `DELETE /admin/create-users/:username` | super admin 立即撤销创建权限 |
 
 卡池 `POST` 既接受 `codes:number[]`，也接受 `importText`。文本每行支持
 `code` 或 `code<TAB>name`；后端以该 code 的字面原名比较，返回每一行的
@@ -218,6 +234,11 @@ room name 幂等记录，成功响应 `{ack:true}`。未知 room、非法 payloa
 `CardInfo` 字段：`code/name/type/desc/level/lscale/rscale/linkMarkers/race/`
 `attribute/atk/def/alias/setCodes/setNames`。name/code 是 exact 卡表行；alias 只
 用于卡组规则副本上限与合法性检查，不用于卡池、搜索、状态或详情去重。
+可选 `pickStats: {poolId,poolName,averagePickPosition,averagePickPercentage,packCount,
+tournamentCount,sampleCount}[]` 按 exact code 返回；抓位从 1 开始，百分比按每个牌包
+的实际卡数归一化（末堆按实际大小），只统计完整抽取且比赛名不以 `test` 开头的现存
+卡池比赛，前端显示抓位和百分比两位小数，并显示参与统计的牌包/比赛数。统计按
+`cardPoolId`，删除卡池后不再产生统计。
 `CardVisibilityStatus` 为 `not_in_pool | dropped | picked | other_picked | seen | unknown`。
 `seen` 只表示玩家在某次选牌前实际看到过仍存在的卡；已被前位玩家拿走的卡不会
 因为同属一个牌堆而自动标记为 seen。构筑阶段的 `dropped` 表示初始排除，
@@ -227,7 +248,7 @@ room name 幂等记录，成功响应 `{ack:true}`。未知 room、非法 payloa
 
 | code | 含义 |
 | --- | --- |
-| `AUTH_REQUIRED` | token/admin/create token 缺失或无效 |
+| `AUTH_REQUIRED` | token/admin/create-user 凭据缺失或无效 |
 | `WRONG_PHASE` / `FROZEN` | 当前阶段或冻结状态不允许 |
 | `BAD_DISPLAY_NAME` | 显示名称为空、过长或包含控制字符 |
 | `NOT_YOUR_TURN` / `CARD_NOT_AVAILABLE` | 选牌状态冲突 |
@@ -235,7 +256,8 @@ room name 幂等记录，成功响应 `{ack:true}`。未知 room、非法 payloa
 | `PACKCOUNT_NOT_MULTIPLE` | 牌堆数违反 `evenPackCount` |
 | `NO_VALID_PAIRING` | 瑞士无法生成无重复对手的完整配对 |
 | `FORMAT_LOCKED` / `BAD_MATCH_FORMAT` | 赛制已锁定或参数非法 |
-| `POOL_EXISTS` / `POOL_NOT_FOUND` / `BAD_POOL_IMPORT` | 卡池操作错误 |
+| `POOL_EXISTS` / `POOL_NOT_FOUND` / `BAD_POOL_IMPORT` / `BAD_POOL_NAME` | 卡池操作错误 |
+| `BAD_CREATE_USERNAME` / `CREATE_USER_EXISTS` / `CREATE_USER_NOT_FOUND` | 创建权限用户错误 |
 | `INVALID_API_KEY` / `SRVPRO_ERROR` | srvpro 连接或鉴权失败 |
 
 ## 6. 配置来源
@@ -243,7 +265,7 @@ room name 幂等记录，成功响应 `{ack:true}`。未知 room、非法 payloa
 根 `config.yaml`（`CONFIG_FILE` 可覆盖）字段包括：
 
 ```yaml
-admin: {super_token: "...", create_token: "..."}
+admin: {super_token: "..."}
 srvpro: {url: "http://127.0.0.1:7922", api_key: "...", host: "127.0.0.1", game_port: 7911}
 server: {port: 3001, db_path: "data/cube.sqlite", cards_cdb: "...", strings_conf: "...",
          allowed_origins: ["http://localhost:3000"], allow_insecure_defaults: false}

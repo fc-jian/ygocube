@@ -14,7 +14,8 @@ const SRVPRO_HOST = process.argv[3] || '127.0.0.1';
 const SRVPRO_GAME_PORT = parseInt(process.argv[4] || '7911', 10);
 const API = `http://127.0.0.1:${API_PORT}`;
 const SUPER = process.env.CUBE_SUPER_TOKEN || 'change-me-super-token';
-const CREATE = process.env.CUBE_CREATE_TOKEN || 'change-me-create-token';
+const CREATE = process.env.CUBE_CREATE_TOKEN || SUPER;
+const CREATE_USER = process.env.CUBE_CREATE_USER;
 const PROTO_VERSION = 0x1362;
 const PLAYERS = ['probeA', 'probeB'];
 const STOC_JOIN_GAME = 0x12;
@@ -32,7 +33,10 @@ function apiCall(method, p, { body, admin, create, player, raw } = {}) {
   return new Promise((resolve, reject) => {
     const headers = { 'Content-Type': 'application/json' };
     if (admin) headers['X-Admin-Token'] = SUPER;
-    if (create) headers['X-Create-Token'] = CREATE;
+    if (create) {
+      headers['X-Create-Token'] = CREATE;
+      if (CREATE_USER) headers['X-Create-User'] = CREATE_USER;
+    }
     if (player) {
       headers['X-Tournament-Id'] = String(player.tid);
       headers['X-Player-Id'] = player.pid;

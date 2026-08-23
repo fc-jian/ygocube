@@ -67,6 +67,12 @@ export function CardMeta({ card, compact = false }: { card: CardInfo; compact?: 
       {atkDefLine(card) && <p className={labelClass + ' font-semibold text-slate-100'}>{atkDefLine(card)}</p>}
       {linkMarkerLine(card) && <p className={labelClass + ' text-slate-300'}>{linkMarkerLine(card)}</p>}
       {setNameLine(card) && <p className={'mt-1 ' + smallClass + ' text-slate-400'}>{setNameLine(card)}</p>}
+      {(card.pickStats ?? []).map((stat) => (
+        <div key={stat.poolId} className={smallClass + ' text-amber-200/90'}>
+          <p>{card.pickStats!.length > 1 ? `${stat.poolName} ` : ''}平均抓位：{stat.averagePickPosition.toFixed(2)}（{stat.averagePickPercentage.toFixed(2)}%）</p>
+          <p>统计：{stat.packCount} 个牌包 · {stat.tournamentCount} 场比赛</p>
+        </div>
+      ))}
       {aliasLine(card) && <p className={smallClass + ' text-slate-500'}>{aliasLine(card)}</p>}
     </>
   );

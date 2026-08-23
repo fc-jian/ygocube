@@ -11,6 +11,17 @@ export interface CardPool {
   createdAt: string;
 }
 
+// Pool names are used directly as public URL path segments. Keep the policy
+// deliberately narrower than encodeURIComponent so every generated link is
+// stable and cannot introduce another path/query segment.
+export const POOL_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+export function normalizePoolName(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('BAD_POOL_NAME');
+  if (!POOL_NAME_PATTERN.test(value)) throw new Error('BAD_POOL_NAME');
+  return value;
+}
+
 export interface PoolImportReport {
   /** Token cards that exist in the card database but cannot be drafted. */
   filtered: number;
@@ -47,11 +58,19 @@ interface PoolRow {
 export class PoolsService {
   constructor(private cards: CardsService) {}
 
-  list(): { id: number; name: string; count: number; createdAt: string; isDefault: boolean }[] {
+  list(): { id: number; name: string; count: number; createdAt: string; isDefault: boolean; url: string | null }[] {
     const setting = getDb().prepare("SELECT value FROM app_settings WHERE key='default_pool_id'").get() as { value: string } | undefined;
     const defaultId = setting ? Number(setting.value) : null;
     return (getDb().prepare('SELECT id, name, codes_json, created_at FROM card_pools ORDER BY name').all() as PoolRow[]).map(
-      (r) => ({ id: r.id, name: r.name, count: (JSON.parse(r.codes_json) as number[]).length, createdAt: r.created_at, isDefault: r.id === defaultId }),
+      (r) => ({
+        id: r.id,
+        name: r.name,
+        count: (JSON.parse(r.codes_json) as number[]).length,
+        createdAt: r.created_at,
+        isDefault: r.id === defaultId,
+        // Historical databases may contain names that predate the URL policy.
+        url: POOL_NAME_PATTERN.test(r.name) ? `/pool/${encodeURIComponent(r.name)}` : null,
+      }),
     );
   }
 
@@ -133,7 +152,7 @@ export class PoolsService {
   }
 
   create(name: string, codes: number[]): { pool: CardPool } & PoolImportReport {
-    if (!name.trim()) throw new Error('BAD_PAYLOAD');
+    name = normalizePoolName(name);
     const { unique, filtered, missingCodes, entryWarnings } = this.filterCodes(codes);
     const exists = getDb().prepare('SELECT 1 FROM card_pools WHERE name=?').get(name) as PoolRow | undefined;
     if (exists) throw new Error('POOL_EXISTS');
@@ -144,6 +163,7 @@ export class PoolsService {
   }
 
   createFromText(name: string, importText: string): { pool: CardPool } & PoolImportReport {
+    name = normalizePoolName(name);
     const entries: PoolImportEntry[] = [];
     const entryWarnings: PoolImportEntryWarning[] = [];
     for (const [index, raw] of String(importText ?? '').split(/\r?\n/).entries()) {
@@ -165,7 +185,6 @@ export class PoolsService {
       // Preserve the report instead of silently creating an empty pool from wholly malformed input.
       throw Object.assign(new Error('BAD_POOL_IMPORT'), { details: entryWarnings });
     }
-    if (!name.trim()) throw new Error('BAD_PAYLOAD');
     const { unique, filtered, missingCodes, entryWarnings: validationWarnings } = this.filterCodes(entries.map((entry) => entry.code), entries);
     const warnings = [...entryWarnings, ...validationWarnings].sort((a, b) => a.line - b.line);
     if (unique.length === 0) throw Object.assign(new Error('BAD_POOL_IMPORT'), { details: warnings });
@@ -182,6 +201,7 @@ export class PoolsService {
   }
 
   createRandom(name: string, size = 1000): { pool: CardPool } & PoolImportReport {
+    name = normalizePoolName(name);
     const pool = this.cards.poolCodes();
     const shuffled = [...pool];
     for (let i = shuffled.length - 1; i > 0; i--) {
@@ -190,7 +210,6 @@ export class PoolsService {
     }
     // poolCodes() is exact-code, deduplicated, and token-free. Store the sample
     // directly so alias metadata cannot randomly shrink a pool.
-    if (!name.trim()) throw new Error('BAD_PAYLOAD');
     const selected = shuffled.slice(0, Math.max(0, Math.min(size, shuffled.length)));
     const exists = getDb().prepare('SELECT 1 FROM card_pools WHERE name=?').get(name) as PoolRow | undefined;
     if (exists) throw new Error('POOL_EXISTS');
@@ -209,6 +228,11 @@ export class PoolsService {
     return row ? { id: row.id, name: row.name, codes: JSON.parse(row.codes_json) as number[], createdAt: row.created_at } : null;
   }
 
+  getByName(name: string): CardPool | null {
+    const row = getDb().prepare('SELECT id, name, codes_json, created_at FROM card_pools WHERE name=?').get(name) as PoolRow | undefined;
+    return row ? { id: row.id, name: row.name, codes: JSON.parse(row.codes_json) as number[], createdAt: row.created_at } : null;
+  }
+
   update(id: number, codes: number[]): { pool: CardPool } & PoolImportReport {
     const row = getDb().prepare('SELECT id, name, codes_json, created_at FROM card_pools WHERE id=?').get(id) as PoolRow | undefined;
     if (!row) throw new Error('POOL_NOT_FOUND');
@@ -223,8 +247,7 @@ export class PoolsService {
   }
 
   codesByName(name: string): number[] | null {
-    const row = getDb().prepare('SELECT codes_json FROM card_pools WHERE name=?').get(name) as PoolRow | undefined;
-    return row ? (JSON.parse(row.codes_json) as number[]) : null;
+    return this.getByName(name)?.codes ?? null;
   }
 
   resolve(poolRef: string | undefined): number[] {

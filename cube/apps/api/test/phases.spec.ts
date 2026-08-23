@@ -277,6 +277,85 @@ describe('pack strategy', () => {
   });
 });
 
+describe('explicit per-pack extra ratio', () => {
+  beforeEach(() => useTestDb());
+
+  function setupRatioPool(name: string, mainCount: number, extraCount: number) {
+    const cards = new CardsService();
+    const pools = new PoolsService(cards);
+    const main = cards.poolCodes().filter((code) => !cards.isExtraDeck(code)).slice(0, mainCount);
+    const extra = cards.poolCodes().filter((code) => cards.isExtraDeck(code)).slice(0, extraCount);
+    pools.create(name, [...main, ...extra]);
+    return { cards, pools };
+  }
+
+  it('gives every full pack the requested ratio and overrides packStrategy', () => {
+    const { cards, pools } = setupRatioPool('ratio', 36, 12);
+    const tournaments = makeTournaments();
+    const draft = new DraftService(cards, tournaments, pools, new MatchesService(fakeSrvpro as any));
+    const tid = tournaments.create({
+      name: 'ratio', maxPlayers: 2, cardPool: 'ratio', packSize: 24, packCount: 2,
+      packStrategy: 'main_then_extra', extraRatioPercent: 25, dropPublic: true,
+    }, 'test').tid;
+    for (let i = 0; i < 2; i++) tournaments.join(tid, `ratio-p${i}`, `Ratio P${i}`);
+    draft.startDraft(tid, 'test');
+    const state = loadState(tid);
+    expect(state.packs).toHaveLength(2);
+    for (const pack of state.packs) {
+      expect(pack.order).toHaveLength(24);
+      expect(pack.order.filter((code) => cards.isExtraDeck(code))).toHaveLength(6);
+      expect(pack.order.filter((code) => !cards.isExtraDeck(code))).toHaveLength(18);
+    }
+    const drafted = state.packs.flatMap((pack) => pack.order);
+    expect(new Set(drafted).size).toBe(drafted.length);
+    expect(state.droppedCards).toHaveLength(0);
+  });
+
+  it('uses the actual size for a short final pack', () => {
+    const { cards, pools } = setupRatioPool('ratio-short', 12, 13);
+    const tournaments = makeTournaments();
+    const draft = new DraftService(cards, tournaments, pools, new MatchesService(fakeSrvpro as any));
+    const tid = tournaments.create({
+      name: 'ratio-short', maxPlayers: 2, cardPool: 'ratio-short', packSize: 24, packCount: 2,
+      evenPackCount: true, extraRatioPercent: 50,
+    }, 'test').tid;
+    for (let i = 0; i < 2; i++) tournaments.join(tid, `short-p${i}`, `Short P${i}`);
+    draft.startDraft(tid, 'test');
+    const packs = loadState(tid).packs;
+    expect(packs.map((pack) => pack.order.length)).toEqual([24, 1]);
+    expect(packs[0].order.filter((code) => cards.isExtraDeck(code))).toHaveLength(12);
+    expect(packs[1].order.filter((code) => cards.isExtraDeck(code))).toHaveLength(1);
+  });
+
+  it('rejects an unavailable ratio before writing packs or phase events', () => {
+    const { cards, pools } = setupRatioPool('ratio-shortage', 24, 0);
+    const tournaments = makeTournaments();
+    const draft = new DraftService(cards, tournaments, pools, new MatchesService(fakeSrvpro as any));
+    const tid = tournaments.create({
+      name: 'ratio-shortage', maxPlayers: 2, cardPool: 'ratio-shortage', packSize: 12, packCount: 2,
+      extraRatioPercent: 25,
+    }, 'test').tid;
+    for (let i = 0; i < 2; i++) tournaments.join(tid, `shortage-p${i}`, `Shortage P${i}`);
+    try {
+      draft.startDraft(tid, 'test');
+      throw new Error('expected INSUFFICIENT_PACK_RATIO');
+    } catch (error) {
+      expect((error as Error).message).toBe('INSUFFICIENT_PACK_RATIO');
+      expect((error as Error & { details: Record<string, number> }).details).toMatchObject({
+        extraRatioPercent: 25,
+        requiredMain: 18,
+        availableMain: 24,
+        requiredExtra: 6,
+        availableExtra: 0,
+      });
+    }
+    const state = loadState(tid);
+    expect(state.status).toBe('registration');
+    expect(state.packs).toEqual([]);
+    expect(state.picks).toEqual([]);
+  });
+});
+
   it('packSize accepts any number (no multiple-of-players requirement)', () => {
     const tournaments = makeTournaments();
     const cards = new CardsService();

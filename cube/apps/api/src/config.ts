@@ -7,7 +7,6 @@ import YAML from 'yaml';
 export interface AppConfig {
   admin: {
     superToken: string;
-    createToken: string;
   };
   srvpro: {
     url: string;
@@ -69,7 +68,6 @@ function loadConfig(): AppConfig {
   return {
     admin: {
       superToken: String(admin.super_token ?? process.env.CUBE_SUPER_TOKEN ?? 'change-me-super-token'),
-      createToken: String(admin.create_token ?? process.env.CUBE_CREATE_TOKEN ?? 'change-me-create-token'),
     },
     srvpro: {
       url: String(srvpro.url ?? process.env.SRVPRO_URL ?? 'http://127.0.0.1:7922'),
@@ -105,6 +103,7 @@ export const defaults = {
   pickSeconds: 40,
   pauseSeconds: 300,
   deckbuildingSeconds: null as number | null, // 默认无限；管理员手动进入对战阶段
+  extraRatioPercent: null as number | null, // 每堆额外卡比例；null 表示沿用 packStrategy
   mainMin: 40,
   mainMax: 60,
   extraMax: 30,
@@ -115,9 +114,9 @@ export const defaults = {
 
 export function validateStartupSecurity(): void {
   if (config.server.allowInsecureDefaults) return;
-  const bad = new Set(['', 'change-me-super-token', 'change-me-create-token']);
-  if (bad.has(config.admin.superToken) || bad.has(config.admin.createToken) || config.admin.superToken === config.admin.createToken) {
-    throw new Error('insecure admin token configuration; set unique non-placeholder tokens or server.allow_insecure_defaults=true');
+  const bad = new Set(['', 'change-me-super-token']);
+  if (bad.has(config.admin.superToken)) {
+    throw new Error('insecure admin token configuration; set a non-placeholder super token or server.allow_insecure_defaults=true');
   }
   if (!config.srvpro.apiKey) throw new Error('srvpro.api_key must not be empty');
 }

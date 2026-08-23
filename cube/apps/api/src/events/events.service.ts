@@ -96,6 +96,7 @@ export interface PickAlternative {
 export interface TournamentState {
   id: number;
   name: string;
+  createdBy?: string;
   configJson: string;
   status: string;
   round: number;
@@ -138,9 +139,9 @@ export function setEventHook(hook: EventHook): void {
   eventHook = hook;
 }
 
-function emptyState(id: number, name: string, configJson: string): TournamentState {
+function emptyState(id: number, name: string, configJson: string, createdBy = 'unknown'): TournamentState {
   return {
-    id, name, configJson, status: 'registration', round: 0, frozen: false,
+    id, name, createdBy, configJson, status: 'registration', round: 0, frozen: false,
     players: [], packs: [], droppedCards: [], picks: [], pickCursor: null, pause: null, decks: {}, matches: [],
     packQueues: {}, pickDeadlines: {}, packsDealt: 0, pickReserves: {}, pickAlternatives: {},
     phaseDeadline: null, pendingPhase: null, frozenTimers: null, competition: null,
@@ -334,7 +335,7 @@ export function loadState(tid: number): TournamentState {
   const cached = stateCache.get(tid);
   if (cached) return cached;
   const row = tournamentRow(tid);
-  const state = emptyState(row.id, row.name, row.config_json);
+  const state = emptyState(row.id, row.name, row.config_json, row.created_by ?? 'unknown');
   state.status = row.status;
   state.round = row.round;
   state.frozen = (row as TournamentRow & { frozen?: number }).frozen === 1;
@@ -370,6 +371,8 @@ interface TournamentRow {
   id: number;
   name: string;
   config_json: string;
+  created_by?: string;
+  card_pool_id?: number | null;
   status: string;
   round: number;
   frozen?: number;
@@ -427,7 +430,7 @@ function stateAt(tid: number, seq: number): TournamentState {
   const row = tournamentRow(tid);
   const target = getDb().prepare('SELECT seq FROM events WHERE tournament_id=? AND seq=?').get(tid, seq);
   if (!target) throw new Error('REVERT_EVENT_NOT_FOUND');
-  const state = emptyState(row.id, row.name, row.config_json);
+  const state = emptyState(row.id, row.name, row.config_json, row.created_by ?? 'unknown');
   const snap = getDb()
     .prepare('SELECT seq, event_seq, state_json FROM tournament_snapshots WHERE tournament_id=? AND event_seq IS NOT NULL AND event_seq<=? ORDER BY event_seq DESC LIMIT 1')
     .get(tid, seq) as SnapRow | undefined;
@@ -505,11 +508,22 @@ export function hardRevertTo(tid: number, seq: number, actor: string): HardRever
   const db = getDb();
   const replacementTokens: Record<string, string> = {};
   const now = new Date().toISOString();
+  let restoredCardPoolId: number | null = null;
+  try {
+    const restoredConfig = JSON.parse(state.configJson) as Record<string, unknown>;
+    restoredCardPoolId = typeof restoredConfig.cardPoolId === 'number' && Number.isInteger(restoredConfig.cardPoolId)
+      ? restoredConfig.cardPoolId
+      : null;
+  } catch {
+    // A malformed historical config is already handled by replay; leave the
+    // restored pool identity unset so it cannot accidentally inherit a newer
+    // same-name pool's statistics.
+  }
   db.transaction(() => {
     db.prepare('DELETE FROM events WHERE tournament_id=? AND seq>?').run(tid, seq);
     db.prepare('DELETE FROM tournament_snapshots WHERE tournament_id=?').run(tid);
-    db.prepare('UPDATE tournaments SET config_json=?, status=?, round=?, frozen=1, updated_at=? WHERE id=?')
-      .run(state.configJson, state.status, state.round, now, tid);
+    db.prepare('UPDATE tournaments SET config_json=?, card_pool_id=?, status=?, round=?, frozen=1, updated_at=? WHERE id=?')
+      .run(state.configJson, restoredCardPoolId, state.status, state.round, now, tid);
 
     db.prepare('UPDATE tournament_players SET active=0 WHERE tournament_id=?').run(tid);
     const findPlayer = db.prepare('SELECT id FROM tournament_players WHERE tournament_id=? AND player_id=?');

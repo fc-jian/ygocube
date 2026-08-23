@@ -89,10 +89,11 @@ function identityHeaders(id: Identity | null): Record<string, string> {
 
 export async function api<T = any>(
   path: string,
-  opts: { method?: string; body?: unknown; identity?: Identity | null; createToken?: string; adminToken?: string } = {},
+  opts: { method?: string; body?: unknown; identity?: Identity | null; createUsername?: string; createToken?: string; adminToken?: string } = {},
 ): Promise<T> {
   const id = opts.identity !== undefined ? opts.identity : manualIdentity ?? readIdentity();
   const headers = identityHeaders(id);
+  if (opts.createUsername) headers['X-Create-User'] = encodeURIComponent(opts.createUsername);
   if (opts.createToken) headers['X-Create-Token'] = encodeURIComponent(opts.createToken);
   if (opts.adminToken) headers['X-Admin-Token'] = encodeURIComponent(opts.adminToken);
   const res = await fetch(`/api${path}`, {

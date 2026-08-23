@@ -43,6 +43,7 @@ describe('tournament card pool validation', () => {
     expect(cfg.pickSeconds).toBe(40);
     expect(cfg.reserveSeconds).toBe(400);
     expect(cfg.packCount).toBe(16); // four default rounds for four players
+    expect(cfg.extraRatioPercent).toBeNull();
     expect(cfg.deckbuildingSeconds).toBeNull();
     expect(cfg.matchFormat).toBe('swiss');
     expect(cfg.swissRoundCount).toBe(3);
@@ -67,6 +68,19 @@ describe('tournament card pool validation', () => {
     expect(errorCode(() => tournaments.updateConfig(tid, { cardPool: '' }, 'test'))).toBe('BAD_PAYLOAD');
     const cfg = tournaments.updateConfig(tid, { cardPool: TEST_POOL }, 'test');
     expect(cfg.cardPool).toBe(TEST_POOL);
+  });
+
+  it('validates and persists the optional per-pack extra ratio', () => {
+    const tournaments = makeTournaments();
+    expect(() => tournaments.create({ name: 'ratio-negative', maxPlayers: 4, cardPool: TEST_POOL, extraRatioPercent: -1 }, 'test')).toThrow('BAD_EXTRA_RATIO');
+    expect(() => tournaments.create({ name: 'ratio-high', maxPlayers: 4, cardPool: TEST_POOL, extraRatioPercent: 101 }, 'test')).toThrow('BAD_EXTRA_RATIO');
+    expect(() => tournaments.create({ name: 'ratio-fraction', maxPlayers: 4, cardPool: TEST_POOL, extraRatioPercent: 12.5 }, 'test')).toThrow('BAD_EXTRA_RATIO');
+    const tid = tournaments.create({ name: 'ratio-ok', maxPlayers: 4, cardPool: TEST_POOL, extraRatioPercent: 25 }, 'test').tid;
+    expect(JSON.parse(loadState(tid).configJson).extraRatioPercent).toBe(25);
+    expect(tournaments.updateConfig(tid, { extraRatioPercent: 0 }, 'test').extraRatioPercent).toBe(0);
+    expect(tournaments.updateConfig(tid, { extraRatioPercent: 100 }, 'test').extraRatioPercent).toBe(100);
+    expect(tournaments.updateConfig(tid, { extraRatioPercent: null }, 'test').extraRatioPercent).toBeNull();
+    expect(() => tournaments.updateConfig(tid, { extraRatioPercent: 101 }, 'test')).toThrow('BAD_EXTRA_RATIO');
   });
 });
 

@@ -8,6 +8,7 @@ import { DraftService } from './draft/draft.service';
 import { DecksService } from './decks/decks.service';
 import { MatchesService, RealSrvproClient } from './matches/matches.service';
 import { CardsService } from './cards/cards.service';
+import { CardPickStatsService } from './cards/card-pick-stats.service';
 import { PoolsService } from './pools/pools.service';
 import { RealtimeService } from './realtime/realtime.service';
 import { config } from './config';
@@ -21,6 +22,7 @@ import { SmallWorldService } from './small-world/small-world.service';
     { provide: APP_GUARD, useClass: AuthGuard },
     TournamentsService,
     CardsService,
+    CardPickStatsService,
     SmallWorldService,
     PoolsService,
     DraftService,

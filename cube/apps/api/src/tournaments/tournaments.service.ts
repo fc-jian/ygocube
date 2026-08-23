@@ -4,9 +4,18 @@ import { config, defaults } from '../config';
 import { logEvent, loadState, persistMeta, getConfig, TournamentState } from '../events/events.service';
 import crypto from 'crypto';
 import { sha256 } from '../auth/auth.guard';
-import { PoolsService } from '../pools/pools.service';
+import { normalizePoolName, PoolsService } from '../pools/pools.service';
 
 export type DropMode = 'use_all' | 'drop_leftover' | 'drop_leftover_exact';
+
+/** Normalize the optional per-pack extra-deck ratio used by pack generation. */
+export function normalizeExtraRatioPercent(value: unknown): number | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 100) {
+    throw new Error('BAD_EXTRA_RATIO');
+  }
+  return value;
+}
 
 export function randomToken(): string {
   // 192 bits; legacy word tokens remain valid because only their hashes are stored.
@@ -36,6 +45,8 @@ export interface CreateTournamentInput {
   dropLeftover?: boolean;
   // 牌堆构成策略：stratify（默认，主/额外按比例均匀每堆）| random | main_then_extra
   packStrategy?: 'stratify' | 'random' | 'main_then_extra';
+  // 每堆额外卡比例（0-100 的整数）；null/缺省时沿用 packStrategy
+  extraRatioPercent?: number | null;
   // 牌堆总数（轮数）：≤ floor(池卡数/packSize) = 固定堆数，剩余卡全部随机丢弃；
   // > 该上限 = 推断为"用全部卡池"（堆数 = ceil(池卡数/packSize)，末堆可不满，不丢弃）；
   // 新建比赛缺省为 4×玩家数，卡池不足时减少完整轮数；显式 legacy dropMode 仍可使用旧自动规则
@@ -88,7 +99,7 @@ export class TournamentsService {
   // (PoolsService.resolve still understands legacy 'full' configs).
   private assertCardPool(cardPool: unknown): string {
     if (typeof cardPool !== 'string' || !cardPool.trim()) throw new BadRequestException({ code: 'BAD_PAYLOAD' });
-    const name = cardPool.trim();
+    const name = normalizePoolName(cardPool);
     if (name === 'full' || !this.pools.codesByName(name)) throw new Error('POOL_NOT_FOUND');
     return name;
   }
@@ -106,6 +117,9 @@ export class TournamentsService {
 
   create(input: CreateTournamentInput, actor: string): { tid: number; url: string; admin_token: string } {
     const cardPool = this.assertCardPool(input.cardPool);
+    const pool = this.pools.getByName(cardPool);
+    if (!pool) throw new Error('POOL_NOT_FOUND');
+    const extraRatioPercent = normalizeExtraRatioPercent(input.extraRatioPercent);
     // New tournaments default to four complete pack rounds. If the selected
     // pool is smaller, reduce the count to the available full packs (and keep
     // the player-count multiple whenever a full round is possible).
@@ -143,6 +157,7 @@ export class TournamentsService {
             ? 'drop_leftover_exact'
             : 'use_all'),
       packStrategy: input.packStrategy ?? 'stratify',
+      extraRatioPercent,
       // Keep an automatically generated short partial round implicit. This
       // lets DraftService apply legacy dropMode/use_all semantics without
       // treating the unavoidable sub-round as an invalid explicit count.
@@ -163,6 +178,7 @@ export class TournamentsService {
       maxCopies: input.maxCopies ?? defaults.maxCopies,
       timeLimit: input.timeLimit ?? defaults.timeLimit,
       cardPool,
+      cardPoolId: pool.id,
       ...match,
     };
     // per-tournament admin token (dev_docs/07 §5.1): manages this tournament only
@@ -170,9 +186,9 @@ export class TournamentsService {
     const now = new Date().toISOString();
     const row = getDb()
       .prepare(
-        'INSERT INTO tournaments (name, config_json, status, round, created_at, updated_at, admin_token_hash) VALUES (?,?,?,?,?,?,?)',
+        'INSERT INTO tournaments (name, config_json, created_by, card_pool_id, status, round, created_at, updated_at, admin_token_hash) VALUES (?,?,?,?,?,?,?,?,?)',
       )
-      .run(input.name, JSON.stringify(cfg), 'registration', 0, now, now, sha256(adminToken));
+      .run(input.name, JSON.stringify(cfg), actor, pool.id, 'registration', 0, now, now, sha256(adminToken));
     const tid = Number(row.lastInsertRowid);
     logEvent(tid, 'tournament', 'phase', { status: 'registration', round: 0 }, actor);
     return { tid, url: `/t/${tid}`, admin_token: adminToken };
@@ -190,6 +206,7 @@ export class TournamentsService {
       players: state.players.map((p) => ({ playerId: p.playerId, displayName: p.displayName, seat: p.seat, eliminated: p.eliminated, withdrawn: p.withdrawn === true, ready: p.ready === true })),
       playerCount: state.players.length,
       frozen: state.frozen,
+      createdBy: state.createdBy,
       authRequired: row ? row.auth_required !== 0 : true,
     };
   }
@@ -403,12 +420,28 @@ export class TournamentsService {
     const state = loadState(tid);
     if (state.frozen) throw new Error('FROZEN');
     if (state.status !== 'registration') throw new Error('WRONG_PHASE');
-    if (patch.cardPool !== undefined) patch = { ...patch, cardPool: this.assertCardPool(patch.cardPool) };
+    if (patch.cardPool !== undefined) {
+      const cardPool = this.assertCardPool(patch.cardPool);
+      const pool = this.pools.getByName(cardPool);
+      if (!pool) throw new Error('POOL_NOT_FOUND');
+      patch = { ...patch, cardPool, cardPoolId: pool.id };
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'extraRatioPercent')) {
+      patch = { ...patch, extraRatioPercent: normalizeExtraRatioPercent(patch.extraRatioPercent) };
+    }
     const cfg = { ...getConfig(state), ...patch };
     if (typeof cfg.maxPlayers === 'number' && cfg.maxPlayers < state.players.length) {
       throw new Error('TOURNAMENT_FULL');
     }
     logEvent(tid, 'tournament', 'config', cfg, actor);
+    // Keep the immutable pool identity column in lockstep with the config
+    // whenever an administrator changes the pool during registration. This is
+    // what pick-stat aggregation uses after a pool is deleted/recreated under
+    // the same name.
+    if (patch.cardPool !== undefined) {
+      const cardPoolId = typeof cfg.cardPoolId === 'number' && Number.isInteger(cfg.cardPoolId) ? cfg.cardPoolId : null;
+      getDb().prepare('UPDATE tournaments SET card_pool_id=?, updated_at=? WHERE id=?').run(cardPoolId, new Date().toISOString(), tid);
+    }
     persistMeta(tid);
     return cfg;
   }
@@ -423,10 +456,10 @@ export class TournamentsService {
     persistMeta(tid);
   }
 
-  list(): { id: number; name: string; status: string }[] {
+  list(): { id: number; name: string; status: string; createdBy: string }[] {
     return getDb()
-      .prepare('SELECT id, name, status FROM tournaments ORDER BY id DESC LIMIT 50')
-      .all() as { id: number; name: string; status: string }[];
+      .prepare('SELECT id, name, status, created_by AS createdBy FROM tournaments ORDER BY id DESC LIMIT 50')
+      .all() as { id: number; name: string; status: string; createdBy: string }[];
   }
 
   stateForPlayer(tid: number, playerId: string) {
@@ -553,10 +586,10 @@ export class TournamentsService {
   // 管理台事件时间线：完整事件列表（全局 seq + 可读摘要），供回溯选择。
   // detail 用于前端 hover；保留关键字段（尤其是选中的 exact card code），
   // 但不把 packs/decks 的超大完整 payload 直接塞进列表响应。
-  events(tid: number): { seq: number; entity: string; action: string; summary: string; detail: string; createdAt: string }[] {
+  events(tid: number): { seq: number; entity: string; action: string; summary: string; detail: string; createdAt: string; actor: string }[] {
     const rows = getDb()
-      .prepare('SELECT seq, entity, action, payload_json, created_at FROM events WHERE tournament_id=? ORDER BY seq')
-      .all(tid) as { seq: number; entity: string; action: string; payload_json: string; created_at: string }[];
+      .prepare('SELECT seq, entity, action, payload_json, created_at, actor FROM events WHERE tournament_id=? ORDER BY seq')
+      .all(tid) as { seq: number; entity: string; action: string; payload_json: string; created_at: string; actor: string }[];
     return rows.map((e) => {
       let payload: Record<string, unknown> = {};
       try { payload = JSON.parse(e.payload_json); } catch { /* ignore */ }
@@ -574,7 +607,7 @@ export class TournamentsService {
       else if (e.entity === 'draft' && e.action === 'alternative') summary = `候选牌 ${p.playerId} #${p.card}`;
       else if (e.entity === 'draft' && e.action === 'reserve') summary = `保留时间 +${p.addedSeconds ?? Math.round(Number(p.deltaMs ?? 0) / 1000)} 秒（${p.playerId}）`;
       else if (e.entity === 'pause' && e.action === 'pause') summary = p?.pausedAt ? '暂停' : '恢复';
-      else if (e.entity === 'tournament' && e.action === 'phase') summary = `阶段 → ${p.status} r${p.round ?? ''}`;
+      else if (e.entity === 'tournament' && e.action === 'phase') summary = p.status === 'registration' && (p.round ?? 0) === 0 ? `创建比赛（${e.actor}）` : `阶段 → ${p.status} r${p.round ?? ''}`;
       else if (e.entity === 'tournament' && e.action === 'config') summary = '参数修改';
       else if (e.entity === 'tournament' && e.action === 'frozen') summary = !p ? '解冻' : '冻结';
       else if (e.entity === 'deck' && e.action === 'deck') summary = `卡组 ${p.playerId}`;
@@ -614,7 +647,10 @@ export class TournamentsService {
           detail = String(payload);
         }
       }
-      return { seq: e.seq, entity: e.entity, action: e.action, summary, detail, createdAt: e.created_at };
+      if (e.entity === 'tournament' && e.action === 'phase' && p.status === 'registration' && (p.round ?? 0) === 0) {
+        detail = `创建者：${e.actor}\n比赛进入报名阶段`;
+      }
+      return { seq: e.seq, entity: e.entity, action: e.action, summary, detail, createdAt: e.created_at, actor: e.actor };
     });
   }
 
@@ -625,6 +661,7 @@ export class TournamentsService {
     return {
       id: state.id,
       name: state.name,
+      createdBy: state.createdBy,
       status: state.status,
       round: state.round,
       frozen: state.frozen,

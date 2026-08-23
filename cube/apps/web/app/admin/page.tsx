@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 interface AdminState {
   id: number;
   name: string;
+  createdBy?: string;
   status: string;
   round: number;
   frozen: boolean;
@@ -30,6 +31,7 @@ interface PoolInfo {
   count: number;
   createdAt: string;
   isDefault?: boolean;
+  url?: string | null;
 }
 
 interface PoolImportReport {
@@ -54,6 +56,7 @@ interface TournamentBrief {
   player_count: number;
   frozen: number;
   created_at: string;
+  created_by?: string;
 }
 
 export default function AdminPage() {
@@ -85,16 +88,22 @@ export default function AdminPage() {
   const [shownToken, setShownToken] = useState<{ pid: string; token: string } | null>(null);
   const [shownAdminToken, setShownAdminToken] = useState<string | null>(null);
   const [matchInputs, setMatchInputs] = useState<Record<number, { a: string; b: string }>>({});
-  const [events, setEvents] = useState<{ seq: number; entity: string; action: string; summary: string; detail: string; createdAt: string }[]>([]);
+  const [events, setEvents] = useState<{ seq: number; entity: string; action: string; summary: string; detail: string; createdAt: string; actor?: string }[]>([]);
   const [packCount, setPackCount] = useState<number | ''>('');
   const [dropPublic, setDropPublic] = useState(false);
   const [reseatEachRound, setReseatEachRound] = useState(true);
   const [evenPackCount, setEvenPackCount] = useState(true);
   const [limitDeckbuilding, setLimitDeckbuilding] = useState(false);
+  const [extraRatioEnabled, setExtraRatioEnabled] = useState(false);
+  const [extraRatioPercent, setExtraRatioPercent] = useState(25);
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null);
   const [reserveInputs, setReserveInputs] = useState<Record<string, string>>({});
   const [hoveredEvent, setHoveredEvent] = useState<number | null>(null);
   const [formatForm, setFormatForm] = useState({ matchFormat: 'swiss', swissRoundCount: 3, playoffSize: 0 });
+  const [createUsers, setCreateUsers] = useState<{ username: string; createdAt: string; active: number }[]>([]);
+  const [createUsersLoaded, setCreateUsersLoaded] = useState(false);
+  const [newCreateUsername, setNewCreateUsername] = useState('');
+  const [issuedCreateToken, setIssuedCreateToken] = useState<{ username: string; token: string } | null>(null);
 
   useEffect(() => {
     if (!state) return;
@@ -152,6 +161,18 @@ export default function AdminPage() {
     } catch {
       if (seq === loadSeq.current) setTournaments([]);
     }
+    try {
+      const users = await adminFetch('/admin/create-users');
+      if (seq === loadSeq.current) {
+        setCreateUsers(users);
+        setCreateUsersLoaded(true);
+      }
+    } catch {
+      if (seq === loadSeq.current) {
+        setCreateUsers([]);
+        setCreateUsersLoaded(false);
+      }
+    }
     if (tid) {
       try {
         const ev = await adminFetch(`/admin/t/${tid}/events`);
@@ -191,7 +212,12 @@ export default function AdminPage() {
       showMsg(`${path} ok ${JSON.stringify(d).slice(0, 100)}（${Math.round(performance.now() - t0)} ms）`);
       await loadRef.current();
     } catch (e: any) {
-      showMsg(`${path} -> ${e.message}（${Math.round(performance.now() - t0)} ms）`);
+      if (e.message === 'INSUFFICIENT_PACK_RATIO' && e.details) {
+        const d = e.details as { extraRatioPercent?: number; requiredMain?: number; availableMain?: number; requiredExtra?: number; availableExtra?: number };
+        showMsg(`按 ${d.extraRatioPercent ?? '?'}% 组包失败：主卡需要 ${d.requiredMain ?? '?'} 张（可用 ${d.availableMain ?? '?'}），额外卡需要 ${d.requiredExtra ?? '?'} 张（可用 ${d.availableExtra ?? '?'})`);
+      } else {
+        showMsg(`${path} -> ${e.message}（${Math.round(performance.now() - t0)} ms）`);
+      }
     }
   };
 
@@ -322,6 +348,9 @@ export default function AdminPage() {
     setReseatEachRound((state.config.reseatEachRound as boolean | undefined) !== false);
     setEvenPackCount((state.config.evenPackCount as boolean | undefined) !== false);
     setLimitDeckbuilding(typeof state.config.deckbuildingSeconds === 'number' && Number(state.config.deckbuildingSeconds) > 0);
+    const configuredExtraRatio = state.config.extraRatioPercent;
+    setExtraRatioEnabled(typeof configuredExtraRatio === 'number');
+    setExtraRatioPercent(typeof configuredExtraRatio === 'number' ? configuredExtraRatio : 25);
     setEditing(true);
   };
 
@@ -343,6 +372,7 @@ export default function AdminPage() {
         reserveSeconds: Number(editForm.reserveSeconds ?? 400),
         deckbuildingSeconds: limitDeckbuilding ? Number(editForm.deckbuildingSeconds) : null,
         packStrategy: String(editForm.packStrategy === 'random' || editForm.packStrategy === 'main_then_extra' ? editForm.packStrategy : 'stratify'),
+        extraRatioPercent: extraRatioEnabled ? extraRatioPercent : null,
         packCount: packCount === '' ? null : Number(packCount), // null = 恢复自动（后端删除该键语义）
         dropPublic,
         reseatEachRound,
@@ -391,6 +421,35 @@ export default function AdminPage() {
     }
   };
 
+  const createPermissionUser = async () => {
+    const username = newCreateUsername.trim();
+    if (!username) {
+      showMsg('请输入权限用户名');
+      return;
+    }
+    try {
+      const result = await adminFetch('/admin/create-users', 'POST', { username });
+      setIssuedCreateToken({ username: result.username, token: result.create_token });
+      setNewCreateUsername('');
+      showMsg(`权限用户 ${result.username} 已创建；token 只显示一次`);
+      await loadRef.current();
+    } catch (e: any) {
+      showMsg(e.message === 'CREATE_USER_EXISTS' ? '该权限用户名已存在' : (e.message === 'BAD_CREATE_USERNAME' ? '用户名须为 1–32 位字母、数字、点、下划线或连字符' : e.message));
+    }
+  };
+
+  const deletePermissionUser = async (username: string) => {
+    if (!window.confirm(`立即撤销权限用户 ${username}？`)) return;
+    try {
+      await adminFetch(`/admin/create-users/${encodeURIComponent(username)}`, 'DELETE');
+      if (issuedCreateToken?.username === username) setIssuedCreateToken(null);
+      showMsg(`权限用户 ${username} 已删除`);
+      await loadRef.current();
+    } catch (e: any) {
+      showMsg(`删除权限用户失败：${e.message}`);
+    }
+  };
+
   const editPlayers = Math.max(1, Number(editForm.maxPlayers) || 1);
   const editPackSize = Math.max(1, Number(editForm.packSize) || 24);
   const editPoolCount = pools.find((p) => p.name === String(editForm.cardPool ?? ''))?.count ?? 0;
@@ -408,6 +467,9 @@ export default function AdminPage() {
   const editDraftedCards = Math.min(editPoolCount, editEffectivePacks * editPackSize);
   const editCardsLow = Math.floor(editDraftedCards / editPlayers);
   const editCardsHigh = Math.ceil(editDraftedCards / editPlayers);
+  const editExtraRatioInvalid = extraRatioEnabled && (!Number.isInteger(extraRatioPercent) || extraRatioPercent < 0 || extraRatioPercent > 100);
+  const editExtraPerPack = extraRatioEnabled ? Math.round(editPackSize * extraRatioPercent / 100) : 0;
+  const editMainPerPack = editPackSize - editExtraPerPack;
 
   return (
     <main className="mx-auto max-w-5xl p-4 sm:p-6">
@@ -428,6 +490,37 @@ export default function AdminPage() {
           加载
         </button>
       </div>
+      {createUsersLoaded && (
+        <section className="mb-6 rounded-lg border border-gold/25 bg-felt/60 p-4 text-xs">
+          <h2 className="mb-2 text-sm font-semibold text-gold">比赛创建权限用户</h2>
+          <p className="mb-3 text-slate-400">创建 token 只保存哈希；新 token 仅在生成或重新生成时显示一次。</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              className="w-56 rounded bg-felt-deep px-2 py-1 outline-none ring-gold/50 focus:ring-2"
+              placeholder="用户名（1–32 位）"
+              value={newCreateUsername}
+              onChange={(e) => setNewCreateUsername(e.target.value)}
+            />
+            <button onClick={() => void createPermissionUser()} className="rounded bg-gold px-3 py-1 font-semibold text-felt-deep hover:brightness-110">生成 token</button>
+          </div>
+          {issuedCreateToken && (
+            <div className="mt-3 rounded border border-amber-300/30 bg-amber-950/30 p-2 text-amber-100">
+              <span>{issuedCreateToken.username} token：</span>
+              <code className="break-all font-mono text-gold">{issuedCreateToken.token}</code>
+              <button onClick={() => void navigator.clipboard.writeText(issuedCreateToken.token)} className="ml-2 rounded bg-felt-edge px-2 py-0.5 hover:brightness-110">复制</button>
+            </div>
+          )}
+          <ul className="mt-3 space-y-1">
+            {createUsers.map((user) => (
+              <li key={user.username} className="flex flex-wrap items-center justify-between gap-2 rounded bg-felt-deep/50 px-2 py-1">
+                <span><b>{user.username}</b> · 创建于 {user.createdAt.slice(0, 10)}{user.active ? '' : ' · 已停用'}</span>
+                <button onClick={() => void deletePermissionUser(user.username)} className="rounded bg-red-900 px-2 py-0.5 text-red-100 hover:brightness-110">删除</button>
+              </li>
+            ))}
+            {createUsers.length === 0 && <li className="text-slate-500">暂无权限用户</li>}
+          </ul>
+        </section>
+      )}
       {msg && (
         <div key={msgKey} className="fixed left-4 right-4 top-4 z-50 rounded-lg border border-felt-edge bg-felt px-3 py-2 text-xs text-slate-300 shadow-2xl sm:left-auto sm:max-w-sm">
           {msg}
@@ -439,6 +532,7 @@ export default function AdminPage() {
             <div className="flex flex-wrap items-center gap-2">
               <b className="text-gold">{state.name}</b>
               <span className="rounded bg-felt-edge px-2 py-0.5 text-xs">{state.status} r{state.round}</span>
+              <span className="text-xs text-slate-400">创建者：{state.createdBy ?? 'unknown'}</span>
               {state.frozen && <span className="rounded bg-red-900 px-2 py-0.5 text-xs text-red-200">管理员冻结</span>}
               {state.status === 'registration' && (
                 <button onClick={openEdit} className="rounded bg-felt-edge px-3 py-1 text-xs hover:brightness-110">
@@ -665,6 +759,7 @@ export default function AdminPage() {
                     <span className="w-14 shrink-0 font-mono text-slate-400">{e.seq}</span>
                     <span className="w-16 shrink-0 font-mono text-slate-500">{new Date(e.createdAt).toLocaleTimeString()}</span>
                     <span className="truncate">{e.summary}</span>
+                    {e.actor && <span className="shrink-0 text-slate-500">· {e.actor}</span>}
                   </div>
                 ))}
                 {events.length === 0 && <p className="py-2 text-center text-slate-500">暂无事件</p>}
@@ -794,16 +889,26 @@ export default function AdminPage() {
               <label className="flex items-center gap-2">选牌秒数 <input type="number" className="w-16 rounded bg-felt-deep px-1 py-1" value={Number(editForm.pickSeconds)} onChange={(e) => setEditForm((f) => ({ ...f, pickSeconds: Number(e.target.value) }))} /></label>
               <label className="flex items-center gap-2"><input type="checkbox" checked={limitDeckbuilding} onChange={(e) => setLimitDeckbuilding(e.target.checked)} /> 限制构筑时间 {limitDeckbuilding ? <><input type="number" min={30} max={7200} className="w-16 rounded bg-felt-deep px-1 py-1" value={Number(editForm.deckbuildingSeconds)} onChange={(e) => setEditForm((f) => ({ ...f, deckbuildingSeconds: Number(e.target.value) }))} /> 秒</> : <span className="text-slate-400">无限</span>}</label>
               <label className="flex items-center gap-2">卡堆组成
-                <select className="rounded bg-felt-deep px-1 py-1" value={String(editForm.packStrategy ?? 'stratify')} onChange={(e) => setEditForm((f) => ({ ...f, packStrategy: e.target.value }))}>
+                <select className="rounded bg-felt-deep px-1 py-1 disabled:cursor-not-allowed disabled:opacity-50" disabled={extraRatioEnabled} value={String(editForm.packStrategy ?? 'stratify')} onChange={(e) => setEditForm((f) => ({ ...f, packStrategy: e.target.value }))}>
                   <option value="stratify">主卡/额外卡按比例均匀每堆</option>
                   <option value="random">全随机</option>
                   <option value="main_then_extra">先全主卡再全额外</option>
                 </select>
+                {extraRatioEnabled && <span className="text-xs text-amber-200">比例配置优先</span>}
+              </label>
+              <label className="col-span-full flex flex-wrap items-center gap-2">
+                <input type="checkbox" checked={extraRatioEnabled} onChange={(e) => setExtraRatioEnabled(e.target.checked)} />
+                按比例配置额外卡
+                {extraRatioEnabled && <>
+                  <input type="number" min={0} max={100} step={1} className="w-16 rounded bg-felt-deep px-2 py-1" value={extraRatioPercent} onChange={(e) => setExtraRatioPercent(e.target.value === '' ? 0 : Number(e.target.value))} />
+                  <span>%（每个完整牌堆 {editMainPerPack} 主卡 + {editExtraPerPack} 额外卡）</span>
+                </>}
+                {editExtraRatioInvalid && <span className="text-xs text-red-300">比例必须是 0–100 的整数</span>}
               </label>
             </div>
             <div className="mt-5 flex justify-end gap-3">
               <button onClick={() => setEditing(false)} className="rounded px-4 py-1.5 text-slate-300 hover:bg-felt-edge">取消</button>
-              <button onClick={() => void saveEdit()} className="rounded bg-gold px-4 py-1.5 font-semibold text-felt-deep hover:brightness-110">保存</button>
+              <button onClick={() => void saveEdit()} disabled={editExtraRatioInvalid} className="rounded bg-gold px-4 py-1.5 font-semibold text-felt-deep hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40">保存</button>
             </div>
           </div>
         </div>
@@ -815,7 +920,7 @@ export default function AdminPage() {
           {tournaments.map((t) => (
             <li key={t.id} className="flex flex-wrap items-center justify-between gap-2 rounded bg-felt-deep/50 px-2 py-1">
               <span>
-                <b>{t.name}</b> · {t.status} r{t.round} · {t.player_count} 人{t.frozen ? ' · 已暂停' : ''}
+                <b>{t.name}</b> · {t.status} r{t.round} · {t.player_count} 人 · 创建者 {t.created_by ?? 'unknown'}{t.frozen ? ' · 已暂停' : ''}
               </span>
               <span className="flex items-center gap-2">
                 <button
@@ -921,6 +1026,7 @@ export default function AdminPage() {
                 <a href={`/admin/pool/${p.id}`} className="rounded bg-felt-edge px-2 py-0.5 text-slate-200 hover:brightness-110">
                   编辑
                 </a>
+                {p.url && <a href={p.url} target="_blank" rel="noreferrer" className="rounded bg-felt-edge px-2 py-0.5 text-emerald-200 hover:brightness-110">公开查看</a>}
                 <button
                   onClick={() => {
                     if (!confirm('确定删除卡池？')) return;

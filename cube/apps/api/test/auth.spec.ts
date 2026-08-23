@@ -3,6 +3,7 @@ import { config } from '../src/config';
 import { AuthGuard } from '../src/auth/auth.guard';
 import { Reflector } from '@nestjs/core';
 import { getDb } from '../src/db';
+import { AdminController } from '../src/admin.controller';
 
 function makeCtx(path: string, headers: Record<string, string>, query: Record<string, string> = {}, body: Record<string, unknown> = {}, method = 'GET') {
   const req: any = {
@@ -44,8 +45,26 @@ describe('auth model', () => {
     const guard = new AuthGuard(new Reflector());
     expectUnauthorized(() => guard.canActivate(makeCtx('/tournaments', {}, {}, {})));
     expectUnauthorized(() => guard.canActivate(makeCtx('/tournaments', { 'x-create-token': 'wrong' }, {}, {})));
-    expect(guard.canActivate(makeCtx('/tournaments', { 'x-create-token': config.admin.createToken }, {}, {}, 'POST'))).toBe(true);
+    const { sha256 } = require('../src/auth/auth.guard');
+    getDb().prepare('INSERT INTO create_users (username, token_hash, created_at, active) VALUES (?,?,?,1)')
+      .run('creator', sha256('create-secret'), new Date().toISOString());
+    expect(guard.canActivate(makeCtx('/tournaments', { 'x-create-user': 'creator', 'x-create-token': 'create-secret' }, {}, {}, 'POST'))).toBe(true);
+    expectUnauthorized(() => guard.canActivate(makeCtx('/tournaments', { 'x-create-user': 'creator', 'x-create-token': 'wrong' }, {}, {}, 'POST')));
     expect(guard.canActivate(makeCtx('/tournaments', { 'x-admin-token': config.admin.superToken }, {}, {}, 'POST'))).toBe(true);
+  });
+
+  it('super admin can create and revoke hashed create users', () => {
+    const controller = new AdminController(null as any, null as any, null as any, null as any, null as any, null as any, null as any, null as any);
+    const req: any = { identity: { isSuper: true } };
+    const created = controller.createUser(req, { username: 'Alice.Creator' });
+    expect(created.username).toBe('alice.creator');
+    expect(created.create_token).toBeTruthy();
+    const row = getDb().prepare('SELECT token_hash FROM create_users WHERE username=?').get(created.username) as { token_hash: string };
+    expect(row.token_hash).not.toBe(created.create_token);
+    const guard = new AuthGuard(new Reflector());
+    expect(guard.canActivate(makeCtx('/tournaments', { 'x-create-user': 'ALICE.CREATOR', 'x-create-token': created.create_token }, {}, {}, 'POST'))).toBe(true);
+    controller.removeCreateUser(req, 'ALICE.CREATOR');
+    expectUnauthorized(() => guard.canActivate(makeCtx('/tournaments', { 'x-create-user': 'alice.creator', 'x-create-token': created.create_token }, {}, {}, 'POST')));
   });
 
   it('per-tournament admin token manages only its own tournament', () => {

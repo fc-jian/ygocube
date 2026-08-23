@@ -56,7 +56,7 @@ export default function PoolEditorPage() {
         setMetaLoading(true);
         for (let i = 0; i < list.length; i += 500) {
           const chunk = list.slice(i, i + 500);
-          const meta = await adminFetch(`/admin/cards?codes=${chunk.join(',')}`);
+          const meta = await adminFetch(`/admin/cards?pool_id=${encodeURIComponent(params.id)}&codes=${chunk.join(',')}`);
           const map: Record<number, CardInfo> = {};
           for (const c of meta) map[c.code] = c;
           setCardMap((m) => ({ ...m, ...map }));
@@ -78,7 +78,7 @@ export default function PoolEditorPage() {
       try {
         for (let i = 0; i < missing.length; i += 500) {
           const chunk = missing.slice(i, i + 500);
-          const meta = await adminFetch(`/admin/cards?codes=${chunk.join(',')}`);
+          const meta = await adminFetch(`/admin/cards?pool_id=${encodeURIComponent(params.id)}&codes=${chunk.join(',')}`);
           const map: Record<number, CardInfo> = {};
           for (const c of meta) map[c.code] = c;
           setCardMap((m) => ({ ...m, ...map }));
@@ -92,6 +92,29 @@ export default function PoolEditorPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [adminFetch],
   );
+
+  // Pick statistics are derived from completed tournaments. Refresh only the
+  // metadata rows already present in the editor so unsaved card additions,
+  // removals and manual ordering are never overwritten.
+  useEffect(() => {
+    if (!adminToken || isNew || codes.size === 0) return;
+    const refresh = async () => {
+      const list = [...codes];
+      const merged: Record<number, CardInfo> = {};
+      try {
+        for (let i = 0; i < list.length; i += 500) {
+          const chunk = list.slice(i, i + 500);
+          const meta = await adminFetch(`/admin/cards?pool_id=${encodeURIComponent(params.id)}&codes=${chunk.join(',')}`);
+          for (const c of meta) merged[c.code] = c;
+        }
+        setCardMap((current) => ({ ...current, ...merged }));
+      } catch {
+        // A transient admin/API failure should not interrupt editing.
+      }
+    };
+    const timer = window.setInterval(() => void refresh(), 30000);
+    return () => window.clearInterval(timer);
+  }, [adminFetch, adminToken, codes, isNew, params.id]);
 
   const addCode = (code: number) => {
     setCodes((prev) => {
@@ -116,7 +139,7 @@ export default function PoolEditorPage() {
       return;
     }
     try {
-      setResults(sortCardSearchResults(await adminFetch(`/admin/cards?q=${encodeURIComponent(q.trim())}`), q));
+      setResults(sortCardSearchResults(await adminFetch(`/admin/cards?pool_id=${encodeURIComponent(params.id)}&q=${encodeURIComponent(q.trim())}`), q));
     } catch {
       setResults([]);
     }

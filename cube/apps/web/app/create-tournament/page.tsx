@@ -9,6 +9,7 @@ interface PoolInfo {
   name: string;
   count: number;
   isDefault?: boolean;
+  url?: string | null;
 }
 
 type MatchFormat = 'round_robin' | 'swiss' | 'double_elimination';
@@ -38,10 +39,13 @@ export default function CreateTournamentPage() {
   const [deckbuildingSeconds, setDeckbuildingSeconds] = useState(600);
   const [limitDeckbuilding, setLimitDeckbuilding] = useState(false);
   const [packStrategy, setPackStrategy] = useState('stratify');
+  const [extraRatioEnabled, setExtraRatioEnabled] = useState(false);
+  const [extraRatioPercent, setExtraRatioPercent] = useState(25);
   const [evenPackCount, setEvenPackCount] = useState(true);
   const [reseatEachRound, setReseatEachRound] = useState(true);
   const [reserveSeconds, setReserveSeconds] = useState(400);
   const [confirmFairness, setConfirmFairness] = useState(false);
+  const [createUsername, setCreateUsername] = useState('');
   const [createToken, setCreateToken] = useState('');
   const [created, setCreated] = useState<{ url: string; adminToken: string } | null>(null);
   const [error, setError] = useState('');
@@ -93,6 +97,9 @@ export default function CreateTournamentPage() {
   const cardsPerPlayerHigh = Math.ceil(draftedCards / Math.max(1, maxPlayers));
   const overLimitDrop = Math.max(0, poolCount - overLimitEffective * packSize);
   const packCountInvalid = packCount !== '' && evenPackCount && Number(packCount) % maxPlayers !== 0;
+  const extraRatioInvalid = extraRatioEnabled && (!Number.isInteger(extraRatioPercent) || extraRatioPercent < 0 || extraRatioPercent > 100);
+  const extraPerPack = extraRatioEnabled ? Math.round(packSize * extraRatioPercent / 100) : 0;
+  const mainPerPack = packSize - extraPerPack;
   // passing 模式公平性只取决于牌堆总数是否为人数倍数；每堆张数可以任意。
   const unfair = effectivePacks % maxPlayers !== 0;
 
@@ -100,13 +107,14 @@ export default function CreateTournamentPage() {
     try {
       const r = await api<{ tid: number; url: string; admin_token: string }>('/tournaments', {
         method: 'POST',
-        body: { name, maxPlayers, mode, packSize, cardPool, mainMin, mainMax, extraMax, sideMax, maxCopies, timeLimit, pickSeconds, deckbuildingSeconds: limitDeckbuilding ? deckbuildingSeconds : null, packStrategy, packCount: packCount === '' ? undefined : Number(packCount), dropPublic, evenPackCount, reserveSeconds, reseatEachRound, matchFormat, swissRoundCount: matchFormat === 'swiss' ? swissRoundCount : undefined, playoffSize: matchFormat === 'swiss' ? playoffSize : 0 },
+        body: { name, maxPlayers, mode, packSize, cardPool, mainMin, mainMax, extraMax, sideMax, maxCopies, timeLimit, pickSeconds, deckbuildingSeconds: limitDeckbuilding ? deckbuildingSeconds : null, packStrategy, extraRatioPercent: extraRatioEnabled ? extraRatioPercent : null, packCount: packCount === '' ? undefined : Number(packCount), dropPublic, evenPackCount, reserveSeconds, reseatEachRound, matchFormat, swissRoundCount: matchFormat === 'swiss' ? swissRoundCount : undefined, playoffSize: matchFormat === 'swiss' ? playoffSize : 0 },
+        createUsername: createUsername.trim() || undefined,
         createToken,
       });
       setCreated({ url: r.url, adminToken: r.admin_token });
       setError('');
     } catch (e: any) {
-      setError(e.code === 'AUTH_REQUIRED' ? '缺少创建令牌' : (e.code === 'PACKCOUNT_NOT_MULTIPLE' ? '牌堆总数必须是人数的整数倍' : (e.code ?? String(e))));
+      setError(e.code === 'AUTH_REQUIRED' ? '缺少创建令牌' : (e.code === 'PACKCOUNT_NOT_MULTIPLE' ? '牌堆总数必须是人数的整数倍' : (e.code === 'BAD_EXTRA_RATIO' ? '额外卡比例必须是 0–100 的整数' : (e.code ?? String(e)))));
     }
   };
 
@@ -305,23 +313,54 @@ export default function CreateTournamentPage() {
               每轮结束后随机重排玩家座位
             </label>
             <label className="flex items-center gap-2">
+              <input type="checkbox" checked={extraRatioEnabled} onChange={(e) => setExtraRatioEnabled(e.target.checked)} />
+              按比例配置额外卡
+              {extraRatioEnabled && (
+                <>
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    step={1}
+                    className="w-16 rounded bg-felt-deep px-2 py-1"
+                    value={extraRatioPercent}
+                    onChange={(e) => setExtraRatioPercent(e.target.value === '' ? 0 : Number(e.target.value))}
+                  />
+                  <span>%（每个完整牌堆 {mainPerPack} 主卡 + {extraPerPack} 额外卡）</span>
+                </>
+              )}
+              {extraRatioInvalid && <span className="text-xs text-red-300">比例必须是 0–100 的整数</span>}
+            </label>
+            <label className="flex items-center gap-2">
               卡堆组成
-              <select className="rounded bg-felt-deep px-2 py-1" value={packStrategy} onChange={(e) => setPackStrategy(e.target.value)}>
+              <select className="rounded bg-felt-deep px-2 py-1 disabled:cursor-not-allowed disabled:opacity-50" disabled={extraRatioEnabled} value={packStrategy} onChange={(e) => setPackStrategy(e.target.value)}>
                 <option value="stratify">主卡/额外卡按比例均匀每堆</option>
                 <option value="random">全随机</option>
                 <option value="main_then_extra">先全主卡再全额外</option>
               </select>
+              {extraRatioEnabled && <span className="text-xs text-amber-200">比例配置优先</span>}
             </label>
           </div>
-          <input
-            className="w-full rounded bg-felt-deep px-3 py-2 outline-none ring-gold/50 focus:ring-2"
-            placeholder="创建令牌"
-            type="password"
-            value={createToken}
-            onChange={(e) => setCreateToken(e.target.value)}
-          />
+          <div className="grid gap-2 sm:grid-cols-2">
+            <input
+              className="w-full rounded bg-felt-deep px-3 py-2 outline-none ring-gold/50 focus:ring-2"
+              placeholder="权限用户名（超级管理员可留空）"
+              autoComplete="username"
+              value={createUsername}
+              onChange={(e) => setCreateUsername(e.target.value)}
+            />
+            <input
+              className="w-full rounded bg-felt-deep px-3 py-2 outline-none ring-gold/50 focus:ring-2"
+              placeholder="创建 token"
+              type="password"
+              autoComplete="off"
+              value={createToken}
+              onChange={(e) => setCreateToken(e.target.value)}
+            />
+          </div>
+          <p className="text-xs text-slate-500">创建权限用户由超级管理员在管理台生成；超级管理员也可直接只填写 token。</p>
           {error && <p className="text-xs text-red-300">{error}</p>}
-          <button onClick={create} disabled={!cardPool || packCountInvalid} className="yc-primary px-6 py-2.5 font-semibold disabled:cursor-not-allowed disabled:opacity-40">
+          <button onClick={create} disabled={!cardPool || packCountInvalid || extraRatioInvalid} className="yc-primary px-6 py-2.5 font-semibold disabled:cursor-not-allowed disabled:opacity-40">
             创建比赛
           </button>
           <ConfirmModal

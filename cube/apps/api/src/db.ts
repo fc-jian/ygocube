@@ -16,6 +16,8 @@ export function getDb(): Database.Database {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
       config_json TEXT NOT NULL,
+      created_by TEXT NOT NULL DEFAULT 'unknown',
+      card_pool_id INTEGER,
       status TEXT NOT NULL DEFAULT 'registration',
       round INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
@@ -138,6 +140,13 @@ export function getDb(): Database.Database {
       value TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS create_users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL UNIQUE,
+      token_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      active INTEGER NOT NULL DEFAULT 1
+    );
   `);
   migrate(db);
   return db;
@@ -154,6 +163,12 @@ function migrate(d: Database.Database): void {
   }
   if (!cols.some((c) => c.name === 'frozen')) {
     d.exec('ALTER TABLE tournaments ADD COLUMN frozen INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!cols.some((c) => c.name === 'created_by')) {
+    d.exec("ALTER TABLE tournaments ADD COLUMN created_by TEXT NOT NULL DEFAULT 'unknown'");
+  }
+  if (!cols.some((c) => c.name === 'card_pool_id')) {
+    d.exec('ALTER TABLE tournaments ADD COLUMN card_pool_id INTEGER');
   }
   const snapCols = d.prepare('PRAGMA table_info(tournament_snapshots)').all() as { name: string }[];
   if (!snapCols.some((c) => c.name === 'event_seq')) {

@@ -8,8 +8,8 @@ import { TopBar, DeckZone, DraftState, useNowTick } from '@/components/TopBar';
 import { PackZone } from '@/components/PackZone';
 import { TokenPrompt } from '@/components/TokenPrompt';
 import { CardSearchAll } from '@/components/CardSearchAll';
-import { CardImage, CardWithTooltip } from '@/components/CardImage';
 import { setCardPreviewAction } from '@/components/CardPreview';
+import { PoolPreview } from '@/components/PoolPreview';
 import { CardInfo } from '@/lib/types';
 import { matchesCardQuery, sortCardSearchResults } from '@/lib/cardInfo';
 
@@ -126,18 +126,30 @@ export default function DraftPage() {
   // 未开始选牌时：加载 drop 前卡池 + 全部卡牌元数据，供浏览/搜索（标记是否在池中）
   useEffect(() => {
     if (state?.status !== 'registration' || !identity) return;
-    api<{ codes: number[] }>(`/t/${tid}/pool`, { identity })
-      .then(async (r) => {
-        setPoolCodes(r.codes);
+    let cancelled = false;
+    const refreshPool = async () => {
+      try {
+        const r = await api<{ codes: number[] }>(`/t/${tid}/pool`, { identity });
         const map: Record<number, CardInfo> = {};
         for (let i = 0; i < r.codes.length; i += 500) {
           const chunk = r.codes.slice(i, i + 500);
           const meta = await api<CardInfo[]>(`/t/${tid}/cards?codes=${chunk.join(',')}`, { identity });
           for (const c of meta) map[c.code] = c;
         }
-        setCardMap((m) => ({ ...m, ...map }));
-      })
-      .catch(() => setPoolCodes([]));
+        if (!cancelled) {
+          setPoolCodes(r.codes);
+          setCardMap((m) => ({ ...m, ...map }));
+        }
+      } catch {
+        if (!cancelled) setPoolCodes([]);
+      }
+    };
+    void refreshPool();
+    const timer = window.setInterval(() => void refreshPool(), 30000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, [state?.status, identity, tid]);
 
   const searchPool = async () => {
@@ -336,46 +348,15 @@ export default function DraftPage() {
         </div>
       )}
       {state.status === 'registration' && (
-        <div className="flex flex-1 flex-col gap-3 p-3 md:flex-row md:overflow-hidden">
-          <div className="flex w-full flex-col gap-2 md:w-3/5 md:overflow-y-auto md:pr-1">
-            <header className="mb-2 text-xs text-slate-400">
-              卡池预览（drop 前，共 {poolCodes.length} 张）—— 选牌尚未开始；请点击顶部“准备”按钮确认参加，点击“玩家”可查看报名与准备情况
-            </header>
-            <DeckZone title="主卡组" zone="main" codes={poolCodes.filter((c) => cardMap[c] && !(cardMap[c].type & 0x4802040))} cardMap={cardMap} />
-            <DeckZone title="额外卡组" zone="extra" codes={poolCodes.filter((c) => cardMap[c] && !!(cardMap[c].type & 0x4802040))} cardMap={cardMap} />
-          </div>
-          <div className="flex-1 rounded-lg border border-felt-edge bg-felt/60 p-2">
-            <header className="mb-1 text-xs font-semibold text-slate-300">搜索并标记是否在卡池中</header>
-            <div className="flex gap-2">
-              <input
-                className="flex-1 rounded bg-felt-deep px-2 py-1 text-xs outline-none ring-gold/50 focus:ring-2"
-                placeholder="搜索名称、编号、效果、字段或系列（空格分隔多个关键词）"
-                value={poolSearch}
-                onChange={(e) => setPoolSearch(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && void searchPool()}
-              />
-              <button onClick={() => void searchPool()} className="rounded bg-felt-edge px-3 py-1 text-xs hover:brightness-110">
-                搜索
-              </button>
-            </div>
-            <ul className="mt-2 max-h-72 space-y-0.5 overflow-y-auto">
-              {poolResults.map((c) => {
-                const inPool = poolCodes.includes(c.code);
-                return (
-                  <li key={c.code} className="flex items-center gap-2 rounded bg-felt-deep/60 px-1.5 py-1">
-                    <CardWithTooltip code={c.code} card={c} className="h-9 w-7 shrink-0" />
-                    <span className="flex-1 truncate text-xs">{c.name}</span>
-                    <span className="font-mono text-[0.625rem] text-slate-500">{c.code}</span>
-                    <span className={`rounded px-1.5 py-0.5 text-[0.625rem] ${inPool ? 'bg-emerald-950 text-emerald-300' : 'bg-slate-800 text-slate-400'}`}>
-                      {inPool ? '在卡池中' : '不在卡池中'}
-                    </span>
-                  </li>
-                );
-              })}
-              {poolSearch.trim() && poolResults.length === 0 && <li className="text-[0.625rem] text-slate-500">未找到匹配的卡牌</li>}
-            </ul>
-          </div>
-        </div>
+        <PoolPreview
+          poolCodes={poolCodes}
+          cardMap={cardMap}
+          searchQuery={poolSearch}
+          searchResults={poolResults}
+          onSearchQuery={setPoolSearch}
+          onSearch={() => void searchPool()}
+          heading={`卡池预览（drop 前，共 ${poolCodes.length} 张）—— 选牌尚未开始；请点击顶部“准备”按钮确认参加，点击“玩家”可查看报名与准备情况`}
+        />
       )}
       {state.status === 'deckbuilding' && (
         <div className="flex flex-1 flex-col items-center justify-center gap-4">

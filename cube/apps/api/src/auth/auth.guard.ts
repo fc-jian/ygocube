@@ -10,12 +10,13 @@ import { config } from '../config';
 //   has token auth disabled by an admin (auth_required=false, for same-machine testing).
 // - /admin/*: X-Admin-Token must be the super admin token (all tournaments + pools)
 //   or the per-tournament admin token issued at creation (that tournament only).
-// - POST /tournaments: requires X-Create-Token (config admin.create_token) or super token.
+// - POST /tournaments: requires X-Create-User + X-Create-Token or the super token.
 export interface Identity {
   tournamentId: number;
   playerId: string;
   isAdmin: boolean;
   isSuper: boolean;
+  createUsername?: string;
 }
 
 export interface AuthedRequest extends Request {
@@ -42,8 +43,8 @@ function tournamentRow(tid: number): TournamentRow | null {
   return (getDb().prepare('SELECT id, admin_token_hash, auth_required FROM tournaments WHERE id=?').get(tid) as TournamentRow | undefined) ?? null;
 }
 
-function headerToken(req: AuthedRequest): string | undefined {
-  const v = req.headers['x-admin-token'] ?? req.headers['x-create-token'];
+function headerValue(req: AuthedRequest, name: string): string | undefined {
+  const v = req.headers[name];
   const raw = Array.isArray(v) ? v[0] : typeof v === 'string' ? v : undefined;
   if (raw === undefined) return undefined;
   try {
@@ -53,12 +54,30 @@ function headerToken(req: AuthedRequest): string | undefined {
   }
 }
 
+function headerToken(req: AuthedRequest): string | undefined {
+  return headerValue(req, 'x-admin-token');
+}
+
+export const CREATE_USERNAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/;
+
+export function normalizeCreateUsername(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('BAD_CREATE_USERNAME');
+  const username = value.trim().toLowerCase();
+  if (!CREATE_USERNAME_PATTERN.test(username)) throw new Error('BAD_CREATE_USERNAME');
+  return username;
+}
+
 function isSuper(token: string): boolean {
   return token === config.admin.superToken;
 }
 
 function isTournamentAdmin(token: string, hash: string | null): boolean {
   return hash !== null && hash !== '' && sha256(token) === hash;
+}
+
+function isCreateUser(username: string, token: string): boolean {
+  const row = getDb().prepare('SELECT token_hash FROM create_users WHERE username=? AND active=1').get(username) as { token_hash: string } | undefined;
+  return !!row && sha256(token) === row.token_hash;
 }
 
 function cookiesOf(req: AuthedRequest): Record<string, string> {
@@ -151,11 +170,31 @@ export class AuthGuard implements CanActivate {
     }
 
     if (req.path === '/tournaments' && req.method === 'POST') {
-      const token = headerToken(req);
-      if (!token || (!isSuper(token) && token !== config.admin.createToken)) {
-        throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields: ['create_token'] });
+      // The super token remains a backwards-compatible direct create credential;
+      // regular create users must use the dedicated create headers.
+      const createToken = headerValue(req, 'x-create-token');
+      const adminToken = headerValue(req, 'x-admin-token');
+      const token = createToken ?? adminToken;
+      if (!token) throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields: ['create_user', 'create_token'] });
+      if (isSuper(token)) {
+        req.identity = { tournamentId: 0, playerId: '', isAdmin: true, isSuper: true, createUsername: 'super-admin' };
+        return true;
       }
-      req.identity = { tournamentId: 0, playerId: '', isAdmin: true, isSuper: isSuper(token) };
+      // A non-super credential is accepted only in the dedicated create-token
+      // header. X-Admin-Token is reserved for tournament administration and
+      // must never become an accidental second create-user header.
+      if (!createToken) throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields: ['create_token'] });
+      const rawUsername = headerValue(req, 'x-create-user');
+      let username: string;
+      try {
+        username = normalizeCreateUsername(rawUsername);
+      } catch {
+        throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields: ['create_user'] });
+      }
+      if (!isCreateUser(username, token)) {
+        throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields: ['create_user', 'create_token'] });
+      }
+      req.identity = { tournamentId: 0, playerId: '', isAdmin: true, isSuper: false, createUsername: username };
       return true;
     }
 

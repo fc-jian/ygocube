@@ -8,13 +8,14 @@
 
 ```text
 src/
-├── auth/          三要素、admin/create token 鉴权
+├── auth/          三要素、super token 与数据库创建权限用户鉴权
 ├── tournaments/   比赛配置、玩家、阶段状态机
 ├── draft/         牌堆生成、传递、计时、暂停
 ├── decks/         构筑移动/整理/洗牌/校验/ydk
 ├── matches/       排表、srvpro 房间、结果 webhook/轮询
 ├── cards/         cards.cdb 导入、字面卡元数据和搜索
-├── pools/         卡池与默认卡池
+├── pools/         卡池、默认卡池与公开浏览
+├── cards/card-pick-stats.service.ts  完成比赛的 exact code 抓位统计
 ├── events/        append-only 日志、快照、回溯
 ├── realtime/      SSE 广播
 └── admin.controller.ts / api.controller.ts
@@ -34,6 +35,7 @@ packSize=24, packSizeMultiple=3（旧配置兼容）
 draftMode=passing, pickSeconds=40, reserveSeconds=400
 evenPackCount=true, reseatEachRound=true
 deckbuildingSeconds=null
+extraRatioPercent=null（可选；每堆额外卡百分比，0--100）
 mainMin=40, mainMax=60, extraMax=30, sideMax=30, maxCopies=1
 timeLimit=180
 ```
@@ -59,6 +61,13 @@ timeLimit=180
 - `stratify`（默认）：main/extra 按整体比例分层到各堆；
 - `random`：全池随机切堆；
 - `main_then_extra`：先放完主卡再放额外卡。
+
+`extraRatioPercent` 非空时覆盖 `packStrategy`：主卡和额外卡池分别随机抽取，
+每堆额外卡数为 `Math.round(actualPackSize × extraRatioPercent / 100)`，其余位置
+由主卡填充，合并后再随机混洗。最后不足完整 `packSize` 的牌堆按实际大小计算。
+比例允许 `0` 和 `100`；若主卡或额外卡数量不足以满足所有牌堆的目标数量，
+`start_draft` 返回 `INSUFFICIENT_PACK_RATIO` 及需求/可用数量，且不会写入牌堆或
+阶段事件。比例为空时维持上述三种旧策略和旧的按池比例弃牌逻辑。
 
 passing 模式按轮发堆，每个玩家有 FIFO 队列；队首堆选一张后顺时针传递，整轮
 全部清空才发下一轮。每个玩家自己的 deadline = 基础 40 秒 + 尚未使用的
@@ -133,6 +142,22 @@ main 仍低于下限的玩家记录 `player_dsq` 并从后续排表排除。
 卡池默认值存于 `app_settings.default_pool_id`，仅 super admin 可读写；创建页
 公开只返回名称和数量，不泄露 code 列表。
 
+卡池名称必须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`；新建和随机采样遇到空格、
+斜杠、查询/控制字符或超长名称返回 `BAD_POOL_NAME`。合法卡池可通过公共
+`GET /pools/:name` 与 `GET /pools/:name/cards?q=&codes=` 只读浏览，响应始终保留
+exact code；历史非法名称不自动改名，也不生成公开链接。卡池列表 `/pools` 和
+管理台列表提供合法池的 `/pool/:name` 链接，Web 公开页复用报名阶段的主卡/额外卡、
+搜索、详情和滚动布局。
+
+每张卡的 `pickStats` 按卡池 ID（不是名称）派生：只扫描名称不以 `test` 开头、
+牌堆中每张卡都完成抽取的比赛；位置为 `pick.round + 1`，百分比为该位置除以
+对应牌包的实际卡数（末堆也按实际大小）再乘 100，alias 不合并，初始弃牌和未进入
+牌堆的卡没有样本。每条统计同时返回原始平均抓位、平均抓位百分比、参与统计的牌包数、
+比赛数和抓牌样本数。卡池删除后不再统计，旧比赛没有 `cardPoolId` 也不计入。
+`CardPickStatsService` 以事件最大序号、比赛更新时间和卡池 exact code 内容作为
+缓存版本，完成比赛、回溯或卡池编辑后下一次读取自动重建；平均值由前端固定显示
+两位小数，所有带卡池上下文的卡片接口都可附加该字段。
+
 ## 5. 排表、srvpro 与结果
 
 `MatchesService` 保存 `CompetitionState`（格式、seed、单循环计划、双败损失），
@@ -162,8 +187,8 @@ side 和 `cube-deck-<tid>-<pid>-<timestamp>` 文件名。timestamp 在该桌对�
 ## 7. SQLite 结构（实际字段摘要）
 
 ```text
-tournaments(id, name, config_json, status, round, admin_token_hash,
-            auth_required, frozen, created_at, updated_at)
+tournaments(id, name, config_json, created_by, card_pool_id, status, round,
+            admin_token_hash, auth_required, frozen, created_at, updated_at)
 tournament_players(id, tournament_id, player_id, display_name, token_hash,
                    seat, eliminated, withdrawn, active, joined_at)
 packs(id, tournament_id, index, size, drop_card_code, order_json)
@@ -182,6 +207,7 @@ cards(code, name, type, desc, level, lscale, rscale, link_markers, race,
 card_pools(id, name, codes_json, created_at)
 admin_actions(id, tournament_id, actor, action, detail_json, created_at)
 app_settings(key, value, updated_at)
+create_users(id, username, token_hash, created_at, active)
 ```
 
 token 只存 SHA-256 哈希；卡图不入库。数据库路径默认 `data/cube.sqlite`，启动
@@ -189,9 +215,14 @@ token 只存 SHA-256 哈希；卡图不入库。数据库路径默认 `data/cube
 
 ## 8. 配置安全
 
-根 `config.yaml` 字段：`admin.super_token`、`admin.create_token`、
+根 `config.yaml` 字段：`admin.super_token`、
 `srvpro.url/api_key/host/game_port`、`server.port/db_path/cards_cdb/strings_conf`
 和精确的 `server.allowed_origins`，以及可选的 `pics.ygopro_root/avif_dir`。
+创建 token 不再来自配置文件；super admin 通过 `/admin/create-users` 创建/删除
+数据库权限用户。用户名规范化为小写并限制为 1--32 位 ASCII 字母、数字、`.`、`_`、`-`，
+token 只保存 SHA-256，明文只在创建/重新生成响应显示一次。创建比赛的普通请求必须
+同时带 `X-Create-User` 和 `X-Create-Token`；super token 仍可直接创建。比赛保存
+`created_by` 与不可变 `card_pool_id`，管理列表、状态和初始事件显示创建者。
 默认拒绝占位 token、相同 admin token 和空 srvpro API key；只有明确开启
 `server.allow_insecure_defaults=true` 才允许本地临时启动。`assets/` 不属于 Git，
 部署脚本必须先准备外部卡牌资源。

@@ -2,6 +2,7 @@ import { BadRequestException, Body, Controller, Post } from '@nestjs/common';
 import type { SmallWorldCalculateRequest, SmallWorldCalculationResponse } from '@ygocube/shared';
 import { Public } from '../auth/auth.guard';
 import { SmallWorldService } from './small-world.service';
+import { CardPickStatsService } from '../cards/card-pick-stats.service';
 
 const MAX_CODES_PER_ZONE = 500;
 
@@ -28,13 +29,18 @@ function parseCodes(body: unknown, field: keyof SmallWorldCalculateRequest): num
 
 @Controller('tools/small-world')
 export class SmallWorldController {
-  constructor(private smallWorld: SmallWorldService) {}
+  constructor(private smallWorld: SmallWorldService, private cardStats?: CardPickStatsService) {}
 
   @Public()
   @Post('calculate')
   calculate(@Body() body: unknown): SmallWorldCalculationResponse {
     const deckCodes = parseCodes(body, 'deckCodes');
     const handCodes = parseCodes(body, 'handCodes');
-    return this.smallWorld.calculate(deckCodes, handCodes);
+    const result = this.smallWorld.calculate(deckCodes, handCodes);
+    const stats = this.cardStats?.forAllPools(new Set(result.cards.map((card) => card.code))) ?? new Map();
+    return {
+      ...result,
+      cards: result.cards.map((card) => ({ ...card, pickStats: stats.get(card.code) ?? [] })),
+    };
   }
 }

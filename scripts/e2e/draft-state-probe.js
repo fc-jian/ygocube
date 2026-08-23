@@ -5,14 +5,18 @@ const http = require('http');
 const port = Number(process.argv[2] || 3001);
 const apiBase = `http://127.0.0.1:${port}`;
 const superToken = process.env.CUBE_SUPER_TOKEN;
-const createToken = process.env.CUBE_CREATE_TOKEN;
-if (!superToken || !createToken) throw new Error('CUBE_SUPER_TOKEN and CUBE_CREATE_TOKEN are required');
+const createToken = process.env.CUBE_CREATE_TOKEN || superToken;
+const createUser = process.env.CUBE_CREATE_USER;
+if (!superToken || !createToken) throw new Error('CUBE_SUPER_TOKEN is required');
 
 function call(method, path, { body, admin = false, create = false, player } = {}) {
   return new Promise((resolve, reject) => {
     const headers = { 'Content-Type': 'application/json' };
     if (admin) headers['X-Admin-Token'] = superToken;
-    if (create) headers['X-Create-Token'] = createToken;
+    if (create) {
+      headers['X-Create-Token'] = createToken;
+      if (createUser) headers['X-Create-User'] = createUser;
+    }
     if (player) {
       headers['X-Tournament-Id'] = String(player.tid);
       headers['X-Player-Id'] = player.pid;

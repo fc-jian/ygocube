@@ -1,5 +1,5 @@
 import { Body, Controller, Delete, Get, Param, Post, Put, Query, Req } from '@nestjs/common';
-import { AuthGuard, AuthedRequest, Identity } from './auth/auth.guard';
+import { AuthGuard, AuthedRequest, Identity, normalizeCreateUsername, sha256 } from './auth/auth.guard';
 import { TournamentsService } from './tournaments/tournaments.service';
 import { DraftService } from './draft/draft.service';
 import { DecksService } from './decks/decks.service';
@@ -8,7 +8,8 @@ import { PoolsService } from './pools/pools.service';
 import { CardsService } from './cards/cards.service';
 import { RealtimeService } from './realtime/realtime.service';
 import { loadState, hardRevertTo, previewRevert, unfreeze, freeze, dropState, getConfig } from './events/events.service';
-import { validateMatchFormat } from './tournaments/tournaments.service';
+import { randomToken, validateMatchFormat } from './tournaments/tournaments.service';
+import { CardPickStatsService } from './cards/card-pick-stats.service';
 import { getDb } from './db';
 
 // Admin endpoints authenticate via X-Admin-Token (handled inside AuthGuard):
@@ -23,6 +24,7 @@ export class AdminController {
     private pools: PoolsService,
     private cards: CardsService,
     private realtime: RealtimeService,
+    private cardStats?: CardPickStatsService,
   ) {}
 
   private adminActor(req: AuthedRequest): string {
@@ -35,6 +37,38 @@ export class AdminController {
     if (!id.isSuper) throw new Error('FORBIDDEN');
   }
 
+  // ---------- create permission users ----------
+
+  @Get('create-users')
+  listCreateUsers(@Req() req: AuthedRequest) {
+    this.superOnly(req);
+    return getDb()
+      .prepare('SELECT id, username, created_at AS createdAt, active FROM create_users ORDER BY username')
+      .all() as { id: number; username: string; createdAt: string; active: number }[];
+  }
+
+  @Post('create-users')
+  createUser(@Req() req: AuthedRequest, @Body() body: Record<string, unknown>) {
+    this.superOnly(req);
+    const username = normalizeCreateUsername(body.username);
+    const exists = getDb().prepare('SELECT id FROM create_users WHERE username=?').get(username);
+    if (exists) throw new Error('CREATE_USER_EXISTS');
+    const token = randomToken();
+    const createdAt = new Date().toISOString();
+    getDb().prepare('INSERT INTO create_users (username, token_hash, created_at, active) VALUES (?,?,?,1)')
+      .run(username, sha256(token), createdAt);
+    return { username, create_token: token, createdAt };
+  }
+
+  @Delete('create-users/:username')
+  removeCreateUser(@Req() req: AuthedRequest, @Param('username') rawUsername: string) {
+    this.superOnly(req);
+    const username = normalizeCreateUsername(rawUsername);
+    const result = getDb().prepare('DELETE FROM create_users WHERE username=?').run(username);
+    if (result.changes === 0) throw new Error('CREATE_USER_NOT_FOUND');
+    return { ok: true, username };
+  }
+
   // ---------- tournaments ----------
 
   @Get('tournaments')
@@ -42,9 +76,9 @@ export class AdminController {
     this.superOnly(req);
     return getDb()
       .prepare(
-        'SELECT t.id, t.name, t.status, t.round, (SELECT count(*) FROM tournament_players tp WHERE tp.tournament_id = t.id AND tp.active=1) AS player_count, t.created_at FROM tournaments t ORDER BY t.id DESC',
+        'SELECT t.id, t.name, t.status, t.round, t.created_by, t.frozen, (SELECT count(*) FROM tournament_players tp WHERE tp.tournament_id = t.id AND tp.active=1) AS player_count, t.created_at FROM tournaments t ORDER BY t.id DESC',
       )
-      .all() as { id: number; name: string; status: string; round: number; player_count: number; created_at: string }[];
+      .all() as { id: number; name: string; status: string; round: number; created_by: string; frozen: number; player_count: number; created_at: string }[];
   }
 
   @Delete('t/:tid')
@@ -126,12 +160,12 @@ export class AdminController {
     const tid = Number(req.params.tid);
     if (loadState(tid).frozen) throw new Error('FROZEN');
     const patch: Record<string, unknown> = {};
-    for (const key of ['name', 'maxPlayers', 'mode', 'packSize', 'packSizeMultiple', 'cardPool', 'mainMin', 'mainMax', 'extraMax', 'sideMax', 'maxCopies', 'timeLimit', 'pickSeconds', 'deckbuildingSeconds', 'dropMode', 'packStrategy', 'packCount', 'dropPublic', 'draftMode', 'evenPackCount', 'reserveSeconds', 'reseatEachRound']) {
+    for (const key of ['name', 'maxPlayers', 'mode', 'packSize', 'packSizeMultiple', 'cardPool', 'mainMin', 'mainMax', 'extraMax', 'sideMax', 'maxCopies', 'timeLimit', 'pickSeconds', 'deckbuildingSeconds', 'dropMode', 'packStrategy', 'extraRatioPercent', 'packCount', 'dropPublic', 'draftMode', 'evenPackCount', 'reserveSeconds', 'reseatEachRound']) {
       if (body[key] !== undefined) patch[key] = body[key];
     }
     if (Object.keys(patch).length === 0) throw new Error('BAD_PAYLOAD');
     if (patch.name !== undefined) {
-      getDb().prepare('UPDATE tournaments SET name=? WHERE id=?').run(String(patch.name), tid);
+      getDb().prepare('UPDATE tournaments SET name=?, updated_at=? WHERE id=?').run(String(patch.name), new Date().toISOString(), tid);
       const state = loadState(tid);
       state.name = String(patch.name);
       delete patch.name;
@@ -360,17 +394,21 @@ export class AdminController {
 
   // 卡池编辑页使用的全卡查询/搜索（super admin）
   @Get('cards')
-  adminCards(@Req() req: AuthedRequest, @Query('q') q: string, @Query('codes') codes: string) {
+  adminCards(@Req() req: AuthedRequest, @Query('q') q: string, @Query('codes') codes: string, @Query('pool_id') poolId: string) {
     this.superOnly(req);
+    const pool = poolId && Number.isInteger(Number(poolId)) ? this.pools.get(Number(poolId)) : null;
+    const stats = pool && this.cardStats ? this.cardStats.forPool(pool) : new Map();
+    const attach = (card: any) => ({ ...card, ...(stats.has(card.code) ? { pickStats: [stats.get(card.code)] } : { pickStats: [] }) });
     if (codes) {
       return codes
         .split(',')
         .map(Number)
         .filter(Number.isInteger)
         .map((c) => this.cards.get(c))
-        .filter((c) => c !== null);
+        .filter((c) => c !== null)
+        .map(attach);
     }
-    return this.cards.search(q ?? '');
+    return this.cards.search(q ?? '').map(attach);
   }
 
   @Delete('pools/:id')

@@ -24,8 +24,9 @@ const CONFLICT_CODES = new Set([
   'WRONG_PHASE', 'NOT_YOUR_TURN', 'CARD_NOT_AVAILABLE', 'CARD_NOT_IN_ZONE', 'WRONG_ZONE',
   'LOCKED', 'ALREADY_LOCKED', 'DECK_INVALID', 'PAUSED', 'PAUSE_EXISTS', 'NO_PAUSE',
   'ALREADY_VOTED', 'NOT_PAUSED', 'FORBIDDEN', 'TOURNAMENT_FULL', 'NOT_ENOUGH_PLAYERS',
-  'POOL_EXISTS', 'POOL_NOT_FOUND', 'FROZEN', 'ALREADY_JOINED', 'CARD_NOT_IN_POOL',
+  'POOL_EXISTS', 'FROZEN', 'ALREADY_JOINED', 'CARD_NOT_IN_POOL',
   'NO_VALID_PAIRING',
+  'CREATE_USER_EXISTS',
 ]);
 
 @Catch()
@@ -50,7 +51,9 @@ class ApiExceptionFilter implements ExceptionFilter {
       details = (exception as Error & { details?: unknown }).details;
       if (code === 'PLAYER_NOT_FOUND') status = 404;
       else if (code === 'MATCH_NOT_FOUND') status = 404;
-      else if (code === 'BAD_PLAYER_ID' || code === 'BAD_DISPLAY_NAME' || code === 'BAD_RESULT' || code === 'BAD_PAYLOAD' || code === 'BAD_POOL_IMPORT' || code === 'REVERT_CONFIRMATION_MISMATCH') status = 400;
+      else if (code === 'CREATE_USER_NOT_FOUND') status = 404;
+      else if (code === 'POOL_NOT_FOUND') status = 404;
+      else if (code === 'BAD_PLAYER_ID' || code === 'BAD_DISPLAY_NAME' || code === 'BAD_RESULT' || code === 'BAD_PAYLOAD' || code === 'BAD_POOL_IMPORT' || code === 'BAD_POOL_NAME' || code === 'BAD_CREATE_USERNAME' || code === 'BAD_EXTRA_RATIO' || code === 'INSUFFICIENT_PACK_RATIO' || code === 'REVERT_CONFIRMATION_MISMATCH') status = 400;
       else if (code === 'REVERT_EVENT_NOT_FOUND') status = 404;
       else if (code.startsWith('REVERT_ROOM_CLOSE_FAILED')) status = 503;
       else if (code === 'DRAFT_NOT_STARTED') status = 409;
