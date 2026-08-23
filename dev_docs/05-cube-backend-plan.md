@@ -76,10 +76,14 @@ reserve；超出基础时间只扣 reserve，reserve 耗尽后才自动随机选
 
 ### 2.2 选牌可见性
 
-`GET /t/:tid/cards/status` 的 `seen` 集合由事件顺序重建：玩家每次选牌前看到
-该时刻牌堆内全部剩余卡；passing 只额外加入当前队首牌堆，serial 只加入当前光标
-牌堆。已被前位玩家选走的卡不算后来玩家见过；私有初始弃牌保持 `unknown`，公开
-弃牌为 `dropped`。返回的 `code` 始终是请求的 exact code，不做 alias 替换。
+`GET /t/:tid/cards/status` 在 drafting 阶段的 `seen` 集合由事件顺序重建：玩家每次
+选牌前看到该时刻牌堆内全部剩余卡；passing 只额外加入当前队首牌堆，serial 只加入
+当前光标牌堆。已被前位玩家选走的卡不算后来玩家见过；私有初始弃牌保持 `unknown`，
+公开弃牌为 `dropped`。进入 deckbuilding（以及其后的对战查看）后，接口切换为全局
+真实状态，返回 `not_in_pool`、`dropped`（初始排除）、`picked`（本人已选）或
+`other_picked`（其他玩家已选），不再按玩家是否看过判定。初始排除由卡池与生成牌堆
+的差集推导，因此即使 `dropPublic=false` 也能正确标注。返回的 `code` 始终是请求的
+exact code，不做 alias 替换。
 
 ## 3. 构筑与合规修复
 

@@ -14,6 +14,7 @@ const STATUS_TEXT: Record<Status, string> = {
   not_in_pool: '未包含在卡池中',
   dropped: '已被初始随机丢弃',
   picked: '已选择',
+  other_picked: '其他玩家已选择',
   seen: '此前见过但未选择',
   unknown: '未知',
 };
@@ -22,6 +23,7 @@ const STATUS_STYLE: Record<Status, string> = {
   not_in_pool: 'bg-slate-800 text-slate-400',
   dropped: 'bg-red-950 text-red-300',
   picked: 'bg-emerald-950 text-emerald-300',
+  other_picked: 'bg-violet-950 text-violet-300',
   seen: 'bg-amber-950 text-amber-300',
   unknown: 'bg-slate-800 text-slate-500',
 };

@@ -13,7 +13,7 @@ import { config } from './config';
 import { loadState } from './events/events.service';
 import { CreateTournamentInput } from './tournaments/tournaments.service';
 import { cubeDeckFileBase } from './decks/deck-filename';
-import { cardsSeenByPlayer } from './cards/card-visibility';
+import { cardStatusForDeckbuilding, cardsSeenByPlayer } from './cards/card-visibility';
 
 export const Public = () => SetMetadata('public', true);
 
@@ -160,20 +160,23 @@ export class ApiController {
     const pool = new Set(this.pools.resolve(cfg.cardPool as string | undefined));
     // Private initial drops are normally represented by an empty list. Keep
     // the config check as a defence for legacy snapshots or edited settings.
+    const deckbuildingGlobal = state.status === 'deckbuilding' || state.status === 'matches' || state.status === 'finished';
     const dropped = cfg.dropPublic === true ? new Set(state.droppedCards) : new Set<number>();
     const myPicks = new Set(state.picks.filter((p) => p.playerId === id.playerId).map((p) => p.card));
     const seen = cardsSeenByPlayer(state, id.playerId);
     const codesList = [...new Set(String(codes ?? '').split(',').map(Number).filter(Number.isInteger))];
     return codesList.map((c) => {
-      const status: CardVisibilityStatus = !pool.has(c)
-        ? 'not_in_pool'
-        : dropped.has(c)
-          ? 'dropped'
-          : myPicks.has(c)
-            ? 'picked'
-            : seen.has(c)
-              ? 'seen'
-              : 'unknown';
+      const status: CardVisibilityStatus = deckbuildingGlobal
+        ? cardStatusForDeckbuilding(state, id.playerId, pool, c)
+        : !pool.has(c)
+          ? 'not_in_pool'
+          : dropped.has(c)
+            ? 'dropped'
+            : myPicks.has(c)
+              ? 'picked'
+              : seen.has(c)
+                ? 'seen'
+                : 'unknown';
       return { code: c, status };
     });
   }

@@ -1,4 +1,4 @@
-import { cardsSeenByPlayer } from '../src/cards/card-visibility';
+import { cardStatusForDeckbuilding, cardsSeenByPlayer } from '../src/cards/card-visibility';
 import { TournamentState } from '../src/events/events.service';
 
 function stateFor(mode: 'serial' | 'passing'): TournamentState {
@@ -52,5 +52,20 @@ describe('card visibility reconstruction', () => {
     expect([...cardsSeenByPlayer(state, 'p2')]).toEqual([103]);
     expect(cardsSeenByPlayer(state, 'p2').has(201)).toBe(false);
     expect(cardsSeenByPlayer(state, 'p2').has(202)).toBe(false);
+  });
+
+  it('uses global deckbuilding status instead of per-player seen history', () => {
+    const state = stateFor('serial');
+    state.status = 'deckbuilding';
+    state.packs = [{ index: 0, size: 2, dropCard: null, order: [101, 102] }];
+    state.picks = [
+      { playerId: 'p0', packIndex: 0, round: 0, card: 101, auto: false, at: '2026-08-14T00:00:00.000Z' },
+      { playerId: 'p1', packIndex: 0, round: 0, card: 102, auto: false, at: '2026-08-14T00:00:01.000Z' },
+    ];
+    const pool = [101, 102, 103];
+    expect(cardStatusForDeckbuilding(state, 'p0', pool, 999)).toBe('not_in_pool');
+    expect(cardStatusForDeckbuilding(state, 'p0', pool, 103)).toBe('dropped');
+    expect(cardStatusForDeckbuilding(state, 'p0', pool, 101)).toBe('picked');
+    expect(cardStatusForDeckbuilding(state, 'p0', pool, 102)).toBe('other_picked');
   });
 });
