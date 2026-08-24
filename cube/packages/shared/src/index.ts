@@ -46,6 +46,8 @@ export interface SmallWorldCalculateRequest {
   deckCodes: number[];
   /** Optional current hand; omitted/empty means scan every unique main-deck monster. */
   handCodes?: number[];
+  /** Allow one exact card code to be both the hand card and the target. */
+  allowSameHandTarget?: boolean;
 }
 
 export interface SmallWorldPath {

@@ -47,6 +47,7 @@ export function enumerateSmallWorldPaths(
   cards: CardInfo[],
   deckCodes: number[],
   handCodes: number[],
+  options: { allowSameHandTarget?: boolean } = {},
 ): SmallWorldPath[] {
   const cardMap = new Map(cards.map((card) => [card.code, card]));
   const deckCounts = new Map<number, number>();
@@ -62,6 +63,7 @@ export function enumerateSmallWorldPaths(
     const card = cardMap.get(code);
     return !!card && isSmallWorldEligible(card);
   });
+  const allowSameHandTarget = options.allowSameHandTarget === true;
   const paths: SmallWorldPath[] = [];
   const bridgeTargets = new Map<number, Array<{ targetCode: number; shared: SmallWorldSharedProperty }>>();
 
@@ -107,6 +109,10 @@ export function enumerateSmallWorldPaths(
         // code therefore needs two remaining physical copies.
         if ((availableCounts.get(targetCode) ?? 0) <= 0) continue;
         if (targetCode === bridgeCode && (availableCounts.get(targetCode) ?? 0) < 2) continue;
+        // By default a printed card cannot represent both the starting hand
+        // card and the searched target. This is a presentation-level option,
+        // independent of alias rules and therefore compares exact codes.
+        if (!allowSameHandTarget && targetCode === handCode) continue;
         paths.push({ handCode, bridgeCode, targetCode, handBridgeShared, bridgeTargetShared });
       }
     }
@@ -119,7 +125,11 @@ export function enumerateSmallWorldPaths(
 export class SmallWorldService {
   constructor(private cards: CardsService) {}
 
-  calculate(deckCodes: number[], handCodes: number[] = []): SmallWorldCalculationResponse {
+  calculate(
+    deckCodes: number[],
+    handCodes: number[] = [],
+    options: { allowSameHandTarget?: boolean } = {},
+  ): SmallWorldCalculationResponse {
     const autoHandMode = handCodes.length === 0;
     const requestedCodes = uniqueCodes([...deckCodes, ...handCodes]);
     const cardMap = new Map<number, CardInfo>();
@@ -140,7 +150,7 @@ export class SmallWorldService {
       const card = cardMap.get(code);
       return !!card && isSmallWorldEligible(card);
     });
-    const paths = enumerateSmallWorldPaths(cards, deckCodes, handCodes);
+    const paths = enumerateSmallWorldPaths(cards, deckCodes, handCodes, options);
 
     return {
       cards,

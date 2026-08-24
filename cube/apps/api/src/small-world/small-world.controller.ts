@@ -28,6 +28,16 @@ function parseCodes(body: unknown, field: keyof SmallWorldCalculateRequest, opti
   return value as number[];
 }
 
+function parseBoolean(body: unknown, field: keyof SmallWorldCalculateRequest, fallback = false): boolean {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    badInput(field, 'expected a JSON object');
+  }
+  const value = (body as Record<string, unknown>)[field];
+  if (value === undefined) return fallback;
+  if (typeof value !== 'boolean') badInput(field, 'expected a boolean');
+  return value;
+}
+
 @Controller('tools/small-world')
 export class SmallWorldController {
   constructor(private smallWorld: SmallWorldService, private cardStats?: CardPickStatsService) {}
@@ -37,7 +47,8 @@ export class SmallWorldController {
   calculate(@Body() body: unknown): SmallWorldCalculationResponse {
     const deckCodes = parseCodes(body, 'deckCodes');
     const handCodes = parseCodes(body, 'handCodes', true);
-    const result = this.smallWorld.calculate(deckCodes, handCodes);
+    const allowSameHandTarget = parseBoolean(body, 'allowSameHandTarget');
+    const result = this.smallWorld.calculate(deckCodes, handCodes, { allowSameHandTarget });
     const stats = this.cardStats?.forAllPools(new Set(result.cards.map((card) => card.code))) ?? new Map();
     return {
       ...result,

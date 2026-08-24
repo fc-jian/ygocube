@@ -62,14 +62,20 @@ function pathRoles(path: SmallWorldPath, mode: SortMode): number[] {
   return [selected, ...rest];
 }
 
+function isDeckMonster(card: CardInfo): boolean {
+  // Keep this in sync with the Small World eligibility check in the API:
+  // monsters from the Extra Deck are not valid hand/bridge/target choices.
+  return (card.type & 0x1) !== 0 && (card.type & 0x4802040) === 0;
+}
+
 function PathCard({ label, code, card }: { label: string; code: number; card?: CardInfo }) {
   return (
-    <div className="flex min-w-0 flex-1 flex-col items-center gap-2">
+    <div className="flex min-w-0 flex-1 flex-col items-center gap-1">
       <span className="text-[0.65rem] font-semibold uppercase tracking-[0.16em] text-emerald-200/65">{label}</span>
       {card ? (
-        <CardWithTooltip code={code} card={card} className="h-36 w-24 max-w-full sm:h-44 sm:w-[7.4rem]" />
+        <CardWithTooltip code={code} card={card} className="h-28 w-20 max-w-full sm:h-36 sm:w-24" />
       ) : (
-        <div className="flex h-36 w-24 items-center justify-center rounded-md border border-slate-600/70 bg-slate-900 p-2 text-center text-xs text-slate-400 sm:h-44 sm:w-[7.4rem]">
+        <div className="flex h-28 w-20 items-center justify-center rounded-md border border-slate-600/70 bg-slate-900 p-2 text-center text-xs text-slate-400 sm:h-36 sm:w-24">
           {code}
         </div>
       )}
@@ -91,19 +97,19 @@ function SharedBadge({ property }: { property: SmallWorldSharedProperty }) {
 
 function PathRow({ path, cards }: { path: SmallWorldPath; cards: Map<number, CardInfo> }) {
   return (
-    <article className="rounded-xl border border-felt-edge/80 bg-felt-deep/65 p-3 shadow-[0_12px_30px_rgba(0,0,0,0.16)] sm:p-4">
-      <div className="flex items-center justify-center gap-2 pb-3 text-[0.65rem] text-slate-400">
-        <span className="rounded bg-emerald-950/80 px-2 py-1">手牌→中间</span>
+    <article className="rounded-xl border border-felt-edge/80 bg-felt-deep/65 p-2.5 shadow-[0_12px_30px_rgba(0,0,0,0.16)] sm:p-3">
+      <div className="flex items-center justify-center gap-1 pb-2 text-[0.65rem] text-slate-400">
+        <span className="rounded bg-emerald-950/80 px-1.5 py-0.5">手牌→中间</span>
         <SharedBadge property={path.handBridgeShared} />
         <span className="text-emerald-200/45">·</span>
-        <span className="rounded bg-emerald-950/80 px-2 py-1">中间→目标</span>
+        <span className="rounded bg-emerald-950/80 px-1.5 py-0.5">中间→目标</span>
         <SharedBadge property={path.bridgeTargetShared} />
       </div>
-      <div className="flex items-start gap-2 sm:gap-5">
+      <div className="flex items-start gap-1 sm:gap-2">
         <PathCard label="手牌怪兽" code={path.handCode} card={cards.get(path.handCode)} />
-        <div className="flex shrink-0 pt-20 text-xl text-gold/75 sm:pt-24">→</div>
+        <div className="flex shrink-0 pt-16 text-lg text-gold/75 sm:pt-20">→</div>
         <PathCard label="中间怪兽" code={path.bridgeCode} card={cards.get(path.bridgeCode)} />
-        <div className="flex shrink-0 pt-20 text-xl text-gold/75 sm:pt-24">→</div>
+        <div className="flex shrink-0 pt-16 text-lg text-gold/75 sm:pt-20">→</div>
         <PathCard label="检索目标" code={path.targetCode} card={cards.get(path.targetCode)} />
       </div>
     </article>
@@ -113,7 +119,10 @@ function PathRow({ path, cards }: { path: SmallWorldPath; cards: Map<number, Car
 export function SmallWorldCalculator() {
   const [deckText, setDeckText] = useState('');
   const [handText, setHandText] = useState('');
+  const [allowSameHandTarget, setAllowSameHandTarget] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>('hand');
+  const [handFilter, setHandFilter] = useState<number | ''>('');
+  const [targetFilter, setTargetFilter] = useState<number | ''>('');
   const [result, setResult] = useState<SmallWorldCalculationResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -137,6 +146,20 @@ export function SmallWorldCalculator() {
     });
   }, [cards, result, sortMode]);
 
+  const filterCards = useMemo(() => {
+    if (!result) return [];
+    const deckCodes = new Set(parseCodes(deckText).codes);
+    const collator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' });
+    return [...cards.values()]
+      .filter((card) => deckCodes.has(card.code) && isDeckMonster(card))
+      .sort((a, b) => collator.compare(a.name, b.name) || a.code - b.code);
+  }, [cards, deckText, result]);
+
+  const filteredPaths = useMemo(() => sortedPaths.filter((path) => (
+    (handFilter === '' || path.handCode === handFilter)
+      && (targetFilter === '' || path.targetCode === targetFilter)
+  )), [handFilter, sortedPaths, targetFilter]);
+
   async function calculate() {
     const deck = parseCodes(deckText);
     const hand = parseCodes(handText);
@@ -157,10 +180,16 @@ export function SmallWorldCalculator() {
     try {
       const next = await api<SmallWorldCalculationResponse>('/tools/small-world/calculate', {
         method: 'POST',
-        body: { deckCodes: deck.codes, handCodes: hand.codes },
+        body: {
+          deckCodes: deck.codes,
+          handCodes: hand.codes,
+          allowSameHandTarget,
+        },
         identity: null,
       });
       setResult(next);
+      setHandFilter('');
+      setTargetFilter('');
     } catch (cause) {
       if (cause instanceof ApiError && cause.code === 'BAD_SMALL_WORLD_INPUT') {
         setError('输入的 code list 无效，请检查格式和数量。');
@@ -217,6 +246,9 @@ export function SmallWorldCalculator() {
             onClick={() => {
               setDeckText('');
               setHandText('');
+              setAllowSameHandTarget(false);
+              setHandFilter('');
+              setTargetFilter('');
               setResult(null);
               setError(null);
             }}
@@ -226,6 +258,18 @@ export function SmallWorldCalculator() {
           </button>
           <span className="text-xs text-slate-500">手牌留空时按实际副本扫描全部主卡组怪兽；额外卡和非怪兽卡会自动跳过。</span>
         </div>
+        <label className="mt-3 flex items-start gap-2 text-xs text-slate-400">
+          <input
+            type="checkbox"
+            checked={allowSameHandTarget}
+            onChange={(event) => setAllowSameHandTarget(event.target.checked)}
+            className="mt-0.5 accent-emerald-400"
+          />
+          <span>
+            允许同一张卡同时作为手牌和检索目标
+            <span className="ml-1 text-slate-500">（默认按精确 code 排除）</span>
+          </span>
+        </label>
         {error && <p className="yc-notice mt-4 px-4 py-3 text-sm">{error}</p>}
         {result?.unknownCodes.length ? (
           <p className="yc-notice mt-4 px-4 py-3 text-sm">未找到的 code：{result.unknownCodes.join('、')}</p>
@@ -237,23 +281,53 @@ export function SmallWorldCalculator() {
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <div>
               <p className="yc-kicker">Results</p>
-              <h2 className="mt-1 text-xl font-bold text-emerald-50">共 {result.summary.pathCount} 条合法路径</h2>
+              <h2 className="mt-1 text-xl font-bold text-emerald-50">
+                {handFilter !== '' || targetFilter !== ''
+                  ? `显示 ${filteredPaths.length} / ${result.summary.pathCount} 条合法路径`
+                  : `共 ${result.summary.pathCount} 条合法路径`}
+              </h2>
               <p className="mt-1 text-xs text-slate-500">
                 {result.summary.handMode === 'deck_unique' ? '已扫描主卡组全部 unique 怪兽' : '指定手牌模式'} · 有效主卡组怪兽 {result.summary.eligibleDeckCount} 张 · 有效候选手牌怪兽 {result.summary.eligibleHandCount} 张
               </p>
             </div>
-            <label className="flex items-center gap-2 text-sm text-slate-300">
-              排序：
-              <select value={sortMode} onChange={(event) => setSortMode(event.target.value as SortMode)} className="rounded-lg bg-felt-deep px-3 py-2 text-sm text-slate-100 outline-none">
-                {(Object.keys(SORT_LABELS) as SortMode[]).map((mode) => <option key={mode} value={mode}>{SORT_LABELS[mode]}</option>)}
-              </select>
-            </label>
+            <div className="flex flex-wrap items-center justify-end gap-2 text-xs text-slate-300">
+              <label className="flex items-center gap-1.5">
+                手牌：
+                <select
+                  aria-label="按手牌怪兽筛选"
+                  value={handFilter}
+                  onChange={(event) => setHandFilter(event.target.value ? Number(event.target.value) : '')}
+                  className="max-w-44 rounded-lg bg-felt-deep px-2.5 py-2 text-xs text-slate-100 outline-none"
+                >
+                  <option value="">全部手牌怪兽</option>
+                  {filterCards.map((card) => <option key={card.code} value={card.code}>{card.name} ({card.code})</option>)}
+                </select>
+              </label>
+              <label className="flex items-center gap-1.5">
+                目标：
+                <select
+                  aria-label="按检索目标筛选"
+                  value={targetFilter}
+                  onChange={(event) => setTargetFilter(event.target.value ? Number(event.target.value) : '')}
+                  className="max-w-44 rounded-lg bg-felt-deep px-2.5 py-2 text-xs text-slate-100 outline-none"
+                >
+                  <option value="">全部检索目标</option>
+                  {filterCards.map((card) => <option key={card.code} value={card.code}>{card.name} ({card.code})</option>)}
+                </select>
+              </label>
+              <label className="flex items-center gap-1.5">
+                排序：
+                <select value={sortMode} onChange={(event) => setSortMode(event.target.value as SortMode)} className="rounded-lg bg-felt-deep px-2.5 py-2 text-xs text-slate-100 outline-none">
+                  {(Object.keys(SORT_LABELS) as SortMode[]).map((mode) => <option key={mode} value={mode}>{SORT_LABELS[mode]}</option>)}
+                </select>
+              </label>
+            </div>
           </div>
 
-          {sortedPaths.length > 0 ? (
-            <div className="space-y-3">
-              {sortedPaths.map((path) => <PathRow key={`${path.handCode}-${path.bridgeCode}-${path.targetCode}`} path={path} cards={cards} />)}
-              <p className="pt-2 text-center text-xs text-slate-500">已展示全部 {sortedPaths.length} 条路径</p>
+          {filteredPaths.length > 0 ? (
+            <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+              {filteredPaths.map((path) => <PathRow key={`${path.handCode}-${path.bridgeCode}-${path.targetCode}`} path={path} cards={cards} />)}
+              <p className="col-span-full pt-1 text-center text-xs text-slate-500">已展示全部 {filteredPaths.length} 条路径</p>
             </div>
           ) : (
             <div className="yc-panel px-6 py-12 text-center">

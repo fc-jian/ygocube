@@ -102,7 +102,7 @@ swissRoundCount, playoffSize
 
 | 方法/路径 | 说明 |
 | --- | --- |
-| `POST /tools/small-world/calculate` | body `{deckCodes:number[],handCodes?:number[]}`；省略或传空手牌时扫描主卡组全部 unique 怪兽，从 `cards.cdb` 元数据计算所有合法路径 |
+| `POST /tools/small-world/calculate` | body `{deckCodes:number[],handCodes?:number[],allowSameHandTarget?:boolean}`；省略或传空手牌时扫描主卡组全部 unique 怪兽，从 `cards.cdb` 元数据计算所有合法路径 |
 
 响应结构：
 
@@ -119,8 +119,10 @@ swissRoundCount, playoffSize
 `deckCodes` 按主卡组处理；非怪兽卡和额外卡静默跳过，未知 code 返回在
 `unknownCodes`。`handCodes` 省略或为空时，`handMode=deck_unique`，每个 unique 主卡组
 怪兽分别扣除一张实体副本后作为候选手牌；中间卡与目标卡相同 code 时必须有至少两张
-剩余实体副本。提供手牌时 `handMode=provided` 并保持显式手牌语义。请求数组只接受正整数
-code；格式错误返回 `BAD_SMALL_WORLD_INPUT`。
+剩余实体副本。默认情况下，手牌与检索目标不能是同一个精确编号；请求
+`allowSameHandTarget=true` 可显式放开这一限制，但仍遵守实体副本数量规则。提供手牌时
+`handMode=provided` 并保持显式手牌语义。请求数组只接受正整数 code，选项只接受布尔值；
+格式错误返回 `BAD_SMALL_WORLD_INPUT`。
 
 `state` 的 passing 视角按当前 seat 从左到右返回 players/queueLengths；本人队首
 牌面才会出现在 `pack.cards`。`cardsRemainingToDraft` 在整轮公平时是精确值，

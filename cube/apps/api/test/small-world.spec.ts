@@ -66,12 +66,23 @@ describe('Small World calculation', () => {
 
     expect(enumerateSmallWorldPaths([hand, bridge], [10, 20], [])).toEqual([]);
     const paths = enumerateSmallWorldPaths([hand, bridge, target], [10, 10, 20, 30], []);
-    expect(paths).toHaveLength(3);
+    expect(paths).toHaveLength(2);
     expect(paths).toEqual(expect.arrayContaining([
-      expect.objectContaining({ handCode: 10, bridgeCode: 20, targetCode: 10 }),
       expect.objectContaining({ handCode: 10, bridgeCode: 20, targetCode: 30 }),
       expect.objectContaining({ handCode: 30, bridgeCode: 20, targetCode: 10 }),
     ]));
+    expect(enumerateSmallWorldPaths([hand, bridge, target], [10, 10, 20, 30], [], { allowSameHandTarget: true })).toHaveLength(3);
+  });
+
+  it('excludes the exact hand code as target by default in explicit-hand mode', () => {
+    const hand = card(10, { race: 1, attribute: 1, level: 4, atk: 100, def: 100 });
+    const bridge = card(20, { race: 1, attribute: 2, level: 5, atk: 200, def: 200 });
+    const target = card(30, { race: 2, attribute: 2, level: 6, atk: 300, def: 300 });
+    const deck = [10, 10, 20, 30];
+    expect(enumerateSmallWorldPaths([hand, bridge, target], deck, [10])
+      .some((path) => path.targetCode === 10)).toBe(false);
+    expect(enumerateSmallWorldPaths([hand, bridge, target], deck, [10], { allowSameHandTarget: true })
+      .some((path) => path.targetCode === 10)).toBe(true);
   });
 
   it('silently filters non-monsters and extra-deck cards', () => {
@@ -140,6 +151,7 @@ describe('Small World calculation', () => {
     expectBadInput({ deckCodes: ['20'], handCodes: [10] });
     expectBadInput({ deckCodes: [0], handCodes: [10] });
     expectBadInput({ deckCodes: [10], handCodes: ['10'] });
+    expectBadInput({ deckCodes: [10], allowSameHandTarget: 'yes' });
     expectBadInput(null);
   });
 });
