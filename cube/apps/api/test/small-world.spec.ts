@@ -59,6 +59,21 @@ describe('Small World calculation', () => {
     expect(enumerateSmallWorldPaths([hand, bridge], [20, 20], [10])).toHaveLength(0);
   });
 
+  it('scans every unique deck monster when the hand list is empty and consumes one physical copy', () => {
+    const hand = card(10, { race: 1, attribute: 1, level: 4, atk: 100, def: 100 });
+    const bridge = card(20, { race: 1, attribute: 2, level: 5, atk: 200, def: 200 });
+    const target = card(30, { race: 2, attribute: 2, level: 6, atk: 300, def: 300 });
+
+    expect(enumerateSmallWorldPaths([hand, bridge], [10, 20], [])).toEqual([]);
+    const paths = enumerateSmallWorldPaths([hand, bridge, target], [10, 10, 20, 30], []);
+    expect(paths).toHaveLength(3);
+    expect(paths).toEqual(expect.arrayContaining([
+      expect.objectContaining({ handCode: 10, bridgeCode: 20, targetCode: 10 }),
+      expect.objectContaining({ handCode: 10, bridgeCode: 20, targetCode: 30 }),
+      expect.objectContaining({ handCode: 30, bridgeCode: 20, targetCode: 10 }),
+    ]));
+  });
+
   it('silently filters non-monsters and extra-deck cards', () => {
     expect(isSmallWorldEligible(card(1))).toBe(true);
     expect(isSmallWorldEligible(card(2, { type: 0x2 }))).toBe(false);
@@ -80,6 +95,35 @@ describe('Small World calculation', () => {
     expect(result.cards.map((item) => item.code)).toEqual([20, 30, 40, 10]);
   });
 
+  it('reports deck-wide hand mode and candidate count when hand codes are omitted', () => {
+    const rows = new Map([
+      [10, card(10, { race: 1, attribute: 1, level: 4, atk: 0, def: 0 })],
+      [20, card(20, { race: 1, attribute: 2, level: 5, atk: 1500, def: 1200 })],
+      [30, card(30, { race: 2, attribute: 2, level: 6, atk: 1800, def: 1600 })],
+      [40, card(40, { type: 0x2 })],
+    ]);
+    const cards = { getLiteral: (code: number) => rows.get(code) ?? null } as any;
+    const result = new SmallWorldService(cards).calculate([10, 20, 30, 40]);
+    expect(result.summary.handMode).toBe('deck_unique');
+    expect(result.summary.handCount).toBe(3);
+    expect(result.summary.eligibleHandCount).toBe(3);
+    expect(result.paths).toEqual(expect.arrayContaining([
+      expect.objectContaining({ handCode: 10, bridgeCode: 20, targetCode: 30 }),
+    ]));
+  });
+
+  it('accepts omitted and empty handCodes through the public controller', () => {
+    const rows = new Map([
+      [10, card(10, { race: 1, attribute: 1, level: 4, atk: 0, def: 0 })],
+      [20, card(20, { race: 1, attribute: 2, level: 5, atk: 1500, def: 1200 })],
+      [30, card(30, { race: 2, attribute: 2, level: 6, atk: 1800, def: 1600 })],
+    ]);
+    const service = new SmallWorldService({ getLiteral: (code: number) => rows.get(code) ?? null } as any);
+    const controller = new SmallWorldController(service);
+    expect(controller.calculate({ deckCodes: [10, 20, 30] }).summary.handMode).toBe('deck_unique');
+    expect(controller.calculate({ deckCodes: [10, 20, 30], handCodes: [] }).summary.handMode).toBe('deck_unique');
+  });
+
   it('rejects malformed public API input', () => {
     const controller = new SmallWorldController(null as any);
     const expectBadInput = (input: unknown) => {
@@ -95,6 +139,7 @@ describe('Small World calculation', () => {
     };
     expectBadInput({ deckCodes: ['20'], handCodes: [10] });
     expectBadInput({ deckCodes: [0], handCodes: [10] });
+    expectBadInput({ deckCodes: [10], handCodes: ['10'] });
     expectBadInput(null);
   });
 });

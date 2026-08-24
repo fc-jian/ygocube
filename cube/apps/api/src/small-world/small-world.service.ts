@@ -57,23 +57,22 @@ export function enumerateSmallWorldPaths(
   }
 
   const eligibleDeckCodes = [...deckCounts.keys()];
-  const eligibleHandCodes = uniqueCodes(handCodes).filter((code) => {
+  const autoHandMode = handCodes.length === 0;
+  const eligibleHandCodes = (autoHandMode ? eligibleDeckCodes : uniqueCodes(handCodes)).filter((code) => {
     const card = cardMap.get(code);
     return !!card && isSmallWorldEligible(card);
   });
   const paths: SmallWorldPath[] = [];
   const bridgeTargets = new Map<number, Array<{ targetCode: number; shared: SmallWorldSharedProperty }>>();
 
-  // Build the deck-side relation once. Without this index, the same
-  // bridge→target comparison is repeated for every hand card.
+  // Build card relationships once.  Automatic deck-wide mode can contain
+  // hundreds of candidate hands; reusing this graph avoids repeating the
+  // metadata comparison for every candidate.
   for (const bridgeCode of eligibleDeckCodes) {
     const bridge = cardMap.get(bridgeCode);
     if (!bridge) continue;
     const targets: Array<{ targetCode: number; shared: SmallWorldSharedProperty }> = [];
     for (const targetCode of eligibleDeckCodes) {
-      // The bridge is banished before the target is added. The same printed
-      // code therefore needs two physical copies in the deck.
-      if (targetCode === bridgeCode && (deckCounts.get(targetCode) ?? 0) < 2) continue;
       const target = cardMap.get(targetCode);
       if (!target) continue;
       const shared = sharedSmallWorldProperty(bridge, target);
@@ -86,13 +85,28 @@ export function enumerateSmallWorldPaths(
     const hand = cardMap.get(handCode);
     if (!hand) continue;
 
-    for (const bridgeCode of eligibleDeckCodes) {
+    // In automatic deck-wide mode the first card is also drawn from this
+    // physical deck.  Remove exactly one copy before looking for bridge and
+    // target cards, so a singleton cannot be reused in two roles.
+    const availableCounts = new Map(deckCounts);
+    if (autoHandMode) {
+      const handCount = availableCounts.get(handCode) ?? 0;
+      if (handCount <= 0) continue;
+      availableCounts.set(handCode, handCount - 1);
+    }
+    const availableDeckCodes = eligibleDeckCodes.filter((code) => (availableCounts.get(code) ?? 0) > 0);
+
+    for (const bridgeCode of availableDeckCodes) {
       const bridge = cardMap.get(bridgeCode);
       if (!bridge) continue;
       const handBridgeShared = sharedSmallWorldProperty(hand, bridge);
       if (!handBridgeShared) continue;
 
       for (const { targetCode, shared: bridgeTargetShared } of bridgeTargets.get(bridgeCode) ?? []) {
+        // The bridge is removed before the target is added. The same printed
+        // code therefore needs two remaining physical copies.
+        if ((availableCounts.get(targetCode) ?? 0) <= 0) continue;
+        if (targetCode === bridgeCode && (availableCounts.get(targetCode) ?? 0) < 2) continue;
         paths.push({ handCode, bridgeCode, targetCode, handBridgeShared, bridgeTargetShared });
       }
     }
@@ -105,7 +119,8 @@ export function enumerateSmallWorldPaths(
 export class SmallWorldService {
   constructor(private cards: CardsService) {}
 
-  calculate(deckCodes: number[], handCodes: number[]): SmallWorldCalculationResponse {
+  calculate(deckCodes: number[], handCodes: number[] = []): SmallWorldCalculationResponse {
+    const autoHandMode = handCodes.length === 0;
     const requestedCodes = uniqueCodes([...deckCodes, ...handCodes]);
     const cardMap = new Map<number, CardInfo>();
     const unknownCodes: number[] = [];
@@ -121,7 +136,7 @@ export class SmallWorldService {
       const card = cardMap.get(code);
       return !!card && isSmallWorldEligible(card);
     });
-    const eligibleHandCodes = uniqueCodes(handCodes).filter((code) => {
+    const eligibleHandCodes = (autoHandMode ? eligibleDeckCodes : uniqueCodes(handCodes)).filter((code) => {
       const card = cardMap.get(code);
       return !!card && isSmallWorldEligible(card);
     });
@@ -133,10 +148,11 @@ export class SmallWorldService {
       unknownCodes,
       summary: {
         deckCount: deckCodes.length,
-        handCount: handCodes.length,
+        handCount: autoHandMode ? eligibleHandCodes.length : handCodes.length,
         eligibleDeckCount: eligibleDeckCodes.length,
         eligibleHandCount: eligibleHandCodes.length,
         pathCount: paths.length,
+        handMode: autoHandMode ? 'deck_unique' : 'provided',
       },
     };
   }

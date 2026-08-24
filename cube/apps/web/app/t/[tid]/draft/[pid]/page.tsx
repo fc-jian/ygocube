@@ -11,7 +11,7 @@ import { CardSearchAll } from '@/components/CardSearchAll';
 import { setCardPreviewAction } from '@/components/CardPreview';
 import { PoolPreview } from '@/components/PoolPreview';
 import { CardInfo } from '@/lib/types';
-import { matchesCardQuery, sortCardSearchResults } from '@/lib/cardInfo';
+import { matchesCardQuery, PickSortMode, sortCardSearchResults } from '@/lib/cardInfo';
 
 export default function DraftPage() {
   const params = useParams<{ tid: string; pid: string }>();
@@ -28,6 +28,7 @@ export default function DraftPage() {
   const [poolCodes, setPoolCodes] = useState<number[]>([]);
   const [poolSearch, setPoolSearch] = useState('');
   const [poolResults, setPoolResults] = useState<CardInfo[]>([]);
+  const [cardSortMode, setCardSortMode] = useState<PickSortMode>('default');
 
   useEffect(() => {
     let cancelled = false;
@@ -286,6 +287,8 @@ export default function DraftPage() {
   };
 
   const deck = state.deck ?? { main: [], extra: [], side: [], lockedAt: null };
+  const configuredPoolId = Number(state.config.cardPoolId);
+  const poolId = Number.isSafeInteger(configuredPoolId) ? configuredPoolId : undefined;
   const q = cardFilter.trim().toLowerCase();
   const filterCodes = (codes: number[]) =>
     !q ? codes : codes.filter((c) => matchesCardQuery(cardMap[c], q));
@@ -343,6 +346,9 @@ export default function DraftPage() {
               alternativeCode={state.pickAlternative}
               onAlternative={(code) => void setAlternative(code)}
               onPick={pick}
+              sortMode={cardSortMode}
+              onSortModeChange={setCardSortMode}
+              poolId={poolId}
             />
           </div>
         </div>
@@ -356,6 +362,9 @@ export default function DraftPage() {
           onSearchQuery={setPoolSearch}
           onSearch={() => void searchPool()}
           heading={`卡池预览（drop 前，共 ${poolCodes.length} 张）—— 选牌尚未开始；请点击顶部“准备”按钮确认参加，点击“玩家”可查看报名与准备情况`}
+          sortMode={cardSortMode}
+          onSortModeChange={setCardSortMode}
+          poolId={poolId}
         />
       )}
       {state.status === 'deckbuilding' && (

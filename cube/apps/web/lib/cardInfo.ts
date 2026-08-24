@@ -1,4 +1,5 @@
 import { CardInfo } from '@/lib/types';
+import { sortCardCodesByPick as sortSharedCardCodesByPick } from '@ygocube/shared';
 
 // 卡牌类型/属性展示（与 ygopro 客户端信息一致，dev_docs/06 §5.1）
 const MONSTER = 0x1;
@@ -263,4 +264,14 @@ export function sortCardCodes(codes: number[], cardMap: Record<number, CardInfo>
     const bi = rank.get(b.code) ?? b.index;
     return ai - bi || a.index - b.index;
   }).map((x) => x.code);
+}
+
+export type PickSortMode = 'default' | 'pick';
+
+/**
+ * Presentation-only pick-stat ordering.  The input occurrence order is kept
+ * for equal/missing statistics, including duplicate physical card copies.
+ */
+export function sortCardCodesByPick(codes: number[], cardMap: Record<number, CardInfo>, poolId?: number): number[] {
+  return sortSharedCardCodesByPick(codes, cardMap, poolId);
 }

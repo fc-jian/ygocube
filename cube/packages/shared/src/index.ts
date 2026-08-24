@@ -44,7 +44,8 @@ export type SmallWorldSharedProperty = 'race' | 'attribute' | 'level' | 'atk' | 
 
 export interface SmallWorldCalculateRequest {
   deckCodes: number[];
-  handCodes: number[];
+  /** Optional current hand; omitted/empty means scan every unique main-deck monster. */
+  handCodes?: number[];
 }
 
 export interface SmallWorldPath {
@@ -65,6 +66,7 @@ export interface SmallWorldCalculationResponse {
     eligibleDeckCount: number;
     eligibleHandCount: number;
     pathCount: number;
+    handMode: 'provided' | 'deck_unique';
   };
 }
 
@@ -156,4 +158,23 @@ export interface SrvproResultWebhook {
   first?: string;
   wins?: string;
   replays?: string;
+}
+
+/** Stable presentation-only ordering for card pick statistics. */
+export function sortCardCodesByPick<T extends {
+  code: number;
+  pickStats?: Array<{ poolId: number; averagePickPercentage: number }>;
+}>(codes: number[], cardMap: Record<number, T>, poolId?: number): number[] {
+  return codes
+    .map((code, index) => {
+      const stat = cardMap[code]?.pickStats?.find((candidate) => poolId === undefined || candidate.poolId === poolId);
+      return { code, index, percentage: stat?.averagePickPercentage };
+    })
+    .sort((a, b) => {
+      if (a.percentage === undefined && b.percentage === undefined) return a.index - b.index;
+      if (a.percentage === undefined) return 1;
+      if (b.percentage === undefined) return -1;
+      return a.percentage - b.percentage || a.index - b.index;
+    })
+    .map(({ code }) => code);
 }

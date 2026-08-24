@@ -102,7 +102,7 @@ swissRoundCount, playoffSize
 
 | 方法/路径 | 说明 |
 | --- | --- |
-| `POST /tools/small-world/calculate` | body `{deckCodes:number[],handCodes:number[]}`；从 `cards.cdb` 元数据计算所有合法的手牌→中间怪兽→检索目标路径 |
+| `POST /tools/small-world/calculate` | body `{deckCodes:number[],handCodes?:number[]}`；省略或传空手牌时扫描主卡组全部 unique 怪兽，从 `cards.cdb` 元数据计算所有合法路径 |
 
 响应结构：
 
@@ -111,14 +111,16 @@ swissRoundCount, playoffSize
   cards: CardInfo[],
   paths: [{handCode, bridgeCode, targetCode, handBridgeShared, bridgeTargetShared}],
   unknownCodes: number[],
-  summary: {deckCount, handCount, eligibleDeckCount, eligibleHandCount, pathCount}
+  summary: {deckCount, handCount, eligibleDeckCount, eligibleHandCount, pathCount, handMode}
 }
 ```
 
 `handBridgeShared` 与 `bridgeTargetShared` 取 `race|attribute|level|atk|def`。
 `deckCodes` 按主卡组处理；非怪兽卡和额外卡静默跳过，未知 code 返回在
-`unknownCodes`。路径按 code 三元组去重，但中间卡与目标卡相同 code 时必须有至少
-两张实体副本。请求数组只接受正整数 code；格式错误返回 `BAD_SMALL_WORLD_INPUT`。
+`unknownCodes`。`handCodes` 省略或为空时，`handMode=deck_unique`，每个 unique 主卡组
+怪兽分别扣除一张实体副本后作为候选手牌；中间卡与目标卡相同 code 时必须有至少两张
+剩余实体副本。提供手牌时 `handMode=provided` 并保持显式手牌语义。请求数组只接受正整数
+code；格式错误返回 `BAD_SMALL_WORLD_INPUT`。
 
 `state` 的 passing 视角按当前 seat 从左到右返回 players/queueLengths；本人队首
 牌面才会出现在 `pack.cards`。`cardsRemainingToDraft` 在整轮公平时是精确值，
@@ -138,6 +140,7 @@ swissRoundCount, playoffSize
 | `POST /admin/t/:tid/match/result` | 管理员录入/修正 0--2 局比分 |
 | `POST /admin/t/:tid/pause` / `pause/resume` | 冻结计时或结束暂停 |
 | `POST /admin/t/:tid/security` | `{require_token:false}` 关闭该比赛 token 鉴权 |
+| `GET /admin/t/:tid/pools` | 比赛管理 token 或 super token 读取全部卡池；返回 `{pools,canEdit}`，非 super 只读 |
 | `POST /admin/t/:tid/admin-token` | 重设比赛 admin token，旧 token 立即失效 |
 | `POST /admin/t/:tid/players/:pid/token` | 重设玩家 token |
 | `POST /admin/t/:tid/players/:pid/reserve` | `{seconds}`：选牌阶段给指定玩家增加 reserve；事件保存余额/deadline 快照 |

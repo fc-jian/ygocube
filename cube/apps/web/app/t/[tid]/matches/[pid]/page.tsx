@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
-import { api, Identity, resolvePlayerIdentity } from '@/lib/api';
+import { api, apiDownload, Identity, resolvePlayerIdentity } from '@/lib/api';
 import { useTournamentStream } from '@/lib/sse';
 import { DraftState } from '@/components/TopBar';
 import { TokenPrompt } from '@/components/TokenPrompt';
@@ -32,6 +32,7 @@ export default function MatchesPage() {
   const [info, setInfo] = useState<DraftState | null>(null);
   const [copied, setCopied] = useState(false);
   const [server, setServer] = useState<{ host: string; port: number } | null>(null);
+  const [error, setError] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -116,12 +117,27 @@ export default function MatchesPage() {
         <h1 className="text-xl font-bold text-gold">
           对战 — 第 {info.round} <span className="text-sm font-normal text-slate-400">（{pid}）</span>
         </h1>
-        <a
-          href={`/t/${tid}/ranking/${encodeURIComponent(pid)}`}
-          className="rounded bg-felt-edge px-3 py-1.5 text-sm text-gold hover:brightness-110"
-        >
-          查看积分榜单
-        </a>
+        <div className="flex flex-wrap items-center gap-2">
+          <a
+            href={`/t/${tid}/deck/${encodeURIComponent(pid)}`}
+            className="rounded bg-felt-edge px-3 py-1.5 text-sm text-slate-200 hover:brightness-110"
+          >
+            返回构筑
+          </a>
+          <button
+            type="button"
+            onClick={() => void apiDownload(`/t/${tid}/deck.ydk`, identity).then(() => setError('')).catch(() => setError('下载卡组失败，请稍后重试'))}
+            className="rounded bg-felt-edge px-3 py-1.5 text-sm text-emerald-200 hover:brightness-110"
+          >
+            下载 ydk
+          </button>
+          <a
+            href={`/t/${tid}/ranking/${encodeURIComponent(pid)}`}
+            className="rounded bg-felt-edge px-3 py-1.5 text-sm text-gold hover:brightness-110"
+          >
+            查看积分榜单
+          </a>
+        </div>
       </div>
       <div className="overflow-x-auto rounded-lg border border-felt-edge">
         <table className="w-full min-w-[34rem] text-sm">
@@ -198,6 +214,7 @@ export default function MatchesPage() {
       <div className="mt-4 text-xs text-slate-500">
         服务器地址与端口由管理员在 config.yaml（srvpro.game_port）中配置；进房昵称即你的玩家 ID，请勿填错房间。
       </div>
+      {error && <div className="mt-3 rounded bg-red-900/60 px-3 py-2 text-xs text-red-200" role="alert">{error}</div>}
     </main>
   );
 }

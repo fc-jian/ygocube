@@ -1,9 +1,10 @@
 'use client';
 
+import { useMemo } from 'react';
 import { CardWithTooltip } from './CardImage';
 import { DeckZone } from './TopBar';
 import { CardInfo } from '@/lib/types';
-import { isExtraDeckType } from '@/lib/cardInfo';
+import { isExtraDeckType, PickSortMode, sortCardCodesByPick } from '@/lib/cardInfo';
 
 export function PoolPreview({
   poolCodes,
@@ -13,6 +14,9 @@ export function PoolPreview({
   onSearchQuery,
   onSearch,
   heading,
+  sortMode = 'default',
+  onSortModeChange,
+  poolId,
 }: {
   poolCodes: number[];
   cardMap: Record<number, CardInfo>;
@@ -21,15 +25,37 @@ export function PoolPreview({
   onSearchQuery: (value: string) => void;
   onSearch: () => void;
   heading: string;
+  sortMode?: PickSortMode;
+  onSortModeChange?: (mode: PickSortMode) => void;
+  poolId?: number;
 }) {
-  const main = poolCodes.filter((code) => cardMap[code] && !isExtraDeckType(cardMap[code].type));
-  const extra = poolCodes.filter((code) => cardMap[code] && isExtraDeckType(cardMap[code].type));
-  const inPool = new Set(poolCodes);
+  const orderedCodes = useMemo(
+    () => sortMode === 'pick' ? sortCardCodesByPick(poolCodes, cardMap, poolId) : poolCodes,
+    [cardMap, poolCodes, poolId, sortMode],
+  );
+  const main = orderedCodes.filter((code) => cardMap[code] && !isExtraDeckType(cardMap[code].type));
+  const extra = orderedCodes.filter((code) => cardMap[code] && isExtraDeckType(cardMap[code].type));
+  const inPool = new Set(orderedCodes);
 
   return (
     <div className="flex flex-1 flex-col gap-3 p-3 md:flex-row md:overflow-hidden">
       <div className="flex w-full flex-col gap-2 md:w-3/5 md:overflow-y-auto md:pr-1">
-        <header className="mb-2 text-xs text-slate-400">{heading}</header>
+        <header className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
+          <span>{heading}</span>
+          {onSortModeChange && (
+            <label className="flex items-center gap-1.5 text-slate-300">
+              卡池排序
+              <select
+                className="rounded bg-felt-edge px-2 py-1 text-xs outline-none ring-gold/50 focus:ring-2"
+                value={sortMode}
+                onChange={(event) => onSortModeChange(event.target.value as PickSortMode)}
+              >
+                <option value="default">默认</option>
+                <option value="pick">抓位（早→晚）</option>
+              </select>
+            </label>
+          )}
+        </header>
         <DeckZone title="主卡组" zone="main" codes={main} cardMap={cardMap} />
         <DeckZone title="额外卡组" zone="extra" codes={extra} cardMap={cardMap} />
       </div>

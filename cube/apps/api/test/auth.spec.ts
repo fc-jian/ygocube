@@ -4,6 +4,8 @@ import { AuthGuard } from '../src/auth/auth.guard';
 import { Reflector } from '@nestjs/core';
 import { getDb } from '../src/db';
 import { AdminController } from '../src/admin.controller';
+import { CardsService } from '../src/cards/cards.service';
+import { PoolsService } from '../src/pools/pools.service';
 
 function makeCtx(path: string, headers: Record<string, string>, query: Record<string, string> = {}, body: Record<string, unknown> = {}, method = 'GET') {
   const req: any = {
@@ -73,8 +75,26 @@ describe('auth model', () => {
     const t2 = tournaments.create({ name: 'b', maxPlayers: 3, cardPool: TEST_POOL }, 'test');
     const guard = new AuthGuard(new Reflector());
     expect(guard.canActivate(makeCtx(`/admin/t/${t1.tid}/state`, { 'x-admin-token': t1.admin_token }))).toBe(true);
+    expect(guard.canActivate(makeCtx(`/admin/t/${t1.tid}/pools`, { 'x-admin-token': t1.admin_token }))).toBe(true);
     expectUnauthorized(() => guard.canActivate(makeCtx(`/admin/t/${t2.tid}/state`, { 'x-admin-token': t1.admin_token })));
+    expectUnauthorized(() => guard.canActivate(makeCtx(`/admin/t/${t2.tid}/pools`, { 'x-admin-token': t1.admin_token })));
     expect(guard.canActivate(makeCtx(`/admin/t/${t2.tid}/state`, { 'x-admin-token': config.admin.superToken }))).toBe(true);
+  });
+
+  it('scoped tournament admins can read all pools but cannot mutate them', () => {
+    const tournaments = makeTournaments();
+    const created = tournaments.create({ name: 'pool-view', maxPlayers: 3, cardPool: TEST_POOL }, 'test');
+    const pools = new PoolsService(new CardsService());
+    pools.create('visible-pool', new CardsService().poolCodes().slice(0, 2));
+    const controller = new AdminController(null as any, null as any, null as any, null as any, pools, null as any, null as any);
+    const scopedReq = { identity: { isSuper: false, tournamentId: created.tid } } as any;
+    const scoped = controller.listTournamentPools(scopedReq, String(created.tid));
+    expect(scoped.canEdit).toBe(false);
+    expect(scoped.pools.some((pool: any) => pool.name === 'visible-pool')).toBe(true);
+    expect(() => controller.createPool(scopedReq, { name: 'blocked', codes: [1] })).toThrow('FORBIDDEN');
+
+    const superReq = { identity: { isSuper: true, tournamentId: 0 } } as any;
+    expect(controller.listTournamentPools(superReq, String(created.tid)).canEdit).toBe(true);
   });
 
   it('auth_required=false skips token check but still needs pid', () => {

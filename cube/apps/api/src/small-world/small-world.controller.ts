@@ -13,11 +13,12 @@ function badInput(field: keyof SmallWorldCalculateRequest, reason: string): neve
   });
 }
 
-function parseCodes(body: unknown, field: keyof SmallWorldCalculateRequest): number[] {
+function parseCodes(body: unknown, field: keyof SmallWorldCalculateRequest, optional = false): number[] {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) {
     badInput(field, 'expected a JSON object');
   }
   const value = (body as Record<string, unknown>)[field];
+  if (value === undefined && optional) return [];
   if (!Array.isArray(value) || value.length > MAX_CODES_PER_ZONE) {
     badInput(field, `expected an array of at most ${MAX_CODES_PER_ZONE} codes`);
   }
@@ -35,7 +36,7 @@ export class SmallWorldController {
   @Post('calculate')
   calculate(@Body() body: unknown): SmallWorldCalculationResponse {
     const deckCodes = parseCodes(body, 'deckCodes');
-    const handCodes = parseCodes(body, 'handCodes');
+    const handCodes = parseCodes(body, 'handCodes', true);
     const result = this.smallWorld.calculate(deckCodes, handCodes);
     const stats = this.cardStats?.forAllPools(new Set(result.cards.map((card) => card.code))) ?? new Map();
     return {

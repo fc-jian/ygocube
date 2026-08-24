@@ -373,7 +373,18 @@ export class AdminController {
     return this.tournaments.adminState(Number(req.params.tid));
   }
 
-  // ---------- card pools (super admin only, dev_docs/07 §5.2) ----------
+  // ---------- card pools (scoped read, super-admin mutations, dev_docs/07 §5.2) ----------
+
+  // Tournament administrators may choose from every existing pool while
+  // editing their tournament, but must not receive pool mutation privileges.
+  @Get('t/:tid/pools')
+  listTournamentPools(@Req() req: AuthedRequest, @Param('tid') rawTid: string) {
+    const identity = req.identity as Identity;
+    const tid = Number(rawTid);
+    if (!Number.isSafeInteger(tid) || tid <= 0) throw new Error('BAD_TOURNAMENT_ID');
+    if (!identity.isSuper && identity.tournamentId !== tid) throw new Error('FORBIDDEN');
+    return { pools: this.pools.list(), canEdit: identity.isSuper === true };
+  }
 
   @Get('pools')
   listPools(@Req() req: AuthedRequest) {

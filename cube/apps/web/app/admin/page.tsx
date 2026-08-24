@@ -64,6 +64,7 @@ export default function AdminPage() {
   const [tid, setTid] = useState('');
   const [state, setState] = useState<AdminState | null>(null);
   const [pools, setPools] = useState<PoolInfo[]>([]);
+  const [canEditPools, setCanEditPools] = useState(false);
   const [poolName, setPoolName] = useState('');
   const [poolCodes, setPoolCodes] = useState('');
   const [poolSize, setPoolSize] = useState(1000);
@@ -150,10 +151,23 @@ export default function AdminPage() {
       }
     }
     try {
-      const p = await adminFetch('/admin/pools');
-      if (seq === loadSeq.current) setPools(p);
+      const p = tid
+        ? await adminFetch(`/admin/t/${tid}/pools`)
+        : await adminFetch('/admin/pools');
+      if (seq === loadSeq.current) {
+        if (Array.isArray(p)) {
+          setPools(p);
+          setCanEditPools(true);
+        } else {
+          setPools(p.pools ?? []);
+          setCanEditPools(p.canEdit === true);
+        }
+      }
     } catch {
-      if (seq === loadSeq.current) setPools([]);
+      if (seq === loadSeq.current) {
+        setPools([]);
+        setCanEditPools(false);
+      }
     }
     try {
       const t = await adminFetch('/admin/tournaments');
@@ -197,6 +211,7 @@ export default function AdminPage() {
     setShownAdminToken(null);
     setReserveInputs({});
     setHoveredEvent(null);
+    setCanEditPools(false);
   }, [tid]);
 
   // 控制台轮询刷新（dev_docs/06 §6）
@@ -956,26 +971,31 @@ export default function AdminPage() {
       <section className="mt-6 rounded-lg border border-felt-edge bg-felt/60 p-4">
         <h2 className="mb-2 flex items-center justify-between text-sm font-semibold text-gold">
           <span>卡池管理</span>
-          <a href="/admin/pool/new" className="rounded bg-gold px-3 py-1 text-xs font-semibold text-felt-deep hover:brightness-110">
-            新建卡池
-          </a>
+          {canEditPools && (
+            <a href="/admin/pool/new" className="rounded bg-gold px-3 py-1 text-xs font-semibold text-felt-deep hover:brightness-110">
+              新建卡池
+            </a>
+          )}
         </h2>
-        <div className="mb-3 flex flex-wrap items-center gap-2 text-xs">
-          <input className="w-40 rounded bg-felt-deep px-2 py-1 outline-none" placeholder="卡池名称" value={poolName} onChange={(e) => setPoolName(e.target.value)} />
-          <textarea
-            className="h-10 w-64 rounded bg-felt-deep px-2 py-1 outline-none"
-            placeholder="每行：code 或 code<TAB>卡名"
-            value={poolCodes}
-            onChange={(e) => setPoolCodes(e.target.value)}
-          />
-          <button onClick={createPoolFromText} className="rounded bg-felt-edge px-3 py-1 hover:brightness-110">
-            按编号创建
-          </button>
-          <input type="number" className="w-20 rounded bg-felt-deep px-2 py-1" value={poolSize} onChange={(e) => setPoolSize(Number(e.target.value))} />
-          <button onClick={createRandomPool} className="rounded bg-felt-edge px-3 py-1 hover:brightness-110">
-            从全卡表随机采样
-          </button>
-        </div>
+        {canEditPools && (
+          <div className="mb-3 flex flex-wrap items-center gap-2 text-xs">
+            <input className="w-40 rounded bg-felt-deep px-2 py-1 outline-none" placeholder="卡池名称" value={poolName} onChange={(e) => setPoolName(e.target.value)} />
+            <textarea
+              className="h-10 w-64 rounded bg-felt-deep px-2 py-1 outline-none"
+              placeholder="每行：code 或 code<TAB>卡名"
+              value={poolCodes}
+              onChange={(e) => setPoolCodes(e.target.value)}
+            />
+            <button onClick={createPoolFromText} className="rounded bg-felt-edge px-3 py-1 hover:brightness-110">
+              按编号创建
+            </button>
+            <input type="number" className="w-20 rounded bg-felt-deep px-2 py-1" value={poolSize} onChange={(e) => setPoolSize(Number(e.target.value))} />
+            <button onClick={createRandomPool} className="rounded bg-felt-edge px-3 py-1 hover:brightness-110">
+              从全卡表随机采样
+            </button>
+          </div>
+        )}
+        {!canEditPools && <p className="mb-3 text-xs text-slate-400">当前为比赛专有管理令牌：卡池列表只读，不能编辑或删除。</p>}
         {poolReport && (poolReport.filtered > 0 || poolReport.missingCodes.length > 0 || (poolReport.invalidEntries?.length ?? 0) > 0 || (poolReport.entryWarnings?.length ?? 0) > 0) && (
           <div className="yc-notice mb-3 p-3 text-xs leading-5" role="alert">
             <div className="mb-1 flex items-center justify-between gap-3">
@@ -1011,7 +1031,7 @@ export default function AdminPage() {
                 <b>{p.name}</b>{p.isDefault && <span className="ml-2 rounded bg-gold px-1.5 py-0.5 text-[0.625rem] text-felt-deep">默认</span>} · {p.count} 张卡 · {p.createdAt.slice(0, 10)}
               </span>
               <span className="flex items-center gap-2">
-                {!p.isDefault && (
+                {canEditPools && !p.isDefault && (
                   <button
                     onClick={() => {
                       adminFetch('/admin/settings/default-pool', 'PUT', { pool_id: p.id })
@@ -1023,21 +1043,25 @@ export default function AdminPage() {
                     设为默认
                   </button>
                 )}
-                <a href={`/admin/pool/${p.id}`} className="rounded bg-felt-edge px-2 py-0.5 text-slate-200 hover:brightness-110">
-                  编辑
-                </a>
+                {canEditPools && (
+                  <a href={`/admin/pool/${p.id}`} className="rounded bg-felt-edge px-2 py-0.5 text-slate-200 hover:brightness-110">
+                    编辑
+                  </a>
+                )}
                 {p.url && <a href={p.url} target="_blank" rel="noreferrer" className="rounded bg-felt-edge px-2 py-0.5 text-emerald-200 hover:brightness-110">公开查看</a>}
-                <button
-                  onClick={() => {
-                    if (!confirm('确定删除卡池？')) return;
-                    adminFetch(`/admin/pools/${p.id}`, 'DELETE')
-                      .then(() => { setMsg('卡池已删除'); void load(); })
-                      .catch((e: any) => setMsg(e.message));
-                  }}
-                  className="rounded bg-red-900 px-2 py-0.5 text-red-100 hover:brightness-110"
-                >
-                  删除
-                </button>
+                {canEditPools && (
+                  <button
+                    onClick={() => {
+                      if (!confirm('确定删除卡池？')) return;
+                      adminFetch(`/admin/pools/${p.id}`, 'DELETE')
+                        .then(() => { setMsg('卡池已删除'); void load(); })
+                        .catch((e: any) => setMsg(e.message));
+                    }}
+                    className="rounded bg-red-900 px-2 py-0.5 text-red-100 hover:brightness-110"
+                  >
+                    删除
+                  </button>
+                )}
               </span>
             </li>
           ))}

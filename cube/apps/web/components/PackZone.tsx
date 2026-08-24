@@ -5,12 +5,12 @@ import { CardImage, CardWithTooltip } from './CardImage';
 import { ConfirmModal } from './ConfirmModal';
 import { CardMeta } from './CardPreview';
 import { CardInfo } from '@/lib/types';
-import { matchesCardQuery, sortCardCodes } from '@/lib/cardInfo';
+import { matchesCardQuery, PickSortMode, sortCardCodes, sortCardCodesByPick } from '@/lib/cardInfo';
 import { useNowTick } from './TopBar';
 
 // 右侧牌堆区（dev_docs/06 §2）：他人回合显示卡背+数量，自己回合显示正面，
 // 背景为剩余秒数倒计时呼吸光效（每秒 tick 实时更新）。
-export function PackZone({ pack, cardMap, droppedCards, alternativeCode, onAlternative, onPick }: {
+export function PackZone({ pack, cardMap, droppedCards, alternativeCode, onAlternative, onPick, sortMode = 'default', onSortModeChange, poolId }: {
   pack: {
     cardsLeft: number;
     isMyTurn: boolean;
@@ -25,13 +25,21 @@ export function PackZone({ pack, cardMap, droppedCards, alternativeCode, onAlter
   alternativeCode?: number | null;
   onAlternative?: (code: number) => void;
   onPick: (code: number) => void;
+  sortMode?: PickSortMode;
+  onSortModeChange?: (mode: PickSortMode) => void;
+  poolId?: number;
 }) {
   const [pending, setPending] = useState<number | null>(null);
   const [showDropped, setShowDropped] = useState(false);
   const [dropFilter, setDropFilter] = useState('');
   // Sorting is presentation-only. The server's pack order remains untouched so
   // pick validation, passing, event logs, and replays keep their exact order.
-  const displayCards = useMemo(() => sortCardCodes(pack?.cards ?? [], cardMap, 'lv'), [pack?.cards, cardMap]);
+  const displayCards = useMemo(
+    () => sortMode === 'pick'
+      ? sortCardCodesByPick(pack?.cards ?? [], cardMap, poolId)
+      : sortCardCodes(pack?.cards ?? [], cardMap, 'lv'),
+    [cardMap, pack?.cards, poolId, sortMode],
+  );
   const now = useNowTick(true);
 
   // 初始弃置（公开）：按钮 + 可搜索的卡图-卡名列表弹窗（dev_docs/06 §2）
@@ -84,11 +92,26 @@ export function PackZone({ pack, cardMap, droppedCards, alternativeCode, onAlter
           {pack.isMyTurn ? '轮到你选牌' : '等待其他玩家'} · 剩余 {pack.cardsLeft} 张
           {pack.queueLength !== undefined && ` · 队列 ${pack.queueLength} 堆`}
         </span>
-        {secondsLeft !== null && (
-          <span className={`font-mono ${inReserve || (baseLeft ?? 1) <= 5 ? 'text-red-300' : 'text-gold'}`}>
-            {pack.pausedRemainingMs !== undefined ? `已暂停 · 剩余 ${secondsLeft} 秒` : inReserve ? `保留时间 ${secondsLeft} 秒` : `${baseLeft ?? secondsLeft} 秒`}
-          </span>
-        )}
+        <span className="flex flex-wrap items-center justify-end gap-2">
+          {onSortModeChange && (
+            <label className="flex items-center gap-1 text-slate-300">
+              排序
+              <select
+                className="rounded bg-felt-edge px-1.5 py-0.5 text-[0.625rem] outline-none ring-gold/50 focus:ring-2"
+                value={sortMode}
+                onChange={(event) => onSortModeChange(event.target.value as PickSortMode)}
+              >
+                <option value="default">默认</option>
+                <option value="pick">抓位（早→晚）</option>
+              </select>
+            </label>
+          )}
+          {secondsLeft !== null && (
+            <span className={`font-mono ${inReserve || (baseLeft ?? 1) <= 5 ? 'text-red-300' : 'text-gold'}`}>
+              {pack.pausedRemainingMs !== undefined ? `已暂停 · 剩余 ${secondsLeft} 秒` : inReserve ? `保留时间 ${secondsLeft} 秒` : `${baseLeft ?? secondsLeft} 秒`}
+            </span>
+          )}
+        </span>
       </header>
       <div className="z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain p-2">
         {pack.isMyTurn && pack.cards ? (

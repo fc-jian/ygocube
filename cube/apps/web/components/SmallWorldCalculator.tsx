@@ -146,8 +146,8 @@ export function SmallWorldCalculator() {
       setResult(null);
       return;
     }
-    if (deck.codes.length === 0 || hand.codes.length === 0) {
-      setError('请同时输入卡组和手牌的 code list。');
+    if (deck.codes.length === 0) {
+      setError('请输入主卡组的 code list。');
       setResult(null);
       return;
     }
@@ -180,7 +180,7 @@ export function SmallWorldCalculator() {
           <p className="yc-kicker mb-3">Yu-Gi-Oh! Utility · Small World</p>
           <h1 className="yc-title text-4xl font-black tracking-tight sm:text-5xl">小世界现象检索计算器</h1>
           <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-400">
-            输入主卡组和手牌的卡片 code，枚举所有“手牌怪兽 → 中间怪兽 → 检索目标”的合法路径。
+            输入主卡组和可选手牌的卡片 code，枚举所有“手牌怪兽 → 中间怪兽 → 检索目标”的合法路径；手牌留空时自动扫描主卡组全部候选怪兽。
           </p>
         </div>
         <a href="/" className="yc-secondary px-4 py-2 text-xs font-semibold">返回 YGO Cube</a>
@@ -199,12 +199,12 @@ export function SmallWorldCalculator() {
             />
           </label>
           <label className="block">
-            <span className="mb-2 block text-sm font-semibold text-emerald-100">手牌 code list</span>
+            <span className="mb-2 block text-sm font-semibold text-emerald-100">手牌 code list（可选）</span>
             <textarea
               value={handText}
               onChange={(event) => setHandText(event.target.value)}
               className="min-h-44 w-full resize-y rounded-lg bg-felt-deep px-3 py-3 font-mono text-sm leading-6 text-slate-100 outline-none"
-              placeholder="例如：14558127 23434538"
+              placeholder="可留空：留空时扫描主卡组全部 unique 怪兽"
               spellCheck={false}
             />
           </label>
@@ -224,7 +224,7 @@ export function SmallWorldCalculator() {
           >
             清空
           </button>
-          <span className="text-xs text-slate-500">额外卡和非怪兽卡会自动跳过；未知 code 会单独提示。</span>
+          <span className="text-xs text-slate-500">手牌留空时按实际副本扫描全部主卡组怪兽；额外卡和非怪兽卡会自动跳过。</span>
         </div>
         {error && <p className="yc-notice mt-4 px-4 py-3 text-sm">{error}</p>}
         {result?.unknownCodes.length ? (
@@ -239,7 +239,7 @@ export function SmallWorldCalculator() {
               <p className="yc-kicker">Results</p>
               <h2 className="mt-1 text-xl font-bold text-emerald-50">共 {result.summary.pathCount} 条合法路径</h2>
               <p className="mt-1 text-xs text-slate-500">
-                有效主卡组怪兽 {result.summary.eligibleDeckCount} 张 · 有效手牌怪兽 {result.summary.eligibleHandCount} 张
+                {result.summary.handMode === 'deck_unique' ? '已扫描主卡组全部 unique 怪兽' : '指定手牌模式'} · 有效主卡组怪兽 {result.summary.eligibleDeckCount} 张 · 有效候选手牌怪兽 {result.summary.eligibleHandCount} 张
               </p>
             </div>
             <label className="flex items-center gap-2 text-sm text-slate-300">

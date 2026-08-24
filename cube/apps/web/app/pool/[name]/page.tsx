@@ -6,6 +6,7 @@ import { api } from '@/lib/api';
 import { CardInfo } from '@/lib/types';
 import { sortCardSearchResults } from '@/lib/cardInfo';
 import { PoolPreview } from '@/components/PoolPreview';
+import { LocalPicsSetting } from '@/components/IdentityWidget';
 
 interface PublicPool {
   id: number;
@@ -121,6 +122,7 @@ export default function PublicPoolPage() {
           <p className="text-xs text-slate-400">{pool.count} 张卡 · 只读公开预览 · 抓位统计实时更新</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <LocalPicsSetting />
           <label className="flex items-center gap-1.5 text-xs text-slate-300">
             抓位排序
             <select
