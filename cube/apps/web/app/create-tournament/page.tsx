@@ -47,7 +47,7 @@ export default function CreateTournamentPage() {
   const [confirmFairness, setConfirmFairness] = useState(false);
   const [createUsername, setCreateUsername] = useState('');
   const [createToken, setCreateToken] = useState('');
-  const [created, setCreated] = useState<{ url: string; adminToken: string } | null>(null);
+  const [created, setCreated] = useState<{ tid: number; url: string; createdBy: string } | null>(null);
   const [error, setError] = useState('');
   const initialFormat = recommendFormat(4);
   const [matchFormat, setMatchFormat] = useState<MatchFormat>(initialFormat.matchFormat);
@@ -105,13 +105,13 @@ export default function CreateTournamentPage() {
 
   const doCreate = async () => {
     try {
-      const r = await api<{ tid: number; url: string; admin_token: string }>('/tournaments', {
+      const r = await api<{ tid: number; url: string; created_by: string }>('/tournaments', {
         method: 'POST',
         body: { name, maxPlayers, mode, packSize, cardPool, mainMin, mainMax, extraMax, sideMax, maxCopies, timeLimit, pickSeconds, deckbuildingSeconds: limitDeckbuilding ? deckbuildingSeconds : null, packStrategy, extraRatioPercent: extraRatioEnabled ? extraRatioPercent : null, packCount: packCount === '' ? undefined : Number(packCount), dropPublic, evenPackCount, reserveSeconds, reseatEachRound, matchFormat, swissRoundCount: matchFormat === 'swiss' ? swissRoundCount : undefined, playoffSize: matchFormat === 'swiss' ? playoffSize : 0 },
         createUsername: createUsername.trim() || undefined,
         createToken,
       });
-      setCreated({ url: r.url, adminToken: r.admin_token });
+      setCreated({ tid: r.tid, url: r.url, createdBy: r.created_by });
       setError('');
     } catch (e: any) {
       setError(e.code === 'AUTH_REQUIRED' ? '缺少创建令牌' : (e.code === 'PACKCOUNT_NOT_MULTIPLE' ? '牌堆总数必须是人数的整数倍' : (e.code === 'BAD_EXTRA_RATIO' ? '额外卡比例必须是 0–100 的整数' : (e.code ?? String(e)))));
@@ -137,10 +137,7 @@ export default function CreateTournamentPage() {
           <a href={created.url} className="block font-mono text-gold underline">
             {created.url}
           </a>
-          <div>
-            <p className="text-xs text-slate-400">比赛专属管理令牌（请妥善保存，仅可管理本场比赛）：</p>
-            <code className="block break-all rounded bg-felt-deep p-3 font-mono text-xs text-gold">{created.adminToken}</code>
-          </div>
+          <p className="text-xs text-slate-400">创建者：<b className="text-gold">{created.createdBy}</b>。后续请在管理台使用相同的创建用户名和 token；权限仅限自己创建的比赛。</p>
           <a href="/admin" className="inline-block rounded bg-felt-edge px-4 py-1.5 text-sm hover:brightness-110">
             管理控制台
           </a>

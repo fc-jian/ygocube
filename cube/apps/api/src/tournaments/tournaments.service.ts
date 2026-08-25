@@ -76,7 +76,7 @@ export class TournamentsService {
     return new CardsService().poolCodes().length;
   }
 
-  create(input: CreateTournamentInput, actor: string): { tid: number; url: string; admin_token: string } {
+  create(input: CreateTournamentInput, actor: string): { tid: number; url: string; created_by: string } {
     input = validateTournamentInput(input);
     const cardPool = this.assertCardPool(input.cardPool);
     const pool = this.pools.getByName(cardPool);
@@ -108,7 +108,6 @@ export class TournamentsService {
       packSize: input.packSize ?? (input.packSizeMultiple === undefined ? defaults.packSize : undefined),
       packSizeMultiple: input.packSizeMultiple ?? defaults.packSizeMultiple,
       pickSeconds: input.pickSeconds ?? defaults.pickSeconds,
-      pauseSeconds: input.pauseSeconds ?? defaults.pauseSeconds,
       deckbuildingSeconds: input.deckbuildingSeconds === undefined ? defaults.deckbuildingSeconds : input.deckbuildingSeconds,
       dropLeftover: input.dropLeftover !== false,
       dropMode:
@@ -147,21 +146,19 @@ export class TournamentsService {
     // partial caller override (for example only mainMin) cannot form an
     // invalid combination with a defaulted companion field.
     validateTournamentInput({ ...cfg, name: input.name, cardPool }, false, true);
-    // per-tournament admin token (dev_docs/07 §5.1): manages this tournament only
-    const adminToken = crypto.randomBytes(24).toString('hex');
     const now = new Date().toISOString();
     const db = getDb();
     const tid = db.transaction(() => {
       const row = db
         .prepare(
-          'INSERT INTO tournaments (name, config_json, created_by, card_pool_id, status, round, created_at, updated_at, admin_token_hash) VALUES (?,?,?,?,?,?,?,?,?)',
+          'INSERT INTO tournaments (name, config_json, created_by, card_pool_id, status, round, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)',
         )
-        .run(input.name, JSON.stringify(cfg), actor, pool.id, 'registration', 0, now, now, sha256(adminToken));
+        .run(input.name, JSON.stringify(cfg), actor, pool.id, 'registration', 0, now, now);
       const createdTid = Number(row.lastInsertRowid);
       logEvent(createdTid, 'tournament', 'phase', { status: 'registration', round: 0 }, actor);
       return createdTid;
     })();
-    return { tid, url: `/t/${tid}`, admin_token: adminToken };
+    return { tid, url: `/t/${tid}`, created_by: actor };
   }
 
   get(tid: number) {
@@ -291,15 +288,6 @@ export class TournamentsService {
     const token = randomToken();
     getDb().prepare('UPDATE tournament_players SET token_hash=? WHERE tournament_id=? AND player_id=?').run(sha256(token), tid, playerId);
     return { token };
-  }
-
-  resetAdminToken(tid: number): { admin_token: string } {
-    const state = loadState(tid);
-    if (state.frozen) throw new Error('FROZEN');
-    const token = randomToken();
-    getDb().prepare('UPDATE tournaments SET admin_token_hash=?, updated_at=? WHERE id=?')
-      .run(sha256(token), new Date().toISOString(), tid);
-    return { admin_token: token };
   }
 
   updateMatchFormat(tid: number, patch: Record<string, unknown>, actor: string): Record<string, unknown> {
@@ -541,7 +529,7 @@ export class TournamentsService {
         if (head) {
           const remaining = remainingOf(head.index);
           const pausedRemainingMs = state.pause?.pausedAt
-            ? state.pause.pausedDeadlines?.[playerId]
+            ? state.pause.pausedDeadlines?.[playerId] ?? state.frozenTimers?.passing?.[playerId]
             : state.frozen
               ? state.frozenTimers?.passing?.[playerId]
               : undefined;
@@ -568,7 +556,7 @@ export class TournamentsService {
       // already-picked cards' codes are never sent (dev_docs/05 §3)
       const remaining = cur ? remainingOf(cur.index) : [];
       const pausedRemainingMs = state.pause?.pausedAt
-        ? state.pause.pausedPickRemainingMs
+        ? state.pause.pausedPickRemainingMs ?? state.frozenTimers?.serial
         : state.frozen
           ? state.frozenTimers?.serial
           : undefined;
@@ -631,13 +619,20 @@ export class TournamentsService {
     };
   }
 
-  // 管理台事件时间线：完整事件列表（全局 seq + 可读摘要），供回溯选择。
+  // 管理台事件时间线：按 seq 分页（全局 seq + 可读摘要），供回溯选择。
   // detail 用于前端 hover；保留关键字段（尤其是选中的 exact card code），
   // 但不把 packs/decks 的超大完整 payload 直接塞进列表响应。
-  events(tid: number): { seq: number; entity: string; action: string; summary: string; detail: string; createdAt: string; actor: string }[] {
+  events(tid: number, options: { limit?: number; before?: number } = {}): { seq: number; entity: string; action: string; summary: string; detail: string; createdAt: string; actor: string }[] {
+    const limit = options.limit === undefined ? 1_000 : options.limit;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) throw new Error('BAD_PAYLOAD');
+    const before = options.before === undefined ? Number.MAX_SAFE_INTEGER : options.before;
+    if (!Number.isSafeInteger(before) || before < 1) throw new Error('BAD_PAYLOAD');
     const rows = getDb()
-      .prepare('SELECT seq, entity, action, payload_json, created_at, actor FROM events WHERE tournament_id=? ORDER BY seq')
-      .all(tid) as { seq: number; entity: string; action: string; payload_json: string; created_at: string; actor: string }[];
+      .prepare('SELECT seq, entity, action, payload_json, created_at, actor FROM events WHERE tournament_id=? AND seq<? ORDER BY seq DESC LIMIT ?')
+      .all(tid, before, limit) as { seq: number; entity: string; action: string; payload_json: string; created_at: string; actor: string }[];
+    // Preserve the historical ascending display order while limiting the
+    // query to the newest page. Clients can request older pages with before.
+    rows.reverse();
     return rows.map((e) => {
       let payload: Record<string, unknown> = {};
       try { payload = JSON.parse(e.payload_json); } catch { /* ignore */ }
@@ -686,7 +681,7 @@ export class TournamentsService {
       } else if (e.entity === 'player' && e.action === 'player_rename') {
         detail = `玩家：${p.playerId}\n新显示名称：${p.displayName}`;
       } else if (e.entity === 'pause' && e.action === 'pause') {
-        detail = p?.pausedAt ? `暂停发起人：${p.proposer ?? '未知'}\n冻结时间：${p.pausedAt}` : '暂停/投票状态已恢复';
+        detail = p?.pausedAt ? `管理员暂停：${p.actor ?? e.actor ?? '未知'}\n暂停时间：${p.pausedAt}` : '管理员已恢复比赛';
       } else {
         try {
           const raw = JSON.stringify(payload, null, 2);

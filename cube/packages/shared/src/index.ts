@@ -83,7 +83,8 @@ export interface TournamentConfig {
   dropPublic?: boolean; // whether dropped cards are exposed (default false)
   dropLast: boolean; // public dropped card list per pack
   pickSeconds: number; // default 40
-  pauseSeconds: number; // default 300 (5 min)
+  // Pausing is an explicit administrator action; legacy pauseSeconds values
+  // may remain in old JSON but are ignored.
   deckbuildingSeconds?: number | null; // null/default = unlimited; admin advances manually
   mainMin: number;
   mainMax: number;

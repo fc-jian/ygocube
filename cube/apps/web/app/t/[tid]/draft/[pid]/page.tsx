@@ -23,7 +23,6 @@ export default function DraftPage() {
   const [state, setState] = useState<DraftState | null>(null);
   const [cardMap, setCardMap] = useState<Record<number, CardInfo>>({});
   const [error, setError] = useState('');
-  const [pauseAction, setPauseAction] = useState('propose');
   const [cardFilter, setCardFilter] = useState('');
   const [poolCodes, setPoolCodes] = useState<number[]>([]);
   const [poolSearch, setPoolSearch] = useState('');
@@ -276,16 +275,6 @@ export default function DraftPage() {
   if (error && !state) return <main className="p-8 text-red-300">{error}</main>;
   if (!state || !identity) return <main className="p-8 text-slate-400">加载中...</main>;
 
-  // 固定预览的快捷操作：主/额外 -> 副卡组，副卡组 -> 主卡组
-  const pause = async () => {
-    try {
-      await api(`/t/${tid}/pause`, { method: 'POST', body: { action: pauseAction }, identity });
-      await load();
-    } catch (e: any) {
-      setError(e.code ?? String(e));
-    }
-  };
-
   const deck = state.deck ?? { main: [], extra: [], side: [], lockedAt: null };
   const configuredPoolId = Number(state.config.cardPoolId);
   const poolId = Number.isSafeInteger(configuredPoolId) ? configuredPoolId : undefined;
@@ -393,21 +382,8 @@ export default function DraftPage() {
         </button>
       </footer>
       {state.pause && (
-        <div className="mx-3 mb-2 flex flex-wrap items-center gap-3 rounded border border-felt-edge bg-felt px-3 py-2 text-xs">
-          {state.pause.pausedAt ? (
-            <span className="text-red-300">已暂停（发起人：{state.pause.proposer}）</span>
-          ) : (
-            <span className="text-slate-300">暂停投票进行中（发起人：{state.pause.proposer}）</span>
-          )}
-          <select className="rounded bg-felt-deep px-2 py-1" value={pauseAction} onChange={(e) => setPauseAction(e.target.value)}>
-            <option value="propose">发起暂停</option>
-            <option value="vote_yes">同意</option>
-            <option value="vote_no">反对</option>
-            <option value="resume">恢复</option>
-          </select>
-          <button onClick={pause} className="rounded bg-felt-edge px-3 py-1 hover:brightness-110">
-            提交
-          </button>
+        <div className="mx-3 mb-2 rounded border border-red-400/30 bg-red-950/40 px-3 py-2 text-xs text-red-200" role="status">
+          比赛已由管理员暂停；倒计时已冻结，等待后台恢复。
         </div>
       )}
       {error && <div className="mx-3 mb-2 rounded bg-red-900/60 px-3 py-1 text-xs text-red-200">{error}</div>}

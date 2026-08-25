@@ -19,7 +19,6 @@ export interface CreateTournamentInput {
   packSizeMultiple?: number;
   packCount?: number;
   pickSeconds?: number;
-  pauseSeconds?: number;
   deckbuildingSeconds?: number | null;
   mainMin?: number;
   mainMax?: number;
@@ -43,7 +42,7 @@ export interface CreateTournamentInput {
 }
 
 const CONFIG_KEYS = new Set<keyof CreateTournamentInput>([
-  'name', 'maxPlayers', 'mode', 'packSize', 'packSizeMultiple', 'packCount', 'pickSeconds', 'pauseSeconds',
+  'name', 'maxPlayers', 'mode', 'packSize', 'packSizeMultiple', 'packCount', 'pickSeconds',
   'deckbuildingSeconds', 'mainMin', 'mainMax', 'extraMax', 'sideMax', 'maxCopies', 'timeLimit',
   'dropMode', 'dropLeftover', 'packStrategy', 'extraRatioPercent', 'dropPublic', 'draftMode',
   'reseatEachRound', 'evenPackCount', 'reserveSeconds', 'cardPool', 'matchFormat', 'swissRoundCount', 'playoffSize',
@@ -100,7 +99,6 @@ export function validateTournamentInput(value: unknown, partial = false, allowUn
   optionalInteger(result, 'packSizeMultiple', 1, 100);
   optionalInteger(result, 'packCount', 1, TOURNAMENT_LIMITS.packCount);
   optionalInteger(result, 'pickSeconds', 1, TOURNAMENT_LIMITS.seconds);
-  optionalInteger(result, 'pauseSeconds', 1, TOURNAMENT_LIMITS.seconds);
   optionalInteger(result, 'reserveSeconds', 0, TOURNAMENT_LIMITS.seconds);
   optionalInteger(result, 'mainMin', 0, TOURNAMENT_LIMITS.deckZone);
   optionalInteger(result, 'mainMax', 1, TOURNAMENT_LIMITS.deckZone);

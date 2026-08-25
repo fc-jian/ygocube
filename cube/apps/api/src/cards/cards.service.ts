@@ -407,6 +407,12 @@ export class CardsService {
   resolvePicPath(code: number): string | null {
     const root = config.pics.ygoproRoot;
     if (!root || !fs.existsSync(root)) return null;
+    let realRoot: string;
+    try {
+      realRoot = fs.realpathSync(root);
+    } catch {
+      return null;
+    }
     const candidates = [
       path.join(root, 'pics', `${code}.jpg`),
       path.join(root, 'expansions', 'pics', `${code}.jpg`),
@@ -425,7 +431,16 @@ export class CardsService {
       }
     }
     for (const dir of this.expansionPicDirs) candidates.push(path.join(dir, `${code}.jpg`));
-    return candidates.find((c) => fs.existsSync(c)) ?? null;
+    for (const candidate of candidates) {
+      if (!fs.existsSync(candidate)) continue;
+      try {
+        const real = fs.realpathSync(candidate);
+        if (real === realRoot || real.startsWith(`${realRoot}${path.sep}`)) return real;
+      } catch {
+        // A disappearing or unreadable asset is treated as not found.
+      }
+    }
+    return null;
   }
 
   // low-res avif thumbnail stored server-side: <avifDir>/<code>.avif (dev_docs/06 §5)
@@ -433,6 +448,13 @@ export class CardsService {
     const dir = config.pics.avifDir;
     if (!dir || !fs.existsSync(dir)) return null;
     const file = path.join(dir, `${code}.avif`);
-    return fs.existsSync(file) ? file : null;
+    if (!fs.existsSync(file)) return null;
+    try {
+      const root = fs.realpathSync(dir);
+      const real = fs.realpathSync(file);
+      return real === root || real.startsWith(`${root}${path.sep}`) ? real : null;
+    } catch {
+      return null;
+    }
   }
 }

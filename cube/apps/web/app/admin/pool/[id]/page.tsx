@@ -24,7 +24,7 @@ export default function PoolEditorPage() {
   const [metaLoading, setMetaLoading] = useState(false);
 
   useEffect(() => {
-    setAdminToken(localStorage.getItem('yc_admin_token') ?? '');
+    setAdminToken(sessionStorage.getItem('yc_super_token') ?? '');
   }, []);
 
   const adminFetch = useCallback(

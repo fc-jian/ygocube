@@ -42,7 +42,7 @@ export interface DraftState {
   pickAlternative?: number | null;
   // passing 模式：所有玩家的牌堆队列长度（仅数量，dev_docs/05 §3 信息隐藏）
   queueLengths?: { playerId: string; length: number }[];
-  pause: { pausedAt: string | null; proposer: string | null; remainingMs: number } | null;
+  pause: { pausedAt: string; actor?: string } | null;
   deck: { main: number[]; extra: number[]; side: number[]; lockedAt: string | null };
 }
 

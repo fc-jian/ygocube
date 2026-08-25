@@ -3,7 +3,7 @@ import { ArgumentsHost, Catch, ExceptionFilter, HttpException } from '@nestjs/co
 import { AppModule } from './app.module';
 import { config, validateStartupSecurity } from './config';
 import { getDb } from './db';
-import { Request, Response, NextFunction } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 
 // Minimal cookie parser (no extra dependency).
 export function cookieParser(req: Request, _res: Response, next: NextFunction) {
@@ -45,7 +45,7 @@ const BAD_REQUEST_CODES = new Set([
   'BAD_PLAYER_ID', 'BAD_DISPLAY_NAME', 'BAD_RESULT', 'BAD_PAYLOAD', 'BAD_POOL_IMPORT',
   'BAD_POOL_NAME', 'BAD_CREATE_USERNAME', 'BAD_EXTRA_RATIO', 'INSUFFICIENT_PACK_RATIO',
   'REVERT_CONFIRMATION_MISMATCH', 'BAD_SEAT_ASSIGNMENT', 'BAD_SWISS_ROUNDS',
-  'BAD_PLAYOFF_SIZE', 'BAD_MATCH_FORMAT', 'FORMAT_PLAYER_COUNT', 'BAD_RESERVE_SECONDS', 'BAD_ACTION',
+  'BAD_PLAYOFF_SIZE', 'BAD_MATCH_FORMAT', 'FORMAT_PLAYER_COUNT', 'BAD_RESERVE_SECONDS', 'BAD_ACTION', 'BAD_TOURNAMENT_ID',
 ]);
 
 @Catch()
@@ -99,9 +99,74 @@ async function bootstrap() {
   // eager card import (cards.cdb): search/pools need the table warm
   const { CardsService } = require('./cards/cards.service');
   new CardsService().allCodes();
-  const app = await NestFactory.create(AppModule, { logger: ['error', 'warn', 'log'] });
+  const app = await NestFactory.create(AppModule, { logger: ['error', 'warn', 'log'], bodyParser: false });
   app.enableShutdownHooks();
   app.use(cookieParser);
+  // Keep the public API conservative by default. This middleware runs before
+  // CORS and controllers, so rejected origins never reach application code and
+  // oversized requests cannot allocate unbounded JSON bodies.
+  const rateBuckets = new Map<string, { startedAt: number; count: number }>();
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
+    if (req.secure || req.headers['x-forwarded-proto'] === 'https') {
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
+    const origin = req.headers.origin;
+    if (origin && !config.server.allowedOrigins.includes(origin)) {
+      res.status(403).json({ ok: false, code: 'CORS_ORIGIN_DENIED' });
+      return;
+    }
+    const length = Number(req.headers['content-length'] ?? 0);
+    if (Number.isFinite(length) && length > 512 * 1024) {
+      res.status(413).json({ ok: false, code: 'REQUEST_TOO_LARGE' });
+      return;
+    }
+    const ip = req.socket.remoteAddress ?? 'unknown';
+    const category = req.path.startsWith('/admin') || req.path === '/tournaments' ? 'privileged' : req.path.startsWith('/t/') ? 'tournament' : 'public';
+    const limit = category === 'privileged' ? 120 : category === 'tournament' ? 300 : 600;
+    const now = Date.now();
+    const key = `${category}:${ip}`;
+    const bucket = rateBuckets.get(key);
+    if (!bucket || now - bucket.startedAt >= 60_000) rateBuckets.set(key, { startedAt: now, count: 1 });
+    else if (++bucket.count > limit) {
+      res.setHeader('Retry-After', '60');
+      res.status(429).json({ ok: false, code: 'RATE_LIMITED' });
+      return;
+    }
+    // Bound memory even when a public service sees many short-lived source IPs.
+    if (rateBuckets.size > 10_000) {
+      for (const [candidate, value] of rateBuckets) {
+        if (now - value.startedAt >= 60_000) rateBuckets.delete(candidate);
+      }
+      while (rateBuckets.size > 8_000) {
+        const oldest = rateBuckets.keys().next().value as string | undefined;
+        if (!oldest) break;
+        rateBuckets.delete(oldest);
+      }
+    }
+    if (!req.path.startsWith('/pics/')) res.setHeader('Cache-Control', 'no-store');
+    next();
+  });
+  // Explicit parser limits apply to chunked requests as well as those with a
+  // Content-Length header. The security/rate middleware above runs first so
+  // rejected origins never spend parser work.
+  app.use(express.json({ limit: '512kb' }));
+  app.use(express.urlencoded({ extended: false, limit: '32kb' }));
+  app.use((error: any, _req: Request, res: Response, next: NextFunction) => {
+    if (error?.type === 'entity.too.large') {
+      res.status(413).json({ ok: false, code: 'REQUEST_TOO_LARGE' });
+      return;
+    }
+    if (error instanceof SyntaxError && (error as SyntaxError & { status?: number }).status === 400) {
+      res.status(400).json({ ok: false, code: 'BAD_PAYLOAD' });
+      return;
+    }
+    next(error);
+  });
   app.enableCors({
     origin: (origin, callback) => {
       if (!origin || config.server.allowedOrigins.includes(origin)) callback(null, true);

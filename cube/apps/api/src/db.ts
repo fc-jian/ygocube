@@ -8,13 +8,30 @@ let db: Database.Database;
 
 export function getDb(): Database.Database {
   if (db) return db;
-  fs.mkdirSync(path.dirname(config.server.dbPath), { recursive: true });
+  const dbPath = config.server.dbPath;
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  const hadDatabase = fs.existsSync(dbPath) && fs.statSync(dbPath).size > 0;
   db = new Database(config.server.dbPath);
   db.pragma('busy_timeout = 5000');
   db.pragma('foreign_keys = ON');
   db.pragma('journal_mode = WAL');
   db.pragma('synchronous = NORMAL');
   db.pragma('wal_autocheckpoint = 1000');
+  // Keep a recoverable copy before the first creator-scope migration. A WAL
+  // checkpoint makes copying the main file sufficient and avoids capturing a
+  // half-written sidecar. The backup is intentionally retained for an
+  // operator-led rollback rather than deleted automatically.
+  const migrationBackup = `${dbPath}.pre-auth-migration.bak`;
+  if (hadDatabase && !fs.existsSync(migrationBackup)) {
+    try {
+      db.pragma('wal_checkpoint(TRUNCATE)');
+      fs.copyFileSync(dbPath, migrationBackup);
+    } catch (error) {
+      db.close();
+      db = undefined as unknown as Database.Database;
+      throw new Error(`database backup failed before migration: ${(error as Error).message}`);
+    }
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS tournaments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -153,7 +170,24 @@ export function getDb(): Database.Database {
       active INTEGER NOT NULL DEFAULT 1
     );
   `);
-  migrate(db);
+  try {
+    migrate(db);
+  } catch (error) {
+    // Restore only when a pre-migration copy exists. This is a fail-closed
+    // path: a partial permission migration must never leave the service
+    // serving an unknown schema.
+    if (fs.existsSync(migrationBackup)) {
+      try {
+        db.close();
+        fs.copyFileSync(migrationBackup, dbPath);
+        for (const suffix of ['-wal', '-shm']) fs.rmSync(`${dbPath}${suffix}`, { force: true });
+      } catch (restoreError) {
+        throw new Error(`database migration failed and rollback failed: ${(restoreError as Error).message}`);
+      }
+    }
+    db = undefined as unknown as Database.Database;
+    throw error;
+  }
   return db;
 }
 
@@ -175,6 +209,11 @@ function migrate(d: Database.Database): void {
   if (!cols.some((c) => c.name === 'card_pool_id')) {
     d.exec('ALTER TABLE tournaments ADD COLUMN card_pool_id INTEGER');
   }
+  // Per-tournament admin tokens are revoked as part of the creator-scoped
+  // administration migration. Keep the nullable legacy column for SQLite
+  // compatibility with old databases, but never populate or authenticate it.
+  if (cols.some((c) => c.name === 'admin_token_hash')) d.exec('UPDATE tournaments SET admin_token_hash=NULL WHERE admin_token_hash IS NOT NULL');
+  d.exec('CREATE INDEX IF NOT EXISTS idx_tournaments_created_by ON tournaments(created_by)');
   const snapCols = d.prepare('PRAGMA table_info(tournament_snapshots)').all() as { name: string }[];
   if (!snapCols.some((c) => c.name === 'event_seq')) {
     // 快照记录全局事件 seq（旧行 seq 是相对计数，语义错配会导致重放翻倍，修复后忽略旧行）

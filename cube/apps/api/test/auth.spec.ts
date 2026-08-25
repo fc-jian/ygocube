@@ -1,6 +1,6 @@
 import { useTestDb, makeTournaments, TEST_POOL } from './helpers';
 import { config } from '../src/config';
-import { AuthGuard } from '../src/auth/auth.guard';
+import { AuthGuard, sha256 } from '../src/auth/auth.guard';
 import { Reflector } from '@nestjs/core';
 import { getDb } from '../src/db';
 import { AdminController } from '../src/admin.controller';
@@ -29,6 +29,15 @@ function expectUnauthorized(fn: () => boolean): void {
     fail('expected UnauthorizedException');
   } catch (e: any) {
     expect(e.response?.code ?? e.message).toBe('AUTH_REQUIRED');
+  }
+}
+
+function expectCode(fn: () => boolean, code: string): void {
+  try {
+    fn();
+    fail(`expected ${code}`);
+  } catch (e: any) {
+    expect(e.response?.code ?? e.message).toBe(code);
   }
 }
 
@@ -65,20 +74,35 @@ describe('auth model', () => {
     expect(row.token_hash).not.toBe(created.create_token);
     const guard = new AuthGuard(new Reflector());
     expect(guard.canActivate(makeCtx('/tournaments', { 'x-create-user': 'ALICE.CREATOR', 'x-create-token': created.create_token }, {}, {}, 'POST'))).toBe(true);
-    controller.removeCreateUser(req, 'ALICE.CREATOR');
+    const rotated = controller.rotateCreateUserToken(req, 'ALICE.CREATOR');
+    expect(rotated.create_token).toBeTruthy();
     expectUnauthorized(() => guard.canActivate(makeCtx('/tournaments', { 'x-create-user': 'alice.creator', 'x-create-token': created.create_token }, {}, {}, 'POST')));
+    expect(guard.canActivate(makeCtx('/tournaments', { 'x-create-user': 'alice.creator', 'x-create-token': rotated.create_token }, {}, {}, 'POST'))).toBe(true);
+    controller.removeCreateUser(req, 'ALICE.CREATOR');
+    expectUnauthorized(() => guard.canActivate(makeCtx('/tournaments', { 'x-create-user': 'alice.creator', 'x-create-token': rotated.create_token }, {}, {}, 'POST')));
   });
 
-  it('per-tournament admin token manages only its own tournament', () => {
+  it('creator credentials manage only tournaments owned by that creator', () => {
     const tournaments = makeTournaments();
-    const t1 = tournaments.create({ name: 'a', maxPlayers: 3, cardPool: TEST_POOL }, 'test');
-    const t2 = tournaments.create({ name: 'b', maxPlayers: 3, cardPool: TEST_POOL }, 'test');
+    getDb().prepare('INSERT INTO create_users (username, token_hash, created_at, active) VALUES (?,?,?,1)')
+      .run('creator', sha256('creator-secret'), new Date().toISOString());
+    getDb().prepare('INSERT INTO create_users (username, token_hash, created_at, active) VALUES (?,?,?,1)')
+      .run('other', sha256('other-secret'), new Date().toISOString());
+    const t1 = tournaments.create({ name: 'a', maxPlayers: 3, cardPool: TEST_POOL }, 'creator');
+    const t2 = tournaments.create({ name: 'b', maxPlayers: 3, cardPool: TEST_POOL }, 'other');
     const guard = new AuthGuard(new Reflector());
-    expect(guard.canActivate(makeCtx(`/admin/t/${t1.tid}/state`, { 'x-admin-token': t1.admin_token }))).toBe(true);
-    expect(guard.canActivate(makeCtx(`/admin/t/${t1.tid}/pools`, { 'x-admin-token': t1.admin_token }))).toBe(true);
-    expectUnauthorized(() => guard.canActivate(makeCtx(`/admin/t/${t2.tid}/state`, { 'x-admin-token': t1.admin_token })));
-    expectUnauthorized(() => guard.canActivate(makeCtx(`/admin/t/${t2.tid}/pools`, { 'x-admin-token': t1.admin_token })));
+    const creatorHeaders = { 'x-create-user': 'creator', 'x-create-token': 'creator-secret' };
+    expect(guard.canActivate(makeCtx(`/admin/t/${t1.tid}/state`, creatorHeaders))).toBe(true);
+    expect(guard.canActivate(makeCtx(`/admin/t/${t1.tid}/pools`, creatorHeaders))).toBe(true);
+    expectCode(() => guard.canActivate(makeCtx(`/admin/t/${t2.tid}/state`, creatorHeaders)), 'FORBIDDEN');
+    expectCode(() => guard.canActivate(makeCtx(`/admin/t/${t2.tid}/pools`, creatorHeaders)), 'FORBIDDEN');
+    expect(guard.canActivate(makeCtx('/admin/mine/tournaments', creatorHeaders))).toBe(true);
+    expectCode(() => guard.canActivate(makeCtx('/admin/tournaments', creatorHeaders)), 'AUTH_REQUIRED');
+    expectCode(() => guard.canActivate(makeCtx(`/admin/t/${t1.tid}/state`, { 'x-admin-token': 'legacy-token' })), 'ADMIN_TOKEN_REMOVED');
     expect(guard.canActivate(makeCtx(`/admin/t/${t2.tid}/state`, { 'x-admin-token': config.admin.superToken }))).toBe(true);
+    getDb().prepare('UPDATE create_users SET token_hash=? WHERE username=?').run(sha256('rotated'), 'creator');
+    expectCode(() => guard.canActivate(makeCtx(`/admin/t/${t1.tid}/state`, creatorHeaders)), 'AUTH_REQUIRED');
+    expect(guard.canActivate(makeCtx(`/admin/t/${t1.tid}/state`, { 'x-create-user': 'creator', 'x-create-token': 'rotated' }))).toBe(true);
   });
 
   it('scoped tournament admins can read all pools but cannot mutate them', () => {
@@ -126,24 +150,22 @@ describe('auth model', () => {
     expect(request.identity.playerId).toBe('alice');
   });
 
-  it('creation returns a unique admin token, stored hashed', () => {
+  it('creation records creator and does not issue a tournament admin token', () => {
     const tournaments = makeTournaments();
     const t1 = tournaments.create({ name: 'd', maxPlayers: 3, cardPool: TEST_POOL }, 'test');
     const t2 = tournaments.create({ name: 'e', maxPlayers: 3, cardPool: TEST_POOL }, 'test');
-    expect(t1.admin_token).toBeTruthy();
-    expect(t1.admin_token).not.toBe(t2.admin_token);
+    expect(t1.created_by).toBe('test');
+    expect(t1).not.toHaveProperty('admin_token');
+    expect(t2).not.toHaveProperty('admin_token');
     const row = getDb().prepare('SELECT admin_token_hash FROM tournaments WHERE id=?').get(t1.tid) as { admin_token_hash: string };
-    const { sha256 } = require('../src/auth/auth.guard');
-    expect(row.admin_token_hash).toBe(sha256(t1.admin_token));
+    expect(row.admin_token_hash).toBeNull();
   });
 
-  it('resetAdminToken invalidates the old tournament token immediately', () => {
+  it('rejects legacy tournament admin tokens even if an old database still contains a hash', () => {
     const tournaments = makeTournaments();
-    const created = tournaments.create({ name: 'reset-admin', maxPlayers: 3, cardPool: TEST_POOL }, 'test');
+    const created = tournaments.create({ name: 'legacy-admin', maxPlayers: 3, cardPool: TEST_POOL }, 'test');
+    getDb().prepare('UPDATE tournaments SET admin_token_hash=? WHERE id=?').run(sha256('old-admin'), created.tid);
     const guard = new AuthGuard(new Reflector());
-    const reset = tournaments.resetAdminToken(created.tid);
-    expect(reset.admin_token).not.toBe(created.admin_token);
-    expectUnauthorized(() => guard.canActivate(makeCtx(`/admin/t/${created.tid}/state`, { 'x-admin-token': created.admin_token })));
-    expect(guard.canActivate(makeCtx(`/admin/t/${created.tid}/state`, { 'x-admin-token': reset.admin_token }))).toBe(true);
+    expectCode(() => guard.canActivate(makeCtx(`/admin/t/${created.tid}/state`, { 'x-admin-token': 'old-admin' })), 'ADMIN_TOKEN_REMOVED');
   });
 });

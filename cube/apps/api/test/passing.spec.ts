@@ -323,32 +323,36 @@ describe('passing draft: timers, pause, admin transitions', () => {
     }
   });
 
-  it('majority pause freezes immediately; resume preserves exact per-player time', () => {
+  it('administrator pause freezes immediately; resume preserves exact per-player time', () => {
     jest.useFakeTimers();
     try {
       const { tournaments, draft, tid } = setupPassing('ppz', 3, 27, 9, { pickSeconds: 30, reserveSeconds: 0 });
       const state = loadState(tid);
       const seats = seatsOf(state);
       jest.advanceTimersByTime(10000);
-      draft.proposePause(tid, seats[0]);
-      draft.votePause(tid, seats[1], true); // 2/3 过半
+      draft.pauseByAdmin(tid, 'creator');
       let s = loadState(tid);
-      expect(s.pause!.pausedAt).not.toBeNull(); // passing 立即暂停（无需等选牌）
-      expect(s.pause!.pausedDeadlines).toBeDefined();
-      expect(Object.keys(s.pause!.pausedDeadlines!).length).toBe(3);
-      for (const ms of Object.values(s.pause!.pausedDeadlines!)) expect(ms).toBe(20000);
+      expect(s.pause!.pausedAt).toBeDefined();
+      expect(s.frozen).toBe(true);
+      expect(s.frozenTimers!.passing).toBeDefined();
+      expect(Object.keys(s.frozenTimers!.passing!).length).toBe(3);
+      for (const ms of Object.values(s.frozenTimers!.passing!)) expect(ms).toBe(20000);
       const pausedView = tournaments.stateForPlayer(tid, seats[0]);
       expect((pausedView.pack as any).deadlineAt).toBeNull();
       expect((pausedView.pack as any).pausedRemainingMs).toBe(20000);
-      expect(() => draft.pick(tid, seats[0], remainingOf(loadState(tid), 0)[0])).toThrow('PAUSED');
+      expect(() => draft.pick(tid, seats[0], remainingOf(loadState(tid), 0)[0])).toThrow('FROZEN');
       // 暂停期间计时器冻结：推进 60s 也不会有自动选牌
       jest.advanceTimersByTime(60000);
       expect(loadState(tid).picks.length).toBe(0);
-      // 注意：pauseExpired 会自动恢复（pauseSeconds 默认 300s > 60s，此处未触发）
-      draft.resume(tid, seats[0]);
+      // 管理员必须明确恢复，暂停不会因旧 pauseSeconds 自动解除。
+      draft.resumeByAdmin(tid, 'creator');
       s = loadState(tid);
       expect(s.pause).toBeNull();
       for (const pid of seats) expect(s.pickDeadlines[pid]).not.toBeNull();
+      const resumedEventCount = getDb().prepare('SELECT count(*) AS c FROM events WHERE tournament_id=?').get(tid) as { c: number };
+      draft.resumeByAdmin(tid, 'creator');
+      const repeatedResumeEventCount = getDb().prepare('SELECT count(*) AS c FROM events WHERE tournament_id=?').get(tid) as { c: number };
+      expect(repeatedResumeEventCount.c).toBe(resumedEventCount.c);
       // 恢复后仍只有暂停前剩下的 20s，而不是重置成完整 30s。
       jest.advanceTimersByTime(19000);
       expect(loadState(tid).picks.length).toBe(0);

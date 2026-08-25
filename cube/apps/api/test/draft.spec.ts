@@ -217,29 +217,19 @@ describe('draft engine', () => {
     expect(loadState(badTid).status).toBe('registration');
   });
 
-  it('pause: majority vote pauses after current picker finishes; proposer resumes', () => {
+  it('pause: only an administrator can freeze and resume the draft', () => {
     const { draft, tid } = setupDraft(3);
     const state = loadState(tid);
     const current = state.pickCursor!.playerId;
-    draft.proposePause(tid, current);
-    for (const p of state.players) {
-      if (p.playerId !== current) draft.votePause(tid, p.playerId, true);
-    }
-    // votes: current yes + both others yes = 3 > 3/2 -> pause pending
+    draft.pauseByAdmin(tid, 'creator');
     let s = loadState(tid);
-    expect(s.pause).not.toBeNull();
-    expect(s.pause!.pausedAt).toBeNull(); // not paused yet
-    // current picker picks -> pause activates
-    const pack = s.packs.find((p) => p.index === s.pickCursor!.packIndex)!;
-    const remaining = pack.order.filter((c) => !s.picks.some((pk) => pk.packIndex === pack.index && pk.card === c));
-    draft.pick(tid, current, remaining[0]);
-    s = loadState(tid);
     expect(s.pause!.pausedAt).not.toBeNull();
-    expect(() => draft.pick(tid, s.pickCursor!.playerId, 0)).toThrow('PAUSED');
-    // proposer resumes
-    draft.resume(tid, current);
+    expect(s.frozen).toBe(true);
+    expect(() => draft.pick(tid, current, 0)).toThrow('FROZEN');
+    draft.resumeByAdmin(tid, 'creator');
     s = loadState(tid);
     expect(s.pause).toBeNull();
+    expect(s.frozen).toBe(false);
   });
 });
 

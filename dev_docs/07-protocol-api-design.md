@@ -21,15 +21,18 @@
 
 - 玩家默认需要 `tid + pid + token`。比赛路由以 path 中的 `tid` 为准；浏览器使用
   按比赛隔离的 `yc_pid_<tid>/yc_token_<tid>` cookie，普通 fetch 也可使用
-  `X-Tournament-Id/X-Player-Id/X-Token`。旧全局 cookie/query/body 仅作兼容入口。
-- `/admin/*` 使用 `X-Admin-Token`：super token 管全部比赛/卡池，per-tournament
-  admin token 只管对应比赛。
+  `X-Tournament-Id/X-Player-Id/X-Token`。旧全局 cookie/query 仅作非敏感 ID 兼容入口；
+  token 只接受比赛隔离 cookie 或 header。
+- `/admin/*` 使用两种身份：超级管理员使用 `X-Admin-Token`；比赛创建者使用
+  `X-Create-User` + `X-Create-Token`，且只能访问 `created_by` 与该用户名一致的
+  `/admin/t/:tid/*` 路由。比赛专有 admin token 已取消，旧 token 立即失效。
 - `POST /tournaments` 普通创建者必须同时使用 `X-Create-User` 与 `X-Create-Token`；
-  super token 仍可直接创建。创建响应只返回一次明文 per-tournament admin token。
+  super token 仍可直接创建。响应只返回 `tid/url/created_by`，不再生成比赛管理 token。
 - 比赛关闭 token 鉴权后仍要求 pid 对应一名已报名且 active 的玩家；super token
   仍可作万能玩家 token。
-- 失败统一为 `401 {ok:false, code:"AUTH_REQUIRED", fields:[...]}`。token 只存
-  SHA-256 哈希，无法读取旧值，只能重置。
+- 失败统一为 `401 {ok:false, code:"AUTH_REQUIRED", fields:[...]}`；跨比赛创建者访问返回
+  `403 FORBIDDEN`。创建用户 token 只存 SHA-256 哈希，无法读取旧值；删除用户或重新生成
+  token 会立即撤销其全部比赛管理权限。旧比赛 `admin_token_hash` 迁移为 null，代码不再验证。
 
 `create_users` 由 super admin 管理：`GET/POST /admin/create-users` 列表/创建，
 `DELETE /admin/create-users/:username` 撤销。用户名规范化为小写，允许 1--32 位
@@ -44,7 +47,7 @@ ASCII 字母、数字、`.`、`_`、`-`；数据库只保存 token 哈希。比�
 name, maxPlayers, mode(single|match), cardPool
 packSize, packSizeMultiple(legacy), packCount, packStrategy, extraRatioPercent
 dropMode(legacy), dropPublic, draftMode, evenPackCount
-pickSeconds, pauseSeconds, reserveSeconds, reseatEachRound
+pickSeconds, reserveSeconds, reseatEachRound
 deckbuildingSeconds(null=无限), mainMin, mainMax, extraMax, sideMax, maxCopies
 timeLimit
 matchFormat(round_robin|swiss|double_elimination)
@@ -87,7 +90,7 @@ swissRoundCount, playoffSize
 | `GET /t/:tid/cards/status?codes=` | drafting 按玩家视角返回 `not_in_pool/dropped/picked/seen/unknown`；deckbuilding 及之后返回全局 `not_in_pool/dropped/picked/other_picked`；返回 exact 请求 code |
 | `POST /t/:tid/pick` | `{card_code,target_zone?}`，passing 队首选牌 |
 | `POST /t/:tid/pick/alternative` | `{card_code}`，记录本人最后点击的候选牌，超时自动选择优先使用 |
-| `POST /t/:tid/pause` | `{action:propose|vote_yes|vote_no|resume}` |
+| `POST /t/:tid/pause` | 已废弃，返回 `410 PAUSE_VOTING_REMOVED`；玩家不能暂停/投票/恢复 |
 | `POST /t/:tid/deck/move` | `{card_code,from,to,index?,from_index?}`，`to=pool` 可移出构筑 |
 | `POST /t/:tid/deck/sort` | YGOPro `deck_sort_lv` 逻辑，显式整理 main/extra/side |
 | `POST /t/:tid/deck/shuffle` | 只随机 main 顺序，模拟洗牌 |
@@ -140,10 +143,12 @@ swissRoundCount, playoffSize
 | `POST /admin/t/:tid/matches/start` | 建立指定轮次排表并异步建 srvpro 房间 |
 | `POST /admin/t/:tid/matches/advance` | 当前轮结果齐全后管理员确认下一轮 |
 | `POST /admin/t/:tid/match/result` | 管理员录入/修正 0--2 局比分 |
+| `GET /admin/t/:tid/events?limit=&before=` | 事件时间线分页，默认最近 1000 条；`before` 为 seq 游标 |
 | `POST /admin/t/:tid/pause` / `pause/resume` | 冻结计时或结束暂停 |
+| `POST /admin/t/:tid/resume` | 恢复管理员暂停；`pause/resume` 为兼容别名 |
 | `POST /admin/t/:tid/security` | `{require_token:false}` 关闭该比赛 token 鉴权 |
-| `GET /admin/t/:tid/pools` | 比赛管理 token 或 super token 读取全部卡池；返回 `{pools,canEdit}`，非 super 只读 |
-| `POST /admin/t/:tid/admin-token` | 重设比赛 admin token，旧 token 立即失效 |
+| `GET /admin/mine/tournaments` | 创建者列出自己创建的比赛；super 可复用全局列表 |
+| `GET /admin/t/:tid/pools` | 比赛创建者或 super 读取全部卡池；返回 `{pools,canEdit}`，非 super 只读 |
 | `POST /admin/t/:tid/players/:pid/token` | 重设玩家 token |
 | `POST /admin/t/:tid/players/:pid/reserve` | `{seconds}`：选牌阶段给指定玩家增加 reserve；事件保存余额/deadline 快照 |
 | `PUT /admin/settings/default-pool` | super 设置全局默认卡池 |
@@ -154,6 +159,7 @@ swissRoundCount, playoffSize
 | `POST /admin/t/:tid/unfreeze` | 回溯后恢复计时/房间编排 |
 | `GET /admin/create-users` | super admin 列出创建权限用户（不返回 token） |
 | `POST /admin/create-users` | super admin 创建用户名并生成一次性随机 create token |
+| `POST /admin/create-users/:username/token` | super admin 轮换 token；旧 token 立即失效，新明文只返回一次 |
 | `DELETE /admin/create-users/:username` | super admin 立即撤销创建权限 |
 
 卡池 `POST` 既接受 `codes:number[]`，也接受 `importText`。文本每行支持

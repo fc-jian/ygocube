@@ -531,6 +531,7 @@ export class MatchesService implements OnModuleInit, OnModuleDestroy {
 
   // srvpro webhook receiver (dev_docs/07 §3.4)
   onWebhook(body: any): { ack: boolean } {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return { ack: false };
     const roomName = body?.room_name;
     if (typeof roomName !== 'string' || roomName.length > 255) return { ack: false };
     const rows = getDb().prepare(
@@ -543,10 +544,20 @@ export class MatchesService implements OnModuleInit, OnModuleDestroy {
     const match = state.matches.find((x) => x.roomName === roomName);
     if (!match) return { ack: false };
     if (match.resultA !== null) return { ack: true }; // idempotent
-    if (!Array.isArray(body.players)) return { ack: false };
+    // srvpro currently sends exactly two players. Keep the endpoint bounded so
+    // a forged internal request cannot allocate an unbounded lookup map.
+    if (!Array.isArray(body.players) || body.players.length > 8) return { ack: false };
     const byId: Record<string, any> = Object.create(null) as Record<string, any>;
     for (const player of body.players) {
-      if (player && typeof player.player_id === 'string') byId[player.player_id] = player;
+      if (
+        player &&
+        typeof player === 'object' &&
+        !Array.isArray(player) &&
+        typeof player.player_id === 'string' &&
+        player.player_id.length <= 64
+      ) {
+        byId[player.player_id] = player;
+      }
     }
     const a = byId[match.playerA];
     const b = byId[match.playerB];

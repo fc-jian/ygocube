@@ -105,7 +105,6 @@ export const defaults = {
   reserveSeconds: 400, // passing 模式每玩家保留时间（单选超时先扣 reserve，耗尽才自动选）
   reseatEachRound: true, // passing 每轮结束后随机重排玩家座位（默认开）
   pickSeconds: 40,
-  pauseSeconds: 300,
   deckbuildingSeconds: null as number | null, // 默认无限；管理员手动进入对战阶段
   extraRatioPercent: null as number | null, // 每堆额外卡比例；null 表示沿用 packStrategy
   mainMin: 40,

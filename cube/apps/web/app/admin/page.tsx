@@ -19,7 +19,7 @@ interface AdminState {
   pickReserves?: Record<string, number>;
   pickAlternatives?: Record<string, { packIndex: number; card: number } | null>;
   pendingPhase: string | null;
-  pause: { pausedAt: string | null; proposer: string | null } | null;
+  pause: { pausedAt: string; actor?: string } | null;
   decks: Record<string, { main: number[]; extra: number[]; side: number[]; lockedAt: string | null }>;
   matches: { id: number; round: number; playerA: string; playerB: string; tableNo: number; roomName: string | null; resultA: number | null; resultB: number | null; faultedAt: string | null; stage?: string; bracketRound?: number }[];
   pickSummary: { playerId: string; seat: number; count: number }[];
@@ -60,7 +60,11 @@ interface TournamentBrief {
 }
 
 export default function AdminPage() {
+  // Super token is global; creator credentials are scoped by the server to
+  // tournaments owned by that username. Never put either credential in URLs.
   const [adminToken, setAdminToken] = useState('');
+  const [createUsername, setCreateUsername] = useState('');
+  const [createToken, setCreateToken] = useState('');
   const [tid, setTid] = useState('');
   const [state, setState] = useState<AdminState | null>(null);
   const [pools, setPools] = useState<PoolInfo[]>([]);
@@ -87,7 +91,6 @@ export default function AdminPage() {
   const loadSeq = useRef(0);
   const [addPid, setAddPid] = useState('');
   const [shownToken, setShownToken] = useState<{ pid: string; token: string } | null>(null);
-  const [shownAdminToken, setShownAdminToken] = useState<string | null>(null);
   const [matchInputs, setMatchInputs] = useState<Record<number, { a: string; b: string }>>({});
   const [events, setEvents] = useState<{ seq: number; entity: string; action: string; summary: string; detail: string; createdAt: string; actor?: string }[]>([]);
   const [packCount, setPackCount] = useState<number | ''>('');
@@ -116,15 +119,38 @@ export default function AdminPage() {
   }, [state?.id, state?.config.matchFormat, state?.config.swissRoundCount, state?.config.playoffSize]);
 
   useEffect(() => {
-    setAdminToken(localStorage.getItem('yc_admin_token') ?? '');
+    setAdminToken(sessionStorage.getItem('yc_super_token') ?? '');
+    setCreateUsername(sessionStorage.getItem('yc_create_username') ?? '');
+    setCreateToken(sessionStorage.getItem('yc_create_token') ?? '');
   }, []);
 
-  const saveToken = () => localStorage.setItem('yc_admin_token', adminToken);
+  const saveCredentials = () => {
+    if (adminToken) sessionStorage.setItem('yc_super_token', adminToken);
+    else sessionStorage.removeItem('yc_super_token');
+    if (createUsername) sessionStorage.setItem('yc_create_username', createUsername);
+    else sessionStorage.removeItem('yc_create_username');
+    if (createToken) sessionStorage.setItem('yc_create_token', createToken);
+    else sessionStorage.removeItem('yc_create_token');
+    // Do not retain the revoked per-tournament token from older builds.
+    localStorage.removeItem('yc_admin_token');
+  };
+
+  const isSuperSession = adminToken.trim().length > 0;
 
   const adminFetch = useCallback(async (path: string, method = 'GET', body?: unknown) => {
     const res = await fetch(`/api${path}`, {
       method,
-      headers: { ...(adminToken ? { 'X-Admin-Token': encodeURIComponent(adminToken) } : {}), 'Content-Type': 'application/json' },
+      headers: {
+        ...(adminToken
+          ? { 'X-Admin-Token': encodeURIComponent(adminToken) }
+          : createUsername && createToken
+            ? {
+                'X-Create-User': encodeURIComponent(createUsername),
+                'X-Create-Token': encodeURIComponent(createToken),
+              }
+            : {}),
+        'Content-Type': 'application/json',
+      },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
     const d = await res.json().catch(() => ({}));
@@ -134,10 +160,10 @@ export default function AdminPage() {
       throw error;
     }
     return d;
-  }, [adminToken]);
+  }, [adminToken, createUsername, createToken]);
 
   const load = useCallback(async () => {
-    saveToken();
+    saveCredentials();
     // 竞态守卫：快速切换 tid 或轮询重叠时，旧请求的迟到响应不得覆盖新数据
     const seq = ++loadSeq.current;
     if (tid) {
@@ -146,14 +172,16 @@ export default function AdminPage() {
         if (seq === loadSeq.current) setState(s);
       } catch (e: any) {
         if (seq !== loadSeq.current) return;
-        setMsg(e.message === 'AUTH_REQUIRED' ? '管理令牌缺失或无权管理该比赛' : e.message);
+        setMsg(e.message === 'AUTH_REQUIRED' || e.message === 'FORBIDDEN' ? '凭据缺失或无权管理该比赛' : e.message);
         setState(null);
       }
     }
     try {
       const p = tid
         ? await adminFetch(`/admin/t/${tid}/pools`)
-        : await adminFetch('/admin/pools');
+        : isSuperSession
+          ? await adminFetch('/admin/pools')
+          : { pools: [], canEdit: false };
       if (seq === loadSeq.current) {
         if (Array.isArray(p)) {
           setPools(p);
@@ -170,7 +198,7 @@ export default function AdminPage() {
       }
     }
     try {
-      const t = await adminFetch('/admin/tournaments');
+      const t = await adminFetch(isSuperSession ? '/admin/tournaments' : '/admin/mine/tournaments');
       if (seq === loadSeq.current) setTournaments(t);
     } catch {
       if (seq === loadSeq.current) setTournaments([]);
@@ -195,7 +223,7 @@ export default function AdminPage() {
         if (seq === loadSeq.current) setEvents([]);
       }
     }
-  }, [adminFetch, tid]);
+  }, [adminFetch, tid, isSuperSession, createUsername, createToken]);
   // act 等异步回调完成后要刷新的是"当前最新 tid"的数据，而非发起时刻的闭包
   const loadRef = useRef(load);
   loadRef.current = load;
@@ -203,12 +231,11 @@ export default function AdminPage() {
   useEffect(() => {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [adminToken, tid]);
+  }, [adminToken, createUsername, createToken, tid]);
 
   // 切换比赛时关闭编辑态，避免上一场比赛的表单残留
   useEffect(() => {
     setEditing(false);
-    setShownAdminToken(null);
     setReserveInputs({});
     setHoveredEvent(null);
     setCanEditPools(false);
@@ -271,21 +298,6 @@ export default function AdminPage() {
       await loadRef.current();
     } catch (e: any) {
       showMsg(`进入对战失败：${e.message}`);
-    }
-  };
-
-  const resetTournamentAdminToken = async () => {
-    if (!state || !window.confirm('重设后旧比赛管理 token 会立即失效，是否继续？')) return;
-    try {
-      const result = await adminFetch(`/admin/t/${state.id}/admin-token`, 'POST');
-      setShownAdminToken(result.admin_token);
-      if (!result.caller_was_super) {
-        setAdminToken(result.admin_token);
-        localStorage.setItem('yc_admin_token', result.admin_token);
-      }
-      showMsg('比赛管理 token 已重设；请立即保存新 token');
-    } catch (e: any) {
-      showMsg(`重设失败：${e.message}`);
     }
   };
 
@@ -465,6 +477,18 @@ export default function AdminPage() {
     }
   };
 
+  const rotatePermissionUser = async (username: string) => {
+    if (!window.confirm(`重新生成 ${username} 的 token？旧 token 将立即失效。`)) return;
+    try {
+      const result = await adminFetch(`/admin/create-users/${encodeURIComponent(username)}/token`, 'POST', {});
+      setIssuedCreateToken({ username: result.username, token: result.create_token });
+      showMsg(`权限用户 ${username} 的旧 token 已失效；新 token 只显示一次`);
+      await loadRef.current();
+    } catch (e: any) {
+      showMsg(`重生成 token 失败：${e.message}`);
+    }
+  };
+
   const editPlayers = Math.max(1, Number(editForm.maxPlayers) || 1);
   const editPackSize = Math.max(1, Number(editForm.packSize) || 24);
   const editPoolCount = pools.find((p) => p.name === String(editForm.cardPool ?? ''))?.count ?? 0;
@@ -495,10 +519,35 @@ export default function AdminPage() {
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <input
           className="w-full rounded bg-felt px-3 py-1.5 font-mono text-xs outline-none sm:w-72"
-          placeholder="管理令牌"
+          placeholder="超级管理员 token（或填写下方创建者凭据）"
           type="password"
           value={adminToken}
-          onChange={(e) => setAdminToken(e.target.value)}
+          onChange={(e) => {
+            setAdminToken(e.target.value);
+            if (e.target.value) {
+              setCreateUsername('');
+              setCreateToken('');
+            }
+          }}
+        />
+        <input
+          className="w-40 rounded bg-felt px-3 py-1.5 text-xs outline-none"
+          placeholder="创建用户名"
+          value={createUsername}
+          onChange={(e) => {
+            setCreateUsername(e.target.value);
+            if (e.target.value) setAdminToken('');
+          }}
+        />
+        <input
+          className="w-full rounded bg-felt px-3 py-1.5 font-mono text-xs outline-none sm:w-64"
+          placeholder="创建 token"
+          type="password"
+          value={createToken}
+          onChange={(e) => {
+            setCreateToken(e.target.value);
+            if (e.target.value) setAdminToken('');
+          }}
         />
         <input className="w-24 rounded bg-felt px-3 py-1.5 outline-none" placeholder="比赛 ID" value={tid} onChange={(e) => setTid(e.target.value)} />
         <button onClick={() => void load()} className="rounded bg-felt-edge px-4 py-1.5 hover:brightness-110">
@@ -529,7 +578,10 @@ export default function AdminPage() {
             {createUsers.map((user) => (
               <li key={user.username} className="flex flex-wrap items-center justify-between gap-2 rounded bg-felt-deep/50 px-2 py-1">
                 <span><b>{user.username}</b> · 创建于 {user.createdAt.slice(0, 10)}{user.active ? '' : ' · 已停用'}</span>
-                <button onClick={() => void deletePermissionUser(user.username)} className="rounded bg-red-900 px-2 py-0.5 text-red-100 hover:brightness-110">删除</button>
+                <span className="flex gap-1">
+                  <button onClick={() => void rotatePermissionUser(user.username)} className="rounded bg-felt-edge px-2 py-0.5 text-gold hover:brightness-110">重生成 token</button>
+                  <button onClick={() => void deletePermissionUser(user.username)} className="rounded bg-red-900 px-2 py-0.5 text-red-100 hover:brightness-110">删除</button>
+                </span>
               </li>
             ))}
             {createUsers.length === 0 && <li className="text-slate-500">暂无权限用户</li>}
@@ -575,8 +627,8 @@ export default function AdminPage() {
               <button onClick={() => void act(`/admin/t/${state.id}/matches/start`, { round: state.round || 1 })} className="rounded bg-felt-edge px-3 py-1 text-xs hover:brightness-110">
                 开始第 {state.round + 1} 轮
               </button>
-              {state.pause?.pausedAt ? (
-                <button onClick={() => void act(`/admin/t/${state.id}/pause/resume`)} className="rounded bg-felt-edge px-3 py-1 text-xs hover:brightness-110">
+              {state.frozen ? (
+                <button onClick={() => void act(`/admin/t/${state.id}/resume`)} className="rounded bg-felt-edge px-3 py-1 text-xs hover:brightness-110">
                   恢复
                 </button>
               ) : null}
@@ -593,16 +645,13 @@ export default function AdminPage() {
                 <button
                   role="switch"
                   aria-checked={state.frozen}
-                  onClick={() => void act(state.frozen ? `/admin/t/${state.id}/unfreeze` : `/admin/t/${state.id}/pause`)}
+                  onClick={() => void act(state.frozen ? `/admin/t/${state.id}/resume` : `/admin/t/${state.id}/pause`)}
                   className={`relative h-5 w-9 rounded-full transition ${state.frozen ? 'bg-red-700' : 'bg-felt-edge'}`}
                 >
                   <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-felt-deep transition-all ${state.frozen ? 'left-[18px]' : 'left-0.5'}`} />
                 </button>
                 <span className={state.frozen ? 'text-red-300' : 'text-slate-300'}>暂停中</span>
               </label>
-              <button onClick={() => void resetTournamentAdminToken()} className="rounded bg-felt-edge px-3 py-1 text-xs hover:brightness-110">
-                重设比赛管理 token
-              </button>
               <label className="flex cursor-pointer items-center gap-2 text-xs" title="同机测试时可关闭玩家令牌校验">
                 <button
                   role="switch"
@@ -633,11 +682,6 @@ export default function AdminPage() {
               {state.matches.length === 0 ? <button onClick={() => void saveFormat()} className="rounded bg-gold px-3 py-1 font-semibold text-felt-deep">保存赛制</button> : <span className="text-slate-400">首轮已生成，赛制已锁定</span>}
             </div>
           </section>
-          {shownAdminToken && (
-            <div className="mt-3 rounded border border-amber-300/30 bg-amber-950/30 p-3 text-xs text-amber-100">
-              新比赛管理 token（仅显示于当前页面，请立即保存）：<code className="ml-2 break-all font-mono text-gold">{shownAdminToken}</code>
-            </div>
-          )}
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <section className="rounded-lg border border-felt-edge bg-felt/60 p-3 text-xs">
               <h3 className="mb-2 font-semibold text-gold">玩家</h3>
@@ -718,7 +762,7 @@ export default function AdminPage() {
                 <p className="text-slate-500">无进行中的选牌</p>
               )}
               {state.pause && (
-                <p className="mt-1 text-red-300">暂停：{state.pause.pausedAt ? '已暂停' : '投票中'}（发起人 {state.pause.proposer}）</p>
+                <p className="mt-1 text-red-300">暂停：管理员已暂停{state.pause.actor ? `（${state.pause.actor}）` : ''}，等待后台恢复</p>
               )}
               {state.pendingPhase === 'deckbuilding' && <p className="mt-1 text-amber-300">已请求进入构筑：等待当前轮结束（进度将保留）</p>}
             </section>
@@ -945,12 +989,12 @@ export default function AdminPage() {
                   打开
                 </button>
                 <button
-                  onClick={() => void act(t.frozen ? `/admin/t/${t.id}/unfreeze` : `/admin/t/${t.id}/pause`)}
+                  onClick={() => void act(t.frozen ? `/admin/t/${t.id}/resume` : `/admin/t/${t.id}/pause`)}
                   className={`rounded px-2 py-0.5 ${t.frozen ? 'bg-red-900 text-red-100' : 'bg-felt-edge'} hover:brightness-110`}
                 >
                   {t.frozen ? '暂停中' : '暂停'}
                 </button>
-                <button
+                {isSuperSession && <button
                   onClick={() => {
                     if (!confirm('确定删除该比赛？将对局房间关闭并清除全部数据')) return;
                     adminFetch(`/admin/t/${t.id}`, 'DELETE')
@@ -960,7 +1004,7 @@ export default function AdminPage() {
                   className="rounded bg-red-900 px-2 py-0.5 text-red-100 hover:brightness-110"
                 >
                   删除
-                </button>
+                </button>}
               </span>
             </li>
           ))}
@@ -995,7 +1039,7 @@ export default function AdminPage() {
             </button>
           </div>
         )}
-        {!canEditPools && <p className="mb-3 text-xs text-slate-400">当前为比赛专有管理令牌：卡池列表只读，不能编辑或删除。</p>}
+        {!canEditPools && <p className="mb-3 text-xs text-slate-400">创建者凭据只能读取卡池，不能编辑或删除。</p>}
         {poolReport && (poolReport.filtered > 0 || poolReport.missingCodes.length > 0 || (poolReport.invalidEntries?.length ?? 0) > 0 || (poolReport.entryWarnings?.length ?? 0) > 0) && (
           <div className="yc-notice mb-3 p-3 text-xs leading-5" role="alert">
             <div className="mb-1 flex items-center justify-between gap-3">

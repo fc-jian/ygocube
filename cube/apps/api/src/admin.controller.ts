@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Post, Put, Query, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, GoneException, Param, Post, Put, Query, Req } from '@nestjs/common';
 import { AuthGuard, AuthedRequest, Identity, normalizeCreateUsername, sha256 } from './auth/auth.guard';
 import { TournamentsService } from './tournaments/tournaments.service';
 import { DraftService } from './draft/draft.service';
@@ -21,8 +21,9 @@ import { randomToken, validateMatchFormat } from './tournaments/tournaments.serv
 import { CardPickStatsService } from './cards/card-pick-stats.service';
 import { getDb } from './db';
 
-// Admin endpoints authenticate via X-Admin-Token (handled inside AuthGuard):
-// super token for everything, per-tournament token for that tournament only.
+// Admin endpoints authenticate via AuthGuard: the super token is global, while
+// creator credentials are scoped to tournaments whose created_by matches the
+// authenticated create username.
 @Controller('admin')
 export class AdminController {
   constructor(
@@ -38,7 +39,7 @@ export class AdminController {
 
   private adminActor(req: AuthedRequest): string {
     const identity = req.identity as Identity;
-    return identity.isSuper ? 'super-admin' : 'tournament-admin';
+    return identity.isSuper ? 'super-admin' : identity.createUsername ?? 'creator-admin';
   }
 
   private superOnly(req: AuthedRequest): void {
@@ -69,6 +70,17 @@ export class AdminController {
     return { username, create_token: token, createdAt };
   }
 
+  @Post('create-users/:username/token')
+  rotateCreateUserToken(@Req() req: AuthedRequest, @Param('username') rawUsername: string) {
+    this.superOnly(req);
+    const username = normalizeCreateUsername(rawUsername);
+    const token = randomToken();
+    const result = getDb().prepare('UPDATE create_users SET token_hash=?, active=1 WHERE username=? AND active=1')
+      .run(sha256(token), username);
+    if (result.changes === 0) throw new Error('CREATE_USER_NOT_FOUND');
+    return { username, create_token: token, rotatedAt: new Date().toISOString() };
+  }
+
   @Delete('create-users/:username')
   removeCreateUser(@Req() req: AuthedRequest, @Param('username') rawUsername: string) {
     this.superOnly(req);
@@ -88,6 +100,18 @@ export class AdminController {
         'SELECT t.id, t.name, t.status, t.round, t.created_by, t.frozen, (SELECT count(*) FROM tournament_players tp WHERE tp.tournament_id = t.id AND tp.active=1) AS player_count, t.created_at FROM tournaments t ORDER BY t.id DESC',
       )
       .all() as { id: number; name: string; status: string; round: number; created_by: string; frozen: number; player_count: number; created_at: string }[];
+  }
+
+  @Get('mine/tournaments')
+  listCreatedTournaments(@Req() req: AuthedRequest) {
+    const identity = req.identity as Identity;
+    if (identity.isSuper) return this.listTournaments(req);
+    if (!identity.isCreator || !identity.createUsername) throw new Error('FORBIDDEN');
+    return getDb()
+      .prepare(
+        'SELECT t.id, t.name, t.status, t.round, t.created_by, t.frozen, (SELECT count(*) FROM tournament_players tp WHERE tp.tournament_id = t.id AND tp.active=1) AS player_count, t.created_at FROM tournaments t WHERE lower(t.created_by)=? ORDER BY t.id DESC',
+      )
+      .all(identity.createUsername) as { id: number; name: string; status: string; round: number; created_by: string; frozen: number; player_count: number; created_at: string }[];
   }
 
   @Delete('t/:tid')
@@ -125,10 +149,8 @@ export class AdminController {
   @Post('t/:tid/pause')
   pauseTournament(@Req() req: AuthedRequest) {
     const tid = Number(req.params.tid);
-    withEventTransaction(tid, () => {
-      this.draft.freezeTimers(tid);
-      freeze(tid, this.adminActor(req));
-    });
+    this.draft.pauseByAdmin(tid, this.adminActor(req));
+    this.realtime.emitPause(tid, loadState(tid).pause);
     return { ok: true };
   }
 
@@ -182,7 +204,7 @@ export class AdminController {
     const tid = Number(req.params.tid);
     if (loadState(tid).frozen) throw new Error('FROZEN');
     const patch: Record<string, unknown> = {};
-    for (const key of ['name', 'maxPlayers', 'mode', 'packSize', 'packSizeMultiple', 'cardPool', 'mainMin', 'mainMax', 'extraMax', 'sideMax', 'maxCopies', 'timeLimit', 'pickSeconds', 'pauseSeconds', 'deckbuildingSeconds', 'dropMode', 'packStrategy', 'extraRatioPercent', 'packCount', 'dropPublic', 'draftMode', 'evenPackCount', 'reserveSeconds', 'reseatEachRound']) {
+    for (const key of ['name', 'maxPlayers', 'mode', 'packSize', 'packSizeMultiple', 'cardPool', 'mainMin', 'mainMax', 'extraMax', 'sideMax', 'maxCopies', 'timeLimit', 'pickSeconds', 'deckbuildingSeconds', 'dropMode', 'packStrategy', 'extraRatioPercent', 'packCount', 'dropPublic', 'draftMode', 'evenPackCount', 'reserveSeconds', 'reseatEachRound']) {
       if (body[key] !== undefined) patch[key] = body[key];
     }
     if (Object.keys(patch).length === 0) throw new Error('BAD_PAYLOAD');
@@ -228,12 +250,6 @@ export class AdminController {
     return { ok: true };
   }
 
-  @Post('t/:tid/admin-token')
-  resetAdminToken(@Req() req: AuthedRequest) {
-    const result = this.tournaments.resetAdminToken(Number(req.params.tid));
-    return { ...result, caller_was_super: (req.identity as Identity).isSuper === true };
-  }
-
   @Get('settings/default-pool')
   defaultPool(@Req() req: AuthedRequest) {
     this.superOnly(req);
@@ -248,12 +264,31 @@ export class AdminController {
     return { pool: this.pools.setDefaultPool(id) };
   }
 
+  @Post('t/:tid/resume')
   @Post('t/:tid/pause/resume')
   resume(@Req() req: AuthedRequest) {
     const tid = Number(req.params.tid);
-    this.draft.resumeByAdmin(tid, this.adminActor(req));
+    const state = loadState(tid);
+    if (state.pause?.pausedAt) {
+      this.draft.resumeByAdmin(tid, this.adminActor(req));
+    } else if (state.frozen) {
+      // A hard revert also freezes a tournament but has no pause marker. Keep
+      // the legacy recovery path available through the single admin resume
+      // control so the UI cannot strand a reverted tournament.
+      withEventTransaction(tid, () => {
+        unfreeze(tid, this.adminActor(req));
+        this.draft.resumeFrozenTimers(tid, this.adminActor(req));
+        this.matches.resumeAfterRevert(tid);
+      });
+    }
     this.realtime.emitPause(tid, loadState(tid).pause);
     return { ok: true };
+  }
+
+  /** Explicit tombstone for clients that still expose the old token control. */
+  @Post('t/:tid/admin-token')
+  resetAdminToken() {
+    throw new GoneException({ code: 'ADMIN_TOKEN_REMOVED' });
   }
 
   @Post('t/:tid/deck/fix')
@@ -310,9 +345,14 @@ export class AdminController {
   @Post('t/:tid/unfreeze')
   unfreeze(@Req() req: AuthedRequest) {
     const tid = Number(req.params.tid);
+    if (loadState(tid).pause?.pausedAt) {
+      this.draft.resumeByAdmin(tid, this.adminActor(req));
+      this.realtime.emitPause(tid, loadState(tid).pause);
+      return { ok: true };
+    }
     withEventTransaction(tid, () => {
       unfreeze(tid, this.adminActor(req));
-      this.draft.resumeFrozenTimers(tid);
+      this.draft.resumeFrozenTimers(tid, this.adminActor(req));
       this.matches.resumeAfterRevert(tid);
     });
     return { ok: true };
@@ -364,8 +404,20 @@ export class AdminController {
   }
 
   @Get('t/:tid/events')
-  events(@Req() req: AuthedRequest) {
-    return this.tournaments.events(Number(req.params.tid));
+  events(@Req() req: AuthedRequest, @Query('limit') rawLimit?: string, @Query('before') rawBefore?: string) {
+    if (Array.isArray(rawLimit) || Array.isArray(rawBefore)) throw new Error('BAD_PAYLOAD');
+    const parseOptional = (raw: string | undefined, name: string): number | undefined => {
+      if (raw === undefined || raw === '') return undefined;
+      if (!/^\d+$/.test(raw)) throw new Error('BAD_PAYLOAD');
+      const value = Number(raw);
+      if (!Number.isSafeInteger(value) || value < 1) throw new Error('BAD_PAYLOAD');
+      if (name === 'limit' && value > 1_000) throw new Error('BAD_PAYLOAD');
+      return value;
+    };
+    return this.tournaments.events(Number(req.params.tid), {
+      limit: parseOptional(rawLimit, 'limit'),
+      before: parseOptional(rawBefore, 'before'),
+    });
   }
 
   @Post('t/:tid/state')
@@ -444,9 +496,15 @@ export class AdminController {
     const stats = pool && this.cardStats ? this.cardStats.forPool(pool) : new Map();
     const attach = (card: any) => ({ ...card, ...(stats.has(card.code) ? { pickStats: [stats.get(card.code)] } : { pickStats: [] }) });
     if (codes) {
-      return this.cards.getMany(codes.split(',').map(Number)).map(attach);
+      if (Array.isArray(codes) || typeof codes !== 'string') throw new Error('BAD_PAYLOAD');
+      const parts = codes.split(',').map((part) => part.trim()).filter(Boolean);
+      if (parts.length > 2_000 || parts.some((part) => !/^\d+$/.test(part) || !Number.isSafeInteger(Number(part)) || Number(part) <= 0)) {
+        throw new Error('BAD_PAYLOAD');
+      }
+      return this.cards.getMany([...new Set(parts.map(Number))]).map(attach);
     }
-    return this.cards.search(q ?? '').map(attach);
+    if (q !== undefined && (Array.isArray(q) || typeof q !== 'string' || [...q].length > 256)) throw new Error('BAD_PAYLOAD');
+    return this.cards.search(q ?? '', 5_000).map(attach);
   }
 
   @Delete('pools/:id')

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, GoneException, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
 import type { CardVisibilityStatus } from '@ygocube/shared';
 import { Response } from 'express';
 import { AuthGuard, AuthedRequest, Identity, Public, safeSecretEqual } from './auth/auth.guard';
@@ -16,6 +16,37 @@ import { getDb } from './db';
 import { CreateTournamentInput } from './tournaments/tournaments.service';
 import { cubeDeckFileBase } from './decks/deck-filename';
 import { cardStatusForDeckbuilding, cardsSeenByPlayer } from './cards/card-visibility';
+
+const MAX_CARD_QUERY_LENGTH = 256;
+const MAX_CARD_CODES = 2_000;
+const MAX_CARD_SEARCH_RESULTS = 5_000;
+
+function boundedQueryText(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  if (Array.isArray(value) || typeof value !== 'string' || [...value].length > MAX_CARD_QUERY_LENGTH) {
+    throw new Error('BAD_PAYLOAD');
+  }
+  return value;
+}
+
+/** Parse exact card ids without silently accepting NaN, negatives, or an unbounded list. */
+function parseCardCodes(value: unknown): number[] {
+  if (value === undefined || value === null || value === '') return [];
+  // Repeated query keys produce an array. Reject them instead of silently
+  // changing the request shape and bypassing the documented comma-delimited
+  // bound.
+  if (Array.isArray(value) || typeof value !== 'string') throw new Error('BAD_PAYLOAD');
+  const raw = value;
+  const parts = raw.split(',').map((part) => part.trim()).filter(Boolean);
+  if (parts.length > MAX_CARD_CODES) throw new Error('BAD_PAYLOAD');
+  const codes = parts.map((part) => {
+    if (!/^\d+$/.test(part)) throw new Error('BAD_PAYLOAD');
+    const code = Number(part);
+    if (!Number.isSafeInteger(code) || code <= 0) throw new Error('BAD_PAYLOAD');
+    return code;
+  });
+  return [...new Set(codes)];
+}
 
 @Controller()
 @UseGuards(AuthGuard)
@@ -65,10 +96,12 @@ export class ApiController {
     const name = normalizePoolName(rawName);
     const pool = this.pools.getByName(name);
     if (!pool) throw new Error('POOL_NOT_FOUND');
-    const rows = codes
-      ? this.cards.getMany(String(codes).split(',').map(Number))
-      : q
-        ? this.cards.search(q)
+    const query = boundedQueryText(q);
+    const codeList = parseCardCodes(codes);
+    const rows = codeList.length
+      ? this.cards.getMany(codeList)
+      : query
+        ? this.cards.search(query, MAX_CARD_SEARCH_RESULTS)
         : this.cards.getMany(pool.codes);
     const stats = this.cardStats?.forPool(pool) ?? new Map();
     const poolCodeSet = new Set(pool.codes);
@@ -123,7 +156,8 @@ export class ApiController {
     res.sendFile(file);
   }
 
-  // requires X-Create-User + X-Create-Token (or super admin token); returns a per-tournament admin token
+  // requires X-Create-User + X-Create-Token (or super admin token). The
+  // creator credential remains the only non-super tournament administrator.
   @Post('tournaments')
   create(@Req() req: AuthedRequest, @Body() body: CreateTournamentInput) {
     const identity = req.identity as Identity;
@@ -176,10 +210,12 @@ export class ApiController {
       : (typeof cfg.cardPool === 'string' ? this.pools.getByName(cfg.cardPool) : null);
     const stats = pool && this.cardStats ? this.cardStats.forPool(pool) : new Map();
     const attach = (card: any) => ({ ...card, ...(stats.has(card.code) ? { pickStats: [stats.get(card.code)] } : { pickStats: [] }) });
-    if (codes) {
-      return this.cards.getMany(codes.split(',').map(Number)).map(attach);
+    const query = boundedQueryText(q);
+    const codeList = parseCardCodes(codes);
+    if (codeList.length) {
+      return this.cards.getMany(codeList).map(attach);
     }
-    return this.cards.search(q ?? '').map(attach);
+    return this.cards.search(query, MAX_CARD_SEARCH_RESULTS).map(attach);
   }
 
   // drop 前卡池（报名/未开始选牌时展示给玩家；选牌开始后也可查看）
@@ -205,7 +241,7 @@ export class ApiController {
     const dropped = cfg.dropPublic === true ? new Set(state.droppedCards) : new Set<number>();
     const myPicks = new Set(state.picks.filter((p) => p.playerId === id.playerId).map((p) => p.card));
     const seen = cardsSeenByPlayer(state, id.playerId);
-    const codesList = [...new Set(String(codes ?? '').split(',').map(Number).filter(Number.isInteger))];
+    const codesList = parseCardCodes(codes);
     return codesList.map((c) => {
       const status: CardVisibilityStatus = deckbuildingGlobal
         ? cardStatusForDeckbuilding(state, id.playerId, pool, c)
@@ -254,16 +290,10 @@ export class ApiController {
   }
 
   @Post('t/:tid/pause')
-  pause(@Req() req: AuthedRequest, @Body() body: Record<string, string>) {
-    const id = req.identity as Identity;
-    const action = String(body.action ?? 'propose');
-    if (action === 'propose') this.draft.proposePause(id.tournamentId, id.playerId);
-    else if (action === 'vote_yes') this.draft.votePause(id.tournamentId, id.playerId, true);
-    else if (action === 'vote_no') this.draft.votePause(id.tournamentId, id.playerId, false);
-    else if (action === 'resume') this.draft.resume(id.tournamentId, id.playerId);
-    else throw new Error('BAD_ACTION');
-    this.realtime.emitPause(id.tournamentId, loadState(id.tournamentId).pause);
-    return { ok: true };
+  pause() {
+    // Kept as a short-lived compatibility response so old clients cannot
+    // accidentally revive player voting by posting a legacy action.
+    throw new GoneException({ code: 'PAUSE_VOTING_REMOVED' });
   }
 
   @Post('t/:tid/deck/move')

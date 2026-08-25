@@ -1,4 +1,4 @@
-import { CanActivate, ExecutionContext, Injectable, SetMetadata, UnauthorizedException } from '@nestjs/common';
+import { CanActivate, ExecutionContext, ForbiddenException, Injectable, SetMetadata, UnauthorizedException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Request } from 'express';
 import crypto from 'crypto';
@@ -8,14 +8,16 @@ import { config } from '../config';
 // Auth model (dev_docs/07 §2, §5.1):
 // - player routes: three-factor tournamentId + playerId + token, unless the tournament
 //   has token auth disabled by an admin (auth_required=false, for same-machine testing).
-// - /admin/*: X-Admin-Token must be the super admin token (all tournaments + pools)
-//   or the per-tournament admin token issued at creation (that tournament only).
+// - /admin/*: X-Admin-Token is reserved for the super admin. Scoped tournament
+//   administration uses the creator's X-Create-User + X-Create-Token pair.
 // - POST /tournaments: requires X-Create-User + X-Create-Token or the super token.
 export interface Identity {
   tournamentId: number;
   playerId: string;
   isAdmin: boolean;
   isSuper: boolean;
+  /** A creator identity is scoped to the tournamentId it owns. */
+  isCreator?: boolean;
   createUsername?: string;
 }
 
@@ -35,12 +37,12 @@ interface PlayerRow {
 
 interface TournamentRow {
   id: number;
-  admin_token_hash: string | null;
+  created_by: string | null;
   auth_required: number;
 }
 
 function tournamentRow(tid: number): TournamentRow | null {
-  return (getDb().prepare('SELECT id, admin_token_hash, auth_required FROM tournaments WHERE id=?').get(tid) as TournamentRow | undefined) ?? null;
+  return (getDb().prepare('SELECT id, created_by, auth_required FROM tournaments WHERE id=?').get(tid) as TournamentRow | undefined) ?? null;
 }
 
 function headerValue(req: AuthedRequest, name: string): string | undefined {
@@ -84,10 +86,6 @@ function isSuper(token: string): boolean {
   return safeSecretEqual(token, config.admin.superToken);
 }
 
-function isTournamentAdmin(token: string, hash: string | null): boolean {
-  return safeHashEqual(token, hash);
-}
-
 function isCreateUser(username: string, token: string): boolean {
   const row = getDb().prepare('SELECT token_hash FROM create_users WHERE username=? AND active=1').get(username) as { token_hash: string } | undefined;
   return !!row && safeHashEqual(token, row.token_hash);
@@ -97,10 +95,15 @@ function cookiesOf(req: AuthedRequest): Record<string, string> {
   return (req as Request & { cookies?: Record<string, string> }).cookies ?? {};
 }
 
+function queryScalar(req: AuthedRequest, key: string): string | undefined {
+  const value = (req.query as Record<string, unknown>)[key];
+  return typeof value === 'string' ? value : undefined;
+}
+
 export function extractIdentity(req: AuthedRequest): Identity | null {
   const cookies = cookiesOf(req);
   const headers = req.headers as Record<string, string | string[] | undefined>;
-  const pathTid = req.path.match(/^\/(?:admin\/)?t\/(\d+)/)?.[1];
+  const pathTid = req.path.match(/^\/(?:admin\/)?t\/(\d+)(?:\/|$)/)?.[1];
   // header values must be ISO-8859-1; non-ASCII player ids are percent-encoded by the client
   const hget = (name: string): string | undefined => {
     const v = headers[name];
@@ -122,8 +125,12 @@ export function extractIdentity(req: AuthedRequest): Identity | null {
         cookies[k] ??
         hget(`x-${k.replace('yc_', '').replace('tid', 'tournament-id').replace('pid', 'player-id')}`) ??
         hget(k) ??
-        (req.query as Record<string, string>)[k] ??
-        (req.body as Record<string, string> | undefined)?.[k];
+        // Authentication material must never be accepted from a request body:
+        // body fields are attacker-controlled application data and are easy to
+        // confuse with an actor supplied by a client. Query parameters remain
+        // supported only for legacy non-secret ids; tokens come from headers or
+        // cookies below.
+        (k === 'yc_token' || k === 'token' ? undefined : queryScalar(req, k));
       if (v !== undefined && v !== '') return v;
     }
     return undefined;
@@ -133,7 +140,11 @@ export function extractIdentity(req: AuthedRequest): Identity | null {
   // tabs for different tournaments cannot overwrite one another.
   const tid = pathTid ?? get('yc_tid', 'tid');
   const pid = get('yc_pid', 'pid');
-  const token = get('yc_token', 'token');
+  const token =
+    (pathTid ? cookies[`yc_token_${pathTid}`] : undefined) ??
+    cookies.yc_token ??
+    hget('x-token') ??
+    hget('token');
   if (!tid || !pid || !token) return null;
   const tournamentId = Number(tid);
   if (!Number.isSafeInteger(tournamentId) || tournamentId <= 0) return null;
@@ -149,12 +160,14 @@ export function extractIdentity(req: AuthedRequest): Identity | null {
 }
 
 export function extractTournamentId(req: AuthedRequest): number | null {
-  const m = req.path.match(/^\/(?:admin\/)?t\/(\d+)/);
-  if (m) return Number(m[1]);
+  const m = req.path.match(/^\/(?:admin\/)?t\/(\d+)(?:\/|$)/);
+  if (m) {
+    const parsed = Number(m[1]);
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+  }
   const v =
-    (req.query as Record<string, string>).tid ??
-    (req.body as Record<string, string> | undefined)?.tid ??
-    (req.headers['x-tournament-id'] as string | undefined);
+    queryScalar(req, 'tid') ??
+    (typeof req.headers['x-tournament-id'] === 'string' ? req.headers['x-tournament-id'] : undefined);
   if (v !== undefined) {
     const n = Number(v);
     if (Number.isInteger(n)) return n;
@@ -172,36 +185,64 @@ export class AuthGuard implements CanActivate {
     const req = ctx.switchToHttp().getRequest<AuthedRequest>();
 
     if (req.path.startsWith('/admin')) {
-      const token = headerToken(req);
-      if (!token) throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields: ['admin_token'] });
-      if (isSuper(token)) {
-        req.identity = { tournamentId: 0, playerId: '', isAdmin: true, isSuper: true };
-        return true;
+      const adminToken = headerToken(req);
+      if (adminToken) {
+        if (isSuper(adminToken)) {
+          req.identity = { tournamentId: 0, playerId: '', isAdmin: true, isSuper: true };
+          return true;
+        }
+        // Per-tournament admin tokens were revoked. Do not fall back to them
+        // or expose whether a token belongs to a particular tournament.
+        throw new UnauthorizedException({ code: 'ADMIN_TOKEN_REMOVED' });
+      }
+
+      const createToken = headerValue(req, 'x-create-token');
+      const rawUsername = headerValue(req, 'x-create-user');
+      if (!createToken || !rawUsername) {
+        throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields: ['create_user', 'create_token'] });
+      }
+      let username: string;
+      try {
+        username = normalizeCreateUsername(rawUsername);
+      } catch {
+        throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields: ['create_user'] });
+      }
+      if (!isCreateUser(username, createToken)) {
+        throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields: ['create_user', 'create_token'] });
       }
       const tid = extractTournamentId(req);
-      if (tid === null) throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields: ['admin_token'] });
-      const row = tournamentRow(tid);
-      if (!row || !isTournamentAdmin(token, row.admin_token_hash)) {
-        throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields: ['admin_token'] });
+      // A creator may use the scoped list endpoint, but all other creator
+      // operations must carry a tournament id and match created_by exactly.
+      if (tid === null) {
+        if (req.path === '/admin/mine/tournaments') {
+          req.identity = { tournamentId: 0, playerId: '', isAdmin: true, isSuper: false, isCreator: true, createUsername: username };
+          return true;
+        }
+        throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields: ['tid'] });
       }
-      req.identity = { tournamentId: tid, playerId: '', isAdmin: true, isSuper: false };
+      const row = tournamentRow(tid);
+      // Rows migrated from databases that predate creator ownership have no
+      // trustworthy actor. They remain super-admin-only even if a future
+      // create user happens to use the historical placeholder name.
+      if (!row || !row.created_by || row.created_by.trim().toLowerCase() === 'unknown' || row.created_by.trim().toLowerCase() !== username) {
+        throw new ForbiddenException({ code: 'FORBIDDEN' });
+      }
+      req.identity = { tournamentId: tid, playerId: '', isAdmin: true, isSuper: false, isCreator: true, createUsername: username };
       return true;
     }
 
     if (req.path === '/tournaments' && req.method === 'POST') {
-      // The super token remains a backwards-compatible direct create credential;
-      // regular create users must use the dedicated create headers.
+      // The super token remains a direct create credential. A non-super
+      // X-Admin-Token is never accepted as a create credential.
       const createToken = headerValue(req, 'x-create-token');
       const adminToken = headerValue(req, 'x-admin-token');
+      if (adminToken && !isSuper(adminToken)) throw new UnauthorizedException({ code: 'ADMIN_TOKEN_REMOVED' });
       const token = createToken ?? adminToken;
       if (!token) throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields: ['create_user', 'create_token'] });
       if (isSuper(token)) {
-        req.identity = { tournamentId: 0, playerId: '', isAdmin: true, isSuper: true, createUsername: 'super-admin' };
+        req.identity = { tournamentId: 0, playerId: '', isAdmin: true, isSuper: true };
         return true;
       }
-      // A non-super credential is accepted only in the dedicated create-token
-      // header. X-Admin-Token is reserved for tournament administration and
-      // must never become an accidental second create-user header.
       if (!createToken) throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields: ['create_token'] });
       const rawUsername = headerValue(req, 'x-create-user');
       let username: string;
@@ -213,7 +254,7 @@ export class AuthGuard implements CanActivate {
       if (!isCreateUser(username, token)) {
         throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields: ['create_user', 'create_token'] });
       }
-      req.identity = { tournamentId: 0, playerId: '', isAdmin: true, isSuper: false, createUsername: username };
+      req.identity = { tournamentId: 0, playerId: '', isAdmin: true, isSuper: false, isCreator: true, createUsername: username };
       return true;
     }
 
@@ -226,8 +267,7 @@ export class AuthGuard implements CanActivate {
           headerValue(req, 'x-player-id') ??
           cookies[`yc_pid_${tid}`] ??
           cookies.yc_pid ??
-          (req.query as Record<string, string>).pid ??
-          (req.body as Record<string, string> | undefined)?.pid;
+          queryScalar(req, 'pid');
         let pid = rawPid;
         if (typeof pid === 'string') {
           try {
@@ -248,13 +288,12 @@ export class AuthGuard implements CanActivate {
 
     const identity = extractIdentity(req);
     if (!identity) {
-      const body = req.body as Record<string, unknown> | undefined;
       const cookies = cookiesOf(req);
-      const pathTid = req.path.match(/^\/(?:admin\/)?t\/(\d+)/)?.[1];
+      const pathTid = req.path.match(/^\/(?:admin\/)?t\/(\d+)(?:\/|$)/)?.[1];
       const fields: string[] = [];
-      if (!pathTid && !cookies.yc_tid && !req.query.tid && !body?.tid) fields.push('tid');
-      if (!(pathTid && cookies[`yc_pid_${pathTid}`]) && !cookies.yc_pid && !req.query.pid && !body?.pid) fields.push('pid');
-      if (!(pathTid && cookies[`yc_token_${pathTid}`]) && !cookies.yc_token && !req.query.token && !body?.token) fields.push('token');
+      if (!pathTid && !cookies.yc_tid && !queryScalar(req, 'tid') && !req.headers['x-tournament-id']) fields.push('tid');
+      if (!(pathTid && cookies[`yc_pid_${pathTid}`]) && !cookies.yc_pid && !queryScalar(req, 'pid') && !req.headers['x-player-id']) fields.push('pid');
+      if (!(pathTid && cookies[`yc_token_${pathTid}`]) && !cookies.yc_token && !req.headers['x-token']) fields.push('token');
       throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields });
     }
     req.identity = identity;

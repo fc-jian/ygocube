@@ -72,10 +72,13 @@ export interface CompetitionState {
 }
 
 export interface PauseState {
-  remainingMs: number;
-  votes: Record<string, boolean>;
-  proposer: string | null;
-  pausedAt: string | null;
+  /** A pause is now an explicit administrator command. */
+  pausedAt: string;
+  actor?: string;
+  // Legacy replay-only fields. New events never write these values.
+  remainingMs?: number;
+  votes?: Record<string, boolean>;
+  proposer?: string | null;
   // passing 模式暂停时冻结的各玩家剩余选牌时间（恢复时按此重设 deadline）
   pausedDeadlines?: Record<string, number>;
   // serial 模式暂停时冻结的当前选牌剩余时间
@@ -394,7 +397,23 @@ export function apply(state: TournamentState, action: string, payload: any): voi
       break;
     }
     case 'pause': {
-      state.pause = payload ? clone(payload) : null;
+      if (!payload) {
+        state.pause = null;
+      } else if (payload.pausedAt) {
+        // Normalize old vote-based snapshots/events to the administrator pause
+        // shape while retaining enough optional fields for historical replay.
+        state.pause = {
+          pausedAt: String(payload.pausedAt),
+          actor: payload.actor ? String(payload.actor) : undefined,
+          remainingMs: typeof payload.remainingMs === 'number' ? payload.remainingMs : undefined,
+          pausedDeadlines: payload.pausedDeadlines ? clone(payload.pausedDeadlines) : undefined,
+          pausedPickRemainingMs: typeof payload.pausedPickRemainingMs === 'number' ? payload.pausedPickRemainingMs : undefined,
+        };
+      } else {
+        // A pending legacy vote is no longer actionable. Treat it as absent so
+        // old replay data cannot re-enable a player-controlled pause.
+        state.pause = null;
+      }
       break;
     }
     case 'deck': {
@@ -465,6 +484,10 @@ export function loadState(tid: number): TournamentState {
     .prepare('SELECT seq, tournament_id, entity, action, payload_json, created_at, actor FROM events WHERE tournament_id=? AND seq>? ORDER BY seq')
     .all(tid, startSeq) as EventRow[];
   for (const e of rows) apply(state, e.action, JSON.parse(e.payload_json));
+  // Snapshots created by the old player-vote implementation may contain a
+  // pending vote object even when no later event exists. Do not expose or
+  // honor that stale state as an administrator pause.
+  if (state.pause && !state.pause.pausedAt) state.pause = null;
   cacheState(tid, state);
   return state;
 }
@@ -706,8 +729,13 @@ export function freeze(tid: number, actor: string): void {
   });
 }
 
-export function getConfig(state: TournamentState) {
-  return { ...defaults, ...JSON.parse(state.configJson) };
+export function getConfig(state: TournamentState): Record<string, any> {
+  const persisted = JSON.parse(state.configJson) as Record<string, unknown>;
+  // pauseSeconds belonged to the removed player-vote implementation. Keep it
+  // in raw historical JSON for replay/forensics, but never expose or consume it
+  // as an active tournament setting.
+  delete persisted.pauseSeconds;
+  return { ...defaults, ...persisted };
 }
 
 export function pickedCards(state: TournamentState, playerId: string): number[] {

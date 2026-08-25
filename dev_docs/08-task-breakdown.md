@@ -13,7 +13,7 @@
 | M3 后端核心 | ✅ | passing/serial 回放、整轮发堆、reserve/暂停冻结、构筑校验/修复、卡池/事件/回溯 |
 | M4 对局编排 | ✅* | 单循环/瑞士无重复对手约束、手动赛制、webhook+轮询、DSQ/bye；双败 bracket 需真机复核 |
 | M5 玩家前端 | ✅ | 独立玩家 URL、脱敏 SSE、六列牌堆、整理/随机排序、卡图 fallback、对战刷新提示 |
-| M6 管理前端 | ✅ | 统一创建/编辑参数、默认卡池、token 重设、卡池字面名警告、合规确认、事件回溯 |
+| M6 管理前端 | ✅ | 统一创建/编辑参数、创建者凭据、默认卡池、玩家 token 重设、卡池字面名警告、合规确认、事件回溯 |
 | M7 集成与部署 | ⏳ | 真实 4+ 人比赛、Windows 客户端 smoke、Aly SSH 部署和故障演练待环境验证 |
 
 `M4*` 的双败实现已持久化 winners/losers/grand-final 字段，但当前配对器按胜负
@@ -25,12 +25,16 @@
 
 - 根仓库不再追踪 `assets/cards.cdb`、`assets/pics`、`assets/script`、
   `assets/expansions` 等个人路径符号链接；`.gitignore` 排除整个运行时 `assets/`。
-- `config.yaml` 不入 Git；默认拒绝占位/重复 admin token 和空 srvpro API key。
+- `config.yaml` 不入 Git；默认拒绝占位 super token 和空 srvpro API key；比赛管理 token 已取消。
 - 玩家、管理员、srvpro webhook 均有独立鉴权路径；SSE 不广播卡组内容或其他桌房间名。
 - 玩家 token 比较使用恒定时间摘要比较；SSE 用按比赛隔离 cookie，不再把 token
   放进 URL。关闭 token 鉴权仍拒绝未报名 pid。
 - 比赛命令使用 SQLite 事务同步事件和投影，提交后再广播；状态/抓位缓存采用有界
-  LRU，服务销毁时清理 draft/deckbuilding/pause/match/SSE 定时器与连接。
+  LRU，服务销毁时清理 draft/deckbuilding/match/SSE 定时器与连接；SSE 有连接数、心跳和反压上限。
+- 创建者权限按 `created_by` 作用域校验；删除/轮换创建用户立即撤销其全部比赛权限。
+  旧 `admin_token_hash` 迁移时先保留 `data/cube.sqlite.pre-auth-migration.bak`，失败自动回滚。
+- 玩家暂停投票接口固定返回 `410 PAUSE_VOTING_REMOVED`；暂停/恢复只能由超级管理员或比赛创建者
+  后台执行，暂停不自动恢复并持久化所有倒计时剩余时间。
 
 ### 2.2 选牌与构筑
 

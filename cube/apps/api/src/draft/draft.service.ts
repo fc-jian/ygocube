@@ -8,6 +8,8 @@ import {
   TournamentState,
   PickState,
   withEventTransaction,
+  freeze,
+  unfreeze,
 } from '../events/events.service';
 import { CardsService } from '../cards/cards.service';
 import { normalizeExtraRatioPercent, TournamentsService } from '../tournaments/tournaments.service';
@@ -16,7 +18,7 @@ import { MatchesService } from '../matches/matches.service';
 import { DecksService } from '../decks/decks.service';
 
 // Draft engine: pack generation, pick timers with server-side auto-pick,
-// pause voting, deckbuilding deadline (dev_docs/05 §3).
+// administrator-controlled pause, deckbuilding deadline (dev_docs/05 §3).
 // 两种模式：
 //  - passing（默认）：每玩家 FIFO 牌堆队列，队首堆选 1 张后顺时针传递，各自独立计时；
 //  - serial（旧兼容）：全局单光标蛇形轮转。运行时按状态形状分派
@@ -26,7 +28,6 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
   private timers = new Map<number, NodeJS.Timeout>();
   private passTimers = new Map<string, NodeJS.Timeout>(); // passing 模式：key = `${tid}:${playerId}`
   private deckbuildingTimers = new Map<number, NodeJS.Timeout>();
-  private pauseTimers = new Map<number, NodeJS.Timeout>();
 
   constructor(
     private cards: CardsService,
@@ -49,13 +50,7 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
       try {
         const state = loadState(r.id);
         if (state.frozen) continue;
-        if (state.pause?.pausedAt) {
-          const elapsed = Math.max(0, Date.now() - new Date(state.pause.pausedAt).getTime());
-          const pauseLeft = Math.max(0, state.pause.remainingMs - elapsed);
-          if (pauseLeft <= 0) this.pauseExpired(r.id);
-          else this.armPauseTimer(r.id, pauseLeft);
-          continue;
-        }
+        if (state.pause?.pausedAt) continue;
         if (this.isPassing(state)) {
           for (const p of state.players) this.armPassTimer(r.id, p.playerId);
         } else if (state.pickCursor?.deadlineAt) {
@@ -80,11 +75,9 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     for (const timer of this.timers.values()) clearTimeout(timer);
     for (const timer of this.passTimers.values()) clearTimeout(timer);
     for (const timer of this.deckbuildingTimers.values()) clearTimeout(timer);
-    for (const timer of this.pauseTimers.values()) clearTimeout(timer);
     this.timers.clear();
     this.passTimers.clear();
     this.deckbuildingTimers.clear();
-    this.pauseTimers.clear();
   }
 
   startDraft(tid: number, actor: string): void {
@@ -474,11 +467,11 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
 
   // 管理员冻结：先把当前剩余时间写入事件日志，再挂起定时器。
   // 这样短暂停不会继续消耗时间，进程重启后也能精确恢复。
-  freezeTimers(tid: number): void {
-    withEventTransaction(tid, () => this.freezeTimersCommand(tid));
+  freezeTimers(tid: number, actor = 'system'): void {
+    withEventTransaction(tid, () => this.freezeTimersCommand(tid, actor));
   }
 
-  private freezeTimersCommand(tid: number): void {
+  private freezeTimersCommand(tid: number, actor = 'system'): void {
     const state = loadState(tid);
     const now = Date.now();
     const frozen: { passing?: Record<string, number>; serial?: number; deckbuilding?: number } = {};
@@ -500,7 +493,7 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     } else if (state.status === 'deckbuilding' && state.phaseDeadline) {
       frozen.deckbuilding = Math.max(0, new Date(state.phaseDeadline).getTime() - now);
     }
-    logEvent(tid, 'tournament', 'timer_freeze', frozen, 'system');
+    logEvent(tid, 'tournament', 'timer_freeze', frozen, actor);
     afterEventCommit(tid, () => {
       this.haltPickTimer(tid);
       const deckbuilding = this.deckbuildingTimers.get(tid);
@@ -511,11 +504,11 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
   }
 
   // 管理员解冻：严格恢复冻结瞬间的剩余时间；旧冻结事件无快照时走兼容逻辑。
-  resumeFrozenTimers(tid: number): void {
-    withEventTransaction(tid, () => this.resumeFrozenTimersCommand(tid));
+  resumeFrozenTimers(tid: number, actor = 'system'): void {
+    withEventTransaction(tid, () => this.resumeFrozenTimersCommand(tid, actor));
   }
 
-  private resumeFrozenTimersCommand(tid: number): void {
+  private resumeFrozenTimersCommand(tid: number, actor = 'system'): void {
     let state = loadState(tid);
     const frozen = state.frozenTimers;
     const now = Date.now();
@@ -542,7 +535,7 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
         deadlineAt: new Date(now + frozen.deckbuilding).toISOString(),
       }, 'system');
     }
-    logEvent(tid, 'tournament', 'timer_freeze', null, 'system');
+    logEvent(tid, 'tournament', 'timer_freeze', null, actor);
     persistMeta(tid);
     state = loadState(tid);
     if (state.status === 'drafting') this.resumePickTimer(tid);
@@ -554,9 +547,6 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     const deckbuilding = this.deckbuildingTimers.get(tid);
     if (deckbuilding) clearTimeout(deckbuilding);
     this.deckbuildingTimers.delete(tid);
-    const pause = this.pauseTimers.get(tid);
-    if (pause) clearTimeout(pause);
-    this.pauseTimers.delete(tid);
   }
 
   resumePickTimer(tid: number): void {
@@ -629,7 +619,8 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
         : new Date(Date.now() + getConfig(state).pickSeconds * 1000 + reserves[playerId]).toISOString();
     }
 
-    // 玩家投票暂停时 deadline 尚未重新建立，必须同步增加暂停快照，
+    // Legacy pause snapshots may not have re-established deadlines yet; keep
+    // their frozen copy consistent for replay compatibility.
     // 否则恢复后新增的 reserve 会凭空丢失。
     const pausedDeadlines = state.pause?.pausedAt ? { ...(state.pause.pausedDeadlines ?? {}) } : undefined;
     if (pausedDeadlines && pausedDeadlines[playerId] !== undefined) pausedDeadlines[playerId] += deltaMs;
@@ -673,6 +664,14 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     if (!state.pickCursor || state.pause?.pausedAt) return;
+    // A timer callback can race with an administrator resume/re-arm. Never
+    // treat a stale callback as an expired pick: verify the persisted
+    // deadline again and re-arm against the authoritative state.
+    const deadlineMs = state.pickCursor.deadlineAt ? new Date(state.pickCursor.deadlineAt).getTime() : NaN;
+    if (Number.isFinite(deadlineMs) && deadlineMs > Date.now()) {
+      this.armTimer(state);
+      return;
+    }
     const remaining = this.remainingInPack(state, state.pickCursor.packIndex);
     if (!remaining.length) {
       this.advance(tid, 'system', false);
@@ -692,6 +691,7 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
   private pickCommand(tid: number, playerId: string, card: number, targetZone?: 'main' | 'extra' | 'side'): void {
     const state = loadState(tid);
     if (state.status !== 'drafting') throw new Error('WRONG_PHASE');
+    if (state.frozen) throw new Error('FROZEN');
     if (state.pause?.pausedAt) throw new Error('PAUSED');
     // 拖拽目标区类型校验在落 pick 事件之前做（避免事件已记录但卡组/光标未推进的不一致）
     if (targetZone) {
@@ -722,6 +722,7 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
   private setPickAlternativeCommand(tid: number, playerId: string, card: number, actor: string): void {
     const state = loadState(tid);
     if (state.status !== 'drafting') throw new Error('WRONG_PHASE');
+    if (state.frozen) throw new Error('FROZEN');
     if (state.pause?.pausedAt) throw new Error('PAUSED');
     let packIndex: number;
     if (this.isPassing(state)) {
@@ -765,15 +766,7 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     };
     logEvent(tid, 'pick', 'pick', pick, actor);
     this.applyPickToDeck(tid, playerId, card, actor, targetZone);
-    const pausePending = !!state.pause && !state.pause.pausedAt;
     this.advance(tid, actor, false);
-    // pause activates after the current picker finishes their pick
-    if (pausePending) {
-      const s = loadState(tid);
-      if (s.pause && !s.pause.pausedAt && s.status === 'drafting') {
-        this.pauseNow(tid);
-      }
-    }
   }
 
   // ---------- passing 模式 ----------
@@ -839,6 +832,14 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     if (state.pause?.pausedAt) return;
     const queue = state.packQueues[playerId] ?? [];
     if (!queue.length) return;
+    // As with serial mode, an old timeout may fire after pause/resume or a
+    // reserve adjustment. Re-check the deadline from the event-replayed state
+    // before performing an automatic pick.
+    const deadlineMs = state.pickDeadlines?.[playerId] ? new Date(state.pickDeadlines[playerId]!).getTime() : NaN;
+    if (Number.isFinite(deadlineMs) && deadlineMs > Date.now()) {
+      this.armPassTimer(tid, playerId);
+      return;
+    }
     const remaining = this.remainingInPack(state, queue[0]);
     if (!remaining.length) return; // 队首堆已空属异常状态（正常流程空堆即消亡），不推进
     const alternative = state.pickAlternatives?.[playerId];
@@ -961,176 +962,33 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     persistMeta(tid);
   }
 
-  // ---------- pause voting (dev_docs/05 §3) ----------
+  // ---------- administrator-controlled pause ----------
 
-  proposePause(tid: number, playerId: string): void {
-    withEventTransaction(tid, () => this.proposePauseCommand(tid, playerId));
-  }
-
-  private proposePauseCommand(tid: number, playerId: string): void {
-    const state = loadState(tid);
-    if (state.status !== 'drafting') throw new Error('WRONG_PHASE');
-    if (state.pause) throw new Error('PAUSE_EXISTS');
-    if (!state.players.some((player) => player.playerId === playerId && !player.eliminated && !player.withdrawn)) {
-      throw new Error('PLAYER_NOT_FOUND');
-    }
-    const cfg = getConfig(state);
-    logEvent(tid, 'pause', 'pause', {
-      remainingMs: cfg.pauseSeconds * 1000,
-      votes: { [playerId]: true },
-      proposer: playerId,
-      pausedAt: null,
-    }, playerId);
-    this.checkPauseVotes(tid);
-  }
-
-  votePause(tid: number, playerId: string, yes: boolean): void {
-    withEventTransaction(tid, () => this.votePauseCommand(tid, playerId, yes));
-  }
-
-  private votePauseCommand(tid: number, playerId: string, yes: boolean): void {
-    const state = loadState(tid);
-    if (!state.pause) throw new Error('NO_PAUSE');
-    if (!state.players.some((player) => player.playerId === playerId && !player.eliminated && !player.withdrawn)) {
-      throw new Error('PLAYER_NOT_FOUND');
-    }
-    if (state.pause.votes[playerId] !== undefined) throw new Error('ALREADY_VOTED');
-    const votes = { ...state.pause.votes, [playerId]: yes };
-    logEvent(tid, 'pause', 'pause', { ...state.pause, votes }, playerId);
-    this.checkPauseVotes(tid);
-  }
-
-  private checkPauseVotes(tid: number): void {
-    const state = loadState(tid);
-    if (!state.pause || state.pause.pausedAt) return;
-    const active = new Set(state.players
-      .filter((player) => !player.eliminated && !player.withdrawn)
-      .map((player) => player.playerId));
-    const n = active.size;
-    const yes = Object.entries(state.pause.votes).filter(([playerId, vote]) => vote && active.has(playerId)).length;
-    if (yes > n / 2) {
-      if (this.isPassing(state)) {
-        // passing：无"当前选牌者"，多数通过即冻结所有人的剩余选牌时间
-        this.pauseNow(tid);
-        return;
-      }
-      // majority reached: pause once current picker finishes their pick
-      logEvent(tid, 'pause', 'pause', { ...state.pause, votes: state.pause.votes }, 'system');
-    }
-  }
-
-  private pauseNow(tid: number): void {
-    const state = loadState(tid);
-    if (!state.pause) return;
-    if (this.isPassing(state)) {
-      // 冻结各玩家剩余选牌时间，恢复时按此重设 deadline
-      const now = Date.now();
-      const pausedDeadlines: Record<string, number> = {};
-      for (const [pid, dl] of Object.entries(state.pickDeadlines)) {
-        if (dl) pausedDeadlines[pid] = Math.max(0, new Date(dl).getTime() - now);
-      }
-      logEvent(tid, 'pause', 'pause', { ...state.pause, pausedDeadlines, pausedAt: new Date().toISOString() }, 'system');
-      persistMeta(tid);
-      // 暂停时长上限（默认 5 分钟）：到期自动恢复（dev_docs/05 §3）
-      afterEventCommit(tid, () => {
-        this.clearPassTimers(tid);
-        this.armPauseTimer(tid, state.pause!.remainingMs);
-      });
-      return;
-    }
-    // serial：分别保存允许暂停的时长和当前选牌剩余时间，禁止两个计时器互相污染。
-    const pausedPickRemainingMs = state.pickCursor?.deadlineAt
-      ? Math.max(0, new Date(state.pickCursor.deadlineAt).getTime() - Date.now())
-      : 0;
-    logEvent(tid, 'pause', 'pause', { ...state.pause, pausedPickRemainingMs, pausedAt: new Date().toISOString() }, 'system');
-    persistMeta(tid);
-    // 暂停时长上限（默认 5 分钟）：到期自动恢复（dev_docs/05 §3）
-    afterEventCommit(tid, () => {
-      this.clearTimer(tid);
-      this.armPauseTimer(tid, state.pause!.remainingMs);
-    });
-  }
-
-  private armPauseTimer(tid: number, ms: number): void {
-    const old = this.pauseTimers.get(tid);
-    if (old) clearTimeout(old);
-    if (ms <= 0) return;
-    const t = setTimeout(() => this.pauseExpired(tid), ms);
-    t.unref();
-    this.pauseTimers.set(tid, t);
-  }
-
-  private pauseExpired(tid: number): void {
-    this.pauseTimers.delete(tid);
-    try {
+  pauseByAdmin(tid: number, actor: string): void {
+    withEventTransaction(tid, () => {
       const state = loadState(tid);
-      if (!state.pause?.pausedAt) return;
-      const proposer = state.pause.proposer;
-      if (!proposer) return;
-      this.resume(tid, proposer);
-    } catch (error) {
-      // Tournament deletion and a concurrent/manual resume are both benign.
-      if ((error as Error).message !== 'NOT_PAUSED') {
-        console.error('pause expiry failed', tid, (error as Error).message);
-      }
-    }
-  }
-
-  resume(tid: number, playerId: string): void {
-    withEventTransaction(tid, () => this.resumeCommand(tid, playerId));
-  }
-
-  private resumeCommand(tid: number, playerId: string): void {
-    const state = loadState(tid);
-    if (!state.pause?.pausedAt) throw new Error('NOT_PAUSED');
-    if (playerId !== state.pause.proposer) throw new Error('FORBIDDEN');
-    if (this.isPassing(state)) {
-      // 恢复：严格恢复暂停瞬间冻结的剩余时间，reserve 余额不变。
-      const cfg = getConfig(state);
-      const reserves: Record<string, number> = { ...state.pickReserves };
-      const now = Date.now();
-      const deadlines: Record<string, string | null> = {};
-      for (const p of state.players) {
-        const hasPack = (state.packQueues[p.playerId]?.length ?? 0) > 0;
-        const remaining = state.pause.pausedDeadlines?.[p.playerId]
-          ?? (cfg.pickSeconds * 1000 + (reserves[p.playerId] ?? cfg.reserveSeconds * 1000));
-        deadlines[p.playerId] = hasPack
-          ? new Date(now + Math.max(0, remaining ?? 0)).toISOString()
-          : null;
-      }
-      logEvent(tid, 'pause', 'pause', null, playerId);
-      logEvent(tid, 'draft', 'deadlines', { deadlines, reserves }, playerId);
-      afterEventCommit(tid, () => {
-        const old = this.pauseTimers.get(tid);
-        if (old) clearTimeout(old);
-        this.pauseTimers.delete(tid);
-        for (const player of state.players) this.armPassTimer(tid, player.playerId);
-      });
+      if (state.pause?.pausedAt || state.frozen) return;
+      // Persist exact remaining timers before freezing the whole tournament.
+      this.freezeTimersCommand(tid, actor);
+      logEvent(tid, 'pause', 'pause', { pausedAt: new Date().toISOString(), actor }, actor);
+      freeze(tid, actor);
       persistMeta(tid);
-      return;
-    }
-    const s = loadState(tid);
-    // serial：严格恢复暂停瞬间冻结的当前选牌剩余时间。
-    const cfg = getConfig(s);
-    const pickLeft = Math.max(0, s.pause?.pausedPickRemainingMs ?? cfg.pickSeconds * 1000);
-    logEvent(tid, 'pause', 'pause', null, playerId);
-    if (s.pickCursor) {
-      const deadlineAt = new Date(Date.now() + pickLeft).toISOString();
-      logEvent(tid, 'draft', 'cursor', { ...s.pickCursor, deadlineAt }, playerId);
-    }
-    afterEventCommit(tid, () => {
-      const old = this.pauseTimers.get(tid);
-      if (old) clearTimeout(old);
-      this.pauseTimers.delete(tid);
-      this.armTimer(loadState(tid));
     });
-    persistMeta(tid);
   }
 
   resumeByAdmin(tid: number, actor: string): void {
-    const state = loadState(tid);
-    if (!state.pause?.pausedAt) throw new Error('NOT_PAUSED');
-    if (!state.pause.proposer) throw new Error('NOT_PAUSED');
-    this.resume(tid, state.pause.proposer);
+    withEventTransaction(tid, () => {
+      const state = loadState(tid);
+      // Resume is deliberately idempotent. A repeated request after the
+      // first committed resume must not append another timer/deadline event or
+      // make an operator retry a command whose effect already applied.
+      if (!state.pause?.pausedAt) return;
+      // Clear the pause marker before rearming timers; resumePickTimer refuses
+      // to arm while a pause marker is present.
+      logEvent(tid, 'pause', 'pause', null, actor);
+      unfreeze(tid, actor);
+      this.resumeFrozenTimersCommand(tid, actor);
+      persistMeta(tid);
+    });
   }
 }

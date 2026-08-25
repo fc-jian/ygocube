@@ -15,6 +15,7 @@ export interface CardPool {
 // deliberately narrower than encodeURIComponent so every generated link is
 // stable and cannot introduce another path/query segment.
 export const POOL_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const MAX_POOL_CODES = 100_000;
 
 export function normalizePoolName(value: unknown): string {
   if (typeof value !== 'string') throw new Error('BAD_POOL_NAME');
@@ -153,6 +154,7 @@ export class PoolsService {
 
   create(name: string, codes: number[]): { pool: CardPool } & PoolImportReport {
     name = normalizePoolName(name);
+    if (!Array.isArray(codes) || codes.length > MAX_POOL_CODES) throw new Error('BAD_PAYLOAD');
     const { unique, filtered, missingCodes, entryWarnings } = this.filterCodes(codes);
     if (unique.length === 0) {
       throw Object.assign(new Error('BAD_POOL_IMPORT'), { details: { missingCodes, entryWarnings } });
@@ -167,6 +169,7 @@ export class PoolsService {
 
   createFromText(name: string, importText: string): { pool: CardPool } & PoolImportReport {
     name = normalizePoolName(name);
+    if (typeof importText !== 'string' || Buffer.byteLength(importText, 'utf8') > 512 * 1024) throw new Error('BAD_PAYLOAD');
     const entries: PoolImportEntry[] = [];
     const entryWarnings: PoolImportEntryWarning[] = [];
     for (const [index, raw] of String(importText ?? '').split(/\r?\n/).entries()) {
@@ -205,7 +208,7 @@ export class PoolsService {
 
   createRandom(name: string, size = 1000): { pool: CardPool } & PoolImportReport {
     name = normalizePoolName(name);
-    if (!Number.isSafeInteger(size) || size < 1) throw new Error('BAD_PAYLOAD');
+    if (!Number.isSafeInteger(size) || size < 1 || size > MAX_POOL_CODES) throw new Error('BAD_PAYLOAD');
     const pool = this.cards.poolCodes();
     const shuffled = [...pool];
     for (let i = shuffled.length - 1; i > 0; i--) {
@@ -240,6 +243,7 @@ export class PoolsService {
   update(id: number, codes: number[]): { pool: CardPool } & PoolImportReport {
     const row = getDb().prepare('SELECT id, name, codes_json, created_at FROM card_pools WHERE id=?').get(id) as PoolRow | undefined;
     if (!row) throw new Error('POOL_NOT_FOUND');
+    if (!Array.isArray(codes) || codes.length > MAX_POOL_CODES) throw new Error('BAD_PAYLOAD');
     const { unique, filtered, missingCodes, entryWarnings } = this.filterCodes(codes);
     if (unique.length === 0) {
       throw Object.assign(new Error('BAD_POOL_IMPORT'), { details: { missingCodes, entryWarnings } });

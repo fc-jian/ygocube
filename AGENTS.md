@@ -25,7 +25,7 @@ ygocube/
 
 - **分支纪律**：禁止直接改 ygopro/srvpro 的 master/主分支；开发一律走 `cube-server` / `cube` 特性分支。
 - **统一配置**：启动前配置全部走仓库根 `config.yaml`（admin.super_token / srvpro / server 路径），可用 `CONFIG_FILE` 覆盖；相对路径以 config.yaml 所在目录为基准。create token 不再写入配置文件。
-- **admin token 三层**：super token 管所有 tournament + 卡池；super admin 通过 `/admin/create-users` 管理数据库创建权限用户，创建者用 `X-Create-User` + `X-Create-Token` 创建比赛（比赛记录 `created_by`）；per-tournament `admin_token` 仅管该 tournament，均存哈希；玩家仍为 `tournamentId + playerId + token` 三要素（管理员可按 tournament 关闭 token 鉴权，`POST /admin/t/:tid/security`）。
+- **admin token 三层**：super token 管所有 tournament + 卡池；super admin 通过 `/admin/create-users` 管理数据库创建权限用户，创建者用 `X-Create-User` + `X-Create-Token` 创建并管理自己创建的比赛（比赛记录 `created_by`）；比赛专有 `admin_token` 已取消，旧值立即失效；玩家仍为 `tournamentId + playerId + token` 三要素（管理员可按 tournament 关闭 token 鉴权，`POST /admin/t/:tid/security`）。创建用户删除或轮换后，其既有比赛管理权限立即失效。
 - **鉴权三要素**：cube 后端所有入口（REST/SSE/ydk）默认校验 `tournamentId + playerId + token`（cookie 或 header 或参数），缺一即 401。
 - **卡图原图不落服务器**：cube 后端不存储原始 pics（不入库）；前端依次尝试本地 ygopro 根目录（`pics/`、`expansions/pics/`）→ 服务端低清 avif `GET /pics/:code.avif`（`pics.avif_dir`，默认 `assets/pics_avif/`，vips 批量生成）→ 服务端原图只读代理 `GET /pics/:code`（config.yaml `pics.ygopro_root`，可选）→ 空白卡。卡牌效果文本（desc）随卡片元数据下发。
 - **所有状态在服务器**：cube 变更先写 append-only 事件日志再执行；支持快照恢复与管理员时间回溯（`POST /admin/t/:id/revert`）。
@@ -34,7 +34,7 @@ ygocube/
 - **选牌信息隐藏**：玩家只能看到自己当前可选牌堆的卡牌内容，其余只有数量；**SSE 广播事件一律不含卡牌/卡组内容与其他对局的房间名**（客户端 refetch 本人状态）。
 - **选牌模式（draftMode）**：默认 `passing`（每玩家 FIFO 牌堆队列，**按轮发堆**：一轮全空才发下一轮；队首堆选 1 张顺时针传递；各自独立计时 + 每玩家保留时间 `reserveSeconds` 默认 400s，超时先扣 reserve 耗尽才自动选；`evenPackCount` 默认开 = 堆数须为人数整数倍）；`serial` 为旧全局串行（仅 raw config 可设）。运行时按 `packs_created` 事件是否带 `queues` 分派，旧比赛回放行为不变。
 - **每玩家独立 URL**：玩家页路由为 `/t/:tid/{draft,deck,matches}/:pid`；token 按 `localStorage yc_token_<tid>_<pid>` 存储；缺失弹输入框；super token 可作万能玩家 token；tournament 关闭鉴权（`/admin/t/:tid/security`）则不校验。
-- **超时自动处理**：选牌超时 = 服务器随机选（记 `auto_picked`）；构筑默认不限时，由管理员手动进入对战，显式设置构筑限时时超时 = 随机补/删至合法（记日志）。暂停/冻结必须保存并原样恢复剩余倒计时。
+- **超时自动处理**：选牌超时 = 服务器随机选（记 `auto_picked`）；构筑默认不限时，由管理员手动进入对战，显式设置构筑限时时超时 = 随机补/删至合法（记日志）。暂停投票已取消，只允许超级管理员或比赛创建者从后台暂停/恢复；暂停不会自动恢复，暂停/冻结必须保存并原样恢复剩余倒计时。
 
 ## 关键文件地图
 

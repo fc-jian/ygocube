@@ -22,9 +22,9 @@ src/
 ```
 
 状态严格按 `registration → drafting → deckbuilding → matches → finished` 迁移。
-管理员可在选牌/构筑阶段暂停或冻结；构筑默认无限时，只有显式配置
+管理员可在后台暂停或冻结；暂停投票已取消，只有超级管理员或比赛创建者可以操作；构筑默认无限时，只有显式配置
 `deckbuildingSeconds` 才会自动修复并进入对战。冻结期间会记录各玩家/当前光标
-剩余时间，解冻后按记录恢复，不从零开始倒计时。
+剩余时间，管理员恢复后按记录恢复，不从零开始倒计时；暂停不会自动恢复。
 
 ## 2. 配置默认值与牌堆生成
 
@@ -75,7 +75,7 @@ reserve；超出基础时间只扣 reserve，reserve 耗尽后才自动随机选
 `auto=true`。玩家点击牌查看详情时会记录本人当前堆的最后一张候选牌；超时
 自动选牌优先使用仍在堆中的候选牌，候选牌仅对本人可见。管理员可通过
 `POST /admin/t/:tid/players/:pid/reserve` 增加指定玩家的 reserve，事件同时保存
-余额、deadline 和暂停快照，保证回放/回溯一致。`reseatEachRound` 开启时会记录
+余额、deadline 和冻结快照，保证回放/回溯一致。`reseatEachRound` 开启时会记录
 `seat_assign` 事件再发下一轮。
 
 `serial` 是旧的全局光标模式，仅用于兼容旧事件回放；新建页面默认不暴露该选项。
@@ -185,7 +185,7 @@ side 和 `cube-deck-<tid>-<pid>-<timestamp>` 文件名。timestamp 在该桌对�
 比赛状态由 append-only `events` 驱动；内存状态和重启回放使用同一 `apply()`。
 单个同步命令通过 SQLite transaction 原子更新事件和 SQL 投影，事务失败会恢复
 此前缓存，SSE hook 和快照只在 commit 后执行，避免客户端看到已回滚状态。状态
-缓存是最多 64 场比赛的 LRU；Nest 销毁时清理 draft/deckbuilding/pause timer、
+缓存是最多 64 场比赛的 LRU；Nest 销毁时清理 draft/deckbuilding timer、
 match poller 与 SSE 连接，避免热重载/重复 provider 造成后台任务累积。
 每 100 条事件或管理员需要时写 `tournament_snapshots`，快照以 `event_seq` 标记
 全局事件位置。回溯流程：预览 → 冻结 → 关闭未完成 srvpro 房间 → 删除目标事件
@@ -195,7 +195,7 @@ match poller 与 SSE 连接，避免热重载/重复 provider 造成后台任务
 
 ```text
 tournaments(id, name, config_json, created_by, card_pool_id, status, round,
-            admin_token_hash, auth_required, frozen, created_at, updated_at)
+            admin_token_hash(legacy-null), auth_required, frozen, created_at, updated_at)
 tournament_players(id, tournament_id, player_id, display_name, token_hash,
                    seat, eliminated, withdrawn, active, joined_at)
 packs(id, tournament_id, index, size, drop_card_code, order_json)
@@ -217,7 +217,9 @@ app_settings(key, value, updated_at)
 create_users(id, username, token_hash, created_at, active)
 ```
 
-token 只存 SHA-256 哈希；比较时使用恒定时间摘要比较。卡图不入库。数据库路径
+比赛管理 token 已取消；迁移清空旧 `admin_token_hash`，代码不再验证该字段，仅保留
+nullable 列兼容旧 SQLite。创建用户 token 只存 SHA-256 哈希；比较时使用恒定时间摘要比较。
+删除用户或重新生成 token 会立即撤销其全部比赛管理权限。卡图不入库。数据库路径
 默认 `data/cube.sqlite`，启动时启用 WAL、busy timeout 和必要索引；新库强制
 `matches(tournament_id,round,table_no)` 唯一，旧库若有重复会记录诊断并继续启动，
 由管理员先修复数据再补唯一索引。
@@ -235,6 +237,16 @@ token 只保存 SHA-256，明文只在创建/重新生成响应显示一次。�
 默认拒绝占位 token 和空 srvpro API key；`allow_insecure_defaults` 只放宽本地占位
 super token，不会跳过端口、API key 和精确 http(s) origin 校验。`assets/` 不属于 Git，
 部署脚本必须先准备外部卡牌资源。
+
+API 默认限制 JSON 请求体 512 KiB、表单请求体 32 KiB；卡牌搜索关键字最多 256 个
+Unicode 字符、精确编号列表最多 2,000 个、单次搜索最多返回 5,000 条。按来源 IP 对
+管理、比赛和公开接口分级限流，过量请求返回 `429 RATE_LIMITED`。响应统一附带
+`nosniff`、`DENY`、严格 referrer、CSP；HTTPS 请求附带 HSTS。CORS 只接受精确的
+`allowed_origins`，不反射任意 Origin，也不允许凭据通配符。
+
+数据库首次执行创建者权限迁移前会在同目录保留
+`<db>.pre-auth-migration.bak`；迁移异常时关闭连接、清理 WAL sidecar 并恢复该副本，
+服务以失败状态退出，避免在半迁移 schema 上继续提供服务。
 
 ## 9. 验收命令
 
