@@ -174,7 +174,7 @@ export class ApiController {
   @Post('t/:tid/join')
   join(@Req() req: AuthedRequest, @Body() body: Record<string, string>) {
     const playerId = String(body.player_id ?? body.pid);
-    return this.tournaments.join(Number(req.params.tid), playerId, String(body.display_name ?? playerId));
+    return this.tournaments.join(Number(req.params.tid), playerId, String(body.display_name ?? playerId), playerId);
   }
 
   @Post('t/:tid/player/name')

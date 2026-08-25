@@ -364,7 +364,7 @@ export class AdminController {
     const playerId = String(body.player_id ?? '').trim();
     const displayName = String(body.display_name ?? '').trim();
     if (!playerId) throw new Error('BAD_PAYLOAD');
-    return this.tournaments.join(tid, playerId, displayName || playerId);
+    return this.tournaments.join(tid, playerId, displayName || playerId, this.adminActor(req));
   }
 
   @Delete('t/:tid/players/:pid')
@@ -377,7 +377,7 @@ export class AdminController {
   @Post('t/:tid/players/:pid/token')
   resetPlayerToken(@Req() req: AuthedRequest) {
     const tid = Number(req.params.tid);
-    return this.tournaments.resetPlayerToken(tid, String(req.params.pid));
+    return this.tournaments.resetPlayerToken(tid, String(req.params.pid), this.adminActor(req));
   }
 
   @Post('t/:tid/players/:pid/reserve')
@@ -399,7 +399,7 @@ export class AdminController {
     if (!Number.isInteger(round) || !Number.isInteger(tableNo) || !Number.isInteger(resultA) || !Number.isInteger(resultB)) {
       throw new Error('BAD_PAYLOAD');
     }
-    this.matches.setMatchResult(tid, round, tableNo, resultA, resultB);
+    this.matches.setMatchResult(tid, round, tableNo, resultA, resultB, this.adminActor(req));
     return { ok: true };
   }
 

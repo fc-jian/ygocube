@@ -483,11 +483,11 @@ export class MatchesService implements OnModuleInit, OnModuleDestroy {
     return new Date();
   }
 
-  private patchMatch(tid: number, id: number, patch: Partial<MatchState>): void {
-    withEventTransaction(tid, () => this.patchMatchCommand(tid, id, patch));
+  private patchMatch(tid: number, id: number, patch: Partial<MatchState>, actor = 'system'): void {
+    withEventTransaction(tid, () => this.patchMatchCommand(tid, id, patch, actor));
   }
 
-  private patchMatchCommand(tid: number, id: number, patch: Partial<MatchState>): void {
+  private patchMatchCommand(tid: number, id: number, patch: Partial<MatchState>, actor = 'system'): void {
     const state = loadState(tid);
     if (state.frozen) return;
     const m = state.matches.find((x) => x.id === id);
@@ -507,7 +507,7 @@ export class MatchesService implements OnModuleInit, OnModuleDestroy {
       value('finishedAt'),
       id,
     );
-    logEvent(tid, 'match', 'match', { ...m, ...patch }, 'system');
+    logEvent(tid, 'match', 'match', { ...m, ...patch }, actor);
     persistMeta(tid);
   }
 
@@ -809,7 +809,7 @@ export class MatchesService implements OnModuleInit, OnModuleDestroy {
   }
 
   // 管理台手动设置/修改对战结果（含故障房间补录）；触发轮次推进与实时积分更新
-  setMatchResult(tid: number, round: number, tableNo: number, resultA: number, resultB: number): void {
+  setMatchResult(tid: number, round: number, tableNo: number, resultA: number, resultB: number, actor = 'admin'): void {
     const state = loadState(tid);
     if (state.frozen) throw new Error('FROZEN');
     if (state.status === 'finished' || state.matches.some((match) => match.round > round)) {
@@ -823,7 +823,7 @@ export class MatchesService implements OnModuleInit, OnModuleDestroy {
     if (this.isEliminationMatch(m) && resultA === resultB) throw new Error('ELIMINATION_DRAW');
     const room = m.roomName;
     withEventTransaction(tid, () => {
-      this.patchMatch(tid, m.id, { resultA, resultB, source: 'admin', faultedAt: null, finishedAt: new Date().toISOString() });
+      this.patchMatch(tid, m.id, { resultA, resultB, source: 'admin', faultedAt: null, finishedAt: new Date().toISOString() }, actor);
       this.maybeAdvance(tid, round);
     });
     if (room) void this.closeSrvproRoom(room);

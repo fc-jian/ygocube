@@ -178,11 +178,11 @@ export class TournamentsService {
     };
   }
 
-  join(tid: number, playerId: string, displayName: string): { token: string } {
-    return withEventTransaction(tid, () => this.joinCommand(tid, playerId, displayName));
+  join(tid: number, playerId: string, displayName: string, actor = playerId): { token: string } {
+    return withEventTransaction(tid, () => this.joinCommand(tid, playerId, displayName, actor));
   }
 
-  private joinCommand(tid: number, playerId: string, displayName: string): { token: string } {
+  private joinCommand(tid: number, playerId: string, displayName: string, actor: string): { token: string } {
     // 进房昵称即玩家 ID：YGOPro 协议仅支持 ASCII 文本，非 ASCII 无法进入游戏（前端已拦截，这里兜底）
     // CTOS_PlayerInfo is uint16_t name[20]: reserve one code unit for NUL.
     // Player ids are also used verbatim as the YGOPro name_vpass value.
@@ -205,7 +205,7 @@ export class TournamentsService {
                   display_name=excluded.display_name, token_hash=excluded.token_hash, seat=NULL,
                   joined_at=excluded.joined_at, eliminated=0, active=1`)
       .run(tid, playerId, displayName, sha256(token), null, new Date().toISOString());
-    logEvent(tid, 'player', 'player_join', { playerId, displayName, seat: -1, eliminated: false, withdrawn: false, ready: false }, playerId);
+    logEvent(tid, 'player', 'player_join', { playerId, displayName, seat: -1, eliminated: false, withdrawn: false, ready: false }, actor);
     return { token };
   }
 
@@ -281,13 +281,20 @@ export class TournamentsService {
   }
 
   // 管理台重置玩家 token（token 只存哈希无法回显，重置后返回新明文）
-  resetPlayerToken(tid: number, playerId: string): { token: string } {
-    const state = loadState(tid);
-    if (state.frozen) throw new Error('FROZEN');
-    if (!state.players.some((p) => p.playerId === playerId)) throw new Error('PLAYER_NOT_FOUND');
-    const token = randomToken();
-    getDb().prepare('UPDATE tournament_players SET token_hash=? WHERE tournament_id=? AND player_id=?').run(sha256(token), tid, playerId);
-    return { token };
+  resetPlayerToken(tid: number, playerId: string, actor = 'admin'): { token: string } {
+    return withEventTransaction(tid, () => {
+      const state = loadState(tid);
+      if (state.frozen) throw new Error('FROZEN');
+      if (!state.players.some((p) => p.playerId === playerId)) throw new Error('PLAYER_NOT_FOUND');
+      const token = randomToken();
+      const now = new Date().toISOString();
+      getDb().prepare('UPDATE tournament_players SET token_hash=? WHERE tournament_id=? AND player_id=?').run(sha256(token), tid, playerId);
+      // Never include the new plaintext token in the audit record. The action
+      // still identifies the actor and target for incident review.
+      getDb().prepare('INSERT INTO admin_actions (tournament_id, actor, action, detail_json, created_at) VALUES (?,?,?,?,?)')
+        .run(tid, actor, 'reset_player_token', JSON.stringify({ playerId }), now);
+      return { token };
+    });
   }
 
   updateMatchFormat(tid: number, patch: Record<string, unknown>, actor: string): Record<string, unknown> {
