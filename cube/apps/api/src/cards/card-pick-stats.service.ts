@@ -173,15 +173,25 @@ export class CardPickStatsService {
     const picks: StatisticalPick[] = [];
     try {
       for (const row of rows) {
-        const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+        const payload: unknown = JSON.parse(row.payload_json);
         if (row.action === 'packs_created') {
-          if (!Array.isArray(payload.packs)) return null;
-          packs = payload.packs.map((raw) => {
+          // Before pack metadata was added, packs_created was stored as the
+          // array itself. Accept both shapes so restored historical drafts
+          // participate in statistics exactly like new drafts.
+          const rawPacks: unknown[] | null = Array.isArray(payload)
+            ? payload
+            : (payload && typeof payload === 'object' && Array.isArray((payload as Record<string, unknown>).packs)
+              ? (payload as Record<string, unknown>).packs as unknown[]
+              : null);
+          if (!rawPacks) return null;
+          packs = rawPacks.map((raw) => {
             const pack = raw as Record<string, unknown>;
             return { index: Number(pack.index), order: Array.isArray(pack.order) ? pack.order.map(Number) : [] };
           });
         } else {
-          picks.push({ packIndex: Number(payload.packIndex), round: Number(payload.round), card: Number(payload.card) });
+          if (!payload || typeof payload !== 'object') return null;
+          const pick = payload as Record<string, unknown>;
+          picks.push({ packIndex: Number(pick.packIndex), round: Number(pick.round), card: Number(pick.card) });
         }
       }
     } catch {

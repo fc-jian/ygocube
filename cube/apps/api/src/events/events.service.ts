@@ -334,16 +334,31 @@ export function apply(state: TournamentState, action: string, payload: any): voi
       break;
     }
     case 'packs_created': {
-      state.packs = (payload.packs as PackState[]).map(clone);
-      if (Array.isArray(payload.droppedCards)) state.droppedCards = payload.droppedCards;
+      // The first Cube releases stored this event as the pack array itself;
+      // current releases wrap it with metadata (`{ packs, droppedCards, ... }`).
+      // Keep the old representation replayable so a restored database can be
+      // started without losing a tournament whose draft predates the wrapper.
+      const legacyPacks = Array.isArray(payload);
+      const packs = (legacyPacks ? payload : payload?.packs) as PackState[] | undefined;
+      if (!Array.isArray(packs)) throw new Error('INVALID_PACKS_CREATED_EVENT');
+      state.packs = packs.map(clone);
+      if (Array.isArray(payload?.droppedCards)) {
+        state.droppedCards = payload.droppedCards;
+      } else if (legacyPacks) {
+        // Legacy events kept a private/public initial discard on each pack.
+        // Reconstruct the aggregate so old public-discard views remain exact.
+        state.droppedCards = packs
+          .map((pack) => pack?.dropCard)
+          .filter((code): code is number => code !== null && Number.isSafeInteger(code) && code > 0);
+      }
       // passing 模式：初始队列与各玩家 deadline 随事件下发（无 queues 字段 = 旧串行模式）
-      if (payload.queues) {
+      if (!legacyPacks && payload.queues) {
         state.packQueues = clone(payload.queues);
         // 旧 passing 事件无 dealt 字段（全部堆一次入队）：回退为 packs.length，回放行为不变
         state.packsDealt = payload.dealt ?? state.packs.length;
       }
-      if (payload.deadlines) state.pickDeadlines = clone(payload.deadlines);
-      if (payload.reserves) state.pickReserves = clone(payload.reserves);
+      if (!legacyPacks && payload.deadlines) state.pickDeadlines = clone(payload.deadlines);
+      if (!legacyPacks && payload.reserves) state.pickReserves = clone(payload.reserves);
       break;
     }
     case 'deal': {

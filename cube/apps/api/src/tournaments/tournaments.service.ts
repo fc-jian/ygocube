@@ -650,7 +650,15 @@ export class TournamentsService {
       else if (e.entity === 'player' && e.action === 'player_remove') summary = `删除玩家 ${p}`;
       else if (e.entity === 'player' && e.action === 'seat_assign') summary = '座位分配';
       else if (e.entity === 'player' && e.action === 'player_dsq') summary = `DSQ ${p.playerId}（${p.reason ?? '卡组不合规'}）`;
-      else if (e.entity === 'pack' && e.action === 'packs_created') summary = `牌堆生成（${(p.packs ?? []).length} 堆${p.droppedCards?.length ? `，弃置 ${p.droppedCards.length} 张` : ''}${p.queues ? '，传递式' : ''}）`;
+      else if (e.entity === 'pack' && e.action === 'packs_created') {
+        const packs = Array.isArray(payload) ? payload : (Array.isArray(p.packs) ? p.packs : []);
+        const droppedCount = Array.isArray(p.droppedCards)
+          ? p.droppedCards.length
+          : Array.isArray(payload)
+            ? packs.filter((pack: any) => Number.isSafeInteger(pack?.dropCard) && pack.dropCard > 0).length
+            : 0;
+        summary = `牌堆生成（${packs.length} 堆${droppedCount ? `，弃置 ${droppedCount} 张` : ''}${p.queues ? '，传递式' : ''}）`;
+      }
       else if (e.entity === 'draft' && e.action === 'deadlines') summary = '选牌计时重设';
       else if (e.entity === 'draft' && e.action === 'cursor') summary = p ? `牌堆 ${p.packIndex} → ${p.playerId}` : '选牌结束';
       else if (e.entity === 'pick' && e.action === 'pick') summary = `选牌 ${p.playerId} #${p.card}${p.auto ? '（超时自动）' : ''}`;

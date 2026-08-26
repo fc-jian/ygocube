@@ -26,6 +26,18 @@ describe('event log & revert', () => {
     expect(state.players.length).toBe(2);
   });
 
+  it('replays the legacy array-form packs_created event', () => {
+    const tournaments = makeTournaments();
+    const tid = tournaments.create({ name: 'legacy-packs', maxPlayers: 2, cardPool: TEST_POOL }, 'test').tid;
+    const legacyPacks = [{ index: 0, size: 2, dropCard: 99, order: [11, 22] }];
+    logEvent(tid, 'pack', 'packs_created', legacyPacks, 'test');
+
+    resetStateCache();
+    const state = loadState(tid);
+    expect(state.packs).toEqual(legacyPacks);
+    expect(state.droppedCards).toEqual([99]);
+  });
+
   it('revertTo rebuilds state as of a historical seq and freezes the tournament', () => {
     const tournaments = makeTournaments();
     const tid = tournaments.create({ name: 'r2', maxPlayers: 3, cardPool: TEST_POOL }, 'test').tid;
