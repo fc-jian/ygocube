@@ -3,6 +3,7 @@ import { ArgumentsHost, Catch, ExceptionFilter, HttpException } from '@nestjs/co
 import { AppModule } from './app.module';
 import { config, validateStartupSecurity } from './config';
 import { getDb } from './db';
+import { clientAddress, rateLimitCategory, rateLimitFor } from './rate-limit';
 import express, { Request, Response, NextFunction } from 'express';
 
 // Minimal cookie parser (no extra dependency).
@@ -125,9 +126,9 @@ async function bootstrap() {
       res.status(413).json({ ok: false, code: 'REQUEST_TOO_LARGE' });
       return;
     }
-    const ip = req.socket.remoteAddress ?? 'unknown';
-    const category = req.path.startsWith('/admin') || req.path === '/tournaments' ? 'privileged' : req.path.startsWith('/t/') ? 'tournament' : 'public';
-    const limit = category === 'privileged' ? 120 : category === 'tournament' ? 300 : 600;
+    const ip = clientAddress(req);
+    const category = rateLimitCategory(req);
+    const limit = rateLimitFor(category);
     const now = Date.now();
     const key = `${category}:${ip}`;
     const bucket = rateBuckets.get(key);
