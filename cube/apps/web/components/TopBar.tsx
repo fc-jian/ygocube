@@ -73,6 +73,7 @@ export function TopBar({
   alternativeName,
   onDisplayNameChange,
   onReadyChange,
+  onLeaveRegistration,
 }: {
   state: DraftState;
   pid: string;
@@ -81,10 +82,13 @@ export function TopBar({
   alternativeName?: string | null;
   onDisplayNameChange?: (displayName: string) => Promise<void>;
   onReadyChange?: (ready: boolean) => Promise<void>;
+  onLeaveRegistration?: () => Promise<void>;
 }) {
   const [showInfo, setShowInfo] = useState(false);
   const [showPlayers, setShowPlayers] = useState(false);
   const [readyBusy, setReadyBusy] = useState(false);
+  const [leaveBusy, setLeaveBusy] = useState(false);
+  const [leaveError, setLeaveError] = useState('');
   const pack = state.pack;
   const cfg = state.config;
   const me = state.players.find((p) => p.playerId === pid);
@@ -211,6 +215,29 @@ export function TopBar({
             >
               {me?.ready === true ? '已准备 ✓' : '准备'}
             </button>
+          )}
+          {state.status === 'registration' && onLeaveRegistration && (
+            <span className="flex flex-wrap items-center gap-1">
+              <button
+                type="button"
+                disabled={leaveBusy}
+                onClick={() => {
+                  if (!window.confirm('确定退出本场报名？退出后会释放名额，之后仍可重新报名。')) return;
+                  setLeaveBusy(true);
+                  setLeaveError('');
+                  void onLeaveRegistration()
+                    .catch((error: any) => {
+                      setLeaveError(error?.code === 'WRONG_PHASE' ? '选牌已开始，无法退出' : error?.code === 'FROZEN' ? '比赛暂被冻结，请稍后再试' : error?.code === 'PLAYER_NOT_FOUND' ? '报名记录已不存在' : '退出失败，请重试');
+                    })
+                    .finally(() => setLeaveBusy(false));
+                }}
+                className="rounded border border-red-300/40 px-2.5 py-1 text-xs text-red-200 transition-colors hover:bg-red-900/70 disabled:opacity-60"
+                title="选牌开始前退出报名"
+              >
+                {leaveBusy ? '退出中…' : '退出报名'}
+              </button>
+              {leaveError && <span className="text-red-300" role="alert">{leaveError}</span>}
+            </span>
           )}
           <IdentityWidget
             tid={tid}

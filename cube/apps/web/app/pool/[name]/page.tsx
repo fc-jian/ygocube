@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { CardInfo } from '@/lib/types';
 import { sortCardSearchResults } from '@/lib/cardInfo';
+import { buildPoolCsv } from '@/lib/poolCsv';
 import { PoolPreview } from '@/components/PoolPreview';
 import { LocalPicsSetting } from '@/components/IdentityWidget';
 
@@ -87,6 +88,22 @@ export default function PublicPoolPage() {
     }
   }, [encodedName, query]);
 
+  const cardsReady = !!pool && pool.codes.every((code) => cardMap[code] !== undefined);
+  const downloadCsv = useCallback(() => {
+    if (!pool || !cardsReady) return;
+    const csv = buildPoolCsv(pool.codes, cardMap);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `pool-${pool.name}.csv`;
+    anchor.hidden = true;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }, [cardMap, cardsReady, pool]);
+
   const orderedCodes = useMemo(() => {
     if (!pool || pickSort === 'default') return pool?.codes ?? [];
     const originalIndex = new Map(pool.codes.map((code, index) => [code, index]));
@@ -123,6 +140,15 @@ export default function PublicPoolPage() {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <LocalPicsSetting />
+          <button
+            type="button"
+            onClick={downloadCsv}
+            disabled={!cardsReady}
+            className="rounded bg-felt-edge px-3 py-1.5 text-xs text-slate-200 hover:brightness-110 disabled:cursor-wait disabled:opacity-50"
+            title={cardsReady ? '下载包含卡号、卡名、主/额外分类和类型的 CSV' : '卡片资料加载完成后可下载'}
+          >
+            {cardsReady ? '下载卡池 CSV' : '准备 CSV…'}
+          </button>
           <label className="flex items-center gap-1.5 text-xs text-slate-300">
             抓位排序
             <select

@@ -1,8 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useParams } from 'next/navigation';
-import { api, apiDownload, Identity, resolvePlayerIdentity } from '@/lib/api';
+import { useParams, useRouter } from 'next/navigation';
+import { api, apiDownload, clearStoredToken, Identity, resolvePlayerIdentity } from '@/lib/api';
 import { useTournamentStream } from '@/lib/sse';
 import { TopBar, DeckZone, DraftState, useNowTick } from '@/components/TopBar';
 import { PackZone } from '@/components/PackZone';
@@ -15,6 +15,7 @@ import { matchesCardQuery, PickSortMode, sortCardSearchResults } from '@/lib/car
 
 export default function DraftPage() {
   const params = useParams<{ tid: string; pid: string }>();
+  const router = useRouter();
   const tid = params.tid;
   const pid = params.pid;
   const [identity, setIdentity] = useState<Identity | null>(null);
@@ -118,6 +119,13 @@ export default function DraftPage() {
       throw e;
     }
   }, [identity, pid, tid]);
+
+  const leaveRegistration = useCallback(async () => {
+    if (!identity) return;
+    await api(`/t/${tid}/player/withdraw`, { method: 'POST', identity });
+    clearStoredToken(tid, pid);
+    router.replace(`/t/${tid}`);
+  }, [identity, pid, router, tid]);
 
   useEffect(() => {
     void load();
@@ -307,6 +315,7 @@ export default function DraftPage() {
         alternativeName={state.pickAlternative !== null && state.pickAlternative !== undefined ? cardMap[state.pickAlternative]?.name : null}
         onDisplayNameChange={updateDisplayName}
         onReadyChange={state.status === 'registration' ? updateReady : undefined}
+        onLeaveRegistration={state.status === 'registration' ? leaveRegistration : undefined}
       />
       {state.status === 'drafting' && (
         <div className="flex flex-1 flex-col gap-3 p-3 md:flex-row md:overflow-hidden">

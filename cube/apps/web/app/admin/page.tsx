@@ -73,6 +73,7 @@ export default function AdminPage() {
   const [poolCodes, setPoolCodes] = useState('');
   const [poolSize, setPoolSize] = useState(1000);
   const [poolReport, setPoolReport] = useState<PoolImportReport | null>(null);
+  const [deletingPoolId, setDeletingPoolId] = useState<number | null>(null);
   const [msg, setMsg] = useState('');
   const [msgKey, setMsgKey] = useState(0);
   const msgHideKey = useRef(0);
@@ -474,6 +475,34 @@ export default function AdminPage() {
       await loadRef.current();
     } catch (e: any) {
       showMsg(`删除权限用户失败：${e.message}`);
+    }
+  };
+
+  const deletePool = async (pool: PoolInfo) => {
+    if (deletingPoolId !== null) return;
+    if (!window.confirm(`确定删除卡池“${pool.name}”？删除后公开浏览链接将失效。`)) return;
+    setDeletingPoolId(pool.id);
+    try {
+      await adminFetch(`/admin/pools/${pool.id}`, 'DELETE');
+      showMsg(`卡池“${pool.name}”已删除`);
+      await loadRef.current();
+    } catch (e: any) {
+      const details = e?.details as { tournaments?: { id: number; name: string; status: string }[] } | undefined;
+      if (e?.message === 'POOL_IN_USE') {
+        const names = details?.tournaments?.map((t) => `${t.name || `#${t.id}`}（${t.status}）`) ?? [];
+        showMsg(names.length > 0
+          ? `卡池仍被进行中的比赛使用：${names.join('、')}。请先结束比赛后再删除。`
+          : '卡池仍被进行中的比赛使用，请先结束比赛后再删除。');
+      } else if (e?.message === 'POOL_NOT_FOUND') {
+        showMsg('卡池已不存在，列表将刷新');
+        await loadRef.current();
+      } else if (e?.message === 'FORBIDDEN' || e?.message === 'AUTH_REQUIRED') {
+        showMsg('当前凭据没有删除卡池的权限，请使用超级管理员 token');
+      } else {
+        showMsg(`删除卡池失败：${e?.message ?? '未知错误'}`);
+      }
+    } finally {
+      setDeletingPoolId(null);
     }
   };
 
@@ -1095,15 +1124,11 @@ export default function AdminPage() {
                 {p.url && <a href={p.url} target="_blank" rel="noreferrer" className="rounded bg-felt-edge px-2 py-0.5 text-emerald-200 hover:brightness-110">公开查看</a>}
                 {canEditPools && (
                   <button
-                    onClick={() => {
-                      if (!confirm('确定删除卡池？')) return;
-                      adminFetch(`/admin/pools/${p.id}`, 'DELETE')
-                        .then(() => { setMsg('卡池已删除'); void load(); })
-                        .catch((e: any) => setMsg(e.message));
-                    }}
-                    className="rounded bg-red-900 px-2 py-0.5 text-red-100 hover:brightness-110"
+                    onClick={() => void deletePool(p)}
+                    disabled={deletingPoolId !== null}
+                    className="rounded bg-red-900 px-2 py-0.5 text-red-100 hover:brightness-110 disabled:cursor-wait disabled:opacity-60"
                   >
-                    删除
+                    {deletingPoolId === p.id ? '删除中…' : '删除'}
                   </button>
                 )}
               </span>

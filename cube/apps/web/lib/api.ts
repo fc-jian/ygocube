@@ -50,6 +50,11 @@ export function storeToken(tid: string, pid: string, token: string): void {
   setIdentityCookie(tid, pid, token); // keep the single-user cookie flow working too
 }
 
+export function clearStoredToken(tid: string, pid: string): void {
+  if (typeof window !== 'undefined') window.localStorage.removeItem(tokenKey(tid, pid));
+  if (typeof document !== 'undefined') clearIdentityCookies(tid);
+}
+
 export function readIdentity(tid?: string): Identity | null {
   if (tid) {
     const pid = getCookie(`yc_pid_${tid}`);

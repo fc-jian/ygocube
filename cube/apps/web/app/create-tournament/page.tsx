@@ -19,6 +19,23 @@ const recommendFormat = (n: number): { matchFormat: MatchFormat; swissRoundCount
       : n <= 16 ? { matchFormat: 'swiss', swissRoundCount: 4, playoffSize: 4 }
         : { matchFormat: 'swiss', swissRoundCount: Math.ceil(Math.log2(n)) + 1, playoffSize: 8 };
 
+function readableCreateError(error: any): string {
+  const details = error?.details;
+  if (details && typeof details === 'object' && typeof details.message === 'string') return details.message;
+  const messages: Record<string, string> = {
+    AUTH_REQUIRED: '请输入权限用户名和创建 token（超级管理员可只填写超级 token）',
+    BAD_PAYLOAD: '请检查比赛名称、人数、牌堆和卡组限制等字段',
+    BAD_EXTRA_RATIO: '额外卡比例必须是 0–100 的整数',
+    BAD_POOL_NAME: '卡池名称格式不合法',
+    POOL_NOT_FOUND: '所选卡池不存在或已被删除，请重新选择',
+    PACKCOUNT_NOT_MULTIPLE: '牌堆总数必须是人数的整数倍',
+    FORMAT_PLAYER_COUNT: '淘汰赛人数不能超过比赛人数',
+    BAD_SWISS_ROUNDS: '瑞士轮数不合法',
+    BAD_PLAYOFF_SIZE: '淘汰赛人数必须是 0 或 2 的幂',
+  };
+  return messages[error?.code] ?? messages[error?.message] ?? '创建比赛失败，请检查表单后重试';
+}
+
 export default function CreateTournamentPage() {
   const [name, setName] = useState('');
   const [maxPlayers, setMaxPlayers] = useState(4);
@@ -104,6 +121,11 @@ export default function CreateTournamentPage() {
   const unfair = effectivePacks % maxPlayers !== 0;
 
   const doCreate = async () => {
+    const validationError = validateForm();
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
     try {
       const r = await api<{ tid: number; url: string; created_by: string }>('/tournaments', {
         method: 'POST',
@@ -114,11 +136,42 @@ export default function CreateTournamentPage() {
       setCreated({ tid: r.tid, url: r.url, createdBy: r.created_by });
       setError('');
     } catch (e: any) {
-      setError(e.code === 'AUTH_REQUIRED' ? '缺少创建令牌' : (e.code === 'PACKCOUNT_NOT_MULTIPLE' ? '牌堆总数必须是人数的整数倍' : (e.code === 'BAD_EXTRA_RATIO' ? '额外卡比例必须是 0–100 的整数' : (e.code ?? String(e)))));
+      setError(readableCreateError(e));
     }
   };
 
+  const validateForm = (): string | null => {
+    if (!name.trim()) return '请输入比赛名称';
+    if (!Number.isInteger(maxPlayers) || maxPlayers < 2 || maxPlayers > 32) return '人数必须是 2–32 的整数';
+    if (!cardPool.trim()) return '请选择卡池';
+    if (!Number.isInteger(packSize) || packSize < 1 || packSize > 1000) return '每堆卡数必须是 1–1000 的整数';
+    if (packCount !== '' && (!Number.isInteger(Number(packCount)) || Number(packCount) < 1 || Number(packCount) > 10_000)) return '牌堆总数必须是 1–10000 的整数';
+    if (packCountInvalid) return `牌堆总数必须是人数（${maxPlayers}）的整数倍`;
+    if (!Number.isInteger(mainMin) || mainMin < 0 || mainMin > 250) return '主卡组最小值必须是 0–250 的整数';
+    if (!Number.isInteger(mainMax) || mainMax < 1 || mainMax > 250) return '主卡组最大值必须是 1–250 的整数';
+    if (mainMin > mainMax) return '主卡组最小值不能大于最大值';
+    if (!Number.isInteger(extraMax) || extraMax < 0 || extraMax > 250) return '额外卡组上限必须是 0–250 的整数';
+    if (!Number.isInteger(sideMax) || sideMax < 0 || sideMax > 250) return '副卡组上限必须是 0–250 的整数';
+    if (!Number.isInteger(maxCopies) || maxCopies < 1 || maxCopies > 100) return '单卡上限必须是 1–100 的整数';
+    if (!Number.isInteger(timeLimit) || timeLimit < 1 || timeLimit > 999) return '回合限时必须是 1–999 秒的整数';
+    if (!Number.isInteger(pickSeconds) || pickSeconds < 1 || pickSeconds > 7 * 24 * 60 * 60) return '选牌限时必须是正整数';
+    if (limitDeckbuilding && (!Number.isInteger(deckbuildingSeconds) || deckbuildingSeconds < 1 || deckbuildingSeconds > 7 * 24 * 60 * 60)) return '构筑限时必须是正整数';
+    if (!Number.isInteger(reserveSeconds) || reserveSeconds < 0 || reserveSeconds > 7 * 24 * 60 * 60) return '保留时间必须是 0 或正整数';
+    if (extraRatioInvalid) return '额外卡比例必须是 0–100 的整数';
+    if (matchFormat === 'swiss') {
+      const maxRounds = maxPlayers % 2 === 0 ? maxPlayers - 1 : maxPlayers;
+      if (!Number.isInteger(swissRoundCount) || swissRoundCount < 1 || swissRoundCount > maxRounds) return `瑞士轮数必须是 1–${maxRounds} 的整数`;
+      if (!Number.isInteger(playoffSize) || playoffSize < 0 || playoffSize > maxPlayers || (playoffSize !== 0 && (playoffSize < 2 || (playoffSize & (playoffSize - 1)) !== 0))) return '淘汰赛人数必须是 0 或不超过人数的 2 的幂';
+    }
+    return null;
+  };
+
   const create = () => {
+    const validationError = validateForm();
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
     if (unfair) {
       setConfirmFairness(true);
       return;

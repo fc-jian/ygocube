@@ -252,16 +252,44 @@ export class PoolsService {
     return { pool: { id, name: row.name, codes: unique, createdAt: row.created_at }, filtered, missingCodes, entryWarnings };
   }
 
-  remove(id: number): void {
+  remove(id: number): { id: number } {
     if (!Number.isSafeInteger(id) || id <= 0) throw new Error('BAD_PAYLOAD');
     const db = getDb();
-    if (!this.get(id)) throw new Error('POOL_NOT_FOUND');
-    const active = db.prepare("SELECT 1 FROM tournaments WHERE card_pool_id=? AND status!='finished' LIMIT 1").get(id);
-    if (active) throw new Error('POOL_IN_USE');
-    db.transaction(() => {
+    const result = db.transaction(() => {
+      const pool = this.get(id);
+      if (!pool) throw new Error('POOL_NOT_FOUND');
+
+      // Keep an in-use pool intact.  Besides the immutable card_pool_id, check
+      // legacy tournaments that predate that column and only retained the pool
+      // name in config_json; deleting either kind would make a future draft
+      // impossible.  Do the check in the same write transaction as DELETE so a
+      // concurrent tournament creation cannot race the safety guard.
+      const candidates = db.prepare(
+        "SELECT id, name, status, card_pool_id, config_json FROM tournaments WHERE status!='finished'",
+      ).all() as { id: number; name: string; status: string; card_pool_id: number | null; config_json: string }[];
+      const activeTournaments = candidates
+        .filter((tournament) => {
+          if (tournament.card_pool_id === id) return true;
+          try {
+            const config = JSON.parse(tournament.config_json) as { cardPool?: unknown };
+            return config.cardPool === pool.name;
+          } catch {
+            return false;
+          }
+        })
+        .map(({ id: tournamentId, name, status }) => ({ id: tournamentId, name, status }));
+      if (activeTournaments.length > 0) {
+        throw Object.assign(new Error('POOL_IN_USE'), {
+          details: { poolId: id, poolName: pool.name, tournaments: activeTournaments },
+        });
+      }
+
       db.prepare("DELETE FROM app_settings WHERE key='default_pool_id' AND value=?").run(String(id));
-      db.prepare('DELETE FROM card_pools WHERE id=?').run(id);
+      const deleted = db.prepare('DELETE FROM card_pools WHERE id=?').run(id);
+      if (deleted.changes !== 1) throw new Error('POOL_NOT_FOUND');
+      return { id };
     })();
+    return result;
   }
 
   codesByName(name: string): number[] | null {

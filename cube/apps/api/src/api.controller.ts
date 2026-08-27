@@ -190,6 +190,17 @@ export class ApiController {
     return this.tournaments.setPlayerReady(id.tournamentId, id.playerId, body.ready === true, id.playerId);
   }
 
+  // A player may give up their registration only before the draft starts.
+  // Authentication still comes from the player identity resolved by AuthGuard;
+  // the request body cannot select another player.
+  @Post('t/:tid/player/withdraw')
+  @Post('t/:tid/player/leave')
+  leaveRegistration(@Req() req: AuthedRequest) {
+    const id = req.identity as Identity;
+    this.tournaments.leaveRegistration(id.tournamentId, id.playerId, id.playerId);
+    return { ok: true };
+  }
+
   @Get('t/:tid/state')
   state(@Req() req: AuthedRequest) {
     const id = req.identity as Identity;

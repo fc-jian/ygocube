@@ -59,9 +59,15 @@ export class TournamentsService {
   // cardPool must name an existing pool; 'full' is rejected on write paths
   // (PoolsService.resolve still understands legacy 'full' configs).
   private assertCardPool(cardPool: unknown): string {
-    if (typeof cardPool !== 'string' || !cardPool.trim()) throw new BadRequestException({ code: 'BAD_PAYLOAD' });
+    if (typeof cardPool !== 'string' || !cardPool.trim()) {
+      throw new BadRequestException({ code: 'BAD_PAYLOAD', details: { field: 'cardPool', message: '请选择卡池' } });
+    }
     const name = normalizePoolName(cardPool);
-    if (name === 'full' || !this.pools.codesByName(name)) throw new Error('POOL_NOT_FOUND');
+    if (name === 'full' || !this.pools.codesByName(name)) {
+      const error = new Error('POOL_NOT_FOUND') as Error & { details?: unknown };
+      error.details = { field: 'cardPool', message: '所选卡池不存在或已被删除' };
+      throw error;
+    }
     return name;
   }
 
@@ -203,7 +209,7 @@ export class TournamentsService {
                 VALUES (?,?,?,?,?,?,1)
                 ON CONFLICT(tournament_id, player_id) DO UPDATE SET
                   display_name=excluded.display_name, token_hash=excluded.token_hash, seat=NULL,
-                  joined_at=excluded.joined_at, eliminated=0, active=1`)
+                  joined_at=excluded.joined_at, eliminated=0, withdrawn=0, active=1`)
       .run(tid, playerId, displayName, sha256(token), null, new Date().toISOString());
     logEvent(tid, 'player', 'player_join', { playerId, displayName, seat: -1, eliminated: false, withdrawn: false, ready: false }, actor);
     return { token };
@@ -278,6 +284,27 @@ export class TournamentsService {
     getDb().prepare('UPDATE tournament_players SET active=0 WHERE tournament_id=? AND player_id=?').run(tid, playerId);
     logEvent(tid, 'player', 'player_remove', playerId, actor);
     persistMeta(tid);
+  }
+
+  /**
+   * Let a player cancel their own registration before drafting starts.
+   *
+   * This deliberately removes the active registration (rather than marking it
+   * withdrawn) so the seat is immediately available to another player and the
+   * same id can register again.  Once drafting has begun, only the administrator
+   * withdrawal flow may change participation; that keeps seats and pack queues
+   * stable for an in-progress event log.
+   */
+  leaveRegistration(tid: number, playerId: string, actor = playerId): void {
+    withEventTransaction(tid, () => {
+      const state = loadState(tid);
+      if (state.frozen) throw new Error('FROZEN');
+      if (state.status !== 'registration') throw new Error('WRONG_PHASE');
+      if (!state.players.some((player) => player.playerId === playerId)) throw new Error('PLAYER_NOT_FOUND');
+      getDb().prepare('UPDATE tournament_players SET active=0 WHERE tournament_id=? AND player_id=?').run(tid, playerId);
+      logEvent(tid, 'player', 'player_remove', playerId, actor);
+      persistMeta(tid);
+    });
   }
 
   // 管理台重置玩家 token（token 只存哈希无法回显，重置后返回新明文）

@@ -16,12 +16,26 @@ describe('tournament card pool validation', () => {
 
   it('create rejects a missing cardPool', () => {
     const tournaments = makeTournaments();
-    expect(errorCode(() => tournaments.create({ name: 'nopool', maxPlayers: 4 }, 'test'))).toBe('BAD_PAYLOAD');
+    let thrown: any;
+    try {
+      tournaments.create({ name: 'nopool', maxPlayers: 4 }, 'test');
+    } catch (error) {
+      thrown = error;
+    }
+    expect(errorCode(() => { throw thrown; })).toBe('BAD_PAYLOAD');
+    expect(thrown.details).toMatchObject({ field: 'cardPool', message: '请选择卡池' });
   });
 
   it('create rejects an empty cardPool', () => {
     const tournaments = makeTournaments();
-    expect(errorCode(() => tournaments.create({ name: 'emptypool', maxPlayers: 4, cardPool: '' }, 'test'))).toBe('BAD_PAYLOAD');
+    let thrown: any;
+    try {
+      tournaments.create({ name: 'emptypool', maxPlayers: 4, cardPool: '' }, 'test');
+    } catch (error) {
+      thrown = error;
+    }
+    expect(errorCode(() => { throw thrown; })).toBe('BAD_PAYLOAD');
+    expect(thrown.details).toMatchObject({ field: 'cardPool', message: '请选择卡池' });
   });
 
   it("create rejects the 'full' pool", () => {
@@ -150,6 +164,23 @@ describe('admin player management', () => {
     expect(() => tournaments.updateDisplayName(tid, 'p1', 'x\nname', 'p1')).toThrow('BAD_DISPLAY_NAME');
     tournaments.setPhase(tid, 'drafting', undefined, 'admin');
     expect(() => tournaments.updateDisplayName(tid, 'p1', 'P1-new', 'p1')).toThrow('WRONG_PHASE');
+  });
+
+  it('allows a player to leave during registration and frees the seat', () => {
+    const tournaments = makeTournaments();
+    const tid = tournaments.create({ name: 'leave', maxPlayers: 2, cardPool: TEST_POOL }, 'test').tid;
+    tournaments.join(tid, 'p1', 'P1');
+    tournaments.join(tid, 'p2', 'P2');
+
+    tournaments.leaveRegistration(tid, 'p1');
+    expect(loadState(tid).players.map((player) => player.playerId)).toEqual(['p2']);
+    expect(require('../src/db').getDb().prepare('SELECT active FROM tournament_players WHERE tournament_id=? AND player_id=?').get(tid, 'p1').active).toBe(0);
+    // The released slot and id can be used again without a stale withdrawn flag.
+    expect(tournaments.join(tid, 'p1', 'P1-new').token).toBeTruthy();
+    expect(loadState(tid).players.map((player) => player.playerId)).toEqual(['p2', 'p1']);
+
+    tournaments.setPhase(tid, 'drafting', undefined, 'test');
+    expect(() => tournaments.leaveRegistration(tid, 'p2')).toThrow('WRONG_PHASE');
   });
 
   it('removePlayer clears player, picks and deck; blocked during matches', () => {

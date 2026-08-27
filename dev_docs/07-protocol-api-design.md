@@ -84,6 +84,7 @@ swissRoundCount, playoffSize
 | `POST /t/:tid/join` | 报名 `{player_id,display_name}`，返回一次性 token |
 | `POST /t/:tid/player/name` | 报名阶段由本人修改 `{display_name}`；需要玩家身份，记录 `player_rename` 事件 |
 | `POST /t/:tid/player/ready` | 报名阶段由本人设置 `{ready:true|false}`；记录 `player_ready` 事件，准备状态对所有报名玩家公开 |
+| `POST /t/:tid/player/withdraw`（`/player/leave` 兼容别名） | 仅报名阶段由本人退出；记录 `player_remove` 事件、释放名额并清除本人报名投影；选牌开始后返回 `WRONG_PHASE` |
 | `GET /t/:tid/state` | 当前玩家视角完整状态（牌堆、队列、reserve、构筑、当前对局） |
 | `GET /t/:tid/pool` | 当前比赛 drop 前卡池（需玩家鉴权） |
 | `GET /t/:tid/cards?q=` / `?codes=` | 卡牌元数据/效果文本搜索或批量读取；`q` 按空白拆分为 AND 关键字，无隐含 30/50 条上限，结果按卡名命中数量及关键字顺序优先 |
@@ -152,7 +153,7 @@ swissRoundCount, playoffSize
 | `POST /admin/t/:tid/players/:pid/token` | 重设玩家 token |
 | `POST /admin/t/:tid/players/:pid/reserve` | `{seconds}`：选牌阶段给指定玩家增加 reserve；事件保存余额/deadline 快照 |
 | `PUT /admin/settings/default-pool` | super 设置全局默认卡池 |
-| `GET/POST/PUT/DELETE /admin/pools...` | 卡池建立、编辑、随机采样、删除 |
+| `GET/POST/PUT/DELETE /admin/pools...` | 卡池建立、编辑、随机采样、删除；删除在进行中的比赛仍引用该池时返回 `POOL_IN_USE` 及占用比赛摘要，避免后续选牌失效 |
 | `GET /admin/t/:tid/events` | 事件时间线 |
 | `GET /admin/t/:tid/revert/preview?seq=` | 回溯影响预览 |
 | `POST /admin/t/:tid/revert` | `{seq,confirm_name}` 硬回溯并保持冻结 |
@@ -286,7 +287,7 @@ tournamentCount,sampleCount}[]` 按 exact code 返回；抓位从 1 开始，百
 | `PAIRING_SEARCH_LIMIT` | 瑞士回溯达到时间/节点保护上限，HTTP 503，可重试或调整赛制 |
 | `RESULT_ROUND_LOCKED` | 后续轮已存在，历史赛果只能通过回溯修改 |
 | `FORMAT_LOCKED` / `BAD_MATCH_FORMAT` | 赛制已锁定或参数非法 |
-| `POOL_EXISTS` / `POOL_NOT_FOUND` / `BAD_POOL_IMPORT` / `BAD_POOL_NAME` / `POOL_IN_USE` | 卡池操作错误 |
+| `POOL_EXISTS` / `POOL_NOT_FOUND` / `BAD_POOL_IMPORT` / `BAD_POOL_NAME` / `POOL_IN_USE` | 卡池操作错误；`POOL_IN_USE.details.tournaments` 列出仍在使用该池的比赛 |
 | `BAD_CREATE_USERNAME` / `CREATE_USER_EXISTS` / `CREATE_USER_NOT_FOUND` | 创建权限用户错误 |
 | `INVALID_API_KEY` / `SRVPRO_ERROR` | srvpro 连接或鉴权失败 |
 

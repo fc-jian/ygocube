@@ -92,7 +92,13 @@ describe('card pools', () => {
     const pool = pools.create('active-pool', cards.poolCodes().slice(0, 8)).pool;
     const tournaments = new TournamentsService(pools);
     const tid = tournaments.create({ name: 'active', maxPlayers: 2, cardPool: pool.name }, 'test').tid;
-    expect(() => pools.remove(pool.id)).toThrow('POOL_IN_USE');
+    try {
+      pools.remove(pool.id);
+      fail('expected POOL_IN_USE');
+    } catch (error: any) {
+      expect(error.message).toBe('POOL_IN_USE');
+      expect(error.details).toMatchObject({ poolId: pool.id, tournaments: [{ id: tid, name: 'active', status: 'registration' }] });
+    }
     tournaments.setPhase(tid, 'drafting', undefined, 'test');
     tournaments.setPhase(tid, 'deckbuilding', undefined, 'test');
     tournaments.setPhase(tid, 'finished', undefined, 'test');

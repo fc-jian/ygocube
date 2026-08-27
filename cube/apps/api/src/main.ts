@@ -71,6 +71,7 @@ export class ApiExceptionFilter implements ExceptionFilter {
       if (['PLAYER_NOT_FOUND', 'MATCH_NOT_FOUND', 'CREATE_USER_NOT_FOUND', 'POOL_NOT_FOUND', 'REVERT_EVENT_NOT_FOUND', 'TOURNAMENT_NOT_FOUND'].includes(candidate)) {
         status = 404;
         code = candidate;
+        details = (exception as Error & { details?: unknown }).details;
       } else if (candidate === 'FORBIDDEN' || candidate === 'CORS_ORIGIN_DENIED') {
         status = 403;
         code = candidate;
@@ -84,6 +85,7 @@ export class ApiExceptionFilter implements ExceptionFilter {
       } else if (candidate === 'DRAFT_NOT_STARTED' || CONFLICT_CODES.has(candidate)) {
         status = 409;
         code = candidate;
+        details = (exception as Error & { details?: unknown }).details;
       } else {
         // SQL paths, filesystem paths, and upstream response bodies frequently
         // occur in Error.message. Keep them in server logs, never in the API.

@@ -510,7 +510,10 @@ export class AdminController {
   @Delete('pools/:id')
   removePool(@Req() req: AuthedRequest) {
     this.superOnly(req);
-    this.pools.remove(Number(req.params.id));
-    return { ok: true };
+    const id = Number(req.params.id);
+    const removed = this.pools.remove(id);
+    // Keep the response explicit so the console can remove the exact row even
+    // when a stale polling response arrives after the delete request.
+    return { ok: true, ...removed };
   }
 }

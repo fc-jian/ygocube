@@ -90,6 +90,12 @@ export class AppModule {
           // player list so every view shows the same status.
           realtime.emitNotice(tid, '玩家准备状态已更新');
           break;
+        case 'player_remove':
+          // A registration cancellation changes the public player list.  Only
+          // send a generic notice; the removed player's id is not needed by the
+          // broadcast and must not be exposed as event payload data.
+          realtime.emitNotice(tid, '报名玩家列表已更新');
+          break;
         case 'pause':
           realtime.emitPause(tid, payload);
           break;
