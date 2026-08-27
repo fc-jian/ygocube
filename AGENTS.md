@@ -72,6 +72,13 @@ bash scripts/e2e/run-e2e.sh             # deck 限制/建房/鉴权 16 项检查
 bash scripts/e2e/run-full-sim.sh        # 8 人 kuro750 BO3 完整模拟赛 → test_tournaments/<tid>/
 ```
 
+## Aly 发布与 Web 静态资源验收
+
+- Next.js 使用 `output: standalone` 时，`.next/standalone` 只包含服务端运行时，**不会自动包含** `.next/static`（以及可能使用的 `public`）。发布 Web 时必须把 `cube/apps/web/.next/static` 同步到 release 的 `web/standalone/apps/web/.next/static`，并按需同步 `public`；不能只打包 standalone 目录。
+- Web release 应先在临时目录解包并校验 build ID、文件数量和校验和，再在同一文件系统内原子切换 `current`。静态目录安装完成后重启 `ygocube-web`，使 Next 重新加载静态文件映射；API、srvpro 不应因 Web 静态资源修复而重启。
+- 健康检查不能只验证首页 200。发布前后至少检查：`/api/health`、首页 HTML 中引用的每个 `/_next/static/*.js`/`*.css` 均返回 200 且 MIME 正确、HTTPS/Nginx 路径，以及四个 systemd 服务状态。缺少静态文件时 Next 仍可能返回首页 HTML 200，但浏览器会收到 404 HTML 并报 `strict MIME type checking`。
+- 失败发布先保留旧 release 和数据库备份；不要通过把所有请求回退到首页来掩盖静态资源 404。完成验证后再清理上传临时文件，并记录 release commit/build ID。
+
 ## 默认端口
 
 cube web 3000 · cube api 3001 · srvpro 游戏 7911 · srvpro http 7922 · srvpro ssl 7923 · ygopro 宿主动态（stdout 报端口）。
