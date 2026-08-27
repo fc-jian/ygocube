@@ -3,8 +3,8 @@ import { ArgumentsHost, Catch, ExceptionFilter, HttpException } from '@nestjs/co
 import { AppModule } from './app.module';
 import { config, validateStartupSecurity } from './config';
 import { getDb } from './db';
-import { clientAddress, rateLimitCategory, rateLimitFor } from './rate-limit';
 import express, { Request, Response, NextFunction } from 'express';
+import { compressJsonResponse } from './response-compression';
 
 // Minimal cookie parser (no extra dependency).
 export function cookieParser(req: Request, _res: Response, next: NextFunction) {
@@ -105,10 +105,11 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule, { logger: ['error', 'warn', 'log'], bodyParser: false });
   app.enableShutdownHooks();
   app.use(cookieParser);
-  // Keep the public API conservative by default. This middleware runs before
-  // CORS and controllers, so rejected origins never reach application code and
-  // oversized requests cannot allocate unbounded JSON bodies.
-  const rateBuckets = new Map<string, { startedAt: number; count: number }>();
+  app.use(compressJsonResponse);
+  // Keep request-boundary protections independent from traffic volume. Card
+  // pool pages legitimately fetch many assets in parallel, so this service does
+  // not apply an application-level request rate limit. Origin, payload-size,
+  // authentication and phase checks still protect the API.
   app.use((req: Request, res: Response, next: NextFunction) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
@@ -128,33 +129,29 @@ async function bootstrap() {
       res.status(413).json({ ok: false, code: 'REQUEST_TOO_LARGE' });
       return;
     }
-    const category = rateLimitCategory(req);
-    const limit = rateLimitFor(category);
-    const now = Date.now();
-    const key = `${category}:${clientAddress(req)}`;
-    const bucket = rateBuckets.get(key);
-    if (!bucket || now - bucket.startedAt >= 60_000) rateBuckets.set(key, { startedAt: now, count: 1 });
-    else if (++bucket.count > limit) {
-      res.setHeader('Retry-After', '60');
-      res.status(429).json({ ok: false, code: 'RATE_LIMITED' });
-      return;
+    const cardMetadataRequest = req.method === 'GET'
+      && (/^\/t\/[^/]+\/cards$/.test(req.path) || /^\/pools\/[^/]+\/cards$/.test(req.path));
+    if (req.path.startsWith('/pics/')) {
+      // Image handlers set their own long-lived cache policy.
+    } else if (cardMetadataRequest) {
+      // Card metadata contains no player-private state. Keep it browser-local
+      // and revalidate periodically so pick statistics converge without
+      // allowing a shared proxy to mix tournament identities.
+      res.setHeader('Cache-Control', 'private, max-age=30, stale-while-revalidate=30');
+      res.setHeader('Vary', 'Accept-Encoding');
+      res.setHeader('X-Accel-Buffering', 'yes');
+    } else if (req.path.endsWith('/stream')) {
+      // RealtimeService sets the definitive no-cache/no-buffer policy.
+    } else {
+      res.setHeader('Cache-Control', 'no-store');
+      // Nginx is configured with buffering disabled for the API so SSE works;
+      // explicitly opt normal JSON responses back into proxy buffering.
+      res.setHeader('X-Accel-Buffering', 'yes');
     }
-    // Bound memory even when a public service sees many short-lived source IPs.
-    if (rateBuckets.size > 10_000) {
-      for (const [candidate, value] of rateBuckets) {
-        if (now - value.startedAt >= 60_000) rateBuckets.delete(candidate);
-      }
-      while (rateBuckets.size > 8_000) {
-        const oldest = rateBuckets.keys().next().value as string | undefined;
-        if (!oldest) break;
-        rateBuckets.delete(oldest);
-      }
-    }
-    if (!req.path.startsWith('/pics/')) res.setHeader('Cache-Control', 'no-store');
     next();
   });
   // Explicit parser limits apply to chunked requests as well as those with a
-  // Content-Length header. The security/rate middleware above runs first so
+  // Content-Length header. The request-boundary middleware above runs first so
   // rejected origins never spend parser work.
   app.use(express.json({ limit: '512kb' }));
   app.use(express.urlencoded({ extended: false, limit: '32kb' }));

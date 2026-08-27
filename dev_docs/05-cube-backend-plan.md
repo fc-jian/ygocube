@@ -190,6 +190,13 @@ side 和 `cube-deck-<tid>-<pid>-<timestamp>` 文件名。timestamp 在该桌对�
 优先，10 秒轮询 `/cube/room_status` 兜底。管理员可手动录入结果并确认下一轮；
 当前轮结果齐全不会绕过管理员确认自动生成下一轮。
 
+### 5.1 响应与实时连接
+
+普通 JSON API 响应在支持的客户端上使用 gzip，并通过 `X-Accel-Buffering: yes` 允许
+反向代理缓冲；SSE `/t/:tid/stream` 保持 `text/event-stream`、`no-cache` 和
+`X-Accel-Buffering: no`，不进入压缩缓冲。卡片元数据接口使用浏览器私有的短期缓存，
+玩家状态、搜索状态和所有写接口继续 `no-store`，避免跨玩家或跨比赛复用敏感状态。
+
 ## 6. 事件、快照与回溯
 
 比赛状态由 append-only `events` 驱动；内存状态和重启回放使用同一 `apply()`。
@@ -249,10 +256,11 @@ super token，不会跳过端口、API key 和精确 http(s) origin 校验。`as
 部署脚本必须先准备外部卡牌资源。
 
 API 默认限制 JSON 请求体 512 KiB、表单请求体 32 KiB；卡牌搜索关键字最多 256 个
-Unicode 字符、精确编号列表最多 2,000 个、单次搜索最多返回 5,000 条。按来源 IP 对
-管理、比赛和公开接口分级限流，过量请求返回 `429 RATE_LIMITED`。响应统一附带
-`nosniff`、`DENY`、严格 referrer、CSP；HTTPS 请求附带 HSTS。CORS 只接受精确的
-`allowed_origins`，不反射任意 Origin，也不允许凭据通配符。
+Unicode 字符、精确编号列表最多 2,000 个、单次搜索最多返回 5,000 条。应用层不按
+来源 IP 或请求频率限流，卡池页面可以并行加载全部卡图；请求仍受鉴权、阶段校验、
+请求体大小和查询结果上限约束。响应统一附带 `nosniff`、`DENY`、严格 referrer、
+CSP；HTTPS 请求附带 HSTS。CORS 只接受精确的 `allowed_origins`，不反射任意 Origin，
+也不允许凭据通配符。
 
 数据库首次执行创建者权限迁移前会在同目录保留
 `<db>.pre-auth-migration.bak`；迁移异常时关闭连接、清理 WAL sidecar 并恢复该副本，

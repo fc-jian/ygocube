@@ -13,7 +13,10 @@ export function useTournamentStream(tid: string | null, identity: Identity | nul
   }, [onEvent]);
 
   useEffect(() => {
-    if (!tid || !identity) return;
+    if (!tid || !identity) {
+      setConnected(false);
+      return;
+    }
     let es: EventSource | null = null;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let closed = false;
@@ -61,4 +64,49 @@ export function useTournamentStream(tid: string | null, identity: Identity | nul
   }, []);
 
   return { connected, refetch };
+}
+
+/**
+ * Use a slow, visibility-aware polling fallback only while SSE is offline.
+ * Callers still own the actual loader; this hook merely schedules it and
+ * prevents fallback ticks from overlapping one another.
+ */
+export function useTournamentFallbackPolling({
+  connected,
+  enabled,
+  intervalMs = 15_000,
+  onPoll,
+}: {
+  connected: boolean;
+  enabled: boolean;
+  intervalMs?: number;
+  onPoll: () => Promise<void> | void;
+}): void {
+  const onPollRef = useRef(onPoll);
+  useEffect(() => {
+    onPollRef.current = onPoll;
+  }, [onPoll]);
+
+  useEffect(() => {
+    if (!enabled || connected) return;
+    let busy = false;
+    const run = async () => {
+      if (busy || document.visibilityState === 'hidden') return;
+      busy = true;
+      try {
+        await onPollRef.current();
+      } finally {
+        busy = false;
+      }
+    };
+    const timer = window.setInterval(() => void run(), intervalMs);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void run();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [connected, enabled, intervalMs]);
 }

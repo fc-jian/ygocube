@@ -9,7 +9,7 @@
 | --- | --- | --- |
 | M0 环境与分支 | ✅ | 根仓库 + `fc-jian` 两个 fork submodule；配置、构建和 E2E 脚本在仓库内 |
 | M1 ygopro | ✅ | marker + 运行时 deck limit、严格 seed 解析、长密码、`STOC_CUBE_DECK`、`-cube` 版本后缀 |
-| M2 srvpro | ✅ | 严格/限流 Cube HTTP API、幂等建房、开局覆盖/siding 校验、长密码、精简 webhook |
+| M2 srvpro | ✅ | 严格 Cube HTTP API、幂等建房、开局覆盖/siding 校验、长密码、精简 webhook |
 | M3 后端核心 | ✅ | passing/serial 回放、整轮发堆、reserve/暂停冻结、构筑校验/修复、卡池/事件/回溯 |
 | M4 对局编排 | ✅* | 单循环/瑞士无重复对手约束、手动赛制、webhook+轮询、DSQ/bye；双败 bracket 需真机复核 |
 | M5 玩家前端 | ✅ | 独立玩家 URL、脱敏 SSE、六列牌堆、整理/随机排序、卡图 fallback、对战刷新提示 |
@@ -53,6 +53,8 @@
   被后位玩家误报为已见，返回 code 不做 alias 替换。
 - 整理按钮使用与 YGOPro `deck_sort_lv` 相同的比较器；手动拖动仍保留顺序，随机
   按钮只洗 main；卡池编辑页复用同一排序逻辑。
+- SSE 在线时页面不再高频轮询；断线才启用 10--15 秒、可见性受控的备用轮询，状态
+  加载单飞且卡片元数据使用有界 TTL/LRU 缓存。普通 JSON 响应 gzip，SSE 保持流式。
 
 ### 2.3 卡池与元数据
 

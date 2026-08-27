@@ -109,6 +109,7 @@ export default function AdminPage() {
   const [createUsersLoaded, setCreateUsersLoaded] = useState(false);
   const [newCreateUsername, setNewCreateUsername] = useState('');
   const [issuedCreateToken, setIssuedCreateToken] = useState<{ username: string; token: string } | null>(null);
+  const loadBusy = useRef(false);
 
   useEffect(() => {
     if (!state) return;
@@ -164,6 +165,9 @@ export default function AdminPage() {
   }, [adminToken, createUsername, createToken]);
 
   const load = useCallback(async () => {
+    if (loadBusy.current) return;
+    loadBusy.current = true;
+    try {
     saveCredentials();
     // 竞态守卫：快速切换 tid 或轮询重叠时，旧请求的迟到响应不得覆盖新数据
     const seq = ++loadSeq.current;
@@ -224,6 +228,9 @@ export default function AdminPage() {
         if (seq === loadSeq.current) setEvents([]);
       }
     }
+    } finally {
+      loadBusy.current = false;
+    }
   }, [adminFetch, tid, isSuperSession, createUsername, createToken]);
   // act 等异步回调完成后要刷新的是"当前最新 tid"的数据，而非发起时刻的闭包
   const loadRef = useRef(load);
@@ -242,10 +249,20 @@ export default function AdminPage() {
     setCanEditPools(false);
   }, [tid]);
 
-  // 控制台轮询刷新（dev_docs/06 §6）
+  // 控制台低频轮询；后台页没有可携带管理员 header 的 EventSource，
+  // 但隐藏标签页不应持续制造请求。
   useEffect(() => {
-    const t = setInterval(() => void load(), 5000);
-    return () => clearInterval(t);
+    const t = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void load();
+    }, 15_000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void load();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.clearInterval(t);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
   }, [load]);
 
   const act = async (path: string, body?: Record<string, unknown>) => {

@@ -5,7 +5,7 @@ import { CardImage, CardWithTooltip } from './CardImage';
 import { ConfirmModal } from './ConfirmModal';
 import { CardMeta } from './CardPreview';
 import { CardInfo } from '@/lib/types';
-import { matchesCardQuery, PickSortMode, sortCardCodes, sortCardCodesByPick } from '@/lib/cardInfo';
+import { matchesCardQuery, PickSortMode, safeCardCodes, sortCardCodes, sortCardCodesByPick } from '@/lib/cardInfo';
 import { useNowTick } from './TopBar';
 
 // 右侧牌堆区（dev_docs/06 §2）：他人回合显示卡背+数量，自己回合显示正面，
@@ -36,14 +36,14 @@ export function PackZone({ pack, cardMap, droppedCards, alternativeCode, onAlter
   // pick validation, passing, event logs, and replays keep their exact order.
   const displayCards = useMemo(
     () => sortMode === 'pick'
-      ? sortCardCodesByPick(pack?.cards ?? [], cardMap, poolId)
-      : sortCardCodes(pack?.cards ?? [], cardMap, 'lv'),
+      ? sortCardCodesByPick(safeCardCodes(pack?.cards), cardMap, poolId)
+      : sortCardCodes(safeCardCodes(pack?.cards), cardMap, 'lv'),
     [cardMap, pack?.cards, poolId, sortMode],
   );
   const now = useNowTick(true);
 
   // 初始弃置（公开）：按钮 + 可搜索的卡图-卡名列表弹窗（dev_docs/06 §2）
-  const droppedList = droppedCards ?? [];
+  const droppedList = safeCardCodes(droppedCards);
   const filteredDropped = useMemo(() => {
     const q = dropFilter.trim().toLowerCase();
     if (!q) return droppedList;

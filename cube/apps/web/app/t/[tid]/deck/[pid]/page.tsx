@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { api, apiDownload, Identity, resolvePlayerIdentity } from '@/lib/api';
 import { useTournamentStream } from '@/lib/sse';
@@ -10,8 +10,10 @@ import { CardSearch } from '@/components/CardSearch';
 import { closeCardPreview, setCardPreviewAction } from '@/components/CardPreview';
 import { TokenPrompt } from '@/components/TokenPrompt';
 import { CardInfo } from '@/lib/types';
-import { canonicalCardCode, isExtraDeckType } from '@/lib/cardInfo';
+import { canonicalCardCode, isExtraDeckType, safeCardCodes } from '@/lib/cardInfo';
 import { flipIds, useFlip } from '@/lib/useFlip';
+import { fetchCardMetadata } from '@/lib/cardCache';
+import { useTournamentFallbackPolling } from '@/lib/sse';
 
 export default function DeckPage() {
   const params = useParams<{ tid: string; pid: string }>();
@@ -23,6 +25,7 @@ export default function DeckPage() {
   const [state, setState] = useState<DraftState | null>(null);
   const [cardMap, setCardMap] = useState<Record<number, CardInfo>>({});
   const [error, setError] = useState('');
+  const loadBusy = useRef(false);
   const flip = useFlip<HTMLDivElement>();
 
   useEffect(() => {
@@ -53,13 +56,28 @@ export default function DeckPage() {
   }, [tid, pid]);
 
   const load = useCallback(async () => {
-    if (!identity) return;
+    if (!identity || loadBusy.current) return;
+    loadBusy.current = true;
     try {
-      const s = await api<DraftState>(`/t/${tid}/state`, { identity });
-      setState(s);
-      const codes = new Set<number>([...(s.pickedCards ?? [])]);
+      const raw = await api<unknown>(`/t/${tid}/state`, { identity });
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('INVALID_STATE_RESPONSE');
+      const s = raw as DraftState;
+      const normalized = {
+        ...s,
+        pickedCards: safeCardCodes(s.pickedCards),
+        droppedCards: safeCardCodes(s.droppedCards),
+        pack: s.pack && typeof s.pack === 'object' ? { ...s.pack, cards: safeCardCodes(s.pack.cards) } : null,
+        deck: s.deck && typeof s.deck === 'object' ? {
+          ...s.deck,
+          main: safeCardCodes(s.deck.main),
+          extra: safeCardCodes(s.deck.extra),
+          side: safeCardCodes(s.deck.side),
+        } : { main: [], extra: [], side: [], lockedAt: null },
+      } as DraftState;
+      setState(normalized);
+      const codes = new Set<number>(normalized.pickedCards);
       if (codes.size) {
-        const cards = await api<CardInfo[]>(`/t/${tid}/cards?codes=${[...codes].join(',')}`, { identity });
+        const cards = await fetchCardMetadata(`/t/${tid}/cards`, [...codes], identity);
         const map: Record<number, CardInfo> = {};
         for (const c of cards) map[c.code] = c;
         setCardMap((m) => ({ ...m, ...map }));
@@ -73,6 +91,8 @@ export default function DeckPage() {
       } else {
         setError(e.code ?? String(e));
       }
+    } finally {
+      loadBusy.current = false;
     }
   }, [tid, identity]);
 
@@ -80,14 +100,15 @@ export default function DeckPage() {
     void load();
   }, [load]);
 
-  useTournamentStream(tid, identity, useCallback(() => void load(), [load]));
-  // SSE is primary; short polling is a fallback so an admin phase change is
-  // reflected even if the browser temporarily lost the event stream.
-  useEffect(() => {
-    if (state?.status !== 'deckbuilding') return;
-    const timer = setInterval(() => void load(), 3000);
-    return () => clearInterval(timer);
-  }, [state?.status, load]);
+  const { connected } = useTournamentStream(tid, identity, useCallback(() => void load(), [load]));
+  // SSE is primary; a slow fallback catches an admin phase change after a
+  // temporary connection loss without multiplying traffic for every client.
+  useTournamentFallbackPolling({
+    connected,
+    enabled: !!identity && (state?.status === 'deckbuilding' || state?.status === 'matches'),
+    intervalMs: 15_000,
+    onPoll: load,
+  });
   const now = useNowTick(true);
 
   // Keep every hook before the loading/permission early returns. Previously
@@ -98,7 +119,7 @@ export default function DeckPage() {
   const discard = useMemo(() => {
     if (!state) return [];
     const used = new Map<number, number>();
-    for (const code of [...deck.main, ...deck.extra, ...deck.side]) {
+    for (const code of [...safeCardCodes(deck.main), ...safeCardCodes(deck.extra), ...safeCardCodes(deck.side)]) {
       const key = canonicalCardCode(code, cardMap);
       used.set(key, (used.get(key) ?? 0) + 1);
     }
@@ -106,7 +127,7 @@ export default function DeckPage() {
     const available: number[] = [];
     // Keep the exact selected code in the unused area. The rules copy key is
     // only used to enforce the shared maxCopies limit across alias rows.
-    for (const code of [...new Set(state.pickedCards ?? [])]) {
+    for (const code of [...new Set(safeCardCodes(state.pickedCards))]) {
       const key = canonicalCardCode(code, cardMap);
       while ((used.get(key) ?? 0) < maxCopies) {
         available.push(code);

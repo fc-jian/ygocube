@@ -143,6 +143,12 @@ export function cardQueryTokens(query: string): string[] {
     .filter(Boolean))];
 }
 
+/** Normalize card-code arrays received from the API before any spread/iteration. */
+export function safeCardCodes(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((code): code is number => Number.isSafeInteger(code) && code > 0);
+}
+
 function searchableCardText(c: CardInfo): string {
   return [
     c.name, c.code, String(c.code).padStart(8, '0'), c.desc, typeLabel(c),

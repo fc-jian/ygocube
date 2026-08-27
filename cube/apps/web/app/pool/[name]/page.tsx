@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { CardInfo } from '@/lib/types';
-import { sortCardSearchResults } from '@/lib/cardInfo';
+import { safeCardCodes, sortCardSearchResults } from '@/lib/cardInfo';
 import { buildPoolCsv } from '@/lib/poolCsv';
 import { PoolPreview } from '@/components/PoolPreview';
 import { LocalPicsSetting } from '@/components/IdentityWidget';
@@ -34,13 +34,16 @@ export default function PublicPoolPage() {
   const loadPool = useCallback(async (withCards = true) => {
     if (!encodedName) return;
     try {
-      const next = await api<PublicPool>(`/pools/${encodedName}`, { identity: null });
-      setPool(next);
+      const raw = await api<unknown>(`/pools/${encodedName}`, { identity: null });
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('INVALID_POOL_RESPONSE');
+      const next = raw as PublicPool;
+      const normalized = { ...next, codes: safeCardCodes(next.codes) };
+      setPool(normalized);
       setError('');
       // Stats are derived data and may change after a completed tournament;
       // use the latest exact code list on every refresh so pool edits also
       // become visible without replacing the user's search state.
-      const codes = next.codes;
+      const codes = normalized.codes;
       if (withCards) {
         const merged: Record<number, CardInfo> = {};
         for (let i = 0; i < codes.length; i += 400) {
@@ -81,8 +84,9 @@ export default function PublicPoolPage() {
       return;
     }
     try {
-      const cards = await api<CardInfo[]>(`/pools/${encodedName}/cards?q=${encodeURIComponent(q)}`, { identity: null });
-      setResults(sortCardSearchResults(cards, q));
+      const payload = await api<unknown>(`/pools/${encodedName}/cards?q=${encodeURIComponent(q)}`, { identity: null });
+      if (!Array.isArray(payload)) throw new Error('INVALID_CARD_RESPONSE');
+      setResults(sortCardSearchResults(payload as CardInfo[], q));
     } catch {
       setResults([]);
     }

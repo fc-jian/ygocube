@@ -1,9 +1,9 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { api, apiDownload, Identity, resolvePlayerIdentity } from '@/lib/api';
-import { useTournamentStream } from '@/lib/sse';
+import { useTournamentFallbackPolling, useTournamentStream } from '@/lib/sse';
 import { DraftState } from '@/components/TopBar';
 import { TokenPrompt } from '@/components/TokenPrompt';
 
@@ -33,6 +33,7 @@ export default function MatchesPage() {
   const [copied, setCopied] = useState(false);
   const [server, setServer] = useState<{ host: string; port: number } | null>(null);
   const [error, setError] = useState('');
+  const loadBusy = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -58,7 +59,8 @@ export default function MatchesPage() {
   }, [tid, pid]);
 
   const load = useCallback(async () => {
-    if (!identity) return;
+    if (!identity || loadBusy.current) return;
+    loadBusy.current = true;
     try {
       const [ms, st] = await Promise.all([
         api<MatchInfo[]>(`/t/${tid}/matches`, { identity }),
@@ -71,6 +73,8 @@ export default function MatchesPage() {
         setIdentity(null);
         setNeedToken(true);
       }
+    } finally {
+      loadBusy.current = false;
     }
   }, [tid, identity]);
 
@@ -85,7 +89,8 @@ export default function MatchesPage() {
       .catch(() => setServer({ host: '127.0.0.1', port: 7911 }));
   }, []);
 
-  useTournamentStream(tid, identity, useCallback(() => void load(), [load]));
+  const { connected } = useTournamentStream(tid, identity, useCallback(() => void load(), [load]));
+  useTournamentFallbackPolling({ connected, enabled: !!identity, intervalMs: 15_000, onPoll: load });
 
   if (needToken) return <TokenPrompt tid={tid} pid={pid} onToken={(t) => { setNeedToken(false); setIdentity({ tid, pid, token: t }); }} />;
   if (!info) return <main className="p-8 text-slate-400">加载中...</main>;

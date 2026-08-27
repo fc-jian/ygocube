@@ -11,7 +11,9 @@ import { CardSearchAll } from '@/components/CardSearchAll';
 import { setCardPreviewAction } from '@/components/CardPreview';
 import { PoolPreview } from '@/components/PoolPreview';
 import { CardInfo } from '@/lib/types';
-import { matchesCardQuery, PickSortMode, sortCardSearchResults } from '@/lib/cardInfo';
+import { matchesCardQuery, PickSortMode, safeCardCodes, sortCardSearchResults } from '@/lib/cardInfo';
+import { fetchCardMetadata } from '@/lib/cardCache';
+import { useTournamentFallbackPolling } from '@/lib/sse';
 
 export default function DraftPage() {
   const params = useParams<{ tid: string; pid: string }>();
@@ -29,6 +31,7 @@ export default function DraftPage() {
   const [poolSearch, setPoolSearch] = useState('');
   const [poolResults, setPoolResults] = useState<CardInfo[]>([]);
   const [cardSortMode, setCardSortMode] = useState<PickSortMode>('default');
+  const loadBusy = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -58,13 +61,39 @@ export default function DraftPage() {
   }, [tid, pid]);
 
   const load = useCallback(async () => {
-    if (!identity) return;
+    if (!identity || loadBusy.current) return;
+    loadBusy.current = true;
     try {
-      const s = await api<DraftState>(`/t/${tid}/state`, { identity });
-      setState(s);
-      const codes = new Set<number>([...(s.pickedCards ?? []), ...(s.pack?.cards ?? []), ...(s.droppedCards ?? []), ...(s.deck?.main ?? []), ...(s.deck?.extra ?? []), ...(s.deck?.side ?? []), ...(s.pickAlternative !== null && s.pickAlternative !== undefined ? [s.pickAlternative] : [])]);
+      const raw = await api<unknown>(`/t/${tid}/state`, { identity });
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('INVALID_STATE_RESPONSE');
+      const s = raw as DraftState;
+      const normalized = {
+        ...s,
+        pickedCards: safeCardCodes(s.pickedCards),
+        droppedCards: safeCardCodes(s.droppedCards),
+        pack: s.pack && typeof s.pack === 'object' ? { ...s.pack, cards: safeCardCodes(s.pack.cards) } : null,
+        deck: s.deck && typeof s.deck === 'object' ? {
+          ...s.deck,
+          main: safeCardCodes(s.deck.main),
+          extra: safeCardCodes(s.deck.extra),
+          side: safeCardCodes(s.deck.side),
+        } : { main: [], extra: [], side: [], lockedAt: null },
+      } as DraftState;
+      setState(normalized);
+      const alternativeCode = typeof normalized.pickAlternative === 'number' && Number.isSafeInteger(normalized.pickAlternative) && normalized.pickAlternative > 0
+        ? normalized.pickAlternative
+        : null;
+      const codes = new Set<number>([
+        ...normalized.pickedCards,
+        ...safeCardCodes(normalized.pack?.cards),
+        ...normalized.droppedCards,
+        ...normalized.deck.main,
+        ...normalized.deck.extra,
+        ...normalized.deck.side,
+        ...(alternativeCode !== null ? [alternativeCode] : []),
+      ]);
       if (codes.size) {
-        const cards = await api<CardInfo[]>(`/t/${tid}/cards?codes=${[...codes].join(',')}`, { identity });
+        const cards = await fetchCardMetadata(`/t/${tid}/cards`, [...codes], identity);
         const map: Record<number, CardInfo> = {};
         for (const c of cards) map[c.code] = c;
         setCardMap((m) => ({ ...m, ...map }));
@@ -78,6 +107,8 @@ export default function DraftPage() {
       } else {
         setError(e.code ?? String(e));
       }
+    } finally {
+      loadBusy.current = false;
     }
   }, [tid, identity]);
 
@@ -135,21 +166,30 @@ export default function DraftPage() {
   useEffect(() => {
     if (state?.status !== 'registration' || !identity) return;
     let cancelled = false;
+    let refreshing = false;
     const refreshPool = async () => {
+      if (cancelled || refreshing) return;
+      refreshing = true;
       try {
-        const r = await api<{ codes: number[] }>(`/t/${tid}/pool`, { identity });
-        const map: Record<number, CardInfo> = {};
-        for (let i = 0; i < r.codes.length; i += 500) {
-          const chunk = r.codes.slice(i, i + 500);
-          const meta = await api<CardInfo[]>(`/t/${tid}/cards?codes=${chunk.join(',')}`, { identity });
+        const r = await api<unknown>(`/t/${tid}/pool`, { identity });
+        const rawCodes = r && typeof r === 'object' && Array.isArray((r as { codes?: unknown }).codes)
+          ? (r as { codes: unknown[] }).codes
+          : [];
+        const codes = rawCodes.filter((code): code is number => typeof code === 'number' && Number.isSafeInteger(code) && code > 0);
+        for (let i = 0; i < codes.length; i += 500) {
+          const chunk = codes.slice(i, i + 500);
+          const meta = await fetchCardMetadata(`/t/${tid}/cards`, chunk, identity);
+          const map: Record<number, CardInfo> = {};
           for (const c of meta) map[c.code] = c;
+          if (!cancelled) setCardMap((m) => ({ ...m, ...map }));
         }
         if (!cancelled) {
-          setPoolCodes(r.codes);
-          setCardMap((m) => ({ ...m, ...map }));
+          setPoolCodes(codes);
         }
       } catch {
         if (!cancelled) setPoolCodes([]);
+      } finally {
+        refreshing = false;
       }
     };
     void refreshPool();
@@ -166,18 +206,19 @@ export default function DraftPage() {
       return;
     }
     try {
-      const cards = await api<CardInfo[]>(`/t/${tid}/cards?q=${encodeURIComponent(poolSearch.trim())}`, { identity });
-      setPoolResults(sortCardSearchResults(cards, poolSearch));
+      const payload = await api<unknown>(`/t/${tid}/cards?q=${encodeURIComponent(poolSearch.trim())}`, { identity });
+      if (!Array.isArray(payload)) throw new Error('INVALID_CARD_RESPONSE');
+      setPoolResults(sortCardSearchResults(payload as CardInfo[], poolSearch));
     } catch {
       setPoolResults([]);
     }
   };
 
-  useTournamentStream(tid, identity, useCallback((event: string) => {
+  const { connected } = useTournamentStream(tid, identity, useCallback((event: string) => {
     if (event === 'pack' || event === 'pick' || event === 'pause' || event === 'phase' || event === 'deck' || event === 'notice') void load();
   }, [load]));
 
-  // 倒计时归零时立即刷新（超时自动选牌可能已发生），选牌期间每 5 秒兜底轮询
+  // 倒计时归零时立即刷新（超时自动选牌可能已发生）。
   const now = useNowTick(true);
   const secondsLeft = state?.pack?.deadlineAt ? Math.max(0, Math.ceil((new Date(state.pack.deadlineAt).getTime() - now) / 1000)) : null;
   const wasMyTurn = useRef(false);
@@ -188,13 +229,12 @@ export default function DraftPage() {
       void load();
     }
   }, [secondsLeft, state?.pack?.isMyTurn, load]);
-  useEffect(() => {
-    if (state?.status !== 'drafting' && state?.status !== 'registration' && state?.status !== 'deckbuilding') return;
-    // 选牌阶段高频轮询，其他玩家选完后及时获得新列表（dev_docs/06 §6）
-    const intervalMs = state?.status === 'drafting' ? 2000 : state?.status === 'deckbuilding' ? 3000 : 5000;
-    const t = setInterval(() => void load(), intervalMs);
-    return () => clearInterval(t);
-  }, [state?.status, load]);
+  useTournamentFallbackPolling({
+    connected,
+    enabled: !!identity && (state?.status === 'drafting' || state?.status === 'registration' || state?.status === 'deckbuilding'),
+    intervalMs: state?.status === 'drafting' || state?.status === 'deckbuilding' ? 10_000 : 15_000,
+    onPoll: load,
+  });
 
   const pick = async (code: number, targetZone?: 'main' | 'extra' | 'side') => {
     // 拖拽到指定区域时校验类型（与 ygopro 一致：主卡组不收额外卡，额外区只收额外卡）

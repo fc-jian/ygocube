@@ -1,9 +1,9 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { api, Identity, resolvePlayerIdentity } from '@/lib/api';
-import { useTournamentStream } from '@/lib/sse';
+import { useTournamentFallbackPolling, useTournamentStream } from '@/lib/sse';
 import { TokenPrompt } from '@/components/TokenPrompt';
 
 interface RankRow {
@@ -28,6 +28,7 @@ export default function RankingPage() {
   const [identity, setIdentity] = useState<Identity | null>(null);
   const [needToken, setNeedToken] = useState(false);
   const [rows, setRows] = useState<RankRow[]>([]);
+  const loadBusy = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -53,7 +54,8 @@ export default function RankingPage() {
   }, [tid, pid]);
 
   const load = useCallback(async () => {
-    if (!identity) return;
+    if (!identity || loadBusy.current) return;
+    loadBusy.current = true;
     try {
       setRows(await api<RankRow[]>(`/t/${tid}/ranking`, { identity }));
     } catch (e: any) {
@@ -61,6 +63,8 @@ export default function RankingPage() {
         setIdentity(null);
         setNeedToken(true);
       }
+    } finally {
+      loadBusy.current = false;
     }
   }, [tid, identity]);
 
@@ -68,14 +72,10 @@ export default function RankingPage() {
     void load();
   }, [load]);
 
-  useTournamentStream(tid, identity, useCallback(() => void load(), [load]));
+  const { connected } = useTournamentStream(tid, identity, useCallback(() => void load(), [load]));
 
-  // 榜单随对局结果实时刷新（SSE + 5 秒轮询兜底）
-  useEffect(() => {
-    if (!identity) return;
-    const t = setInterval(() => void load(), 5000);
-    return () => clearInterval(t);
-  }, [identity, load]);
+  // 榜单随对局结果实时刷新；仅在 SSE 断开时低频兜底。
+  useTournamentFallbackPolling({ connected, enabled: !!identity, intervalMs: 15_000, onPoll: load });
 
   if (needToken) return <TokenPrompt tid={tid} pid={pid} onToken={(t) => { setNeedToken(false); setIdentity({ tid, pid, token: t }); }} />;
 

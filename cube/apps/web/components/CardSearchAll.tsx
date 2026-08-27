@@ -39,7 +39,9 @@ export function CardSearchAll({ tid, identity }: { tid: string; identity: Identi
       return;
     }
     try {
-      const cards = sortCardSearchResults(await api<CardInfo[]>(`/t/${tid}/cards?q=${encodeURIComponent(q.trim())}`, { identity }), q);
+      const cardPayload = await api<unknown>(`/t/${tid}/cards?q=${encodeURIComponent(q.trim())}`, { identity });
+      if (!Array.isArray(cardPayload)) throw new Error('INVALID_CARD_RESPONSE');
+      const cards = sortCardSearchResults(cardPayload as CardInfo[], q);
       if (!cards.length) {
         setResults([]);
         setSearched(true);
@@ -50,7 +52,9 @@ export function CardSearchAll({ tid, identity }: { tid: string; identity: Identi
       const statuses: { code: number; status: Status }[] = [];
       for (let i = 0; i < cards.length; i += 500) {
         const codes = cards.slice(i, i + 500).map((c) => c.code).join(',');
-        statuses.push(...await api<{ code: number; status: Status }[]>(`/t/${tid}/cards/status?codes=${codes}`, { identity }));
+        const statusPayload = await api<unknown>(`/t/${tid}/cards/status?codes=${codes}`, { identity });
+        if (!Array.isArray(statusPayload)) throw new Error('INVALID_STATUS_RESPONSE');
+        statuses.push(...(statusPayload as { code: number; status: Status }[]));
       }
       const statusMap = new Map(statuses.map((s) => [s.code, s.status]));
       setResults(cards.map((c) => ({ ...c, status: statusMap.get(c.code) })));
