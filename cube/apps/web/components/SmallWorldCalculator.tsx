@@ -170,7 +170,7 @@ export function SmallWorldCalculator() {
       return;
     }
     if (deck.codes.length === 0) {
-      setError('请输入主卡组的 code list。');
+      setError('请输入主卡组代码列表。');
       setResult(null);
       return;
     }
@@ -192,7 +192,7 @@ export function SmallWorldCalculator() {
       setTargetFilter('');
     } catch (cause) {
       if (cause instanceof ApiError && cause.code === 'BAD_SMALL_WORLD_INPUT') {
-        setError('输入的 code list 无效，请检查格式和数量。');
+        setError('输入的代码列表无效，请检查格式和数量。');
       } else {
         setError('计算失败，请稍后重试。');
       }
@@ -218,7 +218,7 @@ export function SmallWorldCalculator() {
       <section className="yc-panel p-4 sm:p-6">
         <div className="grid gap-4 lg:grid-cols-2">
           <label className="block">
-            <span className="mb-2 block text-sm font-semibold text-emerald-100">卡组 code list</span>
+            <span className="mb-2 block text-sm font-semibold text-emerald-100">主卡组代码列表</span>
             <textarea
               value={deckText}
               onChange={(event) => setDeckText(event.target.value)}
@@ -228,7 +228,7 @@ export function SmallWorldCalculator() {
             />
           </label>
           <label className="block">
-            <span className="mb-2 block text-sm font-semibold text-emerald-100">手牌 code list（可选）</span>
+            <span className="mb-2 block text-sm font-semibold text-emerald-100">手牌代码列表（可选）</span>
             <textarea
               value={handText}
               onChange={(event) => setHandText(event.target.value)}

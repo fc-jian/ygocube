@@ -87,7 +87,71 @@ export class ApiController {
     const name = normalizePoolName(rawName);
     const pool = this.pools.getByName(name);
     if (!pool) throw new Error('POOL_NOT_FOUND');
-    return { id: pool.id, name: pool.name, count: pool.codes.length, createdAt: pool.createdAt, codes: pool.codes };
+    return {
+      id: pool.id,
+      name: pool.name,
+      count: pool.codes.length,
+      candidateCount: pool.candidateCodes.length,
+      candidateUrl: `/pool/${encodeURIComponent(pool.name)}/candidate`,
+      createdAt: pool.createdAt,
+      codes: pool.codes,
+    };
+  }
+
+  @Public()
+  @Get('pools/:name/candidate')
+  candidatePoolPreview(@Param('name') rawName: string) {
+    const name = normalizePoolName(rawName);
+    const pool = this.pools.getByName(name);
+    if (!pool) throw new Error('POOL_NOT_FOUND');
+    return {
+      ...this.pools.candidatePoolInfo(name),
+      candidateUrl: `/pool/${encodeURIComponent(pool.name)}/candidate`,
+    };
+  }
+
+  @Public()
+  @Get('pools/:name/candidate/cards')
+  candidatePoolCards(@Param('name') rawName: string, @Query('q') q: string, @Query('codes') codes: string) {
+    const name = normalizePoolName(rawName);
+    const pool = this.pools.getByName(name);
+    if (!pool) throw new Error('POOL_NOT_FOUND');
+    const query = boundedQueryText(q);
+    const codeList = parseCardCodes(codes);
+    const rows = codeList.length
+      ? this.cards.getMany(codeList)
+      : query
+        ? this.cards.search(query, MAX_CARD_SEARCH_RESULTS)
+        : this.cards.getMany(pool.candidateCodes);
+    const stats = this.cardStats?.forPool(pool) ?? new Map();
+    const mainCodes = new Set(pool.codes);
+    const candidateCodes = new Set(pool.candidateCodes);
+    return rows.map((card) => {
+      const inPool = mainCodes.has(card.code);
+      const inCandidate = candidateCodes.has(card.code);
+      const poolStatus = inPool ? 'in_pool' : inCandidate ? 'in_candidate' : 'not_in_pool';
+      return {
+        ...card,
+        inPool,
+        inCandidate,
+        poolStatus,
+        ...(stats.has(card.code) ? { pickStats: [stats.get(card.code)!] } : { pickStats: [] }),
+      };
+    });
+  }
+
+  @Post('pools/:name/candidate/cards')
+  addCandidateCards(@Req() req: AuthedRequest, @Param('name') rawName: string, @Body() body?: Record<string, unknown>) {
+    // This route is intentionally not @Public: AuthGuard requires a valid
+    // player identity (tid/pid/token headers or scoped cookies).  The identity
+    // is used only as write authorization; the target pool is independent of
+    // the tournament that issued the player token.
+    const identity = req.identity as Identity | undefined;
+    if (!identity?.playerId) throw new Error('AUTH_REQUIRED');
+    if (!body || !Array.isArray(body.codes) || body.codes.length === 0 || body.codes.length > 500 || body.codes.some((code) => typeof code !== 'number' || !Number.isSafeInteger(code) || code <= 0)) {
+      throw new Error('BAD_PAYLOAD');
+    }
+    return this.pools.addCandidates(normalizePoolName(rawName), body.codes as number[]);
   }
 
   @Public()

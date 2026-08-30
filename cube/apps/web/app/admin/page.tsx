@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { apiErrorCode, readableApiError } from '@/lib/api';
 
 interface AdminState {
   id: number;
@@ -29,9 +30,11 @@ interface PoolInfo {
   id: number;
   name: string;
   count: number;
+  candidateCount?: number;
   createdAt: string;
   isDefault?: boolean;
   url?: string | null;
+  candidateUrl?: string | null;
 }
 
 interface PoolImportReport {
@@ -177,7 +180,8 @@ export default function AdminPage() {
         if (seq === loadSeq.current) setState(s);
       } catch (e: any) {
         if (seq !== loadSeq.current) return;
-        setMsg(e.message === 'AUTH_REQUIRED' || e.message === 'FORBIDDEN' ? '凭据缺失或无权管理该比赛' : e.message);
+        const code = apiErrorCode(e);
+        setMsg(code === 'AUTH_REQUIRED' || code === 'FORBIDDEN' ? '凭据缺失或无权管理该比赛' : readableApiError(e, '比赛状态加载失败'));
         setState(null);
       }
     }
@@ -265,18 +269,29 @@ export default function AdminPage() {
     };
   }, [load]);
 
+  const actionSuccessMessage = (path: string): string => {
+    if (path.endsWith('/pause')) return '比赛已暂停';
+    if (path.endsWith('/resume')) return '比赛已恢复';
+    if (path.endsWith('/start_draft')) return '已开始选牌';
+    if (path.endsWith('/start-deckbuilding')) return '已进入构筑阶段';
+    if (path.endsWith('/phase')) return '比赛阶段已更新';
+    if (path.endsWith('/security')) return '令牌鉴权设置已更新';
+    if (path.includes('/withdraw')) return '玩家已退赛';
+    if (path.includes('/restore')) return '玩家已恢复报名';
+    return '操作已完成';
+  };
+
   const act = async (path: string, body?: Record<string, unknown>) => {
-    const t0 = performance.now();
     try {
-      const d = await adminFetch(path, 'POST', body ?? {});
-      showMsg(`${path} ok ${JSON.stringify(d).slice(0, 100)}（${Math.round(performance.now() - t0)} ms）`);
+      await adminFetch(path, 'POST', body ?? {});
+      showMsg(actionSuccessMessage(path));
       await loadRef.current();
     } catch (e: any) {
-      if (e.message === 'INSUFFICIENT_PACK_RATIO' && e.details) {
+      if (apiErrorCode(e) === 'INSUFFICIENT_PACK_RATIO' && e.details) {
         const d = e.details as { extraRatioPercent?: number; requiredMain?: number; availableMain?: number; requiredExtra?: number; availableExtra?: number };
         showMsg(`按 ${d.extraRatioPercent ?? '?'}% 组包失败：主卡需要 ${d.requiredMain ?? '?'} 张（可用 ${d.availableMain ?? '?'}），额外卡需要 ${d.requiredExtra ?? '?'} 张（可用 ${d.availableExtra ?? '?'})`);
       } else {
-        showMsg(`${path} -> ${e.message}（${Math.round(performance.now() - t0)} ms）`);
+        showMsg(readableApiError(e));
       }
     }
   };
@@ -287,7 +302,7 @@ export default function AdminPage() {
       await adminFetch(`/admin/t/${state.id}/match-format`, 'PUT', formatForm);
       showMsg('赛制已保存');
       await loadRef.current();
-    } catch (e: any) { showMsg(`赛制保存失败：${e.message}`); }
+    } catch (e: any) { showMsg(`赛制保存失败：${readableApiError(e)}`); }
   };
 
   const enterMatches = async () => {
@@ -315,7 +330,7 @@ export default function AdminPage() {
       showMsg(dsq.length ? `已进入对战；DSQ：${dsq.join('、')}` : '卡组检查通过，已进入对战');
       await loadRef.current();
     } catch (e: any) {
-      showMsg(`进入对战失败：${e.message}`);
+      showMsg(`进入对战失败：${readableApiError(e)}`);
     }
   };
 
@@ -332,7 +347,7 @@ export default function AdminPage() {
       showMsg(`${playerId} 已增加 ${seconds} 秒保留时间（当前 ${Math.ceil(Number(result.reserveMs ?? 0) / 1000)} 秒）`);
       await loadRef.current();
     } catch (e: any) {
-      showMsg(`增加保留时间失败：${e.message}`);
+      showMsg(`增加保留时间失败：${readableApiError(e)}`);
     }
   };
 
@@ -365,7 +380,7 @@ export default function AdminPage() {
       setSelectedSeq(null);
       await loadRef.current();
     } catch (e: any) {
-      showMsg(`回溯失败：${e.message}`);
+      showMsg(`回溯失败：${readableApiError(e)}`);
     }
   };
 
@@ -428,7 +443,7 @@ export default function AdminPage() {
       setEditing(false);
       await load();
     } catch (e: any) {
-      setMsg(e.message === 'WRONG_PHASE' ? '选牌开始后不能再修改参数' : e.message);
+      setMsg(apiErrorCode(e) === 'WRONG_PHASE' ? '选牌开始后不能再修改参数' : readableApiError(e, '参数更新失败'));
     }
   };
 
@@ -446,12 +461,12 @@ export default function AdminPage() {
       await load();
       if (warningCount === 0) setPoolCodes('');
     } catch (e: any) {
-      if (e.message === 'BAD_POOL_IMPORT' && Array.isArray(e.details)) {
+      if (apiErrorCode(e) === 'BAD_POOL_IMPORT' && Array.isArray(e.details)) {
         setPoolReport({ filtered: 0, missingCodes: [], entryWarnings: e.details });
         showMsg('没有可导入的有效编号，请查看逐行警告');
         return;
       }
-      showMsg(e.message === 'POOL_EXISTS' ? '卡池名称已存在' : e.message);
+      showMsg(apiErrorCode(e) === 'POOL_EXISTS' ? '卡池名称已存在' : readableApiError(e, '创建卡池失败'));
     }
   };
 
@@ -462,7 +477,7 @@ export default function AdminPage() {
       showMsg(d.filtered > 0 ? `随机卡池已创建，自动过滤 ${d.filtered} 张 token 卡` : '随机卡池已创建');
       await load();
     } catch (e: any) {
-      showMsg(e.message);
+      showMsg(readableApiError(e, '创建随机卡池失败'));
     }
   };
 
@@ -479,7 +494,8 @@ export default function AdminPage() {
       showMsg(`权限用户 ${result.username} 已创建；token 只显示一次`);
       await loadRef.current();
     } catch (e: any) {
-      showMsg(e.message === 'CREATE_USER_EXISTS' ? '该权限用户名已存在' : (e.message === 'BAD_CREATE_USERNAME' ? '用户名须为 1–32 位字母、数字、点、下划线或连字符' : e.message));
+      const code = apiErrorCode(e);
+      showMsg(code === 'CREATE_USER_EXISTS' ? '该权限用户名已存在' : (code === 'BAD_CREATE_USERNAME' ? '用户名须为 1–32 位字母、数字、点、下划线或连字符' : readableApiError(e, '创建权限用户失败')));
     }
   };
 
@@ -491,7 +507,7 @@ export default function AdminPage() {
       showMsg(`权限用户 ${username} 已删除`);
       await loadRef.current();
     } catch (e: any) {
-      showMsg(`删除权限用户失败：${e.message}`);
+      showMsg(`删除权限用户失败：${readableApiError(e)}`);
     }
   };
 
@@ -505,18 +521,19 @@ export default function AdminPage() {
       await loadRef.current();
     } catch (e: any) {
       const details = e?.details as { tournaments?: { id: number; name: string; status: string }[] } | undefined;
-      if (e?.message === 'POOL_IN_USE') {
+      const code = apiErrorCode(e);
+      if (code === 'POOL_IN_USE') {
         const names = details?.tournaments?.map((t) => `${t.name || `#${t.id}`}（${t.status}）`) ?? [];
         showMsg(names.length > 0
           ? `卡池仍被进行中的比赛使用：${names.join('、')}。请先结束比赛后再删除。`
           : '卡池仍被进行中的比赛使用，请先结束比赛后再删除。');
-      } else if (e?.message === 'POOL_NOT_FOUND') {
+      } else if (code === 'POOL_NOT_FOUND') {
         showMsg('卡池已不存在，列表将刷新');
         await loadRef.current();
-      } else if (e?.message === 'FORBIDDEN' || e?.message === 'AUTH_REQUIRED') {
+      } else if (code === 'FORBIDDEN' || code === 'AUTH_REQUIRED') {
         showMsg('当前凭据没有删除卡池的权限，请使用超级管理员 token');
       } else {
-        showMsg(`删除卡池失败：${e?.message ?? '未知错误'}`);
+        showMsg(`删除卡池失败：${readableApiError(e)}`);
       }
     } finally {
       setDeletingPoolId(null);
@@ -531,7 +548,7 @@ export default function AdminPage() {
       showMsg(`权限用户 ${username} 的旧 token 已失效；新 token 只显示一次`);
       await loadRef.current();
     } catch (e: any) {
-      showMsg(`重生成 token 失败：${e.message}`);
+      showMsg(`重生成 token 失败：${readableApiError(e)}`);
     }
   };
 
@@ -645,7 +662,7 @@ export default function AdminPage() {
             <div className="flex flex-wrap items-center gap-2">
               <b className="text-gold">{state.name}</b>
               <span className="rounded bg-felt-edge px-2 py-0.5 text-xs">{state.status} r{state.round}</span>
-              <span className="text-xs text-slate-400">创建者：{state.createdBy ?? 'unknown'}</span>
+              <span className="text-xs text-slate-400">创建者：{state.createdBy ?? '未记录'}</span>
               {state.frozen && <span className="rounded bg-red-900 px-2 py-0.5 text-xs text-red-200">管理员冻结</span>}
               {state.status === 'registration' && (
                 <button onClick={openEdit} className="rounded bg-felt-edge px-3 py-1 text-xs hover:brightness-110">
@@ -735,7 +752,7 @@ export default function AdminPage() {
                 <div key={p.playerId} className="flex flex-wrap items-center justify-between gap-2 py-0.5">
                   <span>{p.displayName} ({p.playerId}) {p.eliminated && <b className="ml-1 rounded bg-red-900 px-1.5 py-0.5 text-red-100">DSQ</b>} {p.withdrawn && <b className="ml-1 rounded bg-amber-900 px-1.5 py-0.5 text-amber-100">退赛</b>}</span>
                   <span className="font-mono text-slate-400">
-                    seat {p.seat} · {state.pickSummary.find((s) => s.playerId === p.playerId)?.count ?? 0} 选牌 · {p.eliminated ? 'DSQ' : state.decks[p.playerId]?.lockedAt ? '已锁定' : '构筑中'}
+                    座位 {p.seat} · {state.pickSummary.find((s) => s.playerId === p.playerId)?.count ?? 0} 次选牌 · {p.eliminated ? 'DSQ' : state.decks[p.playerId]?.lockedAt ? '已锁定' : '构筑中'}
                   </span>
                   <span className="flex shrink-0 gap-1">
                     <button onClick={() => void act(`/admin/t/${state.id}/players/${encodeURIComponent(p.playerId)}/${p.withdrawn ? 'restore' : 'withdraw'}`)} disabled={p.withdrawn && state.matches.length > 0} className="rounded bg-amber-900 px-1.5 py-0.5 text-amber-100 disabled:opacity-40">{p.withdrawn ? '恢复' : '退赛'}</button>
@@ -745,7 +762,7 @@ export default function AdminPage() {
                           const d = await adminFetch(`/admin/t/${state.id}/players/${encodeURIComponent(p.playerId)}/token`, 'POST', {});
                           setShownToken({ pid: p.playerId, token: d.token });
                         } catch (e: any) {
-                          showMsg(e.message);
+                          showMsg(readableApiError(e, '获取玩家令牌失败'));
                         }
                       }}
                       className="rounded bg-felt-edge px-1.5 py-0.5 text-gold hover:brightness-110"
@@ -756,7 +773,7 @@ export default function AdminPage() {
                     <button
                       onClick={() => {
                         if (!confirm(`删除玩家 ${p.playerId}？（将清除其选牌与卡组）`)) return;
-                        void adminFetch(`/admin/t/${state.id}/players/${encodeURIComponent(p.playerId)}`, 'DELETE').then(() => loadRef.current()).catch((e: any) => showMsg(`删除失败: ${e.message}`));
+                        void adminFetch(`/admin/t/${state.id}/players/${encodeURIComponent(p.playerId)}`, 'DELETE').then(() => loadRef.current()).catch((e: any) => showMsg(`删除失败：${readableApiError(e)}`));
                       }}
                       className="rounded bg-red-900 px-1.5 py-0.5 text-red-100 hover:brightness-110"
                       title="删除玩家（报名/选牌/构筑阶段可用）"
@@ -1025,7 +1042,7 @@ export default function AdminPage() {
           {tournaments.map((t) => (
             <li key={t.id} className="flex flex-wrap items-center justify-between gap-2 rounded bg-felt-deep/50 px-2 py-1">
               <span>
-                <b>{t.name}</b> · {t.status} r{t.round} · {t.player_count} 人 · 创建者 {t.created_by ?? 'unknown'}{t.frozen ? ' · 已暂停' : ''}
+                <b>{t.name}</b> · {t.status} 第 {t.round} 轮 · {t.player_count} 人 · 创建者 {t.created_by ?? '未记录'}{t.frozen ? ' · 已暂停' : ''}
               </span>
               <span className="flex items-center gap-2">
                 <button
@@ -1045,7 +1062,7 @@ export default function AdminPage() {
                     if (!confirm('确定删除该比赛？将对局房间关闭并清除全部数据')) return;
                     adminFetch(`/admin/t/${t.id}`, 'DELETE')
                       .then(() => { setMsg('比赛已删除'); if (tid === String(t.id)) { setTid(''); setState(null); } void load(); })
-                      .catch((e: any) => setMsg(e.message));
+                      .catch((e: any) => setMsg(readableApiError(e, '删除比赛失败')));
                   }}
                   className="rounded bg-red-900 px-2 py-0.5 text-red-100 hover:brightness-110"
                 >
@@ -1118,7 +1135,7 @@ export default function AdminPage() {
           {pools.map((p) => (
             <li key={p.id} className="flex flex-wrap items-center justify-between gap-2 rounded bg-felt-deep/50 px-2 py-1">
               <span>
-                <b>{p.name}</b>{p.isDefault && <span className="ml-2 rounded bg-gold px-1.5 py-0.5 text-[0.625rem] text-felt-deep">默认</span>} · {p.count} 张卡 · {p.createdAt.slice(0, 10)}
+                <b>{p.name}</b>{p.isDefault && <span className="ml-2 rounded bg-gold px-1.5 py-0.5 text-[0.625rem] text-felt-deep">默认</span>} · {p.count} 张卡 · 候选 {p.candidateCount ?? 0} 张 · {p.createdAt.slice(0, 10)}
               </span>
               <span className="flex items-center gap-2">
                 {canEditPools && !p.isDefault && (
@@ -1126,7 +1143,7 @@ export default function AdminPage() {
                     onClick={() => {
                       adminFetch('/admin/settings/default-pool', 'PUT', { pool_id: p.id })
                         .then(() => { showMsg(`默认卡池已设为 ${p.name}`); void load(); })
-                        .catch((e: any) => showMsg(e.message));
+                        .catch((e: any) => showMsg(readableApiError(e, '设置默认卡池失败')));
                     }}
                     className="rounded bg-felt-edge px-2 py-0.5 text-emerald-100 hover:brightness-110"
                   >
@@ -1139,6 +1156,7 @@ export default function AdminPage() {
                   </a>
                 )}
                 {p.url && <a href={p.url} target="_blank" rel="noreferrer" className="rounded bg-felt-edge px-2 py-0.5 text-emerald-200 hover:brightness-110">公开查看</a>}
+                {p.candidateUrl && <a href={p.candidateUrl} target="_blank" rel="noreferrer" className="rounded bg-felt-edge px-2 py-0.5 text-cyan-200 hover:brightness-110">候选池</a>}
                 {canEditPools && (
                   <button
                     onClick={() => void deletePool(p)}

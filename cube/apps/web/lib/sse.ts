@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { Identity } from './api';
+import { encodePathSegment, Identity } from './api';
 
 // SSE stream per tournament (dev_docs/07 §2.3): reconnect + refetch full state.
 export function useTournamentStream(tid: string | null, identity: Identity | null, onEvent?: (event: string, data: any) => void) {
@@ -26,7 +26,7 @@ export function useTournamentStream(tid: string | null, identity: Identity | nul
       // EventSource cannot set authentication headers. The identity helper has
       // already written per-tournament SameSite cookies, so credentials never
       // need to appear in browser history, proxy logs, or Referer headers.
-      es = new EventSource(`/api/t/${tid}/stream`);
+      es = new EventSource(`/api/t/${encodePathSegment(tid)}/stream`);
       es.onopen = () => {
         retry = 0;
         setConnected(true);

@@ -1,7 +1,20 @@
-import { useTestDb } from './helpers';
+import { useTestDb, TEST_POOL } from './helpers';
 import { CardsService } from '../src/cards/cards.service';
 import { PoolsService } from '../src/pools/pools.service';
 import { TournamentsService } from '../src/tournaments/tournaments.service';
+import { ApiController } from '../src/api.controller';
+import { AuthGuard } from '../src/auth/auth.guard';
+import { Reflector } from '@nestjs/core';
+import { config } from '../src/config';
+
+function makeAuthContext(path: string, headers: Record<string, string>, method = 'POST') {
+  const req: any = { path, headers, query: {}, body: {}, method, cookies: {} };
+  return {
+    switchToHttp: () => ({ getRequest: () => req }),
+    getHandler: () => ({}),
+    getClass: () => ({}),
+  } as any;
+}
 
 describe('card pools', () => {
   beforeEach(() => useTestDb());
@@ -117,6 +130,129 @@ describe('card pools', () => {
     expect(pools.list().find((p) => p.id === first.id)?.isDefault).toBe(false);
     pools.remove(second.id);
     expect(pools.defaultPool()).toBeNull();
+  });
+
+  it('creates an empty candidate pool and appends exact codes without duplicates', () => {
+    const cards = new CardsService();
+    const pools = new PoolsService(cards);
+    const [mainCode, candidateCode] = cards.poolCodes().slice(0, 2);
+    const pool = pools.create('candidate-empty', [mainCode]).pool;
+    expect(pool.candidateCodes).toEqual([]);
+    expect(pools.candidatePoolInfo(pool.name)).toMatchObject({
+      poolId: pool.id,
+      poolName: pool.name,
+      poolCount: 1,
+      candidateCount: 0,
+      codes: [],
+    });
+
+    const first = pools.addCandidates(pool.name, [candidateCode, candidateCode]);
+    expect(first.addedCodes).toEqual([candidateCode]);
+    expect(first.alreadyCandidateCodes).toEqual([]);
+    expect(first.codes).toEqual([candidateCode]);
+    const second = pools.addCandidates(pool.name, [candidateCode]);
+    expect(second.addedCodes).toEqual([]);
+    expect(second.alreadyCandidateCodes).toEqual([candidateCode]);
+    expect(pools.get(pool.id)?.candidateCodes).toEqual([candidateCode]);
+  });
+
+  it('never adds main-pool, missing, or token codes to the candidate pool', () => {
+    const cards = new CardsService();
+    const pools = new PoolsService(cards);
+    const [mainCode, candidateCode] = cards.poolCodes().slice(0, 2);
+    const tokenCode = 799999998;
+    cards.poolCodes();
+    require('../src/db').getDb().prepare(`INSERT OR REPLACE INTO cards
+      (code, name, type, desc, level, race, attribute, atk, def, alias, search_text, metadata_version)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(tokenCode, '候选衍生物', 0x4011, '', 1, 1, 1, 0, 0, 0, '候选衍生物', 3);
+    const pool = pools.create('candidate-filter', [mainCode]).pool;
+    const result = pools.addCandidates(pool.name, [mainCode, candidateCode, 999999999, tokenCode]);
+    expect(result.addedCodes).toEqual([candidateCode]);
+    expect(result.inPoolCodes).toEqual([mainCode]);
+    expect(result.missingCodes).toEqual([999999999]);
+    expect(result.filtered).toBe(1);
+    expect(pools.get(pool.id)?.candidateCodes).toEqual([candidateCode]);
+  });
+
+  it('removes promoted candidate codes atomically when the main pool is updated', () => {
+    const cards = new CardsService();
+    const pools = new PoolsService(cards);
+    const [mainCode, candidateCode, otherCode] = cards.poolCodes().slice(0, 3);
+    const pool = pools.create('candidate-promote', [mainCode]).pool;
+    pools.addCandidates(pool.name, [candidateCode, otherCode]);
+    const result = pools.update(pool.id, [mainCode, candidateCode]);
+    expect(result.candidateRemovedCodes).toEqual([candidateCode]);
+    expect(result.pool.codes).toEqual([mainCode, candidateCode]);
+    expect(result.pool.candidateCodes).toEqual([otherCode]);
+    const row = require('../src/db').getDb().prepare('SELECT candidate_codes_json FROM card_pools WHERE id=?').get(pool.id) as { candidate_codes_json: string };
+    expect(JSON.parse(row.candidate_codes_json)).toEqual([otherCode]);
+  });
+
+  it('returns three exact-code membership statuses for candidate search', () => {
+    const cards = new CardsService();
+    const pools = new PoolsService(cards);
+    const [mainCode, candidateCode, absentCode] = cards.poolCodes().slice(0, 3);
+    const pool = pools.create('candidate-status', [mainCode]).pool;
+    pools.addCandidates(pool.name, [candidateCode]);
+    const controller = new ApiController(null as any, null as any, null as any, null as any, cards, pools, null as any, null as any);
+    const rows = controller.candidatePoolCards(pool.name, undefined as any, `${mainCode},${candidateCode},${absentCode}`) as any[];
+    expect(rows.map((row) => [row.code, row.poolStatus, row.inPool, row.inCandidate])).toEqual([
+      [mainCode, 'in_pool', true, false],
+      [candidateCode, 'in_candidate', false, true],
+      [absentCode, 'not_in_pool', false, false],
+    ]);
+  });
+
+  it('exposes candidate preview metadata and protects the append endpoint at the controller boundary', () => {
+    const cards = new CardsService();
+    const pools = new PoolsService(cards);
+    const [mainCode, candidateCode] = cards.poolCodes().slice(0, 2);
+    const pool = pools.create('candidate-controller', [mainCode]).pool;
+    const controller = new ApiController(null as any, null as any, null as any, null as any, cards, pools, null as any, null as any);
+    expect(controller.candidatePoolPreview(pool.name)).toMatchObject({
+      poolId: pool.id,
+      poolName: pool.name,
+      candidateCount: 0,
+      candidateUrl: `/pool/${pool.name}/candidate`,
+    });
+    expect(() => controller.addCandidateCards({ identity: undefined } as any, pool.name, { codes: [candidateCode] })).toThrow('AUTH_REQUIRED');
+    const added = controller.addCandidateCards({ identity: { playerId: 'alice' } } as any, pool.name, { codes: [candidateCode] });
+    expect(added.addedCodes).toEqual([candidateCode]);
+  });
+
+  it('requires a valid player token for candidate writes, including no-token tournaments', () => {
+    const cards = new CardsService();
+    const pools = new PoolsService(cards);
+    pools.create(TEST_POOL, cards.poolCodes());
+    const tournaments = new TournamentsService(pools);
+    const tid = tournaments.create({ name: 'candidate-auth', maxPlayers: 2, cardPool: TEST_POOL }, 'test').tid;
+    const player = tournaments.join(tid, 'alice', 'Alice');
+    const guard = new AuthGuard(new Reflector());
+    expect(() => guard.canActivate(makeAuthContext('/pools/test-pool/candidate/cards', {
+      'x-tournament-id': String(tid),
+      'x-player-id': 'alice',
+    }))).toThrow();
+    expect(guard.canActivate(makeAuthContext('/pools/test-pool/candidate/cards', {
+      'x-tournament-id': String(tid),
+      'x-player-id': 'alice',
+      'x-token': player.token,
+    }))).toBe(true);
+    expect(() => guard.canActivate(makeAuthContext('/pools/test-pool/candidate/cards', {
+      'x-tournament-id': String(tid),
+      'x-player-id': 'alice',
+      'x-token': config.admin.superToken,
+    }))).toThrow();
+    tournaments.setAuthRequired(tid, false, 'test');
+    expect(() => guard.canActivate(makeAuthContext('/pools/test-pool/candidate/cards', {
+      'x-tournament-id': String(tid),
+      'x-player-id': 'alice',
+    }))).toThrow();
+    expect(guard.canActivate(makeAuthContext('/pools/test-pool/candidate/cards', {
+      'x-tournament-id': String(tid),
+      'x-player-id': 'alice',
+      'x-token': player.token,
+    }))).toBe(true);
   });
 
   it('token cards are filtered out with a warning count', () => {

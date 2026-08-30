@@ -2,12 +2,16 @@ import { Injectable } from '@nestjs/common';
 import { getDb } from '../db';
 import { CardsService } from '../cards/cards.service';
 
-// Card pools: a pool is a plain-text list of card codes (one per line) or a random
-// sample from the full card table (dev_docs/05 §9.3). Managed by the super admin.
+// Card pools: a main pool is a plain-text list of card codes (one per line) or
+// a random sample from the full card table (dev_docs/05 §9.3), managed by the
+// super admin. Each row also owns an append-only candidate list that players
+// may contribute to through the public candidate endpoint.
 export interface CardPool {
   id: number;
   name: string;
   codes: number[];
+  /** Append-only suggestions bound to this main pool. */
+  candidateCodes: number[];
   createdAt: string;
 }
 
@@ -16,6 +20,7 @@ export interface CardPool {
 // stable and cannot introduce another path/query segment.
 export const POOL_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const MAX_POOL_CODES = 100_000;
+const MAX_CANDIDATE_CODES_PER_REQUEST = 500;
 
 export function normalizePoolName(value: unknown): string {
   if (typeof value !== 'string') throw new Error('BAD_POOL_NAME');
@@ -53,24 +58,74 @@ interface PoolRow {
   name: string;
   codes_json: string;
   created_at: string;
+  candidate_codes_json: string | null;
+}
+
+export interface CandidatePoolInfo {
+  poolId: number;
+  poolName: string;
+  poolCount: number;
+  candidateCount: number;
+  codes: number[];
+}
+
+export interface CandidatePoolAddResult extends CandidatePoolInfo {
+  addedCodes: number[];
+  alreadyCandidateCodes: number[];
+  inPoolCodes: number[];
+  missingCodes: number[];
+  filtered: number;
 }
 
 @Injectable()
 export class PoolsService {
   constructor(private cards: CardsService) {}
 
-  list(): { id: number; name: string; count: number; createdAt: string; isDefault: boolean; url: string | null }[] {
+  private parseCodes(raw: string | null | undefined): number[] {
+    try {
+      const value = JSON.parse(raw ?? '[]');
+      return Array.isArray(value)
+        ? [...new Set(value.filter((code): code is number => Number.isSafeInteger(code) && code > 0))]
+        : [];
+    } catch {
+      return [];
+    }
+  }
+
+  private toPool(row: PoolRow): CardPool {
+    return {
+      id: row.id,
+      name: row.name,
+      codes: this.parseCodes(row.codes_json),
+      candidateCodes: this.parseCodes(row.candidate_codes_json),
+      createdAt: row.created_at,
+    };
+  }
+
+  private candidateInfo(pool: CardPool): CandidatePoolInfo {
+    return {
+      poolId: pool.id,
+      poolName: pool.name,
+      poolCount: pool.codes.length,
+      candidateCount: pool.candidateCodes.length,
+      codes: [...pool.candidateCodes],
+    };
+  }
+
+  list(): { id: number; name: string; count: number; candidateCount: number; createdAt: string; isDefault: boolean; url: string | null; candidateUrl: string | null }[] {
     const setting = getDb().prepare("SELECT value FROM app_settings WHERE key='default_pool_id'").get() as { value: string } | undefined;
     const defaultId = setting ? Number(setting.value) : null;
-    return (getDb().prepare('SELECT id, name, codes_json, created_at FROM card_pools ORDER BY name').all() as PoolRow[]).map(
+    return (getDb().prepare('SELECT id, name, codes_json, candidate_codes_json, created_at FROM card_pools ORDER BY name').all() as PoolRow[]).map(
       (r) => ({
         id: r.id,
         name: r.name,
-        count: (JSON.parse(r.codes_json) as number[]).length,
+        count: this.parseCodes(r.codes_json).length,
+        candidateCount: this.parseCodes(r.candidate_codes_json).length,
         createdAt: r.created_at,
         isDefault: r.id === defaultId,
         // Historical databases may contain names that predate the URL policy.
         url: POOL_NAME_PATTERN.test(r.name) ? `/pool/${encodeURIComponent(r.name)}` : null,
+        candidateUrl: POOL_NAME_PATTERN.test(r.name) ? `/pool/${encodeURIComponent(r.name)}/candidate` : null,
       }),
     );
   }
@@ -162,9 +217,9 @@ export class PoolsService {
     const exists = getDb().prepare('SELECT 1 FROM card_pools WHERE name=?').get(name) as PoolRow | undefined;
     if (exists) throw new Error('POOL_EXISTS');
     const row = getDb()
-      .prepare('INSERT INTO card_pools (name, codes_json, created_at) VALUES (?,?,?)')
-      .run(name, JSON.stringify(unique), new Date().toISOString());
-    return { pool: { id: Number(row.lastInsertRowid), name, codes: unique, createdAt: new Date().toISOString() }, filtered, missingCodes, entryWarnings };
+      .prepare('INSERT INTO card_pools (name, codes_json, created_at, candidate_codes_json) VALUES (?,?,?,?)')
+      .run(name, JSON.stringify(unique), new Date().toISOString(), '[]');
+    return { pool: { id: Number(row.lastInsertRowid), name, codes: unique, candidateCodes: [], createdAt: new Date().toISOString() }, filtered, missingCodes, entryWarnings };
   }
 
   createFromText(name: string, importText: string): { pool: CardPool } & PoolImportReport {
@@ -197,9 +252,9 @@ export class PoolsService {
     const exists = getDb().prepare('SELECT 1 FROM card_pools WHERE name=?').get(name) as PoolRow | undefined;
     if (exists) throw new Error('POOL_EXISTS');
     const createdAt = new Date().toISOString();
-    const row = getDb().prepare('INSERT INTO card_pools (name, codes_json, created_at) VALUES (?,?,?)').run(name, JSON.stringify(unique), createdAt);
+    const row = getDb().prepare('INSERT INTO card_pools (name, codes_json, created_at, candidate_codes_json) VALUES (?,?,?,?)').run(name, JSON.stringify(unique), createdAt, '[]');
     return {
-      pool: { id: Number(row.lastInsertRowid), name, codes: unique, createdAt },
+      pool: { id: Number(row.lastInsertRowid), name, codes: unique, candidateCodes: [], createdAt },
       filtered,
       missingCodes,
       entryWarnings: warnings,
@@ -221,9 +276,9 @@ export class PoolsService {
     const exists = getDb().prepare('SELECT 1 FROM card_pools WHERE name=?').get(name) as PoolRow | undefined;
     if (exists) throw new Error('POOL_EXISTS');
     const createdAt = new Date().toISOString();
-    const row = getDb().prepare('INSERT INTO card_pools (name, codes_json, created_at) VALUES (?,?,?)').run(name, JSON.stringify(selected), createdAt);
+    const row = getDb().prepare('INSERT INTO card_pools (name, codes_json, created_at, candidate_codes_json) VALUES (?,?,?,?)').run(name, JSON.stringify(selected), createdAt, '[]');
     return {
-      pool: { id: Number(row.lastInsertRowid), name, codes: selected, createdAt },
+      pool: { id: Number(row.lastInsertRowid), name, codes: selected, candidateCodes: [], createdAt },
       filtered: 0,
       missingCodes: [],
       entryWarnings: [],
@@ -231,25 +286,81 @@ export class PoolsService {
   }
 
   get(id: number): CardPool | null {
-    const row = getDb().prepare('SELECT id, name, codes_json, created_at FROM card_pools WHERE id=?').get(id) as PoolRow | undefined;
-    return row ? { id: row.id, name: row.name, codes: JSON.parse(row.codes_json) as number[], createdAt: row.created_at } : null;
+    const row = getDb().prepare('SELECT id, name, codes_json, candidate_codes_json, created_at FROM card_pools WHERE id=?').get(id) as PoolRow | undefined;
+    return row ? this.toPool(row) : null;
   }
 
   getByName(name: string): CardPool | null {
-    const row = getDb().prepare('SELECT id, name, codes_json, created_at FROM card_pools WHERE name=?').get(name) as PoolRow | undefined;
-    return row ? { id: row.id, name: row.name, codes: JSON.parse(row.codes_json) as number[], createdAt: row.created_at } : null;
+    const row = getDb().prepare('SELECT id, name, codes_json, candidate_codes_json, created_at FROM card_pools WHERE name=?').get(name) as PoolRow | undefined;
+    return row ? this.toPool(row) : null;
   }
 
-  update(id: number, codes: number[]): { pool: CardPool } & PoolImportReport {
-    const row = getDb().prepare('SELECT id, name, codes_json, created_at FROM card_pools WHERE id=?').get(id) as PoolRow | undefined;
+  candidatePoolInfo(name: string): CandidatePoolInfo {
+    const pool = this.getByName(name);
+    if (!pool) throw new Error('POOL_NOT_FOUND');
+    return this.candidateInfo(pool);
+  }
+
+  update(id: number, codes: number[]): { pool: CardPool; candidateRemovedCodes: number[] } & PoolImportReport {
+    const row = getDb().prepare('SELECT id, name, codes_json, candidate_codes_json, created_at FROM card_pools WHERE id=?').get(id) as PoolRow | undefined;
     if (!row) throw new Error('POOL_NOT_FOUND');
     if (!Array.isArray(codes) || codes.length > MAX_POOL_CODES) throw new Error('BAD_PAYLOAD');
     const { unique, filtered, missingCodes, entryWarnings } = this.filterCodes(codes);
     if (unique.length === 0) {
       throw Object.assign(new Error('BAD_POOL_IMPORT'), { details: { missingCodes, entryWarnings } });
     }
-    getDb().prepare('UPDATE card_pools SET codes_json=? WHERE id=?').run(JSON.stringify(unique), id);
-    return { pool: { id, name: row.name, codes: unique, createdAt: row.created_at }, filtered, missingCodes, entryWarnings };
+    const result = getDb().transaction(() => {
+      const current = getDb().prepare('SELECT id, name, codes_json, candidate_codes_json, created_at FROM card_pools WHERE id=?').get(id) as PoolRow | undefined;
+      if (!current) throw new Error('POOL_NOT_FOUND');
+      const currentCandidates = this.parseCodes(current.candidate_codes_json);
+      const mainSet = new Set(unique);
+      const candidateRemovedCodes = currentCandidates.filter((code) => mainSet.has(code));
+      const remainingCandidates = currentCandidates.filter((code) => !mainSet.has(code));
+      getDb().prepare('UPDATE card_pools SET codes_json=?, candidate_codes_json=? WHERE id=?')
+        .run(JSON.stringify(unique), JSON.stringify(remainingCandidates), id);
+      return {
+        pool: { id, name: current.name, codes: unique, candidateCodes: remainingCandidates, createdAt: current.created_at },
+        candidateRemovedCodes,
+      };
+    })();
+    return { ...result, filtered, missingCodes, entryWarnings };
+  }
+
+  /**
+   * Add exact card codes to a pool's append-only candidate list.  The parent
+   * pool is read and written in the same transaction as the candidate list so
+   * a concurrent main-pool promotion cannot create an overlap.
+   */
+  addCandidates(name: string, codes: number[]): CandidatePoolAddResult {
+    name = normalizePoolName(name);
+    if (!Array.isArray(codes) || codes.length > MAX_CANDIDATE_CODES_PER_REQUEST || codes.some((code) => !Number.isSafeInteger(code) || code <= 0)) {
+      throw new Error('BAD_PAYLOAD');
+    }
+    const requested = [...new Set(codes)];
+    const { unique, filtered, missingCodes } = this.filterCodes(requested);
+    const db = getDb();
+    return db.transaction(() => {
+      const row = db.prepare('SELECT id, name, codes_json, candidate_codes_json, created_at FROM card_pools WHERE name=?').get(name) as PoolRow | undefined;
+      if (!row) throw new Error('POOL_NOT_FOUND');
+      const pool = this.toPool(row);
+      const mainSet = new Set(pool.codes);
+      const candidateSet = new Set(pool.candidateCodes);
+      const inPoolCodes = unique.filter((code) => mainSet.has(code));
+      const alreadyCandidateCodes = unique.filter((code) => !mainSet.has(code) && candidateSet.has(code));
+      const addedCodes = unique.filter((code) => !mainSet.has(code) && !candidateSet.has(code));
+      const nextCandidates = [...pool.candidateCodes, ...addedCodes];
+      if (addedCodes.length > 0) {
+        db.prepare('UPDATE card_pools SET candidate_codes_json=? WHERE id=?').run(JSON.stringify(nextCandidates), pool.id);
+      }
+      return {
+        ...this.candidateInfo({ ...pool, candidateCodes: nextCandidates }),
+        addedCodes,
+        alreadyCandidateCodes,
+        inPoolCodes,
+        missingCodes,
+        filtered,
+      };
+    })();
   }
 
   remove(id: number): { id: number } {

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
-import { api, apiDownload, Identity, resolvePlayerIdentity } from '@/lib/api';
+import { api, apiDownload, encodePathSegment, Identity, readableApiError, resolvePlayerIdentity } from '@/lib/api';
 import { useTournamentFallbackPolling, useTournamentStream } from '@/lib/sse';
 import { DraftState } from '@/components/TopBar';
 import { TokenPrompt } from '@/components/TokenPrompt';
@@ -26,6 +26,8 @@ export default function MatchesPage() {
   const params = useParams<{ tid: string; pid: string }>();
   const tid = params.tid;
   const pid = params.pid;
+  const tidPath = encodePathSegment(tid);
+  const pidPath = encodePathSegment(pid);
   const [identity, setIdentity] = useState<Identity | null>(null);
   const [needToken, setNeedToken] = useState(false);
   const [matches, setMatches] = useState<MatchInfo[]>([]);
@@ -39,7 +41,7 @@ export default function MatchesPage() {
     let cancelled = false;
     (async () => {
       try {
-        const info = await api<{ authRequired: boolean }>(`/t/${tid}`, { identity: null });
+        const info = await api<{ authRequired: boolean }>(`/t/${tidPath}`, { identity: null });
         if (!cancelled) {
           if (info.authRequired === false) {
             setIdentity({ tid, pid, token: '' });
@@ -56,33 +58,36 @@ export default function MatchesPage() {
     return () => {
       cancelled = true;
     };
-  }, [tid, pid]);
+  }, [tidPath, pid]);
 
   const load = useCallback(async () => {
     if (!identity || loadBusy.current) return;
     loadBusy.current = true;
     try {
       const [ms, st] = await Promise.all([
-        api<MatchInfo[]>(`/t/${tid}/matches`, { identity }),
-        api<DraftState>(`/t/${tid}/state`, { identity }),
+        api<MatchInfo[]>(`/t/${tidPath}/matches`, { identity }),
+        api<DraftState>(`/t/${tidPath}/state`, { identity }),
       ]);
       setMatches(ms);
       setInfo(st);
+      setError('');
     } catch (e: any) {
       if (e.code === 'AUTH_REQUIRED') {
         setIdentity(null);
         setNeedToken(true);
+      } else {
+        setError(readableApiError(e, '对战信息加载失败'));
       }
     } finally {
       loadBusy.current = false;
     }
-  }, [tid, identity]);
+  }, [tidPath, identity]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  // 对局服务器地址/端口来自 config.yaml（srvpro.game_port）
+  // 对局服务器地址和端口由服务端提供。
   useEffect(() => {
     api<{ srvpro: { host: string; gamePort: number } }>('/meta', { identity: null })
       .then((m) => setServer({ host: m.srvpro.host, port: m.srvpro.gamePort }))
@@ -93,7 +98,7 @@ export default function MatchesPage() {
   useTournamentFallbackPolling({ connected, enabled: !!identity, intervalMs: 15_000, onPoll: load });
 
   if (needToken) return <TokenPrompt tid={tid} pid={pid} onToken={(t) => { setNeedToken(false); setIdentity({ tid, pid, token: t }); }} />;
-  if (!info) return <main className="p-8 text-slate-400">加载中...</main>;
+  if (!info) return <main className="p-8 text-slate-400">加载中…</main>;
 
   const myMatch = matches.find((m) => m.resultA === null && m.resultB === null);
   const cfg = (info?.config ?? {}) as { mainMin?: number; mainMax?: number; extraMax?: number; sideMax?: number; timeLimit?: number };
@@ -124,20 +129,20 @@ export default function MatchesPage() {
         </h1>
         <div className="flex flex-wrap items-center gap-2">
           <a
-            href={`/t/${tid}/deck/${encodeURIComponent(pid)}`}
+            href={`/t/${tidPath}/deck/${pidPath}`}
             className="rounded bg-felt-edge px-3 py-1.5 text-sm text-slate-200 hover:brightness-110"
           >
             返回构筑
           </a>
           <button
             type="button"
-            onClick={() => void apiDownload(`/t/${tid}/deck.ydk`, identity).then(() => setError('')).catch(() => setError('下载卡组失败，请稍后重试'))}
+            onClick={() => void apiDownload(`/t/${tidPath}/deck.ydk`, identity).then(() => setError('')).catch(() => setError('下载卡组失败，请稍后重试'))}
             className="rounded bg-felt-edge px-3 py-1.5 text-sm text-emerald-200 hover:brightness-110"
           >
             下载 ydk
           </button>
           <a
-            href={`/t/${tid}/ranking/${encodeURIComponent(pid)}`}
+            href={`/t/${tidPath}/ranking/${pidPath}`}
             className="rounded bg-felt-edge px-3 py-1.5 text-sm text-gold hover:brightness-110"
           >
             查看积分榜单
@@ -148,13 +153,13 @@ export default function MatchesPage() {
         <table className="w-full min-w-[34rem] text-sm">
         <thead className="bg-felt text-left text-xs text-slate-400">
           <tr>
-            <th className="px-3 py-2">阶段 / Round</th>
+            <th className="px-3 py-2">阶段 / 轮次</th>
             <th className="px-3 py-2">#</th>
-            <th className="px-3 py-2">You</th>
-            <th className="px-3 py-2">vs</th>
-            <th className="px-3 py-2">Opponent</th>
-            <th className="px-3 py-2">Result</th>
-            <th className="px-3 py-2">Room</th>
+            <th className="px-3 py-2">你</th>
+            <th className="px-3 py-2">对阵</th>
+            <th className="px-3 py-2">对手</th>
+            <th className="px-3 py-2">结果</th>
+            <th className="px-3 py-2">房间</th>
           </tr>
         </thead>
         <tbody className="bg-felt/60">
@@ -188,8 +193,8 @@ export default function MatchesPage() {
           </p>
           <p className="mt-2 text-xs text-slate-400">
             打开修改版 YGOPro-Cube 客户端，连接服务器{' '}
-            <code className="font-mono text-gold">{server ? `${server.host}:${server.port}` : '读取中...'}</code>
-            ，加入房间 <code className="font-mono text-gold">{myMatch.roomName ?? '等待创建房间...'}</code>
+            <code className="font-mono text-gold">{server ? `${server.host}:${server.port}` : '读取中…'}</code>
+            ，加入房间 <code className="font-mono text-gold">{myMatch.roomName ?? '等待创建房间…'}</code>
             ，昵称填写 <code className="font-mono text-gold">{pid}</code>。
           </p>
           {myMatch.roomName && (
@@ -217,7 +222,7 @@ export default function MatchesPage() {
       )}
 
       <div className="mt-4 text-xs text-slate-500">
-        服务器地址与端口由管理员在 config.yaml（srvpro.game_port）中配置；进房昵称即你的玩家 ID，请勿填错房间。
+        服务器地址与端口由管理员配置；进房昵称就是你的玩家 ID，请确认不要填错房间。
       </div>
       {error && <div className="mt-3 rounded bg-red-900/60 px-3 py-2 text-xs text-red-200" role="alert">{error}</div>}
     </main>

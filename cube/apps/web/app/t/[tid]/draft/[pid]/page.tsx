@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { api, apiDownload, clearStoredToken, Identity, resolvePlayerIdentity } from '@/lib/api';
+import { api, apiDownload, clearStoredToken, encodePathSegment, Identity, readableApiError, resolvePlayerIdentity } from '@/lib/api';
 import { useTournamentStream } from '@/lib/sse';
 import { TopBar, DeckZone, DraftState, useNowTick } from '@/components/TopBar';
 import { PackZone } from '@/components/PackZone';
@@ -20,6 +20,8 @@ export default function DraftPage() {
   const router = useRouter();
   const tid = params.tid;
   const pid = params.pid;
+  const tidPath = encodePathSegment(tid);
+  const pidPath = encodePathSegment(pid);
   const [identity, setIdentity] = useState<Identity | null>(null);
   const [needToken, setNeedToken] = useState(false);
   const [notJoined, setNotJoined] = useState(false);
@@ -37,7 +39,7 @@ export default function DraftPage() {
     let cancelled = false;
     (async () => {
       try {
-        const info = await api<{ authRequired: boolean; players: { playerId: string }[] }>(`/t/${tid}`, { identity: null });
+        const info = await api<{ authRequired: boolean; players: { playerId: string }[] }>(`/t/${tidPath}`, { identity: null });
         if (!cancelled) {
           if (!info.players?.some((p) => p.playerId === pid)) {
             setNotJoined(true);
@@ -58,13 +60,13 @@ export default function DraftPage() {
     return () => {
       cancelled = true;
     };
-  }, [tid, pid]);
+  }, [tidPath, pid]);
 
   const load = useCallback(async () => {
     if (!identity || loadBusy.current) return;
     loadBusy.current = true;
     try {
-      const raw = await api<unknown>(`/t/${tid}/state`, { identity });
+      const raw = await api<unknown>(`/t/${tidPath}/state`, { identity });
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('INVALID_STATE_RESPONSE');
       const s = raw as DraftState;
       const normalized = {
@@ -93,7 +95,7 @@ export default function DraftPage() {
         ...(alternativeCode !== null ? [alternativeCode] : []),
       ]);
       if (codes.size) {
-        const cards = await fetchCardMetadata(`/t/${tid}/cards`, [...codes], identity);
+        const cards = await fetchCardMetadata(`/t/${tidPath}/cards`, [...codes], identity);
         const map: Record<number, CardInfo> = {};
         for (const c of cards) map[c.code] = c;
         setCardMap((m) => ({ ...m, ...map }));
@@ -105,16 +107,16 @@ export default function DraftPage() {
       } else if (e.code === 'PLAYER_NOT_FOUND' || e.code === 'NOT_FOUND') {
         setNotJoined(true);
       } else {
-        setError(e.code ?? String(e));
+        setError(readableApiError(e, '比赛状态加载失败'));
       }
     } finally {
       loadBusy.current = false;
     }
-  }, [tid, identity]);
+  }, [tidPath, identity]);
 
   const updateDisplayName = useCallback(async (displayName: string) => {
     if (!identity) return;
-    const result = await api<{ playerId: string; displayName: string }>(`/t/${tid}/player/name`, {
+    const result = await api<{ playerId: string; displayName: string }>(`/t/${tidPath}/player/name`, {
       method: 'POST',
       body: { display_name: displayName },
       identity,
@@ -127,12 +129,12 @@ export default function DraftPage() {
             : player),
         }
       : current);
-  }, [identity, pid, tid]);
+  }, [identity, pid, tidPath]);
 
   const updateReady = useCallback(async (ready: boolean) => {
     if (!identity) return;
     try {
-      const result = await api<{ playerId: string; ready: boolean }>(`/t/${tid}/player/ready`, {
+      const result = await api<{ playerId: string; ready: boolean }>(`/t/${tidPath}/player/ready`, {
         method: 'POST',
         body: { ready },
         identity,
@@ -146,17 +148,17 @@ export default function DraftPage() {
           }
         : current);
     } catch (e: any) {
-      setError(e?.code === 'WRONG_PHASE' ? '报名已结束，无法修改准备状态' : (e?.code ?? String(e)));
+      setError(e?.code === 'WRONG_PHASE' ? '报名已结束，无法修改准备状态' : readableApiError(e, '更新准备状态失败'));
       throw e;
     }
-  }, [identity, pid, tid]);
+  }, [identity, pid, tidPath]);
 
   const leaveRegistration = useCallback(async () => {
     if (!identity) return;
-    await api(`/t/${tid}/player/withdraw`, { method: 'POST', identity });
+    await api(`/t/${tidPath}/player/withdraw`, { method: 'POST', identity });
     clearStoredToken(tid, pid);
-    router.replace(`/t/${tid}`);
-  }, [identity, pid, router, tid]);
+    router.replace(`/t/${tidPath}`);
+  }, [identity, pid, router, tidPath]);
 
   useEffect(() => {
     void load();
@@ -171,14 +173,14 @@ export default function DraftPage() {
       if (cancelled || refreshing) return;
       refreshing = true;
       try {
-        const r = await api<unknown>(`/t/${tid}/pool`, { identity });
+        const r = await api<unknown>(`/t/${tidPath}/pool`, { identity });
         const rawCodes = r && typeof r === 'object' && Array.isArray((r as { codes?: unknown }).codes)
           ? (r as { codes: unknown[] }).codes
           : [];
         const codes = rawCodes.filter((code): code is number => typeof code === 'number' && Number.isSafeInteger(code) && code > 0);
         for (let i = 0; i < codes.length; i += 500) {
           const chunk = codes.slice(i, i + 500);
-          const meta = await fetchCardMetadata(`/t/${tid}/cards`, chunk, identity);
+          const meta = await fetchCardMetadata(`/t/${tidPath}/cards`, chunk, identity);
           const map: Record<number, CardInfo> = {};
           for (const c of meta) map[c.code] = c;
           if (!cancelled) setCardMap((m) => ({ ...m, ...map }));
@@ -198,7 +200,7 @@ export default function DraftPage() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [state?.status, identity, tid]);
+  }, [state?.status, identity, tidPath]);
 
   const searchPool = async () => {
     if (!poolSearch.trim() || !identity) {
@@ -206,7 +208,7 @@ export default function DraftPage() {
       return;
     }
     try {
-      const payload = await api<unknown>(`/t/${tid}/cards?q=${encodeURIComponent(poolSearch.trim())}`, { identity });
+      const payload = await api<unknown>(`/t/${tidPath}/cards?q=${encodeURIComponent(poolSearch.trim())}`, { identity });
       if (!Array.isArray(payload)) throw new Error('INVALID_CARD_RESPONSE');
       setPoolResults(sortCardSearchResults(payload as CardInfo[], poolSearch));
     } catch {
@@ -250,10 +252,10 @@ export default function DraftPage() {
       }
     }
     try {
-      await api(`/t/${tid}/pick`, { method: 'POST', body: { card_code: code, ...(targetZone ? { target_zone: targetZone } : {}) }, identity });
+      await api(`/t/${tidPath}/pick`, { method: 'POST', body: { card_code: code, ...(targetZone ? { target_zone: targetZone } : {}) }, identity });
       await load();
     } catch (e: any) {
-      setError(e.code === 'NOT_YOUR_TURN' ? '当前没有可选择的牌堆（等待传递）' : (e.code === 'CARD_NOT_AVAILABLE' ? '该卡已被选走' : (e.code ?? String(e))));
+      setError(e.code === 'NOT_YOUR_TURN' ? '当前没有可选择的牌堆（等待传递）' : (e.code === 'CARD_NOT_AVAILABLE' ? '该卡已被选走' : readableApiError(e, '选牌失败')));
     }
   };
 
@@ -261,30 +263,30 @@ export default function DraftPage() {
     const previous = state?.pickAlternative ?? null;
     setState((current) => current ? { ...current, pickAlternative: code } : current);
     try {
-      await api(`/t/${tid}/pick/alternative`, { method: 'POST', body: { card_code: code }, identity });
+      await api(`/t/${tidPath}/pick/alternative`, { method: 'POST', body: { card_code: code }, identity });
     } catch (e: any) {
       // The card may have been passed/selected between the click and request;
       // keep the normal pick flow usable while surfacing other failures.
       setState((current) => current ? { ...current, pickAlternative: previous } : current);
-      if (e.code !== 'CARD_NOT_AVAILABLE' && e.code !== 'NOT_YOUR_TURN') setError(e.code ?? String(e));
+      if (e.code !== 'CARD_NOT_AVAILABLE' && e.code !== 'NOT_YOUR_TURN') setError(readableApiError(e, '添加卡片失败'));
     }
   };
 
   const move = async (code: number, from: string, to: string, index?: number, fromIndex?: number) => {
     try {
-      await api(`/t/${tid}/deck/move`, { method: 'POST', body: { card_code: code, from, to, ...(index !== undefined ? { index } : {}), ...(fromIndex !== undefined ? { from_index: fromIndex } : {}) }, identity });
+      await api(`/t/${tidPath}/deck/move`, { method: 'POST', body: { card_code: code, from, to, ...(index !== undefined ? { index } : {}), ...(fromIndex !== undefined ? { from_index: fromIndex } : {}) }, identity });
       await load();
     } catch (e: any) {
-      setError(e.code === 'WRONG_ZONE' ? '该类型卡不能放入此区域' : (e.code ?? String(e)));
+      setError(e.code === 'WRONG_ZONE' ? '该类型卡不能放入此区域' : readableApiError(e));
     }
   };
 
   const sortDeck = async () => {
     try {
-      await api(`/t/${tid}/deck/sort`, { method: 'POST', identity });
+      await api(`/t/${tidPath}/deck/sort`, { method: 'POST', identity });
       await load();
     } catch (e: any) {
-      setError(e.code ?? String(e));
+      setError(readableApiError(e, '整理卡组失败'));
     }
   };
 
@@ -308,20 +310,20 @@ export default function DraftPage() {
       return null;
     });
     return () => setCardPreviewAction(null);
-  }, [state, identity, tid, move]);
+  }, [state, identity, tidPath, move]);
 
   if (needToken) return <TokenPrompt tid={tid} pid={pid} onToken={(t) => { setNeedToken(false); setIdentity({ tid, pid, token: t }); }} />;
   if (notJoined)
     return (
       <main className="flex min-h-screen flex-col items-center justify-center gap-4">
         <p className="text-lg text-slate-200">你还没有报名参加这个比赛</p>
-        <a href={`/t/${tid}`} className="rounded bg-gold px-6 py-2 font-semibold text-felt-deep hover:brightness-110">
+        <a href={`/t/${tidPath}`} className="rounded bg-gold px-6 py-2 font-semibold text-felt-deep hover:brightness-110">
           前往报名
         </a>
       </main>
     );
   if (error && !state) return <main className="p-8 text-red-300">{error}</main>;
-  if (!state || !identity) return <main className="p-8 text-slate-400">加载中...</main>;
+  if (!state || !identity) return <main className="p-8 text-slate-400">加载中…</main>;
 
   const deck = state.deck ?? { main: [], extra: [], side: [], lockedAt: null };
   const configuredPoolId = Number(state.config.cardPoolId);
@@ -408,7 +410,7 @@ export default function DraftPage() {
       {state.status === 'deckbuilding' && (
         <div className="flex flex-1 flex-col items-center justify-center gap-4">
           <p className="text-lg text-slate-200">选牌完成，开始构筑卡组吧！</p>
-          <a href={`/t/${tid}/deck/${pid}`} className="rounded bg-gold px-6 py-2 font-semibold text-felt-deep hover:brightness-110">
+          <a href={`/t/${tidPath}/deck/${pidPath}`} className="rounded bg-gold px-6 py-2 font-semibold text-felt-deep hover:brightness-110">
             前往构筑卡组
           </a>
         </div>
@@ -416,7 +418,7 @@ export default function DraftPage() {
       {state.status === 'matches' && (
         <div className="flex flex-1 flex-col items-center justify-center gap-4">
           <p className="text-lg text-slate-200">对战已开始。</p>
-          <a href={`/t/${tid}/matches/${pid}`} className="rounded bg-gold px-6 py-2 font-semibold text-felt-deep hover:brightness-110">
+          <a href={`/t/${tidPath}/matches/${pidPath}`} className="rounded bg-gold px-6 py-2 font-semibold text-felt-deep hover:brightness-110">
             前往对战页面
           </a>
         </div>
@@ -424,7 +426,7 @@ export default function DraftPage() {
       <footer className="flex items-center justify-between border-t border-felt-edge bg-felt px-4 py-2">
         <span className="text-xs text-slate-400">已选 {state.pickedCards?.length ?? 0} 张</span>
         <button
-          onClick={() => void apiDownload(`/t/${tid}/deck.ydk`, identity).catch(() => setError('下载失败'))}
+          onClick={() => void apiDownload(`/t/${tidPath}/deck.ydk`, identity).catch(() => setError('下载失败'))}
           className="rounded bg-felt-edge px-4 py-1.5 text-sm hover:brightness-110"
         >
           下载 ydk

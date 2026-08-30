@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { clearIdentityCookies } from '@/lib/api';
+import { clearIdentityCookies, encodePathSegment, readableApiError } from '@/lib/api';
 import { getDirHandle, removeDirHandle, saveDirHandle } from '@/lib/pics';
 
 
@@ -57,7 +57,7 @@ export function IdentityWidget({
       setEditingName(false);
     } catch (e: any) {
       const code = e?.code;
-      setNameError(code === 'WRONG_PHASE' ? '选牌已开始，无法再修改显示名称' : code === 'AUTH_REQUIRED' ? '身份已失效，请重新输入令牌' : code === 'BAD_DISPLAY_NAME' ? '显示名称格式不合法' : (code ?? '名称修改失败'));
+      setNameError(code === 'WRONG_PHASE' ? '选牌已开始，无法再修改显示名称' : code === 'AUTH_REQUIRED' ? '身份已失效，请重新输入令牌' : code === 'BAD_DISPLAY_NAME' ? '显示名称格式不合法' : readableApiError(e, '名称修改失败'));
     } finally {
       setSavingName(false);
     }
@@ -89,7 +89,7 @@ export function IdentityWidget({
   if (loggedOut) {
     return (
       <span className="text-xs text-slate-400">
-        已退出 — <a href={`/t/${tid}`} className="text-gold underline">重新输入令牌</a>
+        已退出 — <a href={tid ? `/t/${encodePathSegment(tid)}` : '/'} className="text-gold underline">重新输入令牌</a>
       </span>
     );
   }
@@ -169,7 +169,7 @@ export function IdentityWidget({
         <span className="text-slate-500">无身份信息</span>
       )}
       <span className="text-slate-500">比赛 {tid ?? '-'}</span>
-      <button onClick={logout} className="rounded bg-felt-edge px-2 py-1 hover:bg-red-900 hover:text-red-100" title="退出登录（清除令牌）">
+      <button onClick={logout} className="rounded bg-felt-edge px-2 py-1 hover:bg-red-900 hover:text-red-100" title="退出当前玩家">
         退出登录
       </button>
     </div>
@@ -196,7 +196,7 @@ export function LocalPicsSetting() {
       setBound(handle.name);
       setBindError('');
     } catch (e: any) {
-      if (e?.name !== 'AbortError') setBindError('绑定失败：' + String(e?.message ?? e));
+      if (e?.name !== 'AbortError') setBindError('绑定失败，请重试');
     }
   };
 

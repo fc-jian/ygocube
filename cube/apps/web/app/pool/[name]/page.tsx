@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams } from 'next/navigation';
-import { api } from '@/lib/api';
+import { api, readableApiError } from '@/lib/api';
 import { CardInfo } from '@/lib/types';
 import { safeCardCodes, sortCardSearchResults } from '@/lib/cardInfo';
 import { buildPoolCsv } from '@/lib/poolCsv';
@@ -13,6 +13,8 @@ interface PublicPool {
   id: number;
   name: string;
   count: number;
+  candidateCount?: number;
+  candidateUrl?: string | null;
   createdAt: string;
   codes: number[];
 }
@@ -61,7 +63,7 @@ export default function PublicPoolPage() {
         setCardMap((current) => ({ ...current, ...refreshed }));
       }
     } catch (e: any) {
-      setError(e.code === 'POOL_NOT_FOUND' ? '卡池不存在或已被删除' : (e.code ?? String(e)));
+      setError(e.code === 'POOL_NOT_FOUND' ? '卡池不存在或已被删除' : readableApiError(e, '卡池加载失败'));
     } finally {
       setLoading(false);
     }
@@ -124,7 +126,7 @@ export default function PublicPoolPage() {
     });
   }, [cardMap, pickSort, pool]);
 
-  if (loading) return <main className="mx-auto max-w-6xl p-6 text-slate-400">加载卡池中...</main>;
+  if (loading) return <main className="mx-auto max-w-6xl p-6 text-slate-400">加载卡池中…</main>;
   if (!pool || error) {
     return (
       <main className="mx-auto max-w-3xl p-6 sm:p-10">
@@ -140,10 +142,16 @@ export default function PublicPoolPage() {
         <div>
           <a href="/" className="text-xs text-emerald-100/60 hover:text-gold">← 返回首页</a>
           <h1 className="yc-title mt-1 text-2xl font-bold">卡池：{pool.name}</h1>
-          <p className="text-xs text-slate-400">{pool.count} 张卡 · 只读公开预览 · 抓位统计实时更新</p>
+          <p className="text-xs text-slate-400">{pool.count} 张卡 · 候选池 {pool.candidateCount ?? 0} 张 · 抓位统计实时更新</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <LocalPicsSetting />
+          <a
+            href={pool.candidateUrl ?? `/pool/${encodedName}/candidate`}
+            className="rounded bg-felt-edge px-3 py-1.5 text-xs text-cyan-200 hover:brightness-110"
+          >
+            候选池
+          </a>
           <button
             type="button"
             onClick={downloadCsv}

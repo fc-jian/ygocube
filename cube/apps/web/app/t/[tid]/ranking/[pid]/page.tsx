@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
-import { api, Identity, resolvePlayerIdentity } from '@/lib/api';
+import { api, encodePathSegment, Identity, readableApiError, resolvePlayerIdentity } from '@/lib/api';
 import { useTournamentFallbackPolling, useTournamentStream } from '@/lib/sse';
 import { TokenPrompt } from '@/components/TokenPrompt';
 
@@ -25,16 +25,19 @@ export default function RankingPage() {
   const params = useParams<{ tid: string; pid: string }>();
   const tid = params.tid;
   const pid = params.pid;
+  const tidPath = encodePathSegment(tid);
+  const pidPath = encodePathSegment(pid);
   const [identity, setIdentity] = useState<Identity | null>(null);
   const [needToken, setNeedToken] = useState(false);
   const [rows, setRows] = useState<RankRow[]>([]);
+  const [error, setError] = useState('');
   const loadBusy = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const info = await api<{ authRequired: boolean }>(`/t/${tid}`, { identity: null });
+        const info = await api<{ authRequired: boolean }>(`/t/${tidPath}`, { identity: null });
         if (!cancelled) {
           if (info.authRequired === false) {
             setIdentity({ tid, pid, token: '' });
@@ -51,22 +54,25 @@ export default function RankingPage() {
     return () => {
       cancelled = true;
     };
-  }, [tid, pid]);
+  }, [tidPath, pid]);
 
   const load = useCallback(async () => {
     if (!identity || loadBusy.current) return;
     loadBusy.current = true;
     try {
-      setRows(await api<RankRow[]>(`/t/${tid}/ranking`, { identity }));
+      setRows(await api<RankRow[]>(`/t/${tidPath}/ranking`, { identity }));
+      setError('');
     } catch (e: any) {
       if (e.code === 'AUTH_REQUIRED') {
         setIdentity(null);
         setNeedToken(true);
+      } else {
+        setError(readableApiError(e, '积分榜单加载失败'));
       }
     } finally {
       loadBusy.current = false;
     }
-  }, [tid, identity]);
+  }, [tidPath, identity]);
 
   useEffect(() => {
     void load();
@@ -83,7 +89,7 @@ export default function RankingPage() {
     <main className="mx-auto max-w-3xl p-4 sm:p-6">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-xl font-bold text-gold">积分榜单 <span className="text-sm font-normal text-slate-400">（{pid}）</span></h1>
-        <a href={`/t/${tid}/matches/${encodeURIComponent(pid)}`} className="rounded bg-felt-edge px-3 py-1.5 text-sm text-gold hover:brightness-110">
+        <a href={`/t/${tidPath}/matches/${pidPath}`} className="rounded bg-felt-edge px-3 py-1.5 text-sm text-gold hover:brightness-110">
           返回对战页
         </a>
       </div>
@@ -123,6 +129,7 @@ export default function RankingPage() {
       </table>
       </div>
       <p className="mt-3 text-xs text-slate-500">计分：胜 3 分、平 1 分、负 0 分；同分按净胜局 → 对手胜率（OMW%）→ 对手积分排序。榜单随对局结果实时更新。</p>
+      {error && <div className="mt-3 rounded bg-red-900/60 px-3 py-2 text-xs text-red-200" role="alert">{error}</div>}
     </main>
   );
 }

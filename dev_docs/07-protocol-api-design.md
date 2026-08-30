@@ -77,8 +77,11 @@ swissRoundCount, playoffSize
 | `GET /health` | 公共健康检查 |
 | `GET /tournaments` | 公共比赛简表 |
 | `GET /pools` | 公共卡池名称/数量/`isDefault` 和合法池的 `url`，不含 code |
-| `GET /pools/:name` | 公共卡池元数据与 exact code 列表；name 必须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` |
+| `GET /pools/:name` | 公共卡池元数据与 exact code 列表，并返回 `candidateCount/candidateUrl`；name 必须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` |
 | `GET /pools/:name/cards?q=&codes=` | 公共卡牌元数据、卡池内状态和该池 exact-code 抓位统计 |
+| `GET /pools/:name/candidate` | 公开读取绑定候选池的 exact code 列表与数量 |
+| `GET /pools/:name/candidate/cards?q=&codes=` | 候选池卡牌元数据；`poolStatus` 为 `not_in_pool/in_pool/in_candidate` |
+| `POST /pools/:name/candidate/cards` | 需要任意有效玩家三要素；`{codes:number[]}` 只追加候选卡，不提供删除/替换 |
 | `GET /meta` | 公共 srvpro `host/gamePort` |
 | `GET /t/:tid` | 阶段、配置摘要、玩家、`authRequired` |
 | `POST /t/:tid/join` | 报名 `{player_id,display_name}`，返回一次性 token |
@@ -272,6 +275,13 @@ tournamentCount,sampleCount}[]` 按 exact code 返回；抓位从 1 开始，百
 `seen` 只表示玩家在某次选牌前实际看到过仍存在的卡；已被前位玩家拿走的卡不会
 因为同属一个牌堆而自动标记为 seen。构筑阶段的 `dropped` 表示初始排除，
 `other_picked` 表示其他玩家已选。
+卡池搜索另使用 `PoolMembershipStatus`：`not_in_pool` 表示主卡池和候选池均无，
+`in_pool` 表示已在主卡池，`in_candidate` 表示已在候选池。每个主卡池绑定一个
+`candidate_codes_json`（默认空数组），候选 code 按 exact 编号去重并保留追加顺序，
+不按 alias 合并。候选新增需要 `X-Tournament-Id`、`X-Player-Id`、`X-Token`，可使用
+任意比赛的 active 玩家身份；这些凭据不得出现在 URL 或请求 body。主卡池更新会在同一
+事务中移除被晋升的候选 code，并返回 `candidateRemovedCodes`，候选数据不会自动进入
+比赛牌堆。
 
 常用错误：
 

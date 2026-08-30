@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import type { CardVisibilityStatus } from '@ygocube/shared';
-import { api, Identity } from '@/lib/api';
+import { api, encodePathSegment, Identity } from '@/lib/api';
 import { CardInfo } from '@/lib/types';
 import { CardWithTooltip } from './CardImage';
 import { sortCardSearchResults } from '@/lib/cardInfo';
@@ -29,6 +29,7 @@ const STATUS_STYLE: Record<Status, string> = {
 };
 
 export function CardSearchAll({ tid, identity }: { tid: string; identity: Identity }) {
+  const tidPath = encodePathSegment(tid);
   const [q, setQ] = useState('');
   const [results, setResults] = useState<(CardInfo & { status?: Status })[]>([]);
   const [searched, setSearched] = useState(false);
@@ -39,7 +40,7 @@ export function CardSearchAll({ tid, identity }: { tid: string; identity: Identi
       return;
     }
     try {
-      const cardPayload = await api<unknown>(`/t/${tid}/cards?q=${encodeURIComponent(q.trim())}`, { identity });
+      const cardPayload = await api<unknown>(`/t/${tidPath}/cards?q=${encodeURIComponent(q.trim())}`, { identity });
       if (!Array.isArray(cardPayload)) throw new Error('INVALID_CARD_RESPONSE');
       const cards = sortCardSearchResults(cardPayload as CardInfo[], q);
       if (!cards.length) {
@@ -52,7 +53,7 @@ export function CardSearchAll({ tid, identity }: { tid: string; identity: Identi
       const statuses: { code: number; status: Status }[] = [];
       for (let i = 0; i < cards.length; i += 500) {
         const codes = cards.slice(i, i + 500).map((c) => c.code).join(',');
-        const statusPayload = await api<unknown>(`/t/${tid}/cards/status?codes=${codes}`, { identity });
+        const statusPayload = await api<unknown>(`/t/${tidPath}/cards/status?codes=${codes}`, { identity });
         if (!Array.isArray(statusPayload)) throw new Error('INVALID_STATUS_RESPONSE');
         statuses.push(...(statusPayload as { code: number; status: Status }[]));
       }

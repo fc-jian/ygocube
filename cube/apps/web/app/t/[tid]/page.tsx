@@ -2,12 +2,13 @@
 
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { api, setIdentityCookie, readIdentity } from '@/lib/api';
+import { api, encodePathSegment, readableApiError, setIdentityCookie, readIdentity } from '@/lib/api';
 
 export default function 报名参加Page() {
   const params = useParams<{ tid: string }>();
   const router = useRouter();
   const tid = params.tid;
+  const tidPath = encodePathSegment(tid);
   const [info, setInfo] = useState<any>(null);
   const [playerId, setPlayerId] = useState('');
   const [displayName, setDisplayName] = useState('');
@@ -15,8 +16,8 @@ export default function 报名参加Page() {
   const [error, setError] = useState('');
 
   useEffect(() => {
-    api(`/t/${tid}`).then(setInfo).catch(() => setError('比赛不存在'));
-  }, [tid]);
+    api(`/t/${tidPath}`).then(setInfo).catch(() => setError('比赛不存在'));
+  }, [tidPath]);
 
   const join = async () => {
     const normalizedPlayerId = playerId.trim();
@@ -37,18 +38,18 @@ export default function 报名参加Page() {
     let currentInfo = info;
     if (!currentInfo) {
       try {
-        currentInfo = await api(`/t/${tid}`);
+        currentInfo = await api(`/t/${tidPath}`);
       } catch {
         currentInfo = null;
       }
     }
     if (currentInfo?.players?.some((p: { playerId: string }) => p.playerId === normalizedPlayerId)) {
-      router.push(`/t/${tid}/draft/${encodeURIComponent(normalizedPlayerId)}`);
+      router.push(`/t/${tidPath}/draft/${encodePathSegment(normalizedPlayerId)}`);
       return;
     }
 
     try {
-      const r = await api<{ token: string }>(`/t/${tid}/join`, { method: 'POST', body: { player_id: normalizedPlayerId, display_name: displayName || normalizedPlayerId } });
+      const r = await api<{ token: string }>(`/t/${tidPath}/join`, { method: 'POST', body: { player_id: normalizedPlayerId, display_name: displayName || normalizedPlayerId } });
       setToken(r.token);
       setIdentityCookie(tid, normalizedPlayerId, r.token);
     } catch (e: any) {
@@ -56,16 +57,16 @@ export default function 报名参加Page() {
       // public summary was loaded. Refresh once and use the same recovery path.
       if (e.code === 'ALREADY_JOINED' || e.code === 'TOURNAMENT_FULL') {
         try {
-          const latest = await api<{ players?: { playerId: string }[] }>(`/t/${tid}`);
+          const latest = await api<{ players?: { playerId: string }[] }>(`/t/${tidPath}`);
           if (latest.players?.some((p) => p.playerId === normalizedPlayerId)) {
-            router.push(`/t/${tid}/draft/${encodeURIComponent(normalizedPlayerId)}`);
+            router.push(`/t/${tidPath}/draft/${encodePathSegment(normalizedPlayerId)}`);
             return;
           }
         } catch {
           // Keep the original API error below when the refresh fails.
         }
       }
-      setError(e.code ?? String(e));
+      setError(readableApiError(e, '报名失败，请稍后重试'));
     }
   };
 
@@ -80,18 +81,18 @@ export default function 报名参加Page() {
         </p>
         {token ? (
           <div className="space-y-3">
-            <p className="text-sm text-emerald-300">报名成功！请保存你的令牌（已同时保存到 cookie）：</p>
+            <p className="text-sm text-emerald-300">报名成功！请保存你的令牌（仅显示一次）：</p>
             <code className="block break-all rounded bg-felt-deep p-3 font-mono text-xs text-gold">{token}</code>
-            <a href={`/t/${tid}/draft/${encodeURIComponent(playerId.trim())}`} className="block rounded bg-gold px-4 py-2 text-center font-semibold text-felt-deep">
+            <a href={`/t/${tidPath}/draft/${encodePathSegment(playerId.trim())}`} className="block rounded bg-gold px-4 py-2 text-center font-semibold text-felt-deep">
               进入我的页面
             </a>
           </div>
         ) : existing ? (
           <div className="space-y-3">
             <p className="text-sm text-slate-300">
-              已以 <b>{existing.pid}</b>.
+              已登录：<b>{existing.pid}</b>。
             </p>
-            <a href={`/t/${tid}/draft/${encodeURIComponent(existing.pid)}`} className="block rounded bg-gold px-4 py-2 text-center font-semibold text-felt-deep">
+            <a href={`/t/${tidPath}/draft/${encodePathSegment(existing.pid)}`} className="block rounded bg-gold px-4 py-2 text-center font-semibold text-felt-deep">
               进入我的页面
             </a>
           </div>

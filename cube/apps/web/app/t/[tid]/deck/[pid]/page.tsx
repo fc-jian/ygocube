@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
-import { api, apiDownload, Identity, resolvePlayerIdentity } from '@/lib/api';
+import { api, apiDownload, encodePathSegment, Identity, readableApiError, resolvePlayerIdentity } from '@/lib/api';
 import { useTournamentStream } from '@/lib/sse';
 import { DeckZone, DraftState, useNowTick } from '@/components/TopBar';
 import { CardWithTooltip } from '@/components/CardImage';
@@ -19,6 +19,8 @@ export default function DeckPage() {
   const params = useParams<{ tid: string; pid: string }>();
   const tid = params.tid;
   const pid = params.pid;
+  const tidPath = encodePathSegment(tid);
+  const pidPath = encodePathSegment(pid);
   const [identity, setIdentity] = useState<Identity | null>(null);
   const [needToken, setNeedToken] = useState(false);
   const [notJoined, setNotJoined] = useState(false);
@@ -32,7 +34,7 @@ export default function DeckPage() {
     let cancelled = false;
     (async () => {
       try {
-        const info = await api<{ authRequired: boolean; players: { playerId: string }[] }>(`/t/${tid}`, { identity: null });
+        const info = await api<{ authRequired: boolean; players: { playerId: string }[] }>(`/t/${tidPath}`, { identity: null });
         if (!cancelled) {
           if (!info.players?.some((p) => p.playerId === pid)) {
             setNotJoined(true);
@@ -53,13 +55,13 @@ export default function DeckPage() {
     return () => {
       cancelled = true;
     };
-  }, [tid, pid]);
+  }, [tidPath, pid]);
 
   const load = useCallback(async () => {
     if (!identity || loadBusy.current) return;
     loadBusy.current = true;
     try {
-      const raw = await api<unknown>(`/t/${tid}/state`, { identity });
+      const raw = await api<unknown>(`/t/${tidPath}/state`, { identity });
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('INVALID_STATE_RESPONSE');
       const s = raw as DraftState;
       const normalized = {
@@ -77,7 +79,7 @@ export default function DeckPage() {
       setState(normalized);
       const codes = new Set<number>(normalized.pickedCards);
       if (codes.size) {
-        const cards = await fetchCardMetadata(`/t/${tid}/cards`, [...codes], identity);
+        const cards = await fetchCardMetadata(`/t/${tidPath}/cards`, [...codes], identity);
         const map: Record<number, CardInfo> = {};
         for (const c of cards) map[c.code] = c;
         setCardMap((m) => ({ ...m, ...map }));
@@ -89,12 +91,12 @@ export default function DeckPage() {
       } else if (e.code === 'PLAYER_NOT_FOUND' || e.code === 'NOT_FOUND') {
         setNotJoined(true);
       } else {
-        setError(e.code ?? String(e));
+        setError(readableApiError(e, '比赛状态加载失败'));
       }
     } finally {
       loadBusy.current = false;
     }
-  }, [tid, identity]);
+  }, [tidPath, identity]);
 
   useEffect(() => {
     void load();
@@ -140,43 +142,43 @@ export default function DeckPage() {
   const move = async (card: number, from: string, to: string, index?: number, fromIndex?: number) => {
     try {
       flip.snapshot(); // FLIP: capture positions before the post-move re-render
-      await api(`/t/${tid}/deck/move`, {
+      await api(`/t/${tidPath}/deck/move`, {
         method: 'POST',
         body: { card_code: card, from, to, ...(index !== undefined ? { index } : {}), ...(fromIndex !== undefined ? { from_index: fromIndex } : {}) },
         identity,
       });
       await load();
     } catch (e: any) {
-      setError(e.code === 'WRONG_ZONE' ? '该类型卡不能放入此区域' : (e.code ?? String(e)));
+      setError(e.code === 'WRONG_ZONE' ? '该类型卡不能放入此区域' : readableApiError(e));
     }
   };
 
   const sortDeck = async () => {
     try {
       flip.snapshot();
-      await api(`/t/${tid}/deck/sort`, { method: 'POST', identity });
+      await api(`/t/${tidPath}/deck/sort`, { method: 'POST', identity });
       await load();
     } catch (e: any) {
-      setError(e.code ?? String(e));
+      setError(readableApiError(e, '整理卡组失败'));
     }
   };
 
   const shuffleMain = async () => {
     try {
       flip.snapshot();
-      await api(`/t/${tid}/deck/shuffle`, { method: 'POST', identity });
+      await api(`/t/${tidPath}/deck/shuffle`, { method: 'POST', identity });
       await load();
     } catch (e: any) {
-      setError(e.code ?? String(e));
+      setError(readableApiError(e, '随机排序失败'));
     }
   };
 
   const lock = async () => {
     try {
-      await api(`/t/${tid}/deck/lock`, { method: 'POST', identity });
+      await api(`/t/${tidPath}/deck/lock`, { method: 'POST', identity });
       await load();
     } catch (e: any) {
-      setError(e.details ? (e.details as string[]).join('；') : (e.code ?? String(e)));
+      setError(e.details ? (e.details as string[]).join('；') : readableApiError(e, '锁定卡组失败'));
     }
   };
 
@@ -208,14 +210,14 @@ export default function DeckPage() {
       };
     });
     return () => setCardPreviewAction(null);
-  }, [state, identity, tid, move]);
+  }, [state, identity, tidPath, move]);
 
   const unlock = async () => {
     try {
-      await api(`/t/${tid}/deck/unlock`, { method: 'POST', identity });
+      await api(`/t/${tidPath}/deck/unlock`, { method: 'POST', identity });
       await load();
     } catch (e: any) {
-      setError(e.code ?? String(e));
+      setError(readableApiError(e, '解除卡组锁定失败'));
     }
   };
 
@@ -224,12 +226,12 @@ export default function DeckPage() {
     return (
       <main className="flex min-h-screen flex-col items-center justify-center gap-4">
         <p className="text-lg text-slate-200">你还没有报名参加这个比赛</p>
-        <a href={`/t/${tid}`} className="rounded bg-gold px-6 py-2 font-semibold text-felt-deep hover:brightness-110">
+        <a href={`/t/${tidPath}`} className="rounded bg-gold px-6 py-2 font-semibold text-felt-deep hover:brightness-110">
           前往报名
         </a>
       </main>
     );
-  if (!state || !identity) return <main className="p-8 text-slate-400">加载中...</main>;
+  if (!state || !identity) return <main className="p-8 text-slate-400">加载中…</main>;
 
   const locked = !!deck.lockedAt;
   const buildSecondsLeft = state.phaseDeadlineRemainingMs !== undefined
@@ -255,11 +257,11 @@ export default function DeckPage() {
           )}
         </span>
         <span className="flex items-center gap-2 text-xs">
-          <a href={`/t/${tid}/draft/${pid}`} className="rounded bg-felt-edge px-2 py-0.5 hover:brightness-110">
+          <a href={`/t/${tidPath}/draft/${pidPath}`} className="rounded bg-felt-edge px-2 py-0.5 hover:brightness-110">
             返回选牌
           </a>
           {state.status === 'matches' && (
-            <a href={`/t/${tid}/matches/${pid}`} className="rounded bg-felt-edge px-2 py-0.5 text-gold hover:brightness-110">
+            <a href={`/t/${tidPath}/matches/${pidPath}`} className="rounded bg-felt-edge px-2 py-0.5 text-gold hover:brightness-110">
               前往对战
             </a>
           )}
@@ -271,7 +273,7 @@ export default function DeckPage() {
             <p className={`text-lg font-bold ${state.disqualified ? 'text-red-100' : 'text-emerald-100'}`}>{state.disqualified ? '卡组主卡数量不足，已被判 DSQ' : '对战阶段已开始'}</p>
             <p className="text-xs text-slate-300">{state.disqualified ? '你不会被加入本轮对阵。' : '卡组已锁定，请前往对战页查看桌号、对手和房间。'}</p>
           </div>
-          {!state.disqualified && <a href={`/t/${tid}/matches/${pid}`} className="rounded bg-gold px-6 py-2 font-semibold text-felt-deep hover:brightness-110">立即前往对战</a>}
+          {!state.disqualified && <a href={`/t/${tidPath}/matches/${pidPath}`} className="rounded bg-gold px-6 py-2 font-semibold text-felt-deep hover:brightness-110">立即前往对战</a>}
         </div>
       )}
       <div ref={flip.ref} className="flex flex-1 flex-col gap-3 p-3 md:flex-row md:overflow-hidden">
@@ -333,7 +335,7 @@ export default function DeckPage() {
       </div>
       <footer className="flex items-center justify-between border-t border-felt-edge bg-felt px-4 py-2">
         <button
-          onClick={() => void apiDownload(`/t/${tid}/deck.ydk`, identity).catch(() => setError('下载失败'))}
+          onClick={() => void apiDownload(`/t/${tidPath}/deck.ydk`, identity).catch(() => setError('下载失败'))}
           className="rounded bg-felt-edge px-4 py-1.5 text-sm hover:brightness-110"
         >
           下载 ydk

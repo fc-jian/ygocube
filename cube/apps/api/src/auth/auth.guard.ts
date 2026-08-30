@@ -74,6 +74,10 @@ function safeHashEqual(value: string, expectedHash: string | null | undefined): 
 }
 
 export const CREATE_USERNAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/;
+// Express accepts an optional trailing slash by default. Keep both spellings
+// under the strict candidate-write policy so `/.../cards/` cannot fall into
+// the tournament's no-token testing bypass.
+const CANDIDATE_WRITE_PATH = /^\/pools\/[^/]+\/candidate\/cards\/?$/;
 
 export function normalizeCreateUsername(value: unknown): string {
   if (typeof value !== 'string') throw new Error('BAD_CREATE_USERNAME');
@@ -183,6 +187,23 @@ export class AuthGuard implements CanActivate {
     const isPublic = this.reflector.getAllAndOverride<boolean>('public', [ctx.getHandler(), ctx.getClass()]);
     if (isPublic) return true;
     const req = ctx.switchToHttp().getRequest<AuthedRequest>();
+    // Candidate additions are deliberately a player-only capability.  The
+    // super token is a universal player token for legacy tournament pages, but
+    // it must not bypass the requirement for an active player's real token on
+    // this public, append-only endpoint.
+    const candidateWrite = req.method === 'POST' && CANDIDATE_WRITE_PATH.test(req.path);
+    if (candidateWrite) {
+      // The candidate endpoint is intentionally stricter than legacy player
+      // routes: its caller must send all three identity factors as headers.
+      // Do not accept the fallback query/cookie forms here, which could put a
+      // credential in a URL or accidentally reuse another tournament tab's
+      // cookie.
+      const missing: string[] = [];
+      if (!headerValue(req, 'x-tournament-id')) missing.push('tournament_id');
+      if (!headerValue(req, 'x-player-id')) missing.push('player_id');
+      if (!headerValue(req, 'x-token')) missing.push('token');
+      if (missing.length > 0) throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields: missing });
+    }
 
     if (req.path.startsWith('/admin')) {
       const adminToken = headerToken(req);
@@ -261,7 +282,10 @@ export class AuthGuard implements CanActivate {
     const tid = extractTournamentId(req);
     if (tid !== null) {
       const row = tournamentRow(tid);
-      if (row && row.auth_required === 0) {
+      // Candidate-pool writes are public to read but still require a real
+      // player token.  Do not let the tournament's optional no-token testing
+      // mode turn the append-only endpoint into an unauthenticated writer.
+      if (row && row.auth_required === 0 && !candidateWrite) {
         const cookies = cookiesOf(req);
         const rawPid =
           headerValue(req, 'x-player-id') ??
@@ -295,6 +319,9 @@ export class AuthGuard implements CanActivate {
       if (!(pathTid && cookies[`yc_pid_${pathTid}`]) && !cookies.yc_pid && !queryScalar(req, 'pid') && !req.headers['x-player-id']) fields.push('pid');
       if (!(pathTid && cookies[`yc_token_${pathTid}`]) && !cookies.yc_token && !req.headers['x-token']) fields.push('token');
       throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields });
+    }
+    if (candidateWrite && identity.isSuper) {
+      throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields: ['player_token'] });
     }
     req.identity = identity;
     return true;

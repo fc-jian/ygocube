@@ -5,6 +5,8 @@ export type TournamentPhase = 'registration' | 'drafting' | 'deckbuilding' | 'ma
 export type DuelStage = 'begin' | 'dueling' | 'siding' | 'end';
 export type MatchFormat = 'round_robin' | 'swiss' | 'double_elimination';
 export type MatchStage = 'round_robin' | 'swiss' | 'playoff' | 'winners' | 'losers' | 'grand_final';
+/** Membership of a card in a public pool and its append-only candidate pool. */
+export type PoolMembershipStatus = 'not_in_pool' | 'in_pool' | 'in_candidate';
 // Search status is player-relative during draft; deckbuilding switches to the
 // global truth and may mark a card picked by another player explicitly.
 export type CardVisibilityStatus = 'not_in_pool' | 'dropped' | 'picked' | 'other_picked' | 'seen' | 'unknown';
@@ -26,8 +28,25 @@ export interface CardInfo {
   setCodes: number[];
   setNames: string[];
   inPool?: boolean;
-  poolStatus?: 'in_pool' | 'not_in_pool';
+  inCandidate?: boolean;
+  poolStatus?: PoolMembershipStatus;
   pickStats?: CardPickStat[];
+}
+
+export interface CandidatePoolInfo {
+  poolId: number;
+  poolName: string;
+  poolCount: number;
+  candidateCount: number;
+  codes: number[];
+}
+
+export interface CandidatePoolAddResponse extends CandidatePoolInfo {
+  addedCodes: number[];
+  alreadyCandidateCodes: number[];
+  inPoolCodes: number[];
+  missingCodes: number[];
+  filtered: number;
 }
 
 export interface CardPickStat {

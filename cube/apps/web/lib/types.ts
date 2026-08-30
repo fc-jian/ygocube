@@ -15,7 +15,8 @@ export interface CardInfo {
   setCodes: number[];
   setNames: string[];
   inPool?: boolean;
-  poolStatus?: 'in_pool' | 'not_in_pool';
+  inCandidate?: boolean;
+  poolStatus?: 'in_pool' | 'not_in_pool' | 'in_candidate';
   pickStats?: {
     poolId: number;
     poolName: string;

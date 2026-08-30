@@ -484,8 +484,8 @@ export class AdminController {
       throw new Error('BAD_PAYLOAD');
     }
     const codes = body.codes as number[];
-    const { pool, filtered, missingCodes, entryWarnings } = this.pools.update(Number(id), codes);
-    return { ...pool, filtered, missingCodes, entryWarnings };
+    const { pool, filtered, missingCodes, entryWarnings, candidateRemovedCodes } = this.pools.update(Number(id), codes);
+    return { ...pool, filtered, missingCodes, entryWarnings, candidateRemovedCodes };
   }
 
   // 卡池编辑页使用的全卡查询/搜索（super admin）

@@ -147,7 +147,8 @@ export function getDb(): Database.Database {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL UNIQUE,
       codes_json TEXT NOT NULL,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      candidate_codes_json TEXT NOT NULL DEFAULT '[]'
     );
     CREATE TABLE IF NOT EXISTS admin_actions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -214,6 +215,43 @@ function migrate(d: Database.Database): void {
   // compatibility with old databases, but never populate or authenticate it.
   if (cols.some((c) => c.name === 'admin_token_hash')) d.exec('UPDATE tournaments SET admin_token_hash=NULL WHERE admin_token_hash IS NOT NULL');
   d.exec('CREATE INDEX IF NOT EXISTS idx_tournaments_created_by ON tournaments(created_by)');
+
+  // Every main pool owns an append-only candidate list.  Keep this as a column
+  // on the pool row so main-pool promotion and candidate additions can be
+  // serialized by the same SQLite write transaction.  Older databases have no
+  // column; existing rows are initialized to an empty list below.
+  const poolCols = d.prepare('PRAGMA table_info(card_pools)').all() as { name: string }[];
+  if (!poolCols.some((c) => c.name === 'candidate_codes_json')) {
+    d.exec("ALTER TABLE card_pools ADD COLUMN candidate_codes_json TEXT NOT NULL DEFAULT '[]'");
+  }
+  const poolRows = d.prepare('SELECT id, codes_json, candidate_codes_json FROM card_pools').all() as {
+    id: number;
+    codes_json: string;
+    candidate_codes_json: string | null;
+  }[];
+  const parseCodes = (raw: string | null | undefined): number[] => {
+    try {
+      const parsed = JSON.parse(raw ?? '[]');
+      return Array.isArray(parsed)
+        ? parsed.filter((code): code is number => Number.isSafeInteger(code) && code > 0)
+        : [];
+    } catch {
+      return [];
+    }
+  };
+  const normalizeCandidate = d.prepare('UPDATE card_pools SET candidate_codes_json=? WHERE id=?');
+  for (const row of poolRows) {
+    const main = new Set(parseCodes(row.codes_json));
+    // A legacy or manually edited database may contain an overlap.  Main-pool
+    // membership wins, matching the promotion rule and preventing ambiguous
+    // candidate status after migration.
+    const candidate = [...new Set(parseCodes(row.candidate_codes_json))].filter((code) => !main.has(code));
+    // Compare with the raw value too: a nullable/malformed legacy row should
+    // be rewritten to the canonical JSON array even when parsing yields [].
+    const current = row.candidate_codes_json ?? '';
+    const next = JSON.stringify(candidate);
+    if (current !== next) normalizeCandidate.run(next, row.id);
+  }
   const snapCols = d.prepare('PRAGMA table_info(tournament_snapshots)').all() as { name: string }[];
   if (!snapCols.some((c) => c.name === 'event_seq')) {
     // 快照记录全局事件 seq（旧行 seq 是相对计数，语义错配会导致重放翻倍，修复后忽略旧行）

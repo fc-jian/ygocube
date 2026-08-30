@@ -155,6 +155,19 @@ exact code；历史非法名称不自动改名，也不生成公开链接。卡�
 管理台列表提供合法池的 `/pool/:name` 链接，Web 公开页复用报名阶段的主卡/额外卡、
 搜索、详情和滚动布局。
 
+每个主卡池同时绑定一个默认为空的候选池，存储在同一 `card_pools` 行的
+`candidate_codes_json` 中。候选池通过 `/pool/:name/candidate` 公开查看；候选卡按
+exact code 去重、保留追加顺序，不按 alias 合并，也不会自动进入比赛牌堆。候选页搜索
+返回三态 `not_in_pool`（主池和候选池均无）、`in_pool`（已在主卡池）和
+`in_candidate`（已在候选池）；主卡池已有卡不能加入候选池。候选新增只接受任意比赛的
+有效 active 玩家三要素 `X-Tournament-Id`、`X-Player-Id`、`X-Token`，身份不放在 URL
+或请求 body；读取仍无需登录。候选接口只提供追加，不提供删除/替换。
+
+主卡池编辑保存与候选清理在同一 SQLite 事务中执行：保存结果中的 code 若同时存在候选
+列表，会从候选列表移除并返回 `candidateRemovedCodes`；候选新增与主池更新串行化，避免
+并发请求产生重叠。旧数据库迁移时新增列并清理已有重叠，主卡池成员优先。删除主卡池时
+候选数据随记录一并删除。
+
 每张卡的 `pickStats` 按卡池 ID（不是名称）派生：只扫描名称不以 `test` 开头、
 牌堆中每张卡都完成抽取的比赛；位置为 `pick.round + 1`，百分比为该位置除以
 对应牌包的实际卡数（末堆也按实际大小）再乘 100，alias 不合并，初始弃牌和未进入
@@ -228,7 +241,7 @@ tournament_snapshots(id, tournament_id, seq, event_seq, state_json, created_at)
 cards(code, name, type, desc, level, lscale, rscale, link_markers, race,
       attribute, atk, def, alias, setcodes_json, setnames_json, search_text,
       metadata_version)
-card_pools(id, name, codes_json, created_at)
+card_pools(id, name, codes_json, candidate_codes_json, created_at)
 admin_actions(id, tournament_id, actor, action, detail_json, created_at)
 app_settings(key, value, updated_at)
 create_users(id, username, token_hash, created_at, active)

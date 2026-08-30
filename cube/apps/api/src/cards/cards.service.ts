@@ -25,7 +25,8 @@ export interface CardInfo {
   setNames: string[];
   /** Only populated by public pool-card responses; false means search hit is outside the pool. */
   inPool?: boolean;
-  poolStatus?: 'in_pool' | 'not_in_pool';
+  inCandidate?: boolean;
+  poolStatus?: 'in_pool' | 'not_in_pool' | 'in_candidate';
   pickStats?: CardPickStat[];
 }
 
