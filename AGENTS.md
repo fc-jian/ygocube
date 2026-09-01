@@ -8,7 +8,7 @@ YGO Cube：基于 ygopro + srvpro 的轮抽模式 (Cube) 对战系统。完整�
 ygocube/
 ├── ygopro/     # fc-jian/ygopro：cube-server 分支同时承载客户端与无头宿主改造
 ├── srvpro/     # fc-jian/srvpro：CoffeeScript 服务器；改动在 cube 分支
-├── assets/     # 运行时卡牌资源挂载点（不入 Git，cards.cdb/pics/script/expansions 需单独提供）
+├── assets/     # 运行时卡牌资源挂载点（不入 Git，cards.cdb/ygocdb_cards.json/pics/script/expansions 需单独提供）
 ├── cube/       # 本项目新开发 web 控制端（apps/web=Next.js, apps/api=NestJS, packages/shared=共享契约）
 └── dev_docs/   # 规划与设计文档（中文），07 是接口契约，修改接口必须先改它
 ```
@@ -28,6 +28,7 @@ ygocube/
 - **admin token 三层**：super token 管所有 tournament + 卡池；super admin 通过 `/admin/create-users` 管理数据库创建权限用户，创建者用 `X-Create-User` + `X-Create-Token` 创建并管理自己创建的比赛（比赛记录 `created_by`）；比赛专有 `admin_token` 已取消，旧值立即失效；玩家仍为 `tournamentId + playerId + token` 三要素（管理员可按 tournament 关闭 token 鉴权，`POST /admin/t/:tid/security`）。创建用户删除或轮换后，其既有比赛管理权限立即失效。
 - **鉴权三要素**：cube 后端所有入口（REST/SSE/ydk）默认校验 `tournamentId + playerId + token`（cookie 或 header 或参数），缺一即 401。
 - **卡图原图不落服务器**：cube 后端不存储原始 pics（不入库）；前端依次尝试本地 ygopro 根目录（`pics/`、`expansions/pics/`）→ 服务端低清 avif `GET /pics/:code.avif`（`pics.avif_dir`，默认 `assets/pics_avif/`，vips 批量生成）→ 服务端原图只读代理 `GET /pics/:code`（config.yaml `pics.ygopro_root`，可选）→ 空白卡。卡牌效果文本（desc）随卡片元数据下发。
+- **卡名来源**：API 的结构化卡片数据仍来自 `cards.cdb`，但前端可见名称由 `server.card_names_json`（默认 `assets/ygocdb_cards.json`）按 exact code 提供，显示优先级为 `sc_name` → `md_name` → `jp_name`；`cn_name`、`nwbbs_n`、`cnocg_n`、`jp_ruby`、`en_name` 等字段仅加入搜索索引，不替代显示名。映射文件缺失时不回退到 CDB 的 `texts.name`。
 - **候选池**：每个 `card_pools` 记录都绑定一个默认为空的 `candidate_codes_json`。`/pool/:name/candidate` 公开只读浏览；新增候选卡需要任意有效比赛玩家的 `X-Tournament-Id` + `X-Player-Id` + `X-Token`，只允许追加、不能删除。候选池只用于提案预览，不进入比赛牌堆；主卡池保存时以事务方式移除已晋升的候选 code。
 - **所有状态在服务器**：cube 变更先写 append-only 事件日志再执行；支持快照恢复与管理员时间回溯（`POST /admin/t/:id/revert`）。
 - **协议兼容**：ygopro 消息结构只增不改；宿主新增参数追加在 spawn 参数尾部；老组合必须行为不变。

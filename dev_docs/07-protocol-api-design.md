@@ -266,6 +266,9 @@ srvpro 发送精简的 `room_name/start/end/players/first/wins`；每个 player 
 `CardInfo` 字段：`code/name/type/desc/level/lscale/rscale/linkMarkers/race/`
 `attribute/atk/def/alias/setCodes/setNames`。name/code 是 exact 卡表行；alias 只
 用于卡组规则副本上限与合法性检查，不用于卡池、搜索、状态或详情去重。
+name 的显示值来自 `server.card_names_json` 中的 `sc_name` → `md_name` → `jp_name`；
+`cn_name`、`sc_name`、`md_name`、`nwbbs_n`、`cnocg_n`、`jp_ruby`、`jp_name`、`en_name`
+均加入搜索索引，CDB 的 `texts.name` 不作为显示名或搜索别名。
 可选 `pickStats: {poolId,poolName,averagePickPosition,averagePickPercentage,packCount,
 tournamentCount,sampleCount}[]` 按 exact code 返回；抓位从 1 开始，百分比按每个牌包
 的实际卡数归一化（末堆按实际大小），只统计完整抽取且比赛名不以 `test` 开头的现存
@@ -308,7 +311,7 @@ tournamentCount,sampleCount}[]` 按 exact code 返回；抓位从 1 开始，百
 ```yaml
 admin: {super_token: "..."}
 srvpro: {url: "http://127.0.0.1:7922", api_key: "...", host: "127.0.0.1", game_port: 7911}
-server: {port: 3001, db_path: "data/cube.sqlite", cards_cdb: "...", strings_conf: "...",
+server: {port: 3001, db_path: "data/cube.sqlite", cards_cdb: "...", card_names_json: "assets/ygocdb_cards.json", strings_conf: "...",
          allowed_origins: ["http://localhost:3000"], allow_insecure_defaults: false}
 pics: {ygopro_root: "", avif_dir: "assets/pics_avif"}
 ```

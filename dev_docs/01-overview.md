@@ -113,10 +113,10 @@ YGO Cube 把 YGOPro 的对战引擎、srvpro 的联网房间和一个 Web 控制
 运行时卡牌资源必须由部署脚本或管理员另行提供：
 
 ```text
-cards.cdb   script/   pics/   expansions/
+cards.cdb   ygocdb_cards.json   script/   pics/   expansions/
 ```
 
-它们可以放在 `srvpro/ygopro/`，也可以用 `server.cards_cdb`、
+它们可以放在 `srvpro/ygopro/`，也可以用 `server.cards_cdb`、`server.card_names_json`、
 `pics.ygopro_root` 指向已有安装。原始卡图不入库；可选的低清 AVIF 由
 `pics.avif_dir` 提供。
 

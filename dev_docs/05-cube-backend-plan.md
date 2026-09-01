@@ -131,11 +131,13 @@ main 仍低于下限的玩家记录 `player_dsq` 并从后续排表排除。
 
 ## 4. 卡片与卡池
 
-`CardsService` 从配置的 `server.cards_cdb` 导入 `datas/texts`：保留字面原名、
-效果文本、类型、种族、属性、攻守、等级/刻度、Link 标记、字段 code/name 等字段。
-卡池、搜索、选牌状态和详情均使用 exact code；`alias` 只在卡组规则副本上限与
-合法性检查中作为 rules identity。卡池导入的名称校验使用 `getLiteral(code)` 的
-原始 `texts.name`，不会把“规则上视作”的别名名称当成字面名称。
+`CardsService` 从配置的 `server.cards_cdb` 导入 `datas/texts`：效果文本、类型、
+种族、属性、攻守、等级/刻度、Link 标记、字段 code/name 等结构化字段来自 CDB；
+浏览器可见的卡名不再读取 `texts.name`，而是由 `server.card_names_json` 指向的
+`assets/ygocdb_cards.json` 按 exact code 建立映射，名称优先级为 `sc_name` →
+`md_name` → `jp_name`（空白值跳过）。卡池、搜索、选牌状态和详情均使用 exact code；
+`alias` 只在卡组规则副本上限与合法性检查中作为 rules identity。卡池导入的名称
+校验使用同一映射得到的字面名称，不会把“规则上视作”的别名名称当成字面名称。
 
 卡池创建/编辑支持：
 
@@ -257,7 +259,7 @@ nullable 列兼容旧 SQLite。创建用户 token 只存 SHA-256 哈希；比较
 ## 8. 配置安全
 
 根 `config.yaml` 字段：`admin.super_token`、
-`srvpro.url/api_key/host/game_port`、`server.port/db_path/cards_cdb/strings_conf`
+`srvpro.url/api_key/host/game_port`、`server.port/db_path/cards_cdb/card_names_json/strings_conf`
 和精确的 `server.allowed_origins`，以及可选的 `pics.ygopro_root/avif_dir`。
 创建 token 不再来自配置文件；super admin 通过 `/admin/create-users` 创建/删除
 数据库权限用户。用户名规范化为小写并限制为 1--32 位 ASCII 字母、数字、`.`、`_`、`-`，

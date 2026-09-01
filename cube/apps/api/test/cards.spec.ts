@@ -1,9 +1,97 @@
-import { decodeCardFields, parseSetCodes, CardsService } from '../src/cards/cards.service';
+import fs from 'fs';
+import path from 'path';
+import { decodeCardFields, parseSetCodes, CardsService, readCardNameEntries, readCardNameMap, selectYgocdbCardName } from '../src/cards/cards.service';
+import { config } from '../src/config';
 import { useTestDb } from './helpers';
 import { getDb } from '../src/db';
 
 describe('ygopro card metadata decoding', () => {
   beforeEach(() => useTestDb());
+
+  it('selects literal names in sc/md/jp priority order and ignores blank values', () => {
+    expect(selectYgocdbCardName({ sc_name: '  简体名  ', md_name: 'Master Duel', jp_name: '日本語' })).toBe('简体名');
+    expect(selectYgocdbCardName({ sc_name: ' \t', md_name: '  Master Duel  ', jp_name: '日本語' })).toBe('Master Duel');
+    expect(selectYgocdbCardName({ sc_name: '', md_name: ' ', jp_name: ' 日本語 ' })).toBe('日本語');
+    expect(selectYgocdbCardName({ sc_name: '', md_name: '', jp_name: ' ' })).toBe('');
+  });
+
+  it('reads a code-to-name mapping from object or array exports', () => {
+    const file = path.join('/tmp', `ygocube-card-names-${process.pid}-${Date.now()}.json`);
+    fs.writeFileSync(file, JSON.stringify({
+      first: { id: 900000001, sc_name: '第一名称', md_name: '备用名称' },
+      second: { id: '900000002', sc_name: '', md_name: '第二名称' },
+      ignored: { id: 0, jp_name: '无效' },
+    }));
+    try {
+      expect([...readCardNameMap(file).entries()]).toEqual([
+        [900000001, '第一名称'],
+        [900000002, '第二名称'],
+      ]);
+      expect(readCardNameEntries(file).get(900000001)?.searchNames).toEqual(['第一名称', '备用名称']);
+    } finally {
+      fs.rmSync(file, { force: true });
+    }
+    const arrayFile = path.join('/tmp', `ygocube-card-names-array-${process.pid}-${Date.now()}.json`);
+    fs.writeFileSync(arrayFile, JSON.stringify([{ id: 900000003, jp_name: '数组名称' }]));
+    try {
+      expect(readCardNameMap(arrayFile).get(900000003)).toBe('数组名称');
+    } finally {
+      fs.rmSync(arrayFile, { force: true });
+    }
+  });
+
+  it('uses mapped names for CDB rows and never falls back to texts.name', () => {
+    const cdbPath = path.join('/tmp', `ygocube-card-cdb-${process.pid}-${Date.now()}.cdb`);
+    const namesPath = path.join('/tmp', `ygocube-card-names-${process.pid}-${Date.now()}.json`);
+    const Database = require('better-sqlite3');
+    const cdb = new Database(cdbPath);
+    cdb.exec('CREATE TABLE datas (id INTEGER PRIMARY KEY, type INTEGER, level INTEGER, race INTEGER, attribute INTEGER, atk INTEGER, def INTEGER, alias INTEGER, setcode INTEGER)');
+    cdb.exec('CREATE TABLE texts (id INTEGER PRIMARY KEY, name TEXT, desc TEXT)');
+    const add = cdb.prepare('INSERT INTO datas (id,type,level,race,attribute,atk,def,alias,setcode) VALUES (?,?,?,?,?,?,?,?,?)');
+    const addText = cdb.prepare('INSERT INTO texts (id,name,desc) VALUES (?,?,?)');
+    for (const id of [900000010, 900000011, 900000012, 900000013]) {
+      add.run(id, 0x21, 4, 1, 1, 1500, 1000, 0, 0);
+      addText.run(id, `CDB 名称 ${id}`, `效果 ${id}`);
+    }
+    cdb.close();
+    fs.writeFileSync(namesPath, JSON.stringify({
+      a: {
+        id: 900000010,
+        cn_name: '中文名称',
+        sc_name: '简体名称',
+        md_name: 'MD 名称',
+        nwbbs_n: '论坛名称',
+        cnocg_n: 'OCG 名称',
+        jp_ruby: 'JP 假名',
+        jp_name: 'JP 名称',
+        en_name: 'English Name',
+      },
+      b: { id: 900000011, sc_name: ' ', md_name: 'MD 名称' },
+      c: { id: 900000012, sc_name: '', md_name: '', jp_name: '其他日文名称' },
+      d: { id: 900000013, sc_name: '', md_name: '', jp_name: '' },
+    }));
+    const originalCdb = config.server.cardsCdb;
+    const originalNames = config.server.cardNamesJson;
+    config.server.cardsCdb = cdbPath;
+    config.server.cardNamesJson = namesPath;
+    try {
+      const cards = new CardsService();
+      expect(cards.get(900000010)?.name).toBe('简体名称');
+      expect(cards.get(900000011)?.name).toBe('MD 名称');
+      expect(cards.get(900000012)?.name).toBe('其他日文名称');
+      expect(cards.get(900000013)?.name).toBe('');
+      expect(cards.search('简体名称').map((card) => card.code)).toEqual([900000010]);
+      for (const alias of ['中文名称', '论坛名称', 'OCG 名称', 'JP 假名', 'JP 名称', 'English Name']) {
+        expect(cards.search(alias).map((card) => card.code)).toEqual([900000010]);
+      }
+      expect(cards.search('CDB 名称')).toEqual([]);
+    } finally {
+      config.server.cardsCdb = originalCdb;
+      config.server.cardNamesJson = originalNames;
+      fs.rmSync(cdbPath, { force: true });
+      fs.rmSync(namesPath, { force: true });
+    }
+  });
 
   it('unpacks level and both pendulum scales from the cdb level field', () => {
     expect(decodeCardFields(0x1000001, (8 << 24) | (1 << 16) | 4, 1200)).toEqual({
@@ -65,11 +153,11 @@ describe('ygopro card metadata decoding', () => {
     const insert = db.prepare(`INSERT OR REPLACE INTO cards
       (code, name, type, desc, level, race, attribute, atk, def, alias, search_text, metadata_version)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
-    insert.run(700000010, '链一', 0x21, '', 4, 1, 1, 0, 0, 700000011, '链一', 3);
-    insert.run(700000011, '链二', 0x21, '', 4, 1, 1, 0, 0, 700000012, '链二', 3);
-    insert.run(700000012, '链三', 0x21, '', 4, 1, 1, 0, 0, 0, '链三', 3);
+    insert.run(700000010, '链一', 0x21, '', 4, 1, 1, 0, 0, 700000011, '链一', 5);
+    insert.run(700000011, '链二', 0x21, '', 4, 1, 1, 0, 0, 700000012, '链二', 5);
+    insert.run(700000012, '链三', 0x21, '', 4, 1, 1, 0, 0, 0, '链三', 5);
     expect(cards.canonicalCode(700000010)).toBe(700000012);
-    insert.run(700000012, '链三', 0x21, '', 4, 1, 1, 0, 0, 700000010, '链三', 3);
+    insert.run(700000012, '链三', 0x21, '', 4, 1, 1, 0, 0, 700000010, '链三', 5);
     // Card metadata is immutable after startup in production, so canonical
     // chains are cached per service instance. A fresh instance models a
     // metadata reload after this direct test-fixture mutation.

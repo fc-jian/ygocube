@@ -50,9 +50,12 @@ Requirements: Node.js, pnpm, a working SQLite/native build toolchain, and the
 card/srvpro resources referenced by `config.yaml`.
 
 The root `assets/` directory is deliberately excluded from Git.  A deployment
-must provision `cards.cdb`, `script/`, `pics/`, and `expansions/` from the same
-YGOPro data release (or point `server.cards_cdb` and `pics.*` at an existing
-installation).  Card images and generated `assets/pics_avif/` thumbnails are
+must provision `cards.cdb`, `ygocdb_cards.json`, `script/`, `pics/`, and
+`expansions/` from the matching card-data release (or point
+`server.cards_cdb`/`server.card_names_json` and `pics.*` at an existing
+installation).  Browser-visible names come from `ygocdb_cards.json` in the
+order `sc_name`, `md_name`, `jp_name`; the other localized fields are indexed
+for search.  Card images and generated `assets/pics_avif/` thumbnails are
 runtime data; cloning this repository does not create or track local symlinks.
 
 ```bash

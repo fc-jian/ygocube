@@ -18,6 +18,7 @@ export interface AppConfig {
     port: number;
     dbPath: string;
     cardsCdb: string;
+    cardNamesJson: string;
     stringsConf: string;
     allowedOrigins: string[];
     allowInsecureDefaults: boolean;
@@ -61,6 +62,11 @@ function loadConfig(): AppConfig {
     return path.isAbsolute(rawValue) ? rawValue : path.resolve(base, rawValue);
   };
   const cardsCdb = resolvePath(server.cards_cdb as string | undefined, process.env.CARDS_CDB, 'srvpro/ygopro/cards.cdb');
+  const cardNamesJson = resolvePath(
+    server.card_names_json as string | undefined,
+    process.env.CARD_NAMES_JSON,
+    'assets/ygocdb_cards.json',
+  );
   const originsRaw = server.allowed_origins ?? process.env.CUBE_ALLOWED_ORIGINS ?? ['http://localhost:3000', 'http://127.0.0.1:3000'];
   const allowedOrigins = Array.isArray(originsRaw)
     ? originsRaw.map(String)
@@ -80,6 +86,7 @@ function loadConfig(): AppConfig {
       port: Number(server.port ?? process.env.PORT ?? 3001),
       dbPath: resolvePath(server.db_path as string | undefined, process.env.DB_PATH, 'data/cube.sqlite'),
       cardsCdb,
+      cardNamesJson,
       stringsConf: resolvePath(server.strings_conf as string | undefined, process.env.STRINGS_CONF, path.join(path.dirname(cardsCdb), 'strings.conf')),
       allowedOrigins,
       allowInsecureDefaults: server.allow_insecure_defaults === true || process.env.CUBE_ALLOW_INSECURE_DEFAULTS === '1',

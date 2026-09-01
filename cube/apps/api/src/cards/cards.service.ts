@@ -5,8 +5,11 @@ import { getDb } from '../db';
 import { config } from '../config';
 import type { CardPickStat } from './card-pick-stats.service';
 
-// Card metadata: imported from cards.cdb (itself a sqlite db with datas/texts tables,
-// aligned by rowid) — dev_docs/05 §8. Pics never stored here (dev_docs/06 §5).
+// Card metadata: structural/effect data is imported from cards.cdb (itself a
+// sqlite db with datas/texts tables, aligned by rowid).  The browser-visible
+// card name is deliberately sourced from the external ygocdb mapping instead
+// of cards.cdb's localized texts.name; this keeps literal names consistent
+// across the API, pool imports, search and the web client.
 export interface CardInfo {
   code: number;
   name: string;
@@ -44,7 +47,6 @@ interface DataRow {
 
 interface TextRow {
   id: number;
-  name: string;
   desc: string;
 }
 
@@ -74,9 +76,121 @@ interface CardCacheVersionRow {
 }
 
 // Re-index existing card caches when the imported search/field metadata shape
-// changes instead of serving a partially populated old cache.
-const CARD_METADATA_VERSION = 3;
+// or the card-name source changes instead of serving a partially populated old
+// cache.  Version 5 stores the display name and all localized name variants
+// from ygocdb_cards in the searchable index.
+const CARD_METADATA_VERSION = 5;
 const MONSTER = 0x1;
+
+type YgocdbCardRecord = {
+  id?: unknown;
+  cn_name?: unknown;
+  sc_name?: unknown;
+  md_name?: unknown;
+  nwbbs_n?: unknown;
+  cnocg_n?: unknown;
+  jp_ruby?: unknown;
+  jp_name?: unknown;
+  en_name?: unknown;
+};
+
+export interface CardNameEntry {
+  /** Name shown to users (sc_name -> md_name -> jp_name). */
+  displayName: string;
+  /** Every localized/printed name used by card search, in source order. */
+  searchNames: string[];
+}
+
+const CARD_NAME_FIELDS = [
+  'cn_name', 'sc_name', 'md_name', 'nwbbs_n', 'cnocg_n', 'jp_ruby', 'jp_name', 'en_name',
+] as const;
+
+/**
+ * Select the literal name exposed to clients from one ygocdb record.
+ * Whitespace-only values are treated as missing so a blank sc_name cannot
+ * mask a useful md_name or jp_name.
+ */
+export function selectYgocdbCardName(record: YgocdbCardRecord | null | undefined): string {
+  for (const key of ['sc_name', 'md_name', 'jp_name'] as const) {
+    const value = record?.[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
+function cardNameEntry(record: YgocdbCardRecord): CardNameEntry {
+  const searchNames: string[] = [];
+  const seen = new Set<string>();
+  for (const key of CARD_NAME_FIELDS) {
+    const value = record[key];
+    if (typeof value !== 'string') continue;
+    const name = value.trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    searchNames.push(name);
+  }
+  return { displayName: selectYgocdbCardName(record), searchNames };
+}
+
+/**
+ * Read the code -> card-name index used by the API.  The source
+ * file is intentionally a runtime asset (assets/ is not tracked by Git), so
+ * malformed or unavailable files fail closed to an empty map rather than
+ * allowing cards.cdb names to leak back into the browser.
+ */
+export function readCardNameEntries(file: string): Map<number, CardNameEntry> {
+  const out = new Map<number, CardNameEntry>();
+  if (!file || !fs.existsSync(file)) return out;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (error) {
+    console.warn(`card name mapping parse failed (${file}):`, (error as Error).message);
+    return out;
+  }
+  const records: unknown[] = Array.isArray(parsed)
+    ? parsed
+    : parsed && typeof parsed === 'object'
+      ? Object.values(parsed as Record<string, unknown>)
+      : [];
+  for (const raw of records) {
+    if (!raw || typeof raw !== 'object') continue;
+    const record = raw as YgocdbCardRecord;
+    const id = typeof record.id === 'number'
+      ? record.id
+      : typeof record.id === 'string' && /^\d+$/.test(record.id.trim())
+        ? Number(record.id)
+        : NaN;
+    if (!Number.isSafeInteger(id) || id <= 0) continue;
+    const entry = cardNameEntry(record);
+    // A malformed export can contain the same code more than once. Prefer a
+    // non-empty name while retaining the first-seen value for deterministic
+    // results when both records are populated.
+    const previous = out.get(id);
+    if (!previous) {
+      out.set(id, entry);
+      continue;
+    }
+    const mergedNames = [...previous.searchNames];
+    const seen = new Set(mergedNames);
+    for (const name of entry.searchNames) {
+      if (!seen.has(name)) {
+        seen.add(name);
+        mergedNames.push(name);
+      }
+    }
+    out.set(id, {
+      displayName: previous.displayName || entry.displayName,
+      searchNames: mergedNames,
+    });
+  }
+  return out;
+}
+
+/** Read only the exact-code -> display-name portion of the name index. */
+export function readCardNameMap(file: string): Map<number, string> {
+  return new Map([...readCardNameEntries(file)].map(([id, entry]) => [id, entry.displayName]));
+}
 
 const RACE_NAMES: Record<number, string> = {
   0x1: '战士族', 0x2: '魔法师族', 0x4: '天使族', 0x8: '恶魔族', 0x10: '不死族', 0x20: '机械族',
@@ -170,21 +284,29 @@ function isExtraDeckType(type: number): boolean {
 export class CardsService {
   private loaded = false;
   private readonly canonicalCodes = new Map<number, number>();
+  private readonly cardSearchNames = new Map<number, string[]>();
+  private cdbMetadataLoaded = false;
   private expansionPicDirs: string[] | null = null;
 
   private ensureLoaded(): void {
     if (this.loaded) return;
     const db = getDb();
+    let cdbPath = config.server.cardsCdb;
+    if (!fs.existsSync(cdbPath)) {
+      cdbPath = path.join(__dirname, '..', '..', '..', '..', config.server.cardsCdb);
+    }
+    this.cdbMetadataLoaded = fs.existsSync(cdbPath);
+    // Load the name index even when the metadata rows are already current so
+    // ranking can recognize localized aliases without another database read.
+    const cardNameEntries = readCardNameEntries(config.server.cardNamesJson);
+    this.cardSearchNames.clear();
+    for (const [code, entry] of cardNameEntries) this.cardSearchNames.set(code, entry.searchNames);
     const cache = db.prepare(
       'SELECT count(*) AS c, sum(CASE WHEN metadata_version>=? THEN 1 ELSE 0 END) AS current FROM cards',
     ).get(CARD_METADATA_VERSION) as CardCacheVersionRow;
     if (cache.c > 0 && cache.current === cache.c) {
       this.loaded = true;
       return;
-    }
-    let cdbPath = config.server.cardsCdb;
-    if (!fs.existsSync(cdbPath)) {
-      cdbPath = path.join(__dirname, '..', '..', '..', '..', config.server.cardsCdb);
     }
     if (fs.existsSync(cdbPath)) {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -193,7 +315,10 @@ export class CardsService {
       try {
         // cdb quirk: `id` is the INTEGER PRIMARY KEY (rowid alias) — select by `id`, not `rowid`
         const datas = cdb.prepare('SELECT id, type, level, race, attribute, atk, def, alias, CAST(setcode AS TEXT) AS setcode_text FROM datas').all() as DataRow[];
-        const texts = cdb.prepare('SELECT id, name, desc FROM texts').all() as TextRow[];
+        const texts = cdb.prepare('SELECT id, desc FROM texts').all() as TextRow[];
+        if (cardNameEntries.size === 0) {
+          console.warn(`card name mapping is empty or unavailable (${config.server.cardNamesJson}); cards will be exposed without localized names`);
+        }
         const setNameMap = readSetNames(resolveStringsConf(config.server.stringsConf, cdbPath));
         const nameByRow = new Map<number, TextRow>();
         for (const t of texts) nameByRow.set(t.id, t);
@@ -210,11 +335,16 @@ export class CardsService {
           db.prepare('DELETE FROM cards').run();
           for (const d of datas) {
             const t = nameByRow.get(d.id);
+            // Do not fall back to texts.name: the mapping is the sole source
+            // of browser-visible names.  Unknown records stay searchable by
+            // code/metadata but never reintroduce the CDB localization.
+            const literalName = cardNameEntries.get(d.id)?.displayName ?? '';
             const { level, lscale, rscale, linkMarkers, defense } = decodeCardFields(d.type, d.level, d.def);
             const setCodes = parseSetCodes(d.setcode_text);
             const setNames = setCodes.map((c) => setNameMap.get(c)).filter((x): x is string => !!x);
             const labels = [
-              t?.name ?? '', String(d.id), String(d.id).padStart(8, '0'), t?.desc ?? '',
+              ...(cardNameEntries.get(d.id)?.searchNames ?? []),
+              literalName, String(d.id), String(d.id).padStart(8, '0'), t?.desc ?? '',
               ...typeLabels(d.type), ...bitLabels(d.race ?? 0, RACE_NAMES), ...bitLabels(d.attribute ?? 0, ATTRIBUTE_NAMES),
               `等级 ${level}`, `星级 ${level}`, `攻击力 ${d.atk ?? 0}`,
               ...(d.type & 0x4000000 ? [] : [`守备力 ${defense}`]),
@@ -224,7 +354,7 @@ export class CardsService {
               ...setNames,
               ...setCodes.flatMap((code) => [String(code), `0x${code.toString(16)}`]),
             ];
-            insert.run(d.id, t?.name ?? '', d.type, t?.desc ?? '', level, lscale, rscale, linkMarkers,
+            insert.run(d.id, literalName, d.type, t?.desc ?? '', level, lscale, rscale, linkMarkers,
               d.race ?? 0, d.attribute ?? 0, d.atk ?? 0, defense, d.alias ?? 0,
               JSON.stringify(setCodes), JSON.stringify(setNames), labels.join(' ').toLowerCase(), CARD_METADATA_VERSION);
           }
@@ -386,8 +516,11 @@ export class CardsService {
       .all(...tokens.map((token) => `%${escapeLike(token)}%`)) as CardRow[];
 
     const ranked = rows.map((row) => {
-      const name = (row.name ?? '').normalize('NFKC').toLowerCase();
-      const nameMatches = tokens.map((token) => name.includes(token));
+      const names = (this.cardSearchNames.get(row.code) ?? (this.cdbMetadataLoaded ? [] : [row.name ?? '']))
+        .map((name) => name.normalize('NFKC').toLowerCase());
+      // A token counts as a name hit when it occurs in any localized name,
+      // while the display name remains the sc/md/jp fallback selected above.
+      const nameMatches = tokens.map((token) => names.some((name) => name.includes(token)));
       return { row, nameMatches, nameMatchCount: nameMatches.filter(Boolean).length };
     });
     ranked.sort((a, b) => {
