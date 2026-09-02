@@ -20,6 +20,7 @@ from card_resources import (
     sync_managed_scripts,
     validate_cdb,
     validate_image_zip,
+    merge_name_zip,
 )
 
 
@@ -123,6 +124,20 @@ class CardResourceTests(unittest.TestCase):
         previous.write_text(json.dumps({"scripts": {"files": {"a.lua": {"sha256": "old"}, "gone.lua": {}}}}), encoding="utf-8")
         current.write_text(json.dumps({"scripts": {"files": {"a.lua": {"sha256": "new"}, "b.lua": {}}}}), encoding="utf-8")
         self.assertEqual(manifest_delta(previous, current, "scripts"), {"changed": ["a.lua", "b.lua"], "removed": ["gone.lua"]})
+
+    def test_name_refresh_keys_records_by_exact_code(self) -> None:
+        archive = self.root / "names.zip"
+        with zipfile.ZipFile(archive, "w") as handle:
+            handle.writestr("cards.json", json.dumps([
+                {"id": 1001, "cid": 7, "sc_name": "甲"},
+                {"id": 1002, "cid": 7, "sc_name": "乙"},
+            ]))
+        mapping = self.root / "names.json"
+        mapping.write_text("{}", encoding="utf-8")
+        self.assertEqual(merge_name_zip(archive, mapping), 2)
+        refreshed = json.loads(mapping.read_text(encoding="utf-8"))
+        self.assertEqual(refreshed["1001"]["sc_name"], "甲")
+        self.assertEqual(refreshed["1002"]["sc_name"], "乙")
 
 
 if __name__ == "__main__":

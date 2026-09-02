@@ -354,7 +354,10 @@ def merge_name_zip(zip_path: Path, mapping_path: Path) -> int:
             code = int(raw_id)
         except (TypeError, ValueError):
             continue
-        key = str(record.get("cid", code))
+        # The API consumes records by exact printed card id.  `cid` is an
+        # upstream catalog identifier and can be shared by reprints, so it
+        # must never be the JSON key for a code-to-name refresh.
+        key = str(code)
         if key not in existing:
             added += 1
         existing[key] = record

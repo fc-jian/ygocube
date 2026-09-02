@@ -392,6 +392,11 @@ cmd_build() {
   if ((DRY_RUN)); then return 0; fi
   local binary="$ROOT_DIR/ygopro/bin/release/ygopro"
   [[ -x "$binary" ]] || die "native build did not produce $binary"
+  grep -Fq 'PRODUCT_VERSION_SUFFIX = L"-cube"' "$ROOT_DIR/ygopro/gframe/config.h" || die "ygopro version suffix -cube is missing"
+  if command -v readelf >/dev/null 2>&1; then
+    readelf -h "$binary" | grep -Eq 'Class:.*ELF(32|64)' || die "native artifact is not a valid ELF binary"
+    readelf -l "$binary" | grep -q 'Requesting program interpreter' || warn "native binary has no dynamic interpreter (static build)"
+  fi
   local ldd_output
   ldd_output="$(LD_LIBRARY_PATH="$ROOT_DIR/envs/ygocube/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ldd "$binary" 2>&1)"
   ! grep -q 'not found' <<<"$ldd_output" || { printf '%s\n' "$ldd_output" >&2; die "native binary has unresolved libraries"; }
