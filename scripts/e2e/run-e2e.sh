@@ -39,7 +39,10 @@ def unique_codes(sql, limit):
             break
     return result
 main = unique_codes("SELECT id FROM datas WHERE (type & %d)=0 AND (type & 0x4000)=0" % mask, 80)
-extra = unique_codes("SELECT id FROM datas WHERE (type & %d)!=0" % mask, 40)
+# Tokens are present in datas but cannot be placed in either a deck or a side
+# deck.  Keep them out of the generated fixture so a refreshed CDB cannot make
+# the unrelated deck-override probes fail with DECKERROR_UNKNOWNCARD.
+extra = unique_codes("SELECT id FROM datas WHERE (type & %d)!=0 AND (type & 0x4000)=0" % mask, 40)
 json.dump({"main": main, "extra": extra}, open('/tmp/cube-cardcodes.json', 'w'))
 EOF
 

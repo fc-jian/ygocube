@@ -97,8 +97,10 @@ function deckPkt(mainCodes, sideCodes) {
   return pkt(0x2, p);
 }
 function garbageDeckPkt() {
-  // 与 cube 卡组无关的垃圾卡组：BEGIN 阶段 srvpro 整包覆盖；siding 阶段回退覆盖（兼容路径）
-  return deckPkt([8964, 8964, 8964], []);
+  // If the API cannot provide a recorded cube deck, send an empty upload.  The
+  // BEGIN-stage server path still supplies the recorded deck; using a removed
+  // historical card ID here would make a refreshed cards.cdb look broken.
+  return deckPkt([], []);
 }
 
 const EXTRA_TYPE_MASK = 0x4802040;

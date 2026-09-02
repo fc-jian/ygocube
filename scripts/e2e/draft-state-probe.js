@@ -78,7 +78,7 @@ const assert = (condition, message) => { if (!condition) throw new Error(message
     assert(state.queueLengths.map((q) => q.playerId).join(',') === state.players.map((p) => p.playerId).join(','), 'queue order differs from seat order');
 
     const firstMeta = await call('GET', `/t/${tid}/cards?codes=${state.pack.cards.join(',')}`, { player: { tid, pid: 'probeA' } });
-    const firstMain = firstMeta.find((card) => (card.type & 0x4802040) === 0);
+    const firstMain = firstMeta.find((card) => (card.type & 0x4802040) === 0 && (card.type & 0x4000) === 0);
     assert(firstMain, 'probeA first pack contains no main-deck card');
     await call('POST', `/t/${tid}/pick`, { player: { tid, pid: 'probeA' }, body: { card_code: firstMain.code } });
     await call('POST', `/t/${tid}/deck/move`, { player: { tid, pid: 'probeA' }, body: { card_code: firstMain.code, from: 'main', to: 'pool' } });
