@@ -646,11 +646,17 @@ ssh_upload() {
 remote_rollback() {
   local id="$1"
   info "rolling back Aly resource backup $id"
-  ssh_exec "set -eu; root='$ALY_ROOT'; backup=\"\$root/backups/card-sync-$id\"; test -d \"\$backup\"; systemctl stop ygocube-srvpro ygocube-web ygocube-api nginx; rm -rf \"\$root/shared/srvpro/ygopro\" \"\$root/shared/assets/pics_avif\"; cp -a \"\$backup/srvpro-ygopro\" \"\$root/shared/srvpro/ygopro\"; cp -a \"\$backup/pics_avif\" \"\$root/shared/assets/pics_avif\"; if [ -f \"\$backup/ygocdb_cards.json\" ]; then cp -f \"\$backup/ygocdb_cards.json\" \"\$root/shared/assets/ygocdb_cards.json\"; fi; if [ -f \"\$backup/resource-manifest.json\" ]; then cp -f \"\$backup/resource-manifest.json\" \"\$root/shared/assets/resource-manifest.json\"; fi; chown -R ygocube:ygocube \"\$root/shared/srvpro/ygopro\" \"\$root/shared/assets/pics_avif\"; chown ygocube:ygocube \"\$root/shared/assets/ygocdb_cards.json\" \"\$root/shared/assets/resource-manifest.json\" 2>/dev/null || true; systemctl start ygocube-api; systemctl start ygocube-srvpro; systemctl start ygocube-web; systemctl start nginx; systemctl is-active ygocube-api ygocube-srvpro ygocube-web nginx" 300
+  ssh_exec "set -eu; root='$ALY_ROOT'; backup=\"\$root/backups/card-sync-$id\"; test -d \"\$backup\"; systemctl stop ygocube-srvpro ygocube-web ygocube-api nginx; rm -rf \"\$root/shared/srvpro/ygopro\" \"\$root/shared/assets/pics_avif\"; cp -a \"\$backup/srvpro-ygopro\" \"\$root/shared/srvpro/ygopro\"; cp -a \"\$backup/pics_avif\" \"\$root/shared/assets/pics_avif\"; if [ -f \"\$backup/ygocdb_cards.json\" ]; then cp -f \"\$backup/ygocdb_cards.json\" \"\$root/shared/assets/ygocdb_cards.json\"; fi; if [ -f \"\$backup/resource-manifest.json\" ]; then cp -f \"\$backup/resource-manifest.json\" \"\$root/shared/assets/resource-manifest.json\"; fi; if [ -f \"\$root/shared/data/cube.sqlite\" ]; then sqlite3 \"\$root/shared/data/cube.sqlite\" 'UPDATE cards SET metadata_version=0;'; fi; chown -R ygocube:ygocube \"\$root/shared/srvpro/ygopro\" \"\$root/shared/assets/pics_avif\"; chown ygocube:ygocube \"\$root/shared/assets/ygocdb_cards.json\" \"\$root/shared/assets/resource-manifest.json\" 2>/dev/null || true; systemctl start ygocube-api; systemctl start ygocube-srvpro; systemctl start ygocube-web; systemctl start nginx; systemctl is-active ygocube-api ygocube-srvpro ygocube-web nginx" 300
 }
 
 remote_health() {
-  ssh_exec "set -eu; systemctl is-active ygocube-api ygocube-srvpro ygocube-web nginx; test -x '$ALY_ROOT/shared/srvpro/ygopro/ygopro'; ! ldd '$ALY_ROOT/shared/srvpro/ygopro/ygopro' 2>&1 | grep -q 'not found'; sha256sum '$ALY_ROOT/shared/srvpro/ygopro/cards.cdb'" 120
+  local expected_cdb_sha="${1:-}" expected_manifest_sha="${2:-}" remote_check
+  remote_check="set -eu; systemctl is-active ygocube-api ygocube-srvpro ygocube-web nginx; test -x '$ALY_ROOT/shared/srvpro/ygopro/ygopro'; ! ldd '$ALY_ROOT/shared/srvpro/ygopro/ygopro' 2>&1 | grep -q 'not found'; actual=\$(sha256sum '$ALY_ROOT/shared/srvpro/ygopro/cards.cdb' | awk '{print \$1}'); printf 'remote_cards_sha256=%s\\n' \"\$actual\""
+  [[ -z "$expected_cdb_sha" ]] || remote_check+="; test \"\$actual\" = '$expected_cdb_sha'"
+  if [[ -n "$expected_manifest_sha" ]]; then
+    remote_check+="; test -f '$ALY_ROOT/shared/assets/resource-manifest.json'; manifest=\$(sha256sum '$ALY_ROOT/shared/assets/resource-manifest.json' | awk '{print \$1}'); printf 'remote_manifest_sha256=%s\\n' \"\$manifest\"; test \"\$manifest\" = '$expected_manifest_sha'"
+  fi
+  ssh_exec "$remote_check" 120
   curl --fail --silent --show-error --retry 5 --retry-delay 2 --max-time 30 "$ALY_PUBLIC_URL/api/health" >/dev/null
   local html assets asset
   html="$(curl --fail --silent --show-error --retry 3 --max-time 30 "$ALY_PUBLIC_URL/")"
@@ -688,7 +694,10 @@ cmd_deploy() {
     fi
     die "Aly publish failed before a complete backup was created; services were recovered by the remote safety trap"
   fi
-  remote_health
+  local expected_cdb_sha expected_manifest_sha
+  expected_cdb_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["cards"]["sha256"])' "$STATE_DIR/resource-manifest.json")"
+  expected_manifest_sha="$(sha256sum "$STATE_DIR/resource-manifest.json" | awk '{print $1}')"
+  remote_health "$expected_cdb_sha" "$expected_manifest_sha"
   cp -f "$STATE_DIR/resource-manifest.json" "$STATE_DIR/deployed-resource-manifest.json"
   info "Aly deployment completed: $RELEASE_ID"
 }

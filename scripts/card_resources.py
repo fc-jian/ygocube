@@ -27,7 +27,10 @@ MAX_IMAGE_ENTRIES = 500_000
 MAX_IMAGE_UNCOMPRESSED = 4_000_000_000
 MAX_IMAGE_ENTRY = 20_000_000
 IMAGE_SUFFIXES = {"jpg", "jpeg", "png", "webp"}
-TOKEN_TYPE = 0x4000000
+# TYPE_TOKEN is 0x4000 in the YGOPro CDB format.  0x4000000 is TYPE_LINK;
+# confusing the two would exempt Link monsters from name coverage while
+# treating actual tokens as cards that must have localized names.
+TOKEN_TYPE = 0x4000
 
 
 def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:

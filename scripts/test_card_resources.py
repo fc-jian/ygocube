@@ -45,7 +45,7 @@ class CardResourceTests(unittest.TestCase):
 
     def test_cdb_integrity_and_name_coverage_only_new_codes(self) -> None:
         cdb = self.root / "cards.cdb"
-        self.make_cdb(cdb, [(100, 1), (200, 0x4000000), (300, 1)])
+        self.make_cdb(cdb, [(100, 1), (200, 0x4000), (300, 1)])
         mapping = self.root / "names.json"
         mapping.write_text(json.dumps({"old": {"id": 100, "sc_name": "旧"}}), encoding="utf-8")
         info = validate_cdb(cdb)
