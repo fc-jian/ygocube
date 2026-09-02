@@ -19,15 +19,29 @@ STAGE="$ROOT/.staging/card-sync-$RELEASE_ID"
 BACKUP="$ROOT/backups/card-sync-$RELEASE_ID"
 OLD_HOST="$ROOT/shared/srvpro/ygopro"
 OLD_AVIF="$ROOT/shared/assets/pics_avif"
+OLD_NAMES="$ROOT/shared/assets/ygocdb_cards.json"
 DB="$ROOT/shared/data/cube.sqlite"
 mkdir -p "$BACKUP"
 exec 9>"$ROOT/.card-resource.lock"
 flock -n 9
 [[ -d "$OLD_HOST" && -d "$OLD_AVIF" && -f "$DB" && -f "$STAGE/payload.tar.gz" ]]
+systemctl is-active ygocube-api ygocube-srvpro ygocube-web nginx > "$BACKUP/services-before.txt" 2>&1 || true
 
-# Checkpoint before copying so the backup is a consistent SQLite image.  Keep
-# the sidecar files too: they are useful for forensic recovery if a process
-# writes between the checkpoint and service stop.
+# Enter maintenance before touching the database. This prevents a write from
+# racing the backup and makes the checkpoint/integrity result reproducible.
+SERVICES_STOPPED=1
+recover_services() {
+  local status=$?
+  if [[ "${SERVICES_STOPPED:-0}" == 1 ]]; then
+    systemctl start ygocube-api ygocube-srvpro ygocube-web nginx >/dev/null 2>&1 || true
+  fi
+  exit "$status"
+}
+trap recover_services EXIT
+systemctl stop ygocube-srvpro ygocube-web ygocube-api nginx
+
+# Checkpoint before copying so the backup is a consistent SQLite image. Keep
+# the sidecar files too: they are useful for forensic recovery diagnostics.
 sqlite3 "$DB" 'PRAGMA wal_checkpoint(TRUNCATE); PRAGMA integrity_check;' > "$BACKUP/db-integrity.txt"
 grep -Fxq ok "$BACKUP/db-integrity.txt"
 cp -f "$DB" "$BACKUP/cube.sqlite"
@@ -38,13 +52,14 @@ rm -rf "$BACKUP/srvpro-ygopro" "$BACKUP/pics_avif"
 cp -a "$OLD_HOST" "$BACKUP/srvpro-ygopro"
 cp -a "$OLD_AVIF" "$BACKUP/pics_avif"
 cp -a "$ROOT/current/config.yaml" "$BACKUP/config.yaml"
+[[ -f "$OLD_NAMES" ]] && cp -f "$OLD_NAMES" "$BACKUP/ygocdb_cards.json" || true
 [[ -f "$ROOT/shared/assets/resource-manifest.json" ]] && cp -f "$ROOT/shared/assets/resource-manifest.json" "$BACKUP/resource-manifest.json" || true
 
-systemctl stop ygocube-srvpro ygocube-web ygocube-api nginx
 rm -rf "$STAGE/root"
 mkdir -p "$STAGE/root/srvpro/ygopro" "$STAGE/root/assets/pics_avif"
 cp -a "$OLD_HOST"/. "$STAGE/root/srvpro/ygopro"/
 cp -a "$OLD_AVIF"/. "$STAGE/root/assets/pics_avif"/
+[[ -f "$OLD_NAMES" ]] && cp -f "$OLD_NAMES" "$STAGE/root/assets/ygocdb_cards.json" || true
 tar -xzf "$STAGE/payload.tar.gz" -C "$STAGE/root" --no-same-owner
 
 safe_delete() {
@@ -72,6 +87,10 @@ mv "$OLD_HOST" "$ROOT/shared/srvpro/ygopro.pre-$RELEASE_ID"
 mv "$OLD_AVIF" "$ROOT/shared/assets/pics_avif.pre-$RELEASE_ID"
 mv "$STAGE/root/srvpro/ygopro" "$OLD_HOST"
 mv "$STAGE/root/assets/pics_avif" "$OLD_AVIF"
+if [[ -f "$STAGE/root/assets/ygocdb_cards.json" ]]; then
+  cp -f "$STAGE/root/assets/ygocdb_cards.json" "$ROOT/shared/assets/.ygocdb_cards.json.new"
+  mv -f "$ROOT/shared/assets/.ygocdb_cards.json.new" "$OLD_NAMES"
+fi
 cp -f "$STAGE/root/metadata/resource-manifest.json" "$ROOT/shared/assets/resource-manifest.json"
 chown -R ygocube:ygocube "$OLD_HOST" "$OLD_AVIF" "$ROOT/shared/assets/resource-manifest.json"
 
@@ -80,4 +99,6 @@ systemctl start ygocube-srvpro
 systemctl start ygocube-web
 systemctl start nginx
 systemctl is-active ygocube-api ygocube-srvpro ygocube-web nginx
+SERVICES_STOPPED=0
+trap - EXIT
 printf '%s\n' "$RELEASE_ID" > "$BACKUP/COMPLETED"

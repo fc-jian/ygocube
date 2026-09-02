@@ -13,6 +13,7 @@ import zipfile
 
 from card_resources import (
     build_resource_manifest,
+    compare_cdb_files,
     generate_avif,
     manifest_delta,
     missing_names,
@@ -50,6 +51,13 @@ class CardResourceTests(unittest.TestCase):
         self.assertEqual(info["tokenCodes"], 1)
         self.assertEqual(missing_names(cdb, mapping, [100, 200, 300]), [300])
 
+    def test_cdb_diff_reports_added_and_changed_rows(self) -> None:
+        old = self.root / "old.cdb"
+        new = self.root / "new.cdb"
+        self.make_cdb(old, [(100, 1), (200, 1)])
+        self.make_cdb(new, [(100, 2), (300, 1)])
+        self.assertEqual(compare_cdb_files(old, new), {"addedCodes": 1, "removedCodes": 1, "changedData": 1, "changedTexts": 0})
+
     def make_zip(self, name: str, entries: list[tuple[str, bytes, int | None]] | None = None) -> Path:
         path = self.root / name
         with zipfile.ZipFile(path, "w") as archive:
@@ -62,6 +70,8 @@ class CardResourceTests(unittest.TestCase):
 
     def test_image_zip_rejects_traversal_and_symlink(self) -> None:
         self.assertEqual(validate_image_zip(self.make_zip("ok.zip"))[0]["code"], 123)
+        field = validate_image_zip(self.make_zip("field.zip", [("field/123.jpg", b"x", None)]))[0]
+        self.assertEqual(field["kind"], "field")
         with self.assertRaises(ValueError):
             validate_image_zip(self.make_zip("bad.zip", [("pics/../123.jpg", b"x", None)]))
         with self.assertRaises(ValueError):

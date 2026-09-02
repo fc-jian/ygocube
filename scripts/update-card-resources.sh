@@ -235,22 +235,35 @@ download_images() {
   local partial="$target.part"
   local headers="$target.headers"
   if [[ -s "$target" ]]; then
-    local remote_etag local_etag
+    local remote_etag remote_size local_etag local_size
     remote_etag="$(curl --fail --silent --show-error --location --head --max-time 30 --proto '=https' --tlsv1.2 "$IMAGE_URL" | awk 'BEGIN{IGNORECASE=1} /^etag:/ {sub("^[^:]*:[[:space:]]*",""); gsub("\r",""); print; exit}')" || true
+    remote_size="$(curl --fail --silent --show-error --location --head --max-time 30 --proto '=https' --tlsv1.2 "$IMAGE_URL" | awk 'BEGIN{IGNORECASE=1} /^content-length:/ {sub("^[^:]*:[[:space:]]*",""); gsub("\r",""); print; exit}')" || true
     local_etag="$(cat "$target.etag" 2>/dev/null || true)"
-    if [[ -n "$remote_etag" && "$remote_etag" == "$local_etag" ]]; then
-    info "image archive cache is current (ETag matched)" >&2
+    local_size="$(stat -c %s "$target")"
+    if [[ -n "$remote_etag" && "$remote_etag" == "$local_etag" && ( -z "$remote_size" || "$remote_size" == "$local_size" ) ]]; then
+      info "image archive cache is current (ETag matched)" >&2
       printf '%s\n' "$target"
       return 0
     fi
+    warn "cached image archive metadata differs (ETag or size); downloading a clean copy"
+    rm -f "$target" "$target.etag" "$target.sha256" "$target.headers"
   fi
   info "downloading image archive to cache (this can be large)" >&2
-  curl --fail --show-error --location --proto '=https' --tlsv1.2 --max-time 3600 --retry 4 --retry-delay 3 --continue-at - -D "$headers" -o "$partial" "$IMAGE_URL"
+  curl --fail --show-error --location --proto '=https' --tlsv1.2 --max-time 3600 --retry 4 --retry-delay 3 --max-filesize 4000000000 --continue-at - -D "$headers" -o "$partial" "$IMAGE_URL"
   local content_type size
   content_type="$(awk 'BEGIN{IGNORECASE=1} /^content-type:/ {sub("^[^:]*:[[:space:]]*",""); gsub("\r",""); print; exit}' "$headers")"
   size="$(stat -c %s "$partial")"
   [[ "$content_type" == *zip* || "$content_type" == *octet-stream* || "$content_type" == *binary* ]] || die "image response has unexpected content type: $content_type"
   ((size <= 4000000000)) || die "image archive exceeds configured size limit"
+  local expected_size
+  expected_size="$(awk 'BEGIN{IGNORECASE=1} /^content-length:/ {sub("^[^:]*:[[:space:]]*",""); gsub("\r",""); print; exit}' "$headers")"
+  if [[ -n "$expected_size" && "$size" != "$expected_size" ]]; then
+    warn "resumed image archive size $size differs from HTTP Content-Length $expected_size; retrying from byte zero"
+    rm -f "$partial"
+    curl --fail --show-error --location --proto '=https' --tlsv1.2 --max-time 3600 --retry 4 --retry-delay 3 --max-filesize 4000000000 -D "$headers" -o "$partial" "$IMAGE_URL"
+    size="$(stat -c %s "$partial")"
+    [[ "$size" == "$expected_size" ]] || die "image archive size mismatch after clean retry: $size (expected $expected_size)"
+  fi
   mv -f "$partial" "$target"
   awk 'BEGIN{IGNORECASE=1} /^etag:/ {sub("^[^:]*:[[:space:]]*",""); gsub("\r",""); print; exit}' "$headers" > "$target.etag" || true
   sha256sum "$target" | awk '{print $1}' > "$target.sha256"
@@ -269,10 +282,21 @@ cmd_prepare() {
     return 0
   fi
   mkdir -p "$runtime/script" "$ROOT_DIR/assets/pics_avif"
+  # Keep a binary baseline so repeated prepare runs continue to report the
+  # original upstream diff instead of comparing the already-copied CDB to
+  # itself.  It lives in the ignored state directory.
+  if [[ ! -f "$STATE_DIR/base-cdb.sqlite" && -f "$runtime/cards.cdb" ]]; then
+    cp -f "$runtime/cards.cdb" "$STATE_DIR/base-cdb.sqlite"
+  fi
   if [[ ! -f "$STATE_DIR/base-cdb.json" && -f "$runtime/cards.cdb" ]]; then
     python3 "$HELPER" validate-cdb "$runtime/cards.cdb" > "$STATE_DIR/base-cdb.json"
   fi
   python3 "$HELPER" validate-cdb "$cdb" > "$STATE_DIR/current-cdb.json"
+  if [[ -f "$STATE_DIR/base-cdb.sqlite" ]]; then
+    python3 "$HELPER" compare-cdb "$STATE_DIR/base-cdb.sqlite" "$cdb" > "$STATE_DIR/cdb-diff.json"
+  else
+    printf '{"addedCodes":0,"removedCodes":0,"changedData":0,"changedTexts":0}\n' > "$STATE_DIR/cdb-diff.json"
+  fi
   if ((REFRESH_NAMES)); then
     local names_zip="$CACHE_ROOT/ygocdb-cards.zip"
     if [[ ! -s "$names_zip" ]]; then
@@ -305,12 +329,27 @@ PY
   [[ -f "$ROOT_DIR/ygopro/strings.conf" ]] && cp -f "$ROOT_DIR/ygopro/strings.conf" "$runtime/strings.conf"
   [[ -f "$STATE_DIR/script-manifest.json" ]] && cp -f "$STATE_DIR/script-manifest.json" "$STATE_DIR/previous-script-manifest.json" || true
   python3 "$HELPER" sync-scripts "$scripts" "$runtime/script" --previous "${STATE_DIR}/previous-script-manifest.json" --manifest-out "$STATE_DIR/script-manifest.json"
+  local image_archive_meta='{"locale":null,"url":null,"etag":null,"size":null,"sha256":null,"entryCount":0}'
   if ((SKIP_IMAGES)); then
     warn "image generation skipped by request"
   else
     local archive image_source
     archive="$(download_images)"
     python3 "$HELPER" validate-zip "$archive" > "$STATE_DIR/image-zip-entries.json"
+    image_archive_meta="$(python3 - "$archive" "$STATE_DIR/image-zip-entries.json" "$IMAGE_URL" "$IMAGE_LOCALE" <<'PY'
+import hashlib, json, os, sys
+archive, entries_path, url, locale = sys.argv[1:]
+with open(entries_path, encoding='utf-8') as handle:
+    entries = json.load(handle)
+digest = hashlib.sha256()
+with open(archive, 'rb') as handle:
+    for block in iter(lambda: handle.read(1024 * 1024), b''):
+        digest.update(block)
+etag_path = archive + '.etag'
+etag = open(etag_path, encoding='utf-8').read().strip() if os.path.exists(etag_path) else None
+print(json.dumps({'locale': locale, 'url': url, 'etag': etag, 'size': os.path.getsize(archive), 'sha256': digest.hexdigest(), 'entryCount': len(entries), 'entries': entries}, ensure_ascii=False, separators=(',', ':')))
+PY
+)"
     image_source="$CACHE_ROOT/extracted-${IMAGE_LOCALE}"
     mkdir -p "$image_source"
     # Extraction itself is streaming and path-checked by the helper.
@@ -318,9 +357,21 @@ PY
     [[ -f "$STATE_DIR/avif-manifest.json" ]] && cp -f "$STATE_DIR/avif-manifest.json" "$STATE_DIR/previous-avif-manifest.json" || true
     python3 "$HELPER" avif "$image_source" "$ROOT_DIR/assets/pics_avif" --previous "${STATE_DIR}/previous-avif-manifest.json" --manifest-out "$STATE_DIR/avif-manifest.json"
   fi
-  local extra
-  extra="$(python3 -c 'import json,sys; print(json.dumps({"upstream": {"repo": sys.argv[1], "ref": sys.argv[2], "commit": sys.argv[3]}, "scriptCommit": sys.argv[4], "ocgcoreCommit": sys.argv[5], "imageLocale": sys.argv[6]}, separators=(",", ":")))' "$UPSTREAM_REPO" "$UPSTREAM_REF" "$UPSTREAM_COMMIT" "$SCRIPT_COMMIT" "$OCGCORE_COMMIT" "$IMAGE_LOCALE")"
-  python3 "$HELPER" manifest --cdb "$runtime/cards.cdb" --scripts "$runtime/script" --avif "$ROOT_DIR/assets/pics_avif" --out "$STATE_DIR/resource-manifest.json" --extra "$extra" >/dev/null
+  python3 - "$STATE_DIR/manifest-extra.json" "$image_archive_meta" "$STATE_DIR/missing-names.json" "$STATE_DIR/cdb-diff.json" "$UPSTREAM_REPO" "$UPSTREAM_REF" "$UPSTREAM_COMMIT" "$SCRIPT_COMMIT" "$OCGCORE_COMMIT" <<'PY'
+import json, sys
+out, image, missing, cdb_diff, repo, ref, commit, script, ocgcore = sys.argv[1:]
+payload = {
+    'upstream': {'repo': repo, 'ref': ref, 'commit': commit},
+    'scriptCommit': script,
+    'ocgcoreCommit': ocgcore,
+    'imageArchive': json.loads(image),
+    'missingNameCodes': json.load(open(missing, encoding='utf-8')),
+    'cdbDiff': json.load(open(cdb_diff, encoding='utf-8')),
+}
+with open(out, 'w', encoding='utf-8') as handle:
+    json.dump(payload, handle, ensure_ascii=False, separators=(',', ':'))
+PY
+  python3 "$HELPER" manifest --cdb "$runtime/cards.cdb" --scripts "$runtime/script" --avif "$ROOT_DIR/assets/pics_avif" --names "$ROOT_DIR/assets/ygocdb_cards.json" --out "$STATE_DIR/resource-manifest.json" --extra-file "$STATE_DIR/manifest-extra.json" >/dev/null
   info "prepared resources: $(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["cards"]["codeCount"], "cards,", len(d["scripts"]["files"]), "Lua,", len(d["avif"]["files"]), "AVIF")' "$STATE_DIR/resource-manifest.json")"
 }
 
@@ -375,12 +426,14 @@ make_payload() {
   [[ -f "$current" ]] || die "run prepare before deploy"
   rm -rf "$payload"
   mkdir -p "$payload/srvpro/ygopro" "$payload/srvpro/ygopro/script" "$payload/assets/pics_avif" "$payload/metadata" "$payload/deletes"
+  [[ -f "$ROOT_DIR/assets/ygocdb_cards.json" ]] && cp -f "$ROOT_DIR/assets/ygocdb_cards.json" "$payload/assets/ygocdb_cards.json"
   cp -f "$ROOT_DIR/srvpro/ygopro/cards.cdb" "$payload/srvpro/ygopro/cards.cdb"
   [[ -f "$ROOT_DIR/srvpro/ygopro/strings.conf" ]] && cp -f "$ROOT_DIR/srvpro/ygopro/strings.conf" "$payload/srvpro/ygopro/strings.conf"
   [[ -x "$ROOT_DIR/srvpro/ygopro/ygopro" ]] && cp -f "$ROOT_DIR/srvpro/ygopro/ygopro" "$payload/srvpro/ygopro/ygopro"
-  local script_delta avif_delta
-  script_delta="$(python3 "$HELPER" delta "$current" ${previous:+--previous "$previous"} --section scripts)"
-  avif_delta="$(python3 "$HELPER" delta "$current" ${previous:+--previous "$previous"} --section avif)"
+  local script_delta avif_delta delta_args=()
+  [[ -f "$previous" ]] && delta_args=(--previous "$previous")
+  script_delta="$(python3 "$HELPER" delta "$current" "${delta_args[@]}" --section scripts)"
+  avif_delta="$(python3 "$HELPER" delta "$current" "${delta_args[@]}" --section avif)"
   python3 - "$script_delta" "$avif_delta" "$payload" "$ROOT_DIR" <<'PY'
 import json, os, shutil, sys
 sd, ad, root, base = json.loads(sys.argv[1]), json.loads(sys.argv[2]), sys.argv[3], sys.argv[4]
@@ -410,7 +463,7 @@ ssh_upload() {
 remote_rollback() {
   local id="$1"
   info "rolling back Aly resource backup $id"
-  ssh_exec "set -eu; root='$ALY_ROOT'; backup=\"\$root/backups/card-sync-$id\"; test -d \"\$backup\"; systemctl stop ygocube-srvpro ygocube-web ygocube-api nginx; rm -rf \"\$root/shared/srvpro/ygopro\" \"\$root/shared/assets/pics_avif\"; cp -a \"\$backup/srvpro-ygopro\" \"\$root/shared/srvpro/ygopro\"; cp -a \"\$backup/pics_avif\" \"\$root/shared/assets/pics_avif\"; if [ -f \"\$backup/resource-manifest.json\" ]; then cp -f \"\$backup/resource-manifest.json\" \"\$root/shared/assets/resource-manifest.json\"; fi; chown -R ygocube:ygocube \"\$root/shared/srvpro/ygopro\" \"\$root/shared/assets/pics_avif\" \"\$root/shared/assets/resource-manifest.json\" 2>/dev/null || true; systemctl start ygocube-api; systemctl start ygocube-srvpro; systemctl start ygocube-web; systemctl start nginx; systemctl is-active ygocube-api ygocube-srvpro ygocube-web nginx" 300
+  ssh_exec "set -eu; root='$ALY_ROOT'; backup=\"\$root/backups/card-sync-$id\"; test -d \"\$backup\"; systemctl stop ygocube-srvpro ygocube-web ygocube-api nginx; rm -rf \"\$root/shared/srvpro/ygopro\" \"\$root/shared/assets/pics_avif\"; cp -a \"\$backup/srvpro-ygopro\" \"\$root/shared/srvpro/ygopro\"; cp -a \"\$backup/pics_avif\" \"\$root/shared/assets/pics_avif\"; if [ -f \"\$backup/ygocdb_cards.json\" ]; then cp -f \"\$backup/ygocdb_cards.json\" \"\$root/shared/assets/ygocdb_cards.json\"; fi; if [ -f \"\$backup/resource-manifest.json\" ]; then cp -f \"\$backup/resource-manifest.json\" \"\$root/shared/assets/resource-manifest.json\"; fi; chown -R ygocube:ygocube \"\$root/shared/srvpro/ygopro\" \"\$root/shared/assets/pics_avif\"; chown ygocube:ygocube \"\$root/shared/assets/ygocdb_cards.json\" \"\$root/shared/assets/resource-manifest.json\" 2>/dev/null || true; systemctl start ygocube-api; systemctl start ygocube-srvpro; systemctl start ygocube-web; systemctl start nginx; systemctl is-active ygocube-api ygocube-srvpro ygocube-web nginx" 300
 }
 
 remote_health() {
@@ -445,9 +498,12 @@ cmd_deploy() {
   ssh_upload "$archive" "$ALY_ROOT/.staging/card-sync-$RELEASE_ID/payload.tar.gz"
   ssh_upload "$ROOT_DIR/scripts/remote-resource-apply.sh" "$ALY_ROOT/.staging/card-sync-$RELEASE_ID/apply.sh"
   if ! ssh_exec "set -eu; chmod 700 '$ALY_ROOT/.staging/card-sync-$RELEASE_ID/apply.sh'; '$ALY_ROOT/.staging/card-sync-$RELEASE_ID/apply.sh' --root '$ALY_ROOT' --id '$RELEASE_ID'" 900; then
-    warn "Aly publish failed; attempting automatic resource rollback"
-    remote_rollback "$RELEASE_ID" || die "automatic rollback also failed; keep services stopped and restore $ALY_ROOT/backups/card-sync-$RELEASE_ID manually"
-    die "Aly publish failed and was rolled back"
+    if ssh_exec "test -d '$ALY_ROOT/backups/card-sync-$RELEASE_ID/srvpro-ygopro' && test -d '$ALY_ROOT/backups/card-sync-$RELEASE_ID/pics_avif'" 30 >/dev/null 2>&1; then
+      warn "Aly publish failed; attempting automatic resource rollback"
+      remote_rollback "$RELEASE_ID" || die "automatic rollback also failed; keep services stopped and restore $ALY_ROOT/backups/card-sync-$RELEASE_ID manually"
+      die "Aly publish failed and was rolled back"
+    fi
+    die "Aly publish failed before a complete backup was created; services were recovered by the remote safety trap"
   fi
   remote_health
   info "Aly deployment completed: $RELEASE_ID"

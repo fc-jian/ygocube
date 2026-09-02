@@ -101,7 +101,28 @@ def compare_cdb(previous: dict[str, Any], current: dict[str, Any]) -> dict[str, 
     }
 
 
-def _image_code(name: str) -> tuple[int, str] | None:
+def compare_cdb_files(previous_path: Path, current_path: Path) -> dict[str, int]:
+    """Compare card IDs and all data/text columns between two CDB files."""
+    validate_cdb(previous_path)
+    validate_cdb(current_path)
+    def rows(path: Path, table: str) -> dict[int, tuple[Any, ...]]:
+        uri = f"file:{path.resolve().as_posix()}?mode=ro"
+        with sqlite3.connect(uri, uri=True) as connection:
+            columns = [row[1] for row in connection.execute(f"PRAGMA table_info({table})")]
+            values = connection.execute(f"SELECT {', '.join(columns)} FROM {table}").fetchall()
+        return {int(row[0]): tuple(row[1:]) for row in values}
+    old_data, new_data = rows(previous_path, "datas"), rows(current_path, "datas")
+    old_text, new_text = rows(previous_path, "texts"), rows(current_path, "texts")
+    old_codes, new_codes = set(old_data), set(new_data)
+    return {
+        "addedCodes": len(new_codes - old_codes),
+        "removedCodes": len(old_codes - new_codes),
+        "changedData": sum(1 for code in old_codes & new_codes if old_data[code] != new_data[code]),
+        "changedTexts": sum(1 for code in set(old_text) & set(new_text) if old_text[code] != new_text[code]),
+    }
+
+
+def _image_code(name: str) -> tuple[int, str, str] | None:
     # The source archive normally has pics/123.jpg.  Accept one fixed pics
     # directory (and no other nesting) so an archive cannot escape extraction.
     if "\\" in name or "\x00" in name:
@@ -109,7 +130,7 @@ def _image_code(name: str) -> tuple[int, str] | None:
     pure = PurePosixPath(name)
     if pure.is_absolute() or ".." in pure.parts:
         raise ValueError(f"unsafe image path: {name!r}")
-    if len(pure.parts) > 2 or (len(pure.parts) == 2 and pure.parts[0] not in {"pics", "images"}):
+    if len(pure.parts) > 2 or (len(pure.parts) == 2 and pure.parts[0] not in {"pics", "images", "field"}):
         raise ValueError(f"unexpected image path: {name!r}")
     stem = pure.stem
     suffix = pure.suffix.lower().lstrip(".")
@@ -118,7 +139,11 @@ def _image_code(name: str) -> tuple[int, str] | None:
     code = int(stem)
     if code <= 0 or code > 2_147_483_647:
         raise ValueError(f"invalid card image code: {name!r}")
-    return code, suffix
+    # `field/` is part of the official archive and contains the alternate
+    # field-spell artwork.  It is extracted safely but intentionally not
+    # converted to the public card AVIF endpoint.
+    kind = "field" if len(pure.parts) == 2 and pure.parts[0] == "field" else "card"
+    return code, suffix, kind
 
 
 def validate_image_zip(path: Path) -> list[dict[str, Any]]:
@@ -126,7 +151,7 @@ def validate_image_zip(path: Path) -> list[dict[str, Any]]:
     if not path.is_file():
         raise ValueError(f"image archive not found: {path}")
     entries: list[dict[str, Any]] = []
-    codes: set[int] = set()
+    codes: set[tuple[str, int]] = set()
     total = 0
     try:
         with zipfile.ZipFile(path) as archive:
@@ -142,25 +167,27 @@ def validate_image_zip(path: Path) -> list[dict[str, Any]]:
                     pure_directory = PurePosixPath(directory.rstrip("/"))
                     if pure_directory.is_absolute() or ".." in pure_directory.parts:
                         raise ValueError(f"unsafe image path: {directory!r}")
-                    if len(pure_directory.parts) > 1 or (pure_directory.parts and pure_directory.parts[0] not in {"pics", "images"}):
+                    if len(pure_directory.parts) > 1 or (pure_directory.parts and pure_directory.parts[0] not in {"pics", "images", "field"}):
                         raise ValueError(f"unexpected image path: {directory!r}")
                     continue
                 mode = (info.external_attr >> 16) & 0o170000
                 if mode == stat.S_IFLNK or (info.create_system == 3 and (info.external_attr & 0x10)):
                     raise ValueError(f"symbolic links are not allowed: {info.filename!r}")
-                code, suffix = _image_code(info.filename)
-                if code in codes:
-                    raise ValueError(f"duplicate image code: {code}")
+                code, suffix, kind = _image_code(info.filename)
+                code_key = (kind, code)
+                if code_key in codes:
+                    raise ValueError(f"duplicate image code: {kind}/{code}")
                 if info.file_size > MAX_IMAGE_ENTRY:
                     raise ValueError(f"image entry is too large: {info.filename!r}")
                 total += int(info.file_size)
                 if total > MAX_IMAGE_UNCOMPRESSED:
                     raise ValueError("image archive exceeds uncompressed size limit")
-                codes.add(code)
+                codes.add(code_key)
                 entries.append(
                     {
                         "name": info.filename,
                         "code": code,
+                        "kind": kind,
                         "suffix": suffix,
                         "size": int(info.file_size),
                         "crc": int(info.CRC),
@@ -177,7 +204,9 @@ def extract_image_zip(path: Path, destination: Path) -> list[dict[str, Any]]:
     by_name = {entry["name"]: entry for entry in entries}
     with zipfile.ZipFile(path) as archive:
         for name, entry in by_name.items():
-            target = destination / f"{entry['code']}.{entry['suffix']}"
+            target_dir = destination / entry["kind"] if entry["kind"] == "field" else destination
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target = target_dir / f"{entry['code']}.{entry['suffix']}"
             temp = target.with_name(f".{target.name}.tmp")
             with archive.open(name, "r") as source, temp.open("wb") as output:
                 shutil.copyfileobj(source, output, length=1024 * 1024)
@@ -333,13 +362,19 @@ def merge_name_zip(zip_path: Path, mapping_path: Path) -> int:
     return added
 
 
-def build_resource_manifest(cdb: Path, scripts: Path, avif: Path, output: Path, **extra: Any) -> dict[str, Any]:
+def build_resource_manifest(cdb: Path, scripts: Path, avif: Path, output: Path, names: Path | None = None, **extra: Any) -> dict[str, Any]:
+    cards = validate_cdb(cdb)
+    # Absolute build paths are useful in a local diagnostic but must not be
+    # published to Aly or embedded in an artifact manifest.
+    cards.pop("path", None)
     manifest = {
         "schemaVersion": 1,
-        "cards": validate_cdb(cdb),
+        "cards": cards,
         "scripts": {"files": file_manifest(scripts, ".lua")},
         "avif": {"files": file_manifest(avif, ".avif")},
     }
+    if names and names.is_file():
+        manifest["cardNames"] = {"size": names.stat().st_size, "sha256": sha256_file(names)}
     manifest.update(extra)
     _json_dump(manifest, output)
     return manifest
@@ -366,6 +401,9 @@ def _main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     cdb = sub.add_parser("validate-cdb")
     cdb.add_argument("path", type=Path)
+    compare = sub.add_parser("compare-cdb")
+    compare.add_argument("previous", type=Path)
+    compare.add_argument("current", type=Path)
     z = sub.add_parser("validate-zip")
     z.add_argument("path", type=Path)
     x = sub.add_parser("extract-zip")
@@ -392,8 +430,10 @@ def _main() -> int:
     man.add_argument("--cdb", type=Path, required=True)
     man.add_argument("--scripts", type=Path, required=True)
     man.add_argument("--avif", type=Path, required=True)
+    man.add_argument("--names", type=Path)
     man.add_argument("--out", type=Path, required=True)
     man.add_argument("--extra", default="{}")
+    man.add_argument("--extra-file", type=Path)
     d = sub.add_parser("delta")
     d.add_argument("current", type=Path)
     d.add_argument("--previous", type=Path)
@@ -402,6 +442,8 @@ def _main() -> int:
     try:
         if args.command == "validate-cdb":
             print(json.dumps(validate_cdb(args.path), ensure_ascii=False, sort_keys=True))
+        elif args.command == "compare-cdb":
+            print(json.dumps(compare_cdb_files(args.previous, args.current), ensure_ascii=False, sort_keys=True))
         elif args.command == "validate-zip":
             print(json.dumps(validate_image_zip(args.path), ensure_ascii=False, sort_keys=True))
         elif args.command == "extract-zip":
@@ -422,7 +464,10 @@ def _main() -> int:
         elif args.command == "merge-names":
             print(json.dumps({"added": merge_name_zip(args.zip, args.mapping)}, ensure_ascii=False))
         elif args.command == "manifest":
-            print(json.dumps(build_resource_manifest(args.cdb, args.scripts, args.avif, args.out, **json.loads(args.extra)), ensure_ascii=False, sort_keys=True))
+            extra = json.loads(args.extra)
+            if args.extra_file:
+                extra = json.loads(args.extra_file.read_text(encoding="utf-8"))
+            print(json.dumps(build_resource_manifest(args.cdb, args.scripts, args.avif, args.out, names=args.names, **extra), ensure_ascii=False, sort_keys=True))
         elif args.command == "delta":
             print(json.dumps(manifest_delta(args.previous, args.current, args.section), ensure_ascii=False, sort_keys=True))
     except (OSError, ValueError, sqlite3.Error, zipfile.BadZipFile, json.JSONDecodeError, subprocess.CalledProcessError) as exc:
