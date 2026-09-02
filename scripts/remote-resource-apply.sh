@@ -109,6 +109,30 @@ mkdir -p "$STAGE/root/srvpro/ygopro" "$STAGE/root/assets/pics_avif"
 cp -a "$OLD_HOST"/. "$STAGE/root/srvpro/ygopro"/
 cp -a "$OLD_AVIF"/. "$STAGE/root/assets/pics_avif"/
 [[ -f "$OLD_NAMES" ]] && cp -f "$OLD_NAMES" "$STAGE/root/assets/ygocdb_cards.json" || true
+# Validate the uploaded tar before extraction.  The staging directory is
+# root-owned, but treating the archive as untrusted protects against a
+# replaced upload and prevents traversal, symlink and device-file writes.
+python3 - "$STAGE/payload.tar.gz" <<'PY'
+import posixpath
+import sys
+import tarfile
+
+archive_path = sys.argv[1]
+total = 0
+with tarfile.open(archive_path, "r:gz") as archive:
+    for member in archive.getmembers():
+        name = member.name
+        if not name or name.startswith("/") or "\\" in name:
+            raise SystemExit(f"unsafe payload path: {name!r}")
+        normalized = posixpath.normpath(name)
+        if normalized == ".." or normalized.startswith("../") or "/../" in name:
+            raise SystemExit(f"unsafe payload path: {name!r}")
+        if member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
+            raise SystemExit(f"unsupported payload entry: {name!r}")
+        total += max(0, int(member.size))
+        if total > 4_000_000_000:
+            raise SystemExit("payload is too large")
+PY
 tar -xzf "$STAGE/payload.tar.gz" -C "$STAGE/root" --no-same-owner
 
 safe_delete() {
