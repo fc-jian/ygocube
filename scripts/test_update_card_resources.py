@@ -11,6 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "update-card-resources.sh"
+REMOTE_APPLY = ROOT / "scripts" / "remote-resource-apply.sh"
 
 
 class UpdateScriptTests(unittest.TestCase):
@@ -35,6 +36,24 @@ class UpdateScriptTests(unittest.TestCase):
         result = self.run_script("--dry-run", "deploy", "--confirm-maintenance")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("ssh", result.stdout.lower())
+
+    def test_dry_run_sync_does_not_fetch_or_modify(self) -> None:
+        before = self.git_status()
+        result = self.run_script("--dry-run", "sync")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("would verify", result.stdout)
+        self.assertEqual(self.git_status(), before)
+
+    def test_remote_apply_rejects_broad_or_unsafe_targets(self) -> None:
+        for root, release in (("/", "safe"), ("/opt/ygocube", "../unsafe")):
+            result = subprocess.run(
+                [str(REMOTE_APPLY), "--root", root, "--id", release],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("invalid root or release id", result.stderr)
 
     def test_rollback_rejects_unsafe_backup_identifier(self) -> None:
         result = self.run_script("--dry-run", "rollback", "--backup-id", "../latest")
