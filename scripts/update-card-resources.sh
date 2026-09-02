@@ -29,6 +29,7 @@ RELEASE_ID="$(date -u +%Y%m%d-%H%M%S)-$(git -C "$ROOT_DIR" rev-parse --short HEA
 COMMAND=""
 DRY_RUN=0
 COMMIT_MERGE=0
+CONTINUE_MERGE=0
 PUSH=0
 CLIENT=0
 SKIP_BUILD=0
@@ -126,7 +127,6 @@ parse_args() {
   [[ -n "$COMMAND" ]] || { usage >&2; exit 2; }
 }
 
-CONTINUE_MERGE=0
 parse_args "$@"
 
 # Keep values that are later interpolated into remote shell commands and
@@ -646,7 +646,7 @@ ssh_upload() {
 remote_rollback() {
   local id="$1"
   info "rolling back Aly resource backup $id"
-  ssh_exec "set -eu; root='$ALY_ROOT'; backup=\"\$root/backups/card-sync-$id\"; test -d \"\$backup\"; systemctl stop ygocube-srvpro ygocube-web ygocube-api nginx; rm -rf \"\$root/shared/srvpro/ygopro\" \"\$root/shared/assets/pics_avif\"; cp -a \"\$backup/srvpro-ygopro\" \"\$root/shared/srvpro/ygopro\"; cp -a \"\$backup/pics_avif\" \"\$root/shared/assets/pics_avif\"; if [ -f \"\$backup/ygocdb_cards.json\" ]; then cp -f \"\$backup/ygocdb_cards.json\" \"\$root/shared/assets/ygocdb_cards.json\"; fi; if [ -f \"\$backup/resource-manifest.json\" ]; then cp -f \"\$backup/resource-manifest.json\" \"\$root/shared/assets/resource-manifest.json\"; fi; if [ -f \"\$root/shared/data/cube.sqlite\" ]; then sqlite3 \"\$root/shared/data/cube.sqlite\" 'UPDATE cards SET metadata_version=0;'; fi; chown -R ygocube:ygocube \"\$root/shared/srvpro/ygopro\" \"\$root/shared/assets/pics_avif\"; chown ygocube:ygocube \"\$root/shared/assets/ygocdb_cards.json\" \"\$root/shared/assets/resource-manifest.json\" 2>/dev/null || true; systemctl start ygocube-api; systemctl start ygocube-srvpro; systemctl start ygocube-web; systemctl start nginx; systemctl is-active ygocube-api ygocube-srvpro ygocube-web nginx" 300
+  ssh_exec "set -eu; root='$ALY_ROOT'; backup=\"\$root/backups/card-sync-$id\"; test -d \"\$backup\"; systemctl stop ygocube-srvpro ygocube-web ygocube-api nginx; rm -rf \"\$root/shared/srvpro/ygopro\" \"\$root/shared/assets/pics_avif\"; cp -a \"\$backup/srvpro-ygopro\" \"\$root/shared/srvpro/ygopro\"; cp -a \"\$backup/pics_avif\" \"\$root/shared/assets/pics_avif\"; if [ -f \"\$backup/ygocdb_cards.json\" ]; then cp -f \"\$backup/ygocdb_cards.json\" \"\$root/shared/assets/.ygocdb_cards.json.rollback-new\"; mv -f \"\$root/shared/assets/.ygocdb_cards.json.rollback-new\" \"\$root/shared/assets/ygocdb_cards.json\"; fi; if [ -f \"\$backup/resource-manifest.json\" ]; then cp -f \"\$backup/resource-manifest.json\" \"\$root/shared/assets/.resource-manifest.json.rollback-new\"; mv -f \"\$root/shared/assets/.resource-manifest.json.rollback-new\" \"\$root/shared/assets/resource-manifest.json\"; fi; if [ -f \"\$root/shared/data/cube.sqlite\" ]; then sqlite3 \"\$root/shared/data/cube.sqlite\" 'UPDATE cards SET metadata_version=0;'; fi; chown -R ygocube:ygocube \"\$root/shared/srvpro/ygopro\" \"\$root/shared/assets/pics_avif\"; chown ygocube:ygocube \"\$root/shared/assets/ygocdb_cards.json\" \"\$root/shared/assets/resource-manifest.json\" 2>/dev/null || true; systemctl start ygocube-api; systemctl start ygocube-srvpro; systemctl start ygocube-web; systemctl start nginx; systemctl is-active ygocube-api ygocube-srvpro ygocube-web nginx" 300
 }
 
 remote_health() {

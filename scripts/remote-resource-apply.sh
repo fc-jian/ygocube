@@ -13,7 +13,7 @@ while (($#)); do
     *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
-[[ "$ROOT" == /* && "$RELEASE_ID" =~ ^[A-Za-z0-9._-]+$ ]] || { echo 'invalid root or release id' >&2; exit 2; }
+[[ "$ROOT" =~ ^/[A-Za-z0-9._/+:-]+$ && "$ROOT" != "/" && "$RELEASE_ID" =~ ^[A-Za-z0-9._-]+$ ]] || { echo 'invalid root or release id' >&2; exit 2; }
 
 STAGE="$ROOT/.staging/card-sync-$RELEASE_ID"
 BACKUP="$ROOT/backups/card-sync-$RELEASE_ID"
@@ -169,7 +169,8 @@ if [[ -f "$STAGE/root/assets/ygocdb_cards.json" ]]; then
   mv -f "$ROOT/shared/assets/.ygocdb_cards.json.new" "$OLD_NAMES"
   NAMES_REPLACED=1
 fi
-cp -f "$STAGE/root/metadata/resource-manifest.json" "$ROOT/shared/assets/resource-manifest.json"
+cp -f "$STAGE/root/metadata/resource-manifest.json" "$ROOT/shared/assets/.resource-manifest.json.new"
+mv -f "$ROOT/shared/assets/.resource-manifest.json.new" "$ROOT/shared/assets/resource-manifest.json"
 MANIFEST_REPLACED=1
 # cards are an in-process SQLite index of cards.cdb plus the localized name
 # map.  Resource publication must invalidate it before API restart; otherwise
@@ -177,7 +178,7 @@ MANIFEST_REPLACED=1
 # pre-update rows.  The database itself is backed up above, so this small
 # cache-only mutation is recoverable without restoring tournament state.
 sqlite3 "$DB" 'UPDATE cards SET metadata_version=0;' > "$BACKUP/card-cache-invalidated.txt"
-chown -R ygocube:ygocube "$OLD_HOST" "$OLD_AVIF" "$ROOT/shared/assets/resource-manifest.json"
+chown -R ygocube:ygocube "$OLD_HOST" "$OLD_AVIF" "$OLD_NAMES" "$ROOT/shared/assets/resource-manifest.json"
 
 systemctl start ygocube-api
 systemctl start ygocube-srvpro
