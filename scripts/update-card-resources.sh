@@ -473,14 +473,17 @@ with open(out, 'w', encoding='utf-8') as handle:
 PY
   fi
   python3 "$HELPER" sync-scripts "$scripts" "$runtime/script" --previous "${STATE_DIR}/previous-script-manifest.json" --manifest-out "$STATE_DIR/script-manifest.json"
-  local image_archive_meta='{"locale":null,"url":null,"etag":null,"size":null,"sha256":null,"entryCount":0}'
+  local image_archive_meta_file="$STATE_DIR/image-archive-meta.json"
+  printf '%s\n' '{"locale":null,"url":null,"etag":null,"size":null,"sha256":null,"entryCount":0,"entries":[]}' > "$image_archive_meta_file"
   if ((SKIP_IMAGES)); then
     warn "image generation skipped by request"
   else
     local archive image_source avif_previous
     archive="$(download_images)"
     python3 "$HELPER" validate-zip "$archive" > "$STATE_DIR/image-zip-entries.json"
-    image_archive_meta="$(python3 - "$archive" "$STATE_DIR/image-zip-entries.json" "$IMAGE_URL" "$IMAGE_LOCALE" <<'PY'
+    # Keep the large entry list in a file. Passing it as a command-line
+    # argument exceeds Linux ARG_MAX for the 15k-entry official archive.
+    python3 - "$archive" "$STATE_DIR/image-zip-entries.json" "$IMAGE_URL" "$IMAGE_LOCALE" > "$image_archive_meta_file" <<'PY'
 import hashlib, json, os, sys
 archive, entries_path, url, locale = sys.argv[1:]
 with open(entries_path, encoding='utf-8') as handle:
@@ -493,7 +496,6 @@ etag_path = archive + '.etag'
 etag = open(etag_path, encoding='utf-8').read().strip() if os.path.exists(etag_path) else None
 print(json.dumps({'locale': locale, 'url': url, 'etag': etag, 'size': os.path.getsize(archive), 'sha256': digest.hexdigest(), 'entryCount': len(entries), 'entries': entries}, ensure_ascii=False, separators=(',', ':')))
 PY
-)"
     image_source="$CACHE_ROOT/extracted-${IMAGE_LOCALE}"
     # Never mix entries from an older archive into the new manifest.  The
     # cache path is derived from CACHE_ROOT and locale (validated above), so
@@ -512,14 +514,14 @@ PY
     fi
     python3 "$HELPER" avif "$image_source" "$ROOT_DIR/assets/pics_avif" --previous "$avif_previous" --manifest-out "$STATE_DIR/avif-manifest.json"
   fi
-  python3 - "$STATE_DIR/manifest-extra.json" "$image_archive_meta" "$STATE_DIR/missing-names.json" "$STATE_DIR/cdb-diff.json" "$UPSTREAM_REPO" "$UPSTREAM_REF" "$UPSTREAM_COMMIT" "$SCRIPT_COMMIT" "$OCGCORE_COMMIT" <<'PY'
+  python3 - "$STATE_DIR/manifest-extra.json" "$image_archive_meta_file" "$STATE_DIR/missing-names.json" "$STATE_DIR/cdb-diff.json" "$UPSTREAM_REPO" "$UPSTREAM_REF" "$UPSTREAM_COMMIT" "$SCRIPT_COMMIT" "$OCGCORE_COMMIT" <<'PY'
 import json, sys
-out, image, missing, cdb_diff, repo, ref, commit, script, ocgcore = sys.argv[1:]
+out, image_path, missing, cdb_diff, repo, ref, commit, script, ocgcore = sys.argv[1:]
 payload = {
     'upstream': {'repo': repo, 'ref': ref, 'commit': commit},
     'scriptCommit': script,
     'ocgcoreCommit': ocgcore,
-    'imageArchive': json.loads(image),
+    'imageArchive': json.load(open(image_path, encoding='utf-8')),
     'missingNameCodes': json.load(open(missing, encoding='utf-8')),
     'cdbDiff': json.load(open(cdb_diff, encoding='utf-8')),
 }
@@ -582,7 +584,7 @@ cmd_test() {
 }
 
 make_payload() {
-  local payload="$1" previous="$STATE_DIR/previous-resource-manifest.json" current="$STATE_DIR/resource-manifest.json"
+  local payload="$1" previous="$STATE_DIR/deployed-resource-manifest.json" current="$STATE_DIR/resource-manifest.json"
   [[ -f "$current" ]] || die "run prepare before deploy"
   rm -rf "$payload"
   mkdir -p "$payload/srvpro/ygopro" "$payload/srvpro/ygopro/script" "$payload/assets/pics_avif" "$payload/metadata" "$payload/deletes"
@@ -591,6 +593,9 @@ make_payload() {
   [[ -f "$ROOT_DIR/srvpro/ygopro/strings.conf" ]] && cp -f "$ROOT_DIR/srvpro/ygopro/strings.conf" "$payload/srvpro/ygopro/strings.conf"
   [[ -x "$ROOT_DIR/srvpro/ygopro/ygopro" ]] && cp -f "$ROOT_DIR/srvpro/ygopro/ygopro" "$payload/srvpro/ygopro/ygopro"
   local script_delta avif_delta delta_args=()
+  # Only compare against a manifest recorded after a successful Aly publish.
+  # Local prepare attempts can be interrupted and must never make a first
+  # deployment omit resources that are still absent on the server.
   [[ -f "$previous" ]] && delta_args=(--previous "$previous")
   script_delta="$(python3 "$HELPER" delta "$current" "${delta_args[@]}" --section scripts)"
   avif_delta="$(python3 "$HELPER" delta "$current" "${delta_args[@]}" --section avif)"
@@ -666,6 +671,7 @@ cmd_deploy() {
     die "Aly publish failed before a complete backup was created; services were recovered by the remote safety trap"
   fi
   remote_health
+  cp -f "$STATE_DIR/resource-manifest.json" "$STATE_DIR/deployed-resource-manifest.json"
   info "Aly deployment completed: $RELEASE_ID"
 }
 
