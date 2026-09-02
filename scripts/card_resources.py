@@ -268,6 +268,15 @@ def generate_avif(source: Path, destination: Path, previous: Path | None = None)
         except (OSError, json.JSONDecodeError):
             old = {}
     old_sources = old.get("sources", {}) if isinstance(old, dict) else {}
+    # A bootstrapped resource manifest may only contain output-file metadata,
+    # not the JPEG source metadata produced by this helper.  Still use those
+    # exact output names for stale-file cleanup; never delete an unrelated
+    # extension or a non-numeric local file.
+    old_output_codes = {
+        Path(name).stem
+        for name in (old.get("files", {}) if isinstance(old, dict) else {})
+        if Path(name).suffix.lower() == ".avif" and Path(name).stem.isdecimal()
+    }
     destination.mkdir(parents=True, exist_ok=True)
     current: dict[str, dict[str, Any]] = {}
     for image in sorted(source.iterdir() if source.exists() else []):
@@ -292,7 +301,7 @@ def generate_avif(source: Path, destination: Path, previous: Path | None = None)
             text=True,
         )
         os.replace(temp, output)
-    for old_code in set(old_sources) - set(current):
+    for old_code in (set(old_sources) | old_output_codes) - set(current):
         stale = destination / f"{old_code}.avif"
         if stale.is_file():
             stale.unlink()

@@ -122,6 +122,10 @@ class CardResourceTests(unittest.TestCase):
         before = output.read_bytes()
         generate_avif(source, destination, manifest)
         self.assertEqual(output.read_bytes(), before)
+        (destination / "999.avif").write_bytes(b"stale")
+        manifest.write_text(json.dumps({"files": {"999.avif": {"size": 5}}}), encoding="utf-8")
+        generate_avif(source, destination, manifest)
+        self.assertFalse((destination / "999.avif").exists())
 
     def test_manifest_delta_reports_removed_and_changed(self) -> None:
         previous = self.root / "previous.json"

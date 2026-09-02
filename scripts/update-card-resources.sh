@@ -495,6 +495,10 @@ print(json.dumps({'locale': locale, 'url': url, 'etag': etag, 'size': os.path.ge
 PY
 )"
     image_source="$CACHE_ROOT/extracted-${IMAGE_LOCALE}"
+    # Never mix entries from an older archive into the new manifest.  The
+    # cache path is derived from CACHE_ROOT and locale (validated above), so
+    # replacing this one extraction directory is safe and deterministic.
+    rm -rf "$image_source"
     mkdir -p "$image_source"
     # Extraction itself is streaming and path-checked by the helper.
     python3 "$HELPER" extract-zip "$archive" "$image_source" >/dev/null
