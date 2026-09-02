@@ -93,6 +93,45 @@ describe('ygopro card metadata decoding', () => {
     }
   });
 
+  it('rebuilds the metadata cache when a deployed CDB is replaced', () => {
+    const cdbPath = path.join('/tmp', `ygocube-card-refresh-${process.pid}-${Date.now()}.cdb`);
+    const namesPath = path.join('/tmp', `ygocube-card-refresh-names-${process.pid}-${Date.now()}.json`);
+    const Database = require('better-sqlite3');
+    const writeCdb = (rows: Array<[number, string]>) => {
+      fs.rmSync(cdbPath, { force: true });
+      const cdb = new Database(cdbPath);
+      cdb.exec('CREATE TABLE datas (id INTEGER PRIMARY KEY, type INTEGER, level INTEGER, race INTEGER, attribute INTEGER, atk INTEGER, def INTEGER, alias INTEGER, setcode INTEGER)');
+      cdb.exec('CREATE TABLE texts (id INTEGER PRIMARY KEY, name TEXT, desc TEXT)');
+      const add = cdb.prepare('INSERT INTO datas (id,type,level,race,attribute,atk,def,alias,setcode) VALUES (?,?,?,?,?,?,?,?,?)');
+      const addText = cdb.prepare('INSERT INTO texts (id,name,desc) VALUES (?,?,?)');
+      for (const [id, name] of rows) {
+        add.run(id, 0x21, 4, 1, 1, 1500, 1000, 0, 0);
+        addText.run(id, name, `效果 ${id}`);
+      }
+      cdb.close();
+    };
+    writeCdb([[900000020, '旧卡']]);
+    fs.writeFileSync(namesPath, JSON.stringify({
+      a: { id: 900000020, sc_name: '旧卡名' },
+      b: { id: 900000021, sc_name: '新卡名' },
+    }));
+    const originalCdb = config.server.cardsCdb;
+    const originalNames = config.server.cardNamesJson;
+    config.server.cardsCdb = cdbPath;
+    config.server.cardNamesJson = namesPath;
+    try {
+      expect(new CardsService().get(900000020)?.name).toBe('旧卡名');
+      writeCdb([[900000020, '旧卡'], [900000021, '新卡']]);
+      const refreshed = new CardsService();
+      expect(refreshed.get(900000021)?.name).toBe('新卡名');
+    } finally {
+      config.server.cardsCdb = originalCdb;
+      config.server.cardNamesJson = originalNames;
+      fs.rmSync(cdbPath, { force: true });
+      fs.rmSync(namesPath, { force: true });
+    }
+  });
+
   it('unpacks level and both pendulum scales from the cdb level field', () => {
     expect(decodeCardFields(0x1000001, (8 << 24) | (1 << 16) | 4, 1200)).toEqual({
       level: 4,

@@ -304,7 +304,11 @@ export class CardsService {
     const cache = db.prepare(
       'SELECT count(*) AS c, sum(CASE WHEN metadata_version>=? THEN 1 ELSE 0 END) AS current FROM cards',
     ).get(CARD_METADATA_VERSION) as CardCacheVersionRow;
-    if (cache.c > 0 && cache.current === cache.c) {
+    // The SQLite cache does not know when cards.cdb is replaced by a resource
+    // deployment.  Re-index a real CDB on every process start so newly synced
+    // rows and changed text are visible immediately; retain the early return
+    // only for the synthetic test/dev catalogue used when no CDB is present.
+    if (!this.cdbMetadataLoaded && cache.c > 0 && cache.current === cache.c) {
       this.loaded = true;
       return;
     }

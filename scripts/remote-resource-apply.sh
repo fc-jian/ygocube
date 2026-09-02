@@ -171,6 +171,12 @@ if [[ -f "$STAGE/root/assets/ygocdb_cards.json" ]]; then
 fi
 cp -f "$STAGE/root/metadata/resource-manifest.json" "$ROOT/shared/assets/resource-manifest.json"
 MANIFEST_REPLACED=1
+# cards are an in-process SQLite index of cards.cdb plus the localized name
+# map.  Resource publication must invalidate it before API restart; otherwise
+# an older API process can see metadata_version=5 and incorrectly keep the
+# pre-update rows.  The database itself is backed up above, so this small
+# cache-only mutation is recoverable without restoring tournament state.
+sqlite3 "$DB" 'UPDATE cards SET metadata_version=0;' > "$BACKUP/card-cache-invalidated.txt"
 chown -R ygocube:ygocube "$OLD_HOST" "$OLD_AVIF" "$ROOT/shared/assets/resource-manifest.json"
 
 systemctl start ygocube-api
