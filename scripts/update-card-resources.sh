@@ -149,7 +149,18 @@ git_clean_check() {
 submodule_branch_check() {
   local branch
   branch="$(git -C "$ROOT_DIR/ygopro" symbolic-ref --quiet --short HEAD || true)"
-  [[ -n "$branch" ]] || die "ygopro is detached; create a feature branch before sync"
+  if [[ -z "$branch" ]]; then
+    local root_branch
+    root_branch="$(git -C "$ROOT_DIR" symbolic-ref --short HEAD)"
+    [[ "$root_branch" == codex/card-resource-sync-* ]] || die "ygopro is detached; switch the root to a resource-sync feature branch first"
+    if ((DRY_RUN)); then
+      info "dry-run: would create matching ygopro branch $root_branch"
+      return 0
+    fi
+    info "ygopro is detached; creating matching feature branch $root_branch"
+    git -C "$ROOT_DIR/ygopro" switch -c "$root_branch"
+    branch="$root_branch"
+  fi
   [[ "$branch" != main && "$branch" != master ]] || die "refusing to modify ygopro/$branch"
 }
 
@@ -226,7 +237,8 @@ cmd_sync() {
     root_branch="$(git -C "$ROOT_DIR" symbolic-ref --short HEAD)"
     sub_branch="$(git -C "$ROOT_DIR/ygopro" symbolic-ref --short HEAD)"
     run git -C "$ROOT_DIR/ygopro" push --set-upstream fc-jian "$sub_branch"
-    info "root gitlink is not committed automatically; commit it before pushing $root_branch"
+    ((DRY_RUN)) || [[ -z "$(git -C "$ROOT_DIR" status --porcelain)" ]] || die "root gitlink is not committed; commit it before --push"
+    run git -C "$ROOT_DIR" push --set-upstream origin "$root_branch"
   fi
 }
 
