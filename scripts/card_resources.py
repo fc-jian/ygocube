@@ -267,14 +267,15 @@ def generate_avif(source: Path, destination: Path, previous: Path | None = None)
             old = json.loads(previous.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             old = {}
-    old_sources = old.get("sources", {}) if isinstance(old, dict) else {}
+    old_section = old.get("avif", {}) if isinstance(old, dict) and isinstance(old.get("avif"), dict) else old
+    old_sources = old_section.get("sources", {}) if isinstance(old_section, dict) else {}
     # A bootstrapped resource manifest may only contain output-file metadata,
     # not the JPEG source metadata produced by this helper.  Still use those
     # exact output names for stale-file cleanup; never delete an unrelated
     # extension or a non-numeric local file.
     old_output_codes = {
         Path(name).stem
-        for name in (old.get("files", {}) if isinstance(old, dict) else {})
+        for name in (old_section.get("files", {}) if isinstance(old_section, dict) else {})
         if Path(name).suffix.lower() == ".avif" and Path(name).stem.isdecimal()
     }
     destination.mkdir(parents=True, exist_ok=True)
@@ -290,6 +291,11 @@ def generate_avif(source: Path, destination: Path, previous: Path | None = None)
         current[str(code)] = source_meta
         if output.exists() and old_sources.get(str(code)) == source_meta:
             continue
+        old_output = old_section.get("files", {}).get(f"{code}.avif") if isinstance(old_section, dict) else None
+        if output.exists() and isinstance(old_output, dict):
+            output_meta = {"size": output.stat().st_size, "sha256": sha256_file(output)}
+            if output_meta == old_output:
+                continue
         # Keep the .avif suffix on the temporary output: libvips chooses the
         # writer from the final extension, and a .tmp suffix would be rejected.
         temp = output.with_name(f".{output.stem}.tmp.avif")

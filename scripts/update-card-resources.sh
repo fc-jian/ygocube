@@ -477,7 +477,7 @@ PY
   if ((SKIP_IMAGES)); then
     warn "image generation skipped by request"
   else
-    local archive image_source
+    local archive image_source avif_previous
     archive="$(download_images)"
     python3 "$HELPER" validate-zip "$archive" > "$STATE_DIR/image-zip-entries.json"
     image_archive_meta="$(python3 - "$archive" "$STATE_DIR/image-zip-entries.json" "$IMAGE_URL" "$IMAGE_LOCALE" <<'PY'
@@ -503,7 +503,14 @@ PY
     # Extraction itself is streaming and path-checked by the helper.
     python3 "$HELPER" extract-zip "$archive" "$image_source" >/dev/null
     [[ -f "$STATE_DIR/avif-manifest.json" ]] && cp -f "$STATE_DIR/avif-manifest.json" "$STATE_DIR/previous-avif-manifest.json" || true
-    python3 "$HELPER" avif "$image_source" "$ROOT_DIR/assets/pics_avif" --previous "${STATE_DIR}/previous-avif-manifest.json" --manifest-out "$STATE_DIR/avif-manifest.json"
+    avif_previous="${STATE_DIR}/previous-avif-manifest.json"
+    # On the first run, reuse the bootstrapped resource manifest's AVIF file
+    # hashes.  This avoids re-encoding thousands of unchanged thumbnails;
+    # only new or modified source images invoke vips.
+    if [[ ! -f "$avif_previous" && -f "$STATE_DIR/previous-resource-manifest.json" ]]; then
+      avif_previous="${STATE_DIR}/previous-resource-manifest.json"
+    fi
+    python3 "$HELPER" avif "$image_source" "$ROOT_DIR/assets/pics_avif" --previous "$avif_previous" --manifest-out "$STATE_DIR/avif-manifest.json"
   fi
   python3 - "$STATE_DIR/manifest-extra.json" "$image_archive_meta" "$STATE_DIR/missing-names.json" "$STATE_DIR/cdb-diff.json" "$UPSTREAM_REPO" "$UPSTREAM_REF" "$UPSTREAM_COMMIT" "$SCRIPT_COMMIT" "$OCGCORE_COMMIT" <<'PY'
 import json, sys

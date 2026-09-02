@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 import sqlite3
 import stat
@@ -121,6 +122,11 @@ class CardResourceTests(unittest.TestCase):
         manifest.write_text(json.dumps({"sources": second}), encoding="utf-8")
         before = output.read_bytes()
         generate_avif(source, destination, manifest)
+        self.assertEqual(output.read_bytes(), before)
+        output_meta = {"size": output.stat().st_size, "sha256": hashlib.sha256(before).hexdigest()}
+        resource_manifest = self.root / "resource.json"
+        resource_manifest.write_text(json.dumps({"avif": {"files": {"123.avif": output_meta}}}), encoding="utf-8")
+        generate_avif(source, destination, resource_manifest)
         self.assertEqual(output.read_bytes(), before)
         (destination / "999.avif").write_bytes(b"stale")
         manifest.write_text(json.dumps({"files": {"999.avif": {"size": 5}}}), encoding="utf-8")
