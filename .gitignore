@@ -13,6 +13,8 @@ test_deck.ydk
 .omo/
 .agents/
 .DS_Store
+.card-resource-sync/
+__pycache__/
 
 # node
 node_modules/
