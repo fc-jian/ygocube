@@ -331,6 +331,41 @@ PY
   fi
   local missing
   missing="$(python3 "$HELPER" missing-names "$cdb" "$ROOT_DIR/assets/ygocdb_cards.json" --only "$only_codes")"
+  if ((REFRESH_NAMES)) && [[ "$missing" != '[]' ]]; then
+    # YGOCDB's bulk archive intentionally omits many alternate-art records.
+    # Resolve those exact ids through the read-only card endpoint and copy the
+    # literal text/name fields to a new exact-code record; failures remain in
+    # the audited missing-name report and still require --allow-missing-names.
+    local api_records="$STATE_DIR/ygocdb-api-records.jsonl" code response
+    : > "$api_records"
+    while IFS= read -r code; do
+      [[ "$code" =~ ^[0-9]+$ ]] || continue
+      response="$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --max-time 20 "https://ygocdb.com/api/v0/card/$code" 2>/dev/null || true)"
+      [[ -n "$response" ]] && printf '%s\n' "$(python3 -c 'import json,sys; print(json.dumps({"requested": int(sys.argv[1]), "payload": json.loads(sys.argv[2])}, ensure_ascii=False, separators=(",", ":")))' "$code" "$response")" >> "$api_records"
+    done < <(python3 -c 'import json,sys; print("\n".join(str(x) for x in json.load(sys.stdin)))' <<<"$missing")
+    python3 - "$ROOT_DIR/assets/ygocdb_cards.json" "$api_records" <<'PY'
+import json, sys
+mapping_path, records_path = sys.argv[1:]
+try:
+    mapping = json.load(open(mapping_path, encoding='utf-8'))
+except (OSError, json.JSONDecodeError):
+    mapping = {}
+if not isinstance(mapping, dict):
+    mapping = {str(item.get('id')): item for item in mapping if isinstance(item, dict) and item.get('id') is not None}
+with open(records_path, encoding='utf-8') as source:
+    for line in source:
+        try:
+            item = json.loads(line); requested = int(item['requested']); payload = item['payload']
+            text = payload.get('text', {}); data = payload.get('data', {})
+            record = {'id': requested, 'cid': payload.get('cid'), 'cn_name': text.get('name', ''), 'sc_name': text.get('sc_name', ''), 'md_name': text.get('md_name', ''), 'jp_name': text.get('jp_name', ''), 'en_name': text.get('en_name', ''), 'text': {'types': text.get('types', ''), 'pdesc': text.get('pdesc', ''), 'desc': text.get('desc', '')}, 'data': data}
+            mapping[str(requested)] = record
+        except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+            continue
+with open(mapping_path, 'w', encoding='utf-8') as target:
+    json.dump(mapping, target, ensure_ascii=False, indent=2, sort_keys=True); target.write('\n')
+PY
+    missing="$(python3 "$HELPER" missing-names "$cdb" "$ROOT_DIR/assets/ygocdb_cards.json" --only "$only_codes")"
+  fi
   printf '%s\n' "$missing" > "$STATE_DIR/missing-names.json"
   if [[ "$missing" != '[]' ]]; then
     warn "new non-token cards missing display names: $missing"
