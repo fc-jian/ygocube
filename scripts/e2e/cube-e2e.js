@@ -177,6 +177,10 @@ function dumpEvents(events) {
 }
 
 const validMain = main.slice(0, 40);
+// Keep the client-side upload probe valid against every cards.cdb revision.
+// The old fixture used 8964, which was removed from recent upstream CDBs and
+// caused unrelated deck-override checks to fail with an UNKNOWNCARD error.
+const clientGarbageCode = main[0] || 1;
 const deck39 = { main: main.slice(0, 39), side: [] };
 const deckTruncated = { main: main.slice(0, 55), side: [] };
 const deckUnknown = { main: validMain.slice(0, 39).concat([99999999]), side: [] };
@@ -218,7 +222,7 @@ function baseRoom(name, decks) {
   check('R1 idempotent retry reuses host', retry.ok === true && retry.port === r.port, JSON.stringify(retry));
   const conflict = await api('POST', '/cube/create_room', { ...room, deck_size: { ...room.deck_size, main_max: 51 } });
   check('R1 conflicting retry rejected', conflict.ok === false && conflict.code === 'ROOM_CONFLICT', JSON.stringify(conflict));
-  const ev1 = await play('alice', room1Name, { main: [8964, 8964, 8964], side: [] });
+  const ev1 = await play('alice', room1Name, { main: [clientGarbageCode, clientGarbageCode, clientGarbageCode], side: [] });
   check('R1 ready accepted (deck overridden)', hsStatus(ev1) === 0x9, JSON.stringify(dumpEvents(ev1)));
   await api('POST', '/cube/close_room', { room_name: room1Name });
 
@@ -227,7 +231,7 @@ function baseRoom(name, decks) {
   room = baseRoom(room2Name, { alice: { main: deck39.main, side: [] } });
   r = await api('POST', '/cube/create_room', room);
   check('R2 create', r.ok === true, JSON.stringify(r));
-  const ev2 = await play('alice', room2Name, { main: [8964], side: [] });
+  const ev2 = await play('alice', room2Name, { main: [clientGarbageCode], side: [] });
   check('R2 rejected (MAINCOUNT)', hsStatus(ev2) === 0xa, JSON.stringify(dumpEvents(ev2)));
   await api('POST', '/cube/close_room', { room_name: room2Name });
 
@@ -236,7 +240,7 @@ function baseRoom(name, decks) {
   room = baseRoom(room3Name, { alice: { main: deckTruncated.main, side: [] } });
   r = await api('POST', '/cube/create_room', room);
   check('R3 create', r.ok === true, JSON.stringify(r));
-  const ev3 = await play('alice', room3Name, { main: [8964], side: [] });
+  const ev3 = await play('alice', room3Name, { main: [clientGarbageCode], side: [] });
   check('R3 accepted (truncated to 50)', hsStatus(ev3) === 0x9, JSON.stringify(dumpEvents(ev3)));
   await api('POST', '/cube/close_room', { room_name: room3Name });
 
@@ -245,7 +249,7 @@ function baseRoom(name, decks) {
   room = baseRoom(room4Name, { alice: { main: deckUnknown.main, side: [] } });
   r = await api('POST', '/cube/create_room', room);
   check('R4 create', r.ok === true, JSON.stringify(r));
-  const ev4 = await play('alice', room4Name, { main: [8964], side: [] });
+  const ev4 = await play('alice', room4Name, { main: [clientGarbageCode], side: [] });
   check('R4 rejected (UNKNOWNCARD)', hsStatus(ev4) === 0xa, JSON.stringify(dumpEvents(ev4)));
   await api('POST', '/cube/close_room', { room_name: room4Name });
 
