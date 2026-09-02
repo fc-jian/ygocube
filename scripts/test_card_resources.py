@@ -59,6 +59,11 @@ class CardResourceTests(unittest.TestCase):
         self.make_cdb(new, [(100, 2), (300, 1)])
         self.assertEqual(compare_cdb_files(old, new), {"addedCodes": 1, "removedCodes": 1, "changedData": 1, "changedTexts": 0})
 
+    def test_cdb_paths_with_spaces_are_read_only_safe(self) -> None:
+        cdb = self.root / "cards with spaces.cdb"
+        self.make_cdb(cdb, [(101, 1)])
+        self.assertEqual(validate_cdb(cdb)["codes"], [101])
+
     def make_zip(self, name: str, entries: list[tuple[str, bytes, int | None]] | None = None) -> Path:
         path = self.root / name
         with zipfile.ZipFile(path, "w") as archive:

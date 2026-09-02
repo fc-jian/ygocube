@@ -274,38 +274,78 @@ download_images() {
   local target="$CACHE_ROOT/ygopro-images-${IMAGE_LOCALE}.zip"
   local partial="$target.part"
   local headers="$target.headers"
+  local remote_headers remote_etag remote_size local_etag local_size
+  remote_headers="$(curl --fail --silent --show-error --location --head --max-time 30 --proto '=https' --tlsv1.2 "$IMAGE_URL")" || die "image archive HEAD request failed"
+  remote_etag="$(printf '%s\n' "$remote_headers" | awk 'BEGIN{IGNORECASE=1} /^etag:/ {sub("^[^:]*:[[:space:]]*",""); gsub("\r",""); print; exit}')"
+  remote_size="$(printf '%s\n' "$remote_headers" | awk 'BEGIN{IGNORECASE=1} /^content-length:/ {sub("^[^:]*:[[:space:]]*",""); gsub("\r",""); print; exit}')"
+  [[ -z "$remote_size" || "$remote_size" =~ ^[0-9]+$ ]] || die "image response has invalid Content-Length: $remote_size"
+  [[ -z "$remote_size" || "$remote_size" -le 4000000000 ]] || die "image archive exceeds configured size limit"
   if [[ -s "$target" ]]; then
-    local remote_etag remote_size local_etag local_size
-    remote_etag="$(curl --fail --silent --show-error --location --head --max-time 30 --proto '=https' --tlsv1.2 "$IMAGE_URL" | awk 'BEGIN{IGNORECASE=1} /^etag:/ {sub("^[^:]*:[[:space:]]*",""); gsub("\r",""); print; exit}')" || true
-    remote_size="$(curl --fail --silent --show-error --location --head --max-time 30 --proto '=https' --tlsv1.2 "$IMAGE_URL" | awk 'BEGIN{IGNORECASE=1} /^content-length:/ {sub("^[^:]*:[[:space:]]*",""); gsub("\r",""); print; exit}')" || true
-    local_etag="$(cat "$target.etag" 2>/dev/null || true)"
     local_size="$(stat -c %s "$target")"
+    local_etag="$(cat "$target.etag" 2>/dev/null || true)"
     if [[ -n "$remote_etag" && "$remote_etag" == "$local_etag" && ( -z "$remote_size" || "$remote_size" == "$local_size" ) ]]; then
-      info "image archive cache is current (ETag matched)" >&2
-      printf '%s\n' "$target"
-      return 0
+      # Metadata alone is not sufficient after an interrupted/proxy download;
+      # validate the central directory before trusting a cached archive.
+      if python3 "$HELPER" validate-zip "$target" >/dev/null 2>&1; then
+        info "image archive cache is current (ETag matched)" >&2
+        printf '%s\n' "$target"
+        return 0
+      fi
+      warn "cached image archive failed ZIP validation; downloading a clean copy"
+    else
+      warn "cached image archive metadata differs (ETag or size); downloading a clean copy"
     fi
-    warn "cached image archive metadata differs (ETag or size); downloading a clean copy"
     rm -f "$target" "$target.etag" "$target.sha256" "$target.headers"
   fi
   info "downloading image archive to cache (this can be large)" >&2
-  curl --fail --show-error --location --proto '=https' --tlsv1.2 --max-time 3600 --retry 4 --retry-delay 3 --max-filesize 4000000000 --continue-at - -D "$headers" -o "$partial" "$IMAGE_URL"
-  local content_type size
-  content_type="$(awk 'BEGIN{IGNORECASE=1} /^content-type:/ {sub("^[^:]*:[[:space:]]*",""); gsub("\r",""); print; exit}' "$headers")"
+  # curl's --continue-at can append a full 200 response when a proxy ignores a
+  # Range header.  Resume explicitly, verify Content-Range, and only append a
+  # chunk whose start and length match the existing partial file.
+  local attempt offset expected_size resume_headers resume_chunk range_value range_start range_end range_total size content_type
+  expected_size="$remote_size"
+  for attempt in 1 2 3 4 5 6; do
+    offset=0
+    [[ -f "$partial" ]] && offset="$(stat -c %s "$partial")"
+    if [[ -n "$expected_size" && "$offset" -ge "$expected_size" ]]; then
+      if [[ "$offset" -eq "$expected_size" ]]; then
+        break
+      fi
+      warn "partial image archive is larger than Content-Length; restarting clean"
+      rm -f "$partial"
+      continue
+    fi
+    if [[ "$offset" -gt 0 ]]; then
+      resume_headers="$partial.headers"
+      resume_chunk="$partial.resume"
+      rm -f "$resume_chunk" "$resume_headers"
+      if curl --http1.1 --fail --silent --show-error --location --proto '=https' --tlsv1.2 --connect-timeout 20 --max-time 600 --max-filesize 4000000000 --range "$offset-" -D "$resume_headers" -o "$resume_chunk" "$IMAGE_URL"; then
+        range_value="$(awk 'BEGIN{IGNORECASE=1} /^content-range:/ {sub("^[^:]*:[[:space:]]*",""); gsub("\r",""); print; exit}' "$resume_headers")"
+        if [[ "$range_value" =~ ^bytes[[:space:]]+([0-9]+)-([0-9]+)/([0-9]+)$ ]]; then
+          range_start="${BASH_REMATCH[1]}"; range_end="${BASH_REMATCH[2]}"; range_total="${BASH_REMATCH[3]}"
+          size="$(stat -c %s "$resume_chunk" 2>/dev/null || echo 0)"
+          if [[ "$range_start" == "$offset" && "$range_end" -ge "$range_start" && "$size" -eq $((range_end - range_start + 1)) && ( -z "$expected_size" || "$range_total" == "$expected_size" ) ]]; then
+            cat "$resume_chunk" >> "$partial"
+          fi
+        fi
+      fi
+      rm -f "$resume_chunk" "$resume_headers"
+    else
+      rm -f "$partial"
+      curl --http1.1 --fail --silent --show-error --location --proto '=https' --tlsv1.2 --connect-timeout 20 --max-time 600 --max-filesize 4000000000 -D "$headers" -o "$partial" "$IMAGE_URL" || true
+    fi
+    size="$(stat -c %s "$partial" 2>/dev/null || echo 0)"
+    if [[ -n "$expected_size" && "$size" == "$expected_size" ]]; then
+      break
+    fi
+    sleep 2
+  done
+  [[ -f "$partial" ]] || die "image archive download failed"
   size="$(stat -c %s "$partial")"
+  [[ -z "$expected_size" || "$size" == "$expected_size" ]] || die "image archive size mismatch: $size (expected $expected_size)"
+  content_type="$(printf '%s\n' "$remote_headers" | awk 'BEGIN{IGNORECASE=1} /^content-type:/ {sub("^[^:]*:[[:space:]]*",""); gsub("\r",""); print; exit}')"
   [[ "$content_type" == *zip* || "$content_type" == *octet-stream* || "$content_type" == *binary* ]] || die "image response has unexpected content type: $content_type"
-  ((size <= 4000000000)) || die "image archive exceeds configured size limit"
-  local expected_size
-  expected_size="$(awk 'BEGIN{IGNORECASE=1} /^content-length:/ {sub("^[^:]*:[[:space:]]*",""); gsub("\r",""); print; exit}' "$headers")"
-  if [[ -n "$expected_size" && "$size" != "$expected_size" ]]; then
-    warn "resumed image archive size $size differs from HTTP Content-Length $expected_size; retrying from byte zero"
-    rm -f "$partial"
-    curl --fail --show-error --location --proto '=https' --tlsv1.2 --max-time 3600 --retry 4 --retry-delay 3 --max-filesize 4000000000 -D "$headers" -o "$partial" "$IMAGE_URL"
-    size="$(stat -c %s "$partial")"
-    [[ "$size" == "$expected_size" ]] || die "image archive size mismatch after clean retry: $size (expected $expected_size)"
-  fi
   mv -f "$partial" "$target"
-  awk 'BEGIN{IGNORECASE=1} /^etag:/ {sub("^[^:]*:[[:space:]]*",""); gsub("\r",""); print; exit}' "$headers" > "$target.etag" || true
+  printf '%s\n' "$remote_etag" > "$target.etag"
   sha256sum "$target" | awk '{print $1}' > "$target.sha256"
   printf '%s\n' "$target"
 }

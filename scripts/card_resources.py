@@ -18,8 +18,8 @@ import shutil
 import sqlite3
 import stat
 import subprocess
-import tempfile
 from typing import Any, Iterable
+from urllib.parse import quote
 import zipfile
 
 
@@ -55,7 +55,7 @@ def validate_cdb(path: Path) -> dict[str, Any]:
     path = path.resolve()
     if not path.is_file():
         raise ValueError(f"cards.cdb not found: {path}")
-    uri = f"file:{path.as_posix()}?mode=ro"
+    uri = f"file:{quote(path.as_posix())}?mode=ro"
     try:
         connection = sqlite3.connect(uri, uri=True)
         try:
@@ -106,7 +106,7 @@ def compare_cdb_files(previous_path: Path, current_path: Path) -> dict[str, int]
     validate_cdb(previous_path)
     validate_cdb(current_path)
     def rows(path: Path, table: str) -> dict[int, tuple[Any, ...]]:
-        uri = f"file:{path.resolve().as_posix()}?mode=ro"
+        uri = f"file:{quote(path.resolve().as_posix())}?mode=ro"
         with sqlite3.connect(uri, uri=True) as connection:
             columns = [row[1] for row in connection.execute(f"PRAGMA table_info({table})")]
             values = connection.execute(f"SELECT {', '.join(columns)} FROM {table}").fetchall()
@@ -319,7 +319,7 @@ def missing_names(cdb_path: Path, mapping_path: Path, only_codes: Iterable[int] 
             records[code] = value
     # Read type for token filtering.  Tokens may intentionally be absent from
     # the external name mapping; all other cards must have a display name.
-    uri = f"file:{cdb_path.resolve().as_posix()}?mode=ro"
+    uri = f"file:{quote(cdb_path.resolve().as_posix())}?mode=ro"
     with sqlite3.connect(uri, uri=True) as connection:
         types = dict(connection.execute("SELECT id, type FROM datas"))
     missing: list[int] = []
