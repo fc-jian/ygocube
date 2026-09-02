@@ -219,7 +219,7 @@ def file_manifest(directory: Path, suffix: str | None = None) -> dict[str, dict[
     if not directory.exists():
         return out
     for path in sorted(directory.rglob("*")):
-        if not path.is_file() or path.is_symlink():
+        if not path.is_file() or path.is_symlink() or path.name.startswith("."):
             continue
         if suffix and path.suffix.lower() != suffix.lower():
             continue
@@ -279,6 +279,11 @@ def generate_avif(source: Path, destination: Path, previous: Path | None = None)
         if Path(name).suffix.lower() == ".avif" and Path(name).stem.isdecimal()
     }
     destination.mkdir(parents=True, exist_ok=True)
+    # An interrupted vips process can leave a hidden temporary AVIF behind;
+    # remove only our own deterministic temp pattern before rebuilding.
+    for temp in destination.glob(".*.tmp.avif"):
+        if temp.is_file() and not temp.is_symlink():
+            temp.unlink()
     current: dict[str, dict[str, Any]] = {}
     for image in sorted(source.iterdir() if source.exists() else []):
         if not image.is_file() or image.suffix.lower().lstrip(".") not in IMAGE_SUFFIXES:
