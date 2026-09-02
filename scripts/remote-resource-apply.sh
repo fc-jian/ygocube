@@ -34,9 +34,11 @@ cp -f "$DB" "$BACKUP/cube.sqlite"
 for sidecar in "$DB-wal" "$DB-shm"; do
   [[ -e "$sidecar" ]] && cp -f "$sidecar" "$BACKUP/$(basename "$sidecar")" || true
 done
+rm -rf "$BACKUP/srvpro-ygopro" "$BACKUP/pics_avif"
 cp -a "$OLD_HOST" "$BACKUP/srvpro-ygopro"
 cp -a "$OLD_AVIF" "$BACKUP/pics_avif"
 cp -a "$ROOT/current/config.yaml" "$BACKUP/config.yaml"
+[[ -f "$ROOT/shared/assets/resource-manifest.json" ]] && cp -f "$ROOT/shared/assets/resource-manifest.json" "$BACKUP/resource-manifest.json" || true
 
 systemctl stop ygocube-srvpro ygocube-web ygocube-api nginx
 rm -rf "$STAGE/root"

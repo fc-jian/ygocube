@@ -318,3 +318,17 @@ pics: {ygopro_root: "", avif_dir: "assets/pics_avif"}
 
 相对路径按配置文件目录解析。`assets/` 不被 Git 追踪，卡库、脚本和卡图必须由
 部署环境单独提供。
+
+## 7. 资源发布契约
+
+卡片资源发布不通过 REST 修改比赛状态，而由
+`scripts/update-card-resources.sh` 生成 `resource-manifest.json` 并原子安装到
+运行时目录。清单至少包含上游仓库/ref/commit、cards.cdb SHA-256/字节数/代码
+数、script Lua 文件哈希、AVIF 文件哈希和图片归档 ETag。服务启动时只读取同一
+版本的 `cards.cdb`、`strings.conf` 与 `script/`；卡图 API 仅暴露低清 AVIF，原始
+`pics/` 不属于发布包。
+
+资源发布必须在维护模式完成，远程锁和 SQLite `integrity_check` 通过后才能切换。
+验收至少包括 `/api/health`、首页引用的静态 JS/CSS 状态码与 MIME、srvpro 协议
+探针和宿主 `ldd`。任何校验失败都保留失败目录和备份，并恢复上一版资源；脚本不
+自动恢复数据库或强制覆盖 Git 冲突。

@@ -146,7 +146,7 @@ def validate_image_zip(path: Path) -> list[dict[str, Any]]:
                         raise ValueError(f"unexpected image path: {directory!r}")
                     continue
                 mode = (info.external_attr >> 16) & 0o170000
-                if mode == stat.S_IFLNK:
+                if mode == stat.S_IFLNK or (info.create_system == 3 and (info.external_attr & 0x10)):
                     raise ValueError(f"symbolic links are not allowed: {info.filename!r}")
                 code, suffix = _image_code(info.filename)
                 if code in codes:
@@ -210,10 +210,16 @@ def sync_managed_scripts(source: Path, destination: Path, previous: Path | None 
             old = {}
     old_files = set(old.get("files", old).keys()) if isinstance(old, dict) else set()
     for rel in sorted(old_files - set(current)):
+        pure = PurePosixPath(rel)
+        if pure.is_absolute() or ".." in pure.parts:
+            raise ValueError(f"unsafe managed script path: {rel!r}")
         candidate = destination / rel
         if candidate.is_file() and not candidate.is_symlink():
             candidate.unlink()
     for rel, metadata in current.items():
+        pure = PurePosixPath(rel)
+        if pure.is_absolute() or ".." in pure.parts:
+            raise ValueError(f"unsafe managed script path: {rel!r}")
         source_path = source / rel
         target = destination / rel
         if not target.exists() or target.is_symlink() or target.stat().st_size != metadata["size"] or sha256_file(target) != metadata["sha256"]:

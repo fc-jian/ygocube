@@ -179,3 +179,18 @@ srvpro 原有 `modules.reconnect` 继续负责代理断线重连；Cube 的重�
   13 个核心文件产生冲突，因此不把整分支 merge 当作“更新”。应审计上游安全、
   Node 兼容、房间生命周期提交，逐项移植并同步 CoffeeScript/生成 JS；每次通过
   `npm test`、`npm run build` 和真实建房探针后再更新 submodule 指针。
+
+## 7. 卡片资源同步脚本
+
+`scripts/update-card-resources.sh` 是资源更新的唯一入口，配套
+`scripts/card_resources.py` 和 `scripts/remote-resource-apply.sh`。`check` 不
+修改工作区；`sync` 只在 `codex/card-resource-sync-*` 分支抓取固定的
+`mycard/ygopro/server` ref，并以 `--no-ff --no-commit` 合并。C++、cards.cdb 或
+gitlink 冲突不会采用任一侧，必须人工解决后以 `--continue --commit` 继续。
+
+`prepare` 对 cards.cdb 执行 SQLite 完整性检查，对图片 ZIP 拒绝绝对路径、`..`
+路径、符号链接、重复编号、超大条目和超出总大小的归档；Lua 只同步新增/修改
+文件，删除清单仅作用于上一次脚本管理的文件。资源清单记录提交、哈希、条目
+数和缺失名称报告，状态目录被 `.gitignore` 忽略。Aly 发布先备份数据库/WAL/
+SHM、配置及资源，取得远程锁后进入维护模式，原子切换资源目录并验收服务、
+静态资源 MIME、API 和宿主动态库；失败时使用同一备份自动恢复。

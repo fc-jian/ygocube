@@ -84,6 +84,34 @@ The Linux YGOPro host/client build helper is at
 under [`scripts/e2e`](scripts/e2e); they require the corresponding API and
 srvpro services and configured test credentials.
 
+### Updating card resources
+
+Use the reusable pipeline in [`scripts/update-card-resources.sh`](scripts/update-card-resources.sh)
+from a `codex/card-resource-sync-*` branch. `check` is read-only; `sync` fetches
+the pinned `mycard/ygopro/server` commit and performs a no-ff merge with manual
+conflicts; `prepare` validates SQLite/ZIP input, copies only managed Lua changes,
+and generates max-200px Q30 AVIF thumbnails. Missing names for newly added
+non-token cards stop a release unless `--refresh-names` or the explicitly
+audited `--allow-missing-names` flag is supplied.
+
+```bash
+scripts/update-card-resources.sh check
+scripts/update-card-resources.sh sync --commit
+scripts/update-card-resources.sh prepare --refresh-names
+scripts/update-card-resources.sh build
+scripts/update-card-resources.sh test --skip-e2e   # full E2E when services are running
+scripts/update-card-resources.sh deploy --confirm-maintenance
+```
+
+The image archive is cached outside the repository (override with
+`YGOCUBE_CACHE_DIR`). Only `assets/pics_avif` is published to Aly; original
+images never enter the release. Deployment takes a SQLite/WAL/SHM/config and
+resource backup, locks the host, stops services in maintenance mode, atomically
+switches the resource directories, restarts API → srvpro → Web → Nginx, and
+checks API health, static JavaScript/CSS MIME responses and native `ldd` output.
+On failure use `rollback --backup-id <id>`; old directories and backups are
+retained until an operator verifies the release.
+
 ## Configuration and security
 
 Do not commit `config.yaml`, administrator tokens, srvpro API keys, database

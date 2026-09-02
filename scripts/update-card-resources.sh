@@ -20,7 +20,9 @@ IMAGE_URL="${YGOCUBE_IMAGES_URL:-https://cdn02.moecube.com:444/images/ygopro-ima
 ALY_HOST="${YGOCUBE_ALY_HOST:-aly}"
 ALY_ROOT="${YGOCUBE_ALY_ROOT:-/opt/ygocube}"
 ALY_PUBLIC_URL="${YGOCUBE_ALY_URL:-https://39.96.220.91}"
-CACHE_ROOT="${YGOCUBE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/ygocube/card-resources}"
+# Keep the default cache in /tmp: the project may run in a read-only home
+# (notably WSL/CI), while callers can still select a durable cache explicitly.
+CACHE_ROOT="${YGOCUBE_CACHE_DIR:-/tmp/ygocube-card-resources}"
 STATE_DIR="$ROOT_DIR/.card-resource-sync"
 RELEASE_ID="$(date -u +%Y%m%d-%H%M%S)-$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || printf unknown)"
 
@@ -36,6 +38,7 @@ ALLOW_MISSING_NAMES=0
 REFRESH_NAMES=0
 CONFIRM_MAINTENANCE=0
 BACKUP_ID=""
+IMAGE_URL_OVERRIDE=0
 
 usage() {
   sed -n '1,55p' "$0"
@@ -101,8 +104,8 @@ parse_args() {
         [[ -z "$COMMAND" ]] || die "only one command may be specified"
         COMMAND="$1"; shift ;;
       --dry-run) DRY_RUN=1; shift ;;
-      --locale) [[ $# -ge 2 ]] || die "--locale needs a value"; IMAGE_LOCALE="$2"; shift 2; IMAGE_URL="https://cdn02.moecube.com:444/images/ygopro-images-${IMAGE_LOCALE}.zip" ;;
-      --images-url) [[ $# -ge 2 ]] || die "--images-url needs a value"; IMAGE_URL="$2"; shift 2 ;;
+      --locale) [[ $# -ge 2 ]] || die "--locale needs a value"; IMAGE_LOCALE="$2"; shift 2; ((IMAGE_URL_OVERRIDE)) || IMAGE_URL="https://cdn02.moecube.com:444/images/ygopro-images-${IMAGE_LOCALE}.zip" ;;
+      --images-url) [[ $# -ge 2 ]] || die "--images-url needs a value"; IMAGE_URL="$2"; IMAGE_URL_OVERRIDE=1; shift 2 ;;
       --aly-host) [[ $# -ge 2 ]] || die "--aly-host needs a value"; ALY_HOST="$2"; shift 2 ;;
       --aly-root) [[ $# -ge 2 ]] || die "--aly-root needs a value"; ALY_ROOT="$2"; shift 2 ;;
       --client) CLIENT=1; shift ;;
@@ -348,7 +351,7 @@ cmd_build() {
 cmd_test() {
   require_command python3
   info "resource helper tests"
-  PYTHONPATH="$ROOT_DIR/scripts" python3 -m unittest discover -s "$ROOT_DIR/scripts" -p 'test_card_resources.py'
+  PYTHONPATH="$ROOT_DIR/scripts" python3 -m unittest discover -s "$ROOT_DIR/scripts" -p 'test_*card_resources.py'
   info "API tests/build"
   (cd "$ROOT_DIR" && TMPDIR=/tmp TMP=/tmp TEMP=/tmp npm --prefix cube/apps/api test -- --runInBand)
   (cd "$ROOT_DIR" && npm --prefix cube/apps/api run build)
@@ -407,7 +410,7 @@ ssh_upload() {
 remote_rollback() {
   local id="$1"
   info "rolling back Aly resource backup $id"
-  ssh_exec "set -eu; root='$ALY_ROOT'; backup=\"\$root/backups/card-sync-$id\"; test -d \"\$backup\"; systemctl stop ygocube-srvpro ygocube-web ygocube-api nginx; rm -rf \"\$root/shared/srvpro/ygopro\" \"\$root/shared/assets/pics_avif\"; cp -a \"\$backup/srvpro-ygopro\" \"\$root/shared/srvpro/ygopro\"; cp -a \"\$backup/pics_avif\" \"\$root/shared/assets/pics_avif\"; systemctl start ygocube-api; systemctl start ygocube-srvpro; systemctl start ygocube-web; systemctl start nginx; systemctl is-active ygocube-api ygocube-srvpro ygocube-web nginx" 300
+  ssh_exec "set -eu; root='$ALY_ROOT'; backup=\"\$root/backups/card-sync-$id\"; test -d \"\$backup\"; systemctl stop ygocube-srvpro ygocube-web ygocube-api nginx; rm -rf \"\$root/shared/srvpro/ygopro\" \"\$root/shared/assets/pics_avif\"; cp -a \"\$backup/srvpro-ygopro\" \"\$root/shared/srvpro/ygopro\"; cp -a \"\$backup/pics_avif\" \"\$root/shared/assets/pics_avif\"; if [ -f \"\$backup/resource-manifest.json\" ]; then cp -f \"\$backup/resource-manifest.json\" \"\$root/shared/assets/resource-manifest.json\"; fi; chown -R ygocube:ygocube \"\$root/shared/srvpro/ygopro\" \"\$root/shared/assets/pics_avif\" \"\$root/shared/assets/resource-manifest.json\" 2>/dev/null || true; systemctl start ygocube-api; systemctl start ygocube-srvpro; systemctl start ygocube-web; systemctl start nginx; systemctl is-active ygocube-api ygocube-srvpro ygocube-web nginx" 300
 }
 
 remote_health() {
@@ -419,7 +422,13 @@ remote_health() {
   [[ -n "$assets" ]] || die "homepage did not reference Next static assets"
   while IFS= read -r asset; do
     [[ -z "$asset" ]] && continue
-    curl --fail --silent --show-error --max-time 30 -o /dev/null -H 'Accept: */*' "$ALY_PUBLIC_URL$asset"
+    local asset_headers content_type
+    asset_headers="$(curl --fail --silent --show-error --head --max-time 30 -H 'Accept: */*' "$ALY_PUBLIC_URL$asset")"
+    content_type="$(printf '%s\n' "$asset_headers" | awk 'BEGIN{IGNORECASE=1} /^content-type:/ {sub("^[^:]*:[[:space:]]*",""); gsub("\r",""); print; exit}')"
+    case "$asset" in
+      *.js) [[ "$content_type" == *javascript* || "$content_type" == *ecmascript* ]] || die "JS asset has wrong MIME: $asset ($content_type)" ;;
+      *.css) [[ "$content_type" == *text/css* ]] || die "CSS asset has wrong MIME: $asset ($content_type)" ;;
+    esac
   done <<<"$assets"
   info "Aly health and static-asset checks passed"
 }

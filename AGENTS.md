@@ -72,6 +72,14 @@ pnpm install && pnpm dev                # web:3000 / api:3001
 # e2e（需先启动 srvpro + cube api）
 bash scripts/e2e/run-e2e.sh             # deck 限制/建房/鉴权 16 项检查
 bash scripts/e2e/run-full-sim.sh        # 8 人 kuro750 BO3 完整模拟赛 → test_tournaments/<tid>/
+
+# 上游卡片资源同步（必须在 codex/card-resource-sync-* 分支）
+bash scripts/update-card-resources.sh check
+bash scripts/update-card-resources.sh sync --commit
+bash scripts/update-card-resources.sh prepare --refresh-names
+bash scripts/update-card-resources.sh build
+bash scripts/update-card-resources.sh test
+bash scripts/update-card-resources.sh deploy --confirm-maintenance
 ```
 
 ## Aly 发布与 Web 静态资源验收

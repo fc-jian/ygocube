@@ -120,6 +120,30 @@ cards.cdb   ygocdb_cards.json   script/   pics/   expansions/
 `pics.ygopro_root` 指向已有安装。原始卡图不入库；可选的低清 AVIF 由
 `pics.avif_dir` 提供。
 
+### 资源同步与发布
+
+上游 `mycard/ygopro/server` 的卡片资源使用
+`scripts/update-card-resources.sh` 管理。脚本固定校验上游 ref/commit，维护
+`cards.cdb` 的 SQLite 完整性、script 子模块 gitlink、图片 ZIP 的路径/大小和
+CRC，并在 `.card-resource-sync/` 生成可审计的 `resource-manifest.json`。Lua
+差量只删除上一次由脚本管理且已从上游移除的文件，未知扩展文件保留。图片在
+本地用 `vips thumbnail` 生成最大边 200、AVIF Q30 缩略图；原始 `pics/` 永不
+上传 Aly。
+
+同步必须在 `codex/card-resource-sync-*` 分支进行，合并使用
+`git merge --no-ff --no-commit`，冲突只报告路径并由人工解决；`--continue
+--commit` 之后才更新根仓库 gitlink。默认不推送、不覆盖工作区，只有显式
+`--push` 才推送特性分支。新增非 token 卡若没有
+`assets/ygocdb_cards.json` 的字面名称会阻止发布，必须先刷新 YGOCDB 名称包或
+经过审计后使用 `--allow-missing-names`，缺失编号会写入报告。
+
+`deploy --confirm-maintenance` 会先锁定 Aly、执行 SQLite `integrity_check`
+并备份数据库（含 WAL/SHM）、配置、宿主资源和清单，然后停止 API、Web、
+srvpro、Nginx，将仅包含变化文件的归档在同一文件系统原子切换，按 API →
+srvpro → Web → Nginx 顺序启动。发布后必须同时检查 `/api/health`、首页引用的
+每个 Next 静态 JS/CSS（状态码和 MIME）、四个 systemd 服务及宿主 `ldd`；失败
+由旧资源备份自动回滚，备份和失败日志保留到人工确认后再清理。
+
 ## 7. 关键设计约束
 
 1. 所有比赛状态先写 append-only 事件，再由同一 `apply()` 回放；快照用于

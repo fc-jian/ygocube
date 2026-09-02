@@ -136,3 +136,28 @@ git -C ygopro diff --check
   连接的资源修复。
   已有的 room cap、版本读取和 Node socket 兼容实现保留。后续同步继续按提交审计、
   小批移植和 Cube API 回归测试进行。
+
+## 7. 资源更新验收清单
+
+资源更新使用 `scripts/update-card-resources.sh` 的固定顺序：
+
+```bash
+scripts/update-card-resources.sh check
+scripts/update-card-resources.sh sync --commit
+scripts/update-card-resources.sh prepare --refresh-names
+scripts/update-card-resources.sh build
+scripts/update-card-resources.sh test
+scripts/update-card-resources.sh deploy --confirm-maintenance
+```
+
+`sync` 在专用 `codex/card-resource-sync-*` 分支执行 no-ff 合并；出现 C++、
+cards.cdb 或 gitlink 冲突时必须人工解决，脚本不会自动选择任一侧。`prepare`
+生成包含上游提交、SQLite 哈希/行数、Lua 与 AVIF 文件哈希、图片 ETag 和删除
+清单的 `resource-manifest.json`，状态目录不入 Git。缺失新卡字面名称默认阻止
+发布；`--allow-missing-names` 只适用于已记录审计的例外。
+
+部署前的远程脚本取得锁并备份 `cube.sqlite`、WAL/SHM、配置、宿主目录和 AVIF，
+校验数据库后进入维护模式，原子切换仅含变化文件的资源目录，按 API → srvpro →
+Web → Nginx 启动。验收必须同时覆盖四个 systemd 服务、`/api/health`、首页全部
+Next JS/CSS 的 200 与 MIME、srvpro 协议探针、宿主 `ldd` 和新 cards.cdb；失败
+自动调用 `rollback --backup-id` 恢复旧资源并保留备份。
