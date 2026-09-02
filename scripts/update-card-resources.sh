@@ -129,6 +129,14 @@ parse_args() {
 CONTINUE_MERGE=0
 parse_args "$@"
 
+# Keep values that are later interpolated into remote shell commands and
+# archive paths deliberately narrow.  The image endpoint is required to use
+# TLS; callers can still point it at a different HTTPS mirror with
+# --images-url.
+[[ "$IMAGE_LOCALE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$ ]] || die "invalid image locale"
+[[ "$IMAGE_URL" == https://* ]] || die "image URL must use HTTPS"
+[[ "$ALY_ROOT" =~ ^/[A-Za-z0-9._/+:-]+$ ]] || die "invalid Aly root path"
+
 if [[ "$COMMAND" == "check" || "$COMMAND" == "test" ]]; then
   :
 else

@@ -30,8 +30,57 @@ systemctl is-active ygocube-api ygocube-srvpro ygocube-web nginx > "$BACKUP/serv
 # Enter maintenance before touching the database. This prevents a write from
 # racing the backup and makes the checkpoint/integrity result reproducible.
 SERVICES_STOPPED=1
+HOST_REPLACED=0
+AVIF_REPLACED=0
+HOST_PRE_MOVED=0
+AVIF_PRE_MOVED=0
+NAMES_REPLACED=0
+MANIFEST_REPLACED=0
+rollback_resource_moves() {
+  # The backup is complete before any live directory is moved.  If an
+  # unexpected filesystem error occurs during the two-directory switch,
+  # restore the old paths before bringing services back up.  Keep the failed
+  # stage and backup for forensic inspection; never touch the database here.
+  if [[ "${HOST_REPLACED:-0}" == 1 ]]; then
+    rm -rf "$OLD_HOST"
+    if [[ -d "$OLD_HOST.pre-$RELEASE_ID" ]]; then
+      mv "$OLD_HOST.pre-$RELEASE_ID" "$OLD_HOST" || true
+    elif [[ -d "$BACKUP/srvpro-ygopro" ]]; then
+      cp -a "$BACKUP/srvpro-ygopro" "$OLD_HOST" || true
+    fi
+  elif [[ "${HOST_PRE_MOVED:-0}" == 1 && ! -e "$OLD_HOST" && -d "$OLD_HOST.pre-$RELEASE_ID" ]]; then
+    mv "$OLD_HOST.pre-$RELEASE_ID" "$OLD_HOST" || true
+  fi
+  if [[ "${AVIF_REPLACED:-0}" == 1 ]]; then
+    rm -rf "$OLD_AVIF"
+    if [[ -d "$OLD_AVIF.pre-$RELEASE_ID" ]]; then
+      mv "$OLD_AVIF.pre-$RELEASE_ID" "$OLD_AVIF" || true
+    elif [[ -d "$BACKUP/pics_avif" ]]; then
+      cp -a "$BACKUP/pics_avif" "$OLD_AVIF" || true
+    fi
+  elif [[ "${AVIF_PRE_MOVED:-0}" == 1 && ! -e "$OLD_AVIF" && -d "$OLD_AVIF.pre-$RELEASE_ID" ]]; then
+    mv "$OLD_AVIF.pre-$RELEASE_ID" "$OLD_AVIF" || true
+  fi
+  if [[ "${NAMES_REPLACED:-0}" == 1 ]]; then
+    if [[ -f "$BACKUP/ygocdb_cards.json" ]]; then
+      cp -f "$BACKUP/ygocdb_cards.json" "$OLD_NAMES"
+    else
+      rm -f "$OLD_NAMES"
+    fi
+  fi
+  if [[ "${MANIFEST_REPLACED:-0}" == 1 ]]; then
+    if [[ -f "$BACKUP/resource-manifest.json" ]]; then
+      cp -f "$BACKUP/resource-manifest.json" "$ROOT/shared/assets/resource-manifest.json"
+    else
+      rm -f "$ROOT/shared/assets/resource-manifest.json"
+    fi
+  fi
+}
 recover_services() {
   local status=$?
+  if [[ "$status" != 0 ]]; then
+    rollback_resource_moves || true
+  fi
   if [[ "${SERVICES_STOPPED:-0}" == 1 ]]; then
     systemctl start ygocube-api ygocube-srvpro ygocube-web nginx >/dev/null 2>&1 || true
   fi
@@ -84,14 +133,20 @@ safe_delete "$STAGE/root/assets/pics_avif" "$STAGE/root/deletes/avif.txt"
 # cleanup.  Moving complete directories on one filesystem makes the switch
 # atomic from running processes' point of view.
 mv "$OLD_HOST" "$ROOT/shared/srvpro/ygopro.pre-$RELEASE_ID"
+HOST_PRE_MOVED=1
 mv "$OLD_AVIF" "$ROOT/shared/assets/pics_avif.pre-$RELEASE_ID"
+AVIF_PRE_MOVED=1
 mv "$STAGE/root/srvpro/ygopro" "$OLD_HOST"
+HOST_REPLACED=1
 mv "$STAGE/root/assets/pics_avif" "$OLD_AVIF"
+AVIF_REPLACED=1
 if [[ -f "$STAGE/root/assets/ygocdb_cards.json" ]]; then
   cp -f "$STAGE/root/assets/ygocdb_cards.json" "$ROOT/shared/assets/.ygocdb_cards.json.new"
   mv -f "$ROOT/shared/assets/.ygocdb_cards.json.new" "$OLD_NAMES"
+  NAMES_REPLACED=1
 fi
 cp -f "$STAGE/root/metadata/resource-manifest.json" "$ROOT/shared/assets/resource-manifest.json"
+MANIFEST_REPLACED=1
 chown -R ygocube:ygocube "$OLD_HOST" "$OLD_AVIF" "$ROOT/shared/assets/resource-manifest.json"
 
 systemctl start ygocube-api
