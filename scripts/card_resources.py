@@ -363,8 +363,23 @@ def merge_name_zip(zip_path: Path, mapping_path: Path) -> int:
     existing: dict[str, Any] = {}
     if mapping_path.exists():
         old = json.loads(mapping_path.read_text(encoding="utf-8"))
-        if isinstance(old, dict):
-            existing = old
+        old_values = old.values() if isinstance(old, dict) else old if isinstance(old, list) else []
+        # Older exports were keyed by YGOCDB's catalog/cid, which aliases
+        # alternate-art records and makes exact-code lookup ambiguous.  Keep
+        # only the literal `id` as the key while preserving one deterministic
+        # record per code.
+        for value in old_values:
+            if not isinstance(value, dict):
+                continue
+            try:
+                code = int(value.get("id"))
+            except (TypeError, ValueError):
+                continue
+            if code > 0:
+                key = str(code)
+                previous = existing.get(key)
+                if previous is None or not any(str(previous.get(field) or "").strip() for field in ("sc_name", "md_name", "jp_name")):
+                    existing[key] = value
     added = 0
     for record in incoming:
         if not isinstance(record, dict):

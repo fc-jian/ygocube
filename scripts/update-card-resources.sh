@@ -420,6 +420,21 @@ except (OSError, json.JSONDecodeError):
     mapping = {}
 if not isinstance(mapping, dict):
     mapping = {str(item.get('id')): item for item in mapping if isinstance(item, dict) and item.get('id') is not None}
+else:
+    normalized = {}
+    for value in mapping.values():
+        if not isinstance(value, dict):
+            continue
+        try:
+            code = int(value.get('id'))
+        except (TypeError, ValueError):
+            continue
+        if code > 0:
+            key = str(code)
+            old = normalized.get(key)
+            if old is None or not any(str(old.get(field) or '').strip() for field in ('sc_name', 'md_name', 'jp_name')):
+                normalized[key] = value
+    mapping = normalized
 with open(records_path, encoding='utf-8') as source:
     for line in source:
         try:
@@ -592,16 +607,19 @@ make_payload() {
   cp -f "$ROOT_DIR/srvpro/ygopro/cards.cdb" "$payload/srvpro/ygopro/cards.cdb"
   [[ -f "$ROOT_DIR/srvpro/ygopro/strings.conf" ]] && cp -f "$ROOT_DIR/srvpro/ygopro/strings.conf" "$payload/srvpro/ygopro/strings.conf"
   [[ -x "$ROOT_DIR/srvpro/ygopro/ygopro" ]] && cp -f "$ROOT_DIR/srvpro/ygopro/ygopro" "$payload/srvpro/ygopro/ygopro"
-  local script_delta avif_delta delta_args=()
+  local script_delta_file="$payload/metadata/scripts-delta.json" avif_delta_file="$payload/metadata/avif-delta.json" delta_args=()
   # Only compare against a manifest recorded after a successful Aly publish.
   # Local prepare attempts can be interrupted and must never make a first
   # deployment omit resources that are still absent on the server.
   [[ -f "$previous" ]] && delta_args=(--previous "$previous")
-  script_delta="$(python3 "$HELPER" delta "$current" "${delta_args[@]}" --section scripts)"
-  avif_delta="$(python3 "$HELPER" delta "$current" "${delta_args[@]}" --section avif)"
-  python3 - "$script_delta" "$avif_delta" "$payload" "$ROOT_DIR" <<'PY'
+  python3 "$HELPER" delta "$current" "${delta_args[@]}" --section scripts > "$script_delta_file"
+  python3 "$HELPER" delta "$current" "${delta_args[@]}" --section avif > "$avif_delta_file"
+  # Read the potentially large delta JSON from files; passing all changed
+  # paths as argv can exceed Linux ARG_MAX on a first resource publish.
+  python3 - "$script_delta_file" "$avif_delta_file" "$payload" "$ROOT_DIR" <<'PY'
 import json, os, shutil, sys
-sd, ad, root, base = json.loads(sys.argv[1]), json.loads(sys.argv[2]), sys.argv[3], sys.argv[4]
+sd, ad = json.load(open(sys.argv[1], encoding='utf-8')), json.load(open(sys.argv[2], encoding='utf-8'))
+root, base = sys.argv[3], sys.argv[4]
 base=os.path.abspath(base)
 for section, delta, source, target in (("scripts", sd, os.path.join(base, "srvpro", "ygopro", "script"), os.path.join(root, "srvpro", "ygopro", "script")), ("avif", ad, os.path.join(base, "assets", "pics_avif"), os.path.join(root, "assets", "pics_avif"))):
     for rel in delta["changed"]:

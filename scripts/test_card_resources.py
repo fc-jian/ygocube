@@ -148,9 +148,10 @@ class CardResourceTests(unittest.TestCase):
                 {"id": 1002, "cid": 7, "sc_name": "乙"},
             ]))
         mapping = self.root / "names.json"
-        mapping.write_text("{}", encoding="utf-8")
-        self.assertEqual(merge_name_zip(archive, mapping), 2)
+        mapping.write_text(json.dumps({"7": {"id": 1001, "cid": 7, "sc_name": "旧"}}), encoding="utf-8")
+        self.assertEqual(merge_name_zip(archive, mapping), 1)
         refreshed = json.loads(mapping.read_text(encoding="utf-8"))
+        self.assertNotIn("7", refreshed)
         self.assertEqual(refreshed["1001"]["sc_name"], "甲")
         self.assertEqual(refreshed["1002"]["sc_name"], "乙")
 
