@@ -398,6 +398,21 @@ def merge_name_zip(zip_path: Path, mapping_path: Path) -> int:
         key = str(code)
         if key not in existing:
             added += 1
+        previous = existing.get(key)
+        incoming_has_display = any(
+            str(record.get(field) or "").strip()
+            for field in ("sc_name", "md_name", "jp_name")
+        )
+        previous_has_display = isinstance(previous, dict) and any(
+            str(previous.get(field) or "").strip()
+            for field in ("sc_name", "md_name", "jp_name")
+        )
+        # Some YGOCDB exports contain an alternate-art row with no localized
+        # display name. Do not let that blank row erase a useful exact-code
+        # name already present in the map; a later exact API refresh can still
+        # replace it when it has a real display value.
+        if previous_has_display and not incoming_has_display:
+            continue
         existing[key] = record
     _json_dump(existing, mapping_path)
     return added

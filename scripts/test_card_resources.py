@@ -155,6 +155,16 @@ class CardResourceTests(unittest.TestCase):
         self.assertEqual(refreshed["1001"]["sc_name"], "甲")
         self.assertEqual(refreshed["1002"]["sc_name"], "乙")
 
+    def test_name_refresh_does_not_erase_existing_display_name(self) -> None:
+        archive = self.root / "blank-name.zip"
+        with zipfile.ZipFile(archive, "w") as handle:
+            handle.writestr("cards.json", json.dumps([{"id": 1001, "cid": 7, "sc_name": ""}]))
+        mapping = self.root / "names.json"
+        mapping.write_text(json.dumps({"1001": {"id": 1001, "sc_name": "已有名称"}}), encoding="utf-8")
+        self.assertEqual(merge_name_zip(archive, mapping), 0)
+        refreshed = json.loads(mapping.read_text(encoding="utf-8"))
+        self.assertEqual(refreshed["1001"]["sc_name"], "已有名称")
+
 
 if __name__ == "__main__":
     unittest.main()
