@@ -205,6 +205,26 @@ cmd_sync() {
     return 0
   fi
   git -C "$ROOT_DIR/ygopro" cat-file -e "$UPSTREAM_COMMIT^{commit}" || die "upstream commit $UPSTREAM_COMMIT was not fetched"
+  # A repeated sync is a safe no-op once the requested upstream commit is
+  # already an ancestor.  This keeps scheduled runs idempotent and avoids a
+  # second no-op merge followed by a failing `git commit`.
+  if git -C "$ROOT_DIR/ygopro" merge-base --is-ancestor "$UPSTREAM_COMMIT" HEAD; then
+    info "ygopro already contains upstream $UPSTREAM_COMMIT"
+    local script_ref ocg_ref
+    script_ref="$(git -C "$ROOT_DIR/ygopro" ls-tree HEAD script | awk '{print $3}')"
+    ocg_ref="$(git -C "$ROOT_DIR/ygopro" ls-tree HEAD ocgcore | awk '{print $3}')"
+    [[ "$script_ref" == "$SCRIPT_COMMIT"* ]] || die "script gitlink is $script_ref, expected $SCRIPT_COMMIT"
+    [[ "$ocg_ref" == "$OCGCORE_COMMIT"* ]] || die "ocgcore gitlink is $ocg_ref, expected $OCGCORE_COMMIT"
+    if ((PUSH)); then
+      local root_branch sub_branch
+      root_branch="$(git -C "$ROOT_DIR" symbolic-ref --short HEAD)"
+      sub_branch="$(git -C "$ROOT_DIR/ygopro" symbolic-ref --short HEAD)"
+      run git -C "$ROOT_DIR/ygopro" push --set-upstream fc-jian "$sub_branch"
+      ((DRY_RUN)) || [[ -z "$(git -C "$ROOT_DIR" status --porcelain)" ]] || die "root gitlink is not committed; commit it before --push"
+      run git -C "$ROOT_DIR" push --set-upstream origin "$root_branch"
+    fi
+    return 0
+  fi
   if git -C "$ROOT_DIR/ygopro" rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
     ((CONTINUE_MERGE)) || die "ygopro merge is already in progress; resolve conflicts and rerun with --continue"
     [[ -z "$(git -C "$ROOT_DIR/ygopro" diff --name-only --diff-filter=U)" ]] || die "unresolved ygopro conflicts remain: $(git -C "$ROOT_DIR/ygopro" diff --name-only --diff-filter=U | tr '\n' ' ')"
@@ -371,10 +391,39 @@ PY
     warn "new non-token cards missing display names: $missing"
     ((ALLOW_MISSING_NAMES)) || die "name coverage is incomplete; use --refresh-names or --allow-missing-names"
   fi
-  [[ -f "$STATE_DIR/resource-manifest.json" ]] && cp -f "$STATE_DIR/resource-manifest.json" "$STATE_DIR/previous-resource-manifest.json" || true
+  # On the first run there is no prior state manifest yet.  Bootstrap one
+  # from the currently installed runtime so the first payload still contains
+  # only changed Lua/AVIF files (rather than re-uploading the whole cache).
+  if [[ -f "$STATE_DIR/resource-manifest.json" ]]; then
+    cp -f "$STATE_DIR/resource-manifest.json" "$STATE_DIR/previous-resource-manifest.json"
+  elif [[ -f "$runtime/cards.cdb" ]]; then
+    python3 "$HELPER" manifest --cdb "$runtime/cards.cdb" --scripts "$runtime/script" --avif "$ROOT_DIR/assets/pics_avif" --out "$STATE_DIR/previous-resource-manifest.json" --names "$ROOT_DIR/assets/ygocdb_cards.json" >/dev/null
+  fi
   cp -f "$cdb" "$runtime/cards.cdb"
   [[ -f "$ROOT_DIR/ygopro/strings.conf" ]] && cp -f "$ROOT_DIR/ygopro/strings.conf" "$runtime/strings.conf"
-  [[ -f "$STATE_DIR/script-manifest.json" ]] && cp -f "$STATE_DIR/script-manifest.json" "$STATE_DIR/previous-script-manifest.json" || true
+  if [[ -f "$STATE_DIR/script-manifest.json" ]]; then
+    cp -f "$STATE_DIR/script-manifest.json" "$STATE_DIR/previous-script-manifest.json"
+  elif [[ -d "$runtime/script" ]]; then
+    python3 - "$runtime/script" "$STATE_DIR/previous-script-manifest.json" <<'PY'
+import json, hashlib, os, sys
+root, out = sys.argv[1:]
+files = {}
+for base, _, names in os.walk(root):
+    for name in sorted(names):
+        if not name.lower().endswith('.lua'):
+            continue
+        path = os.path.join(base, name)
+        rel = os.path.relpath(path, root).replace(os.sep, '/')
+        digest = hashlib.sha256()
+        with open(path, 'rb') as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b''):
+                digest.update(block)
+        files[rel] = {'size': os.path.getsize(path), 'sha256': digest.hexdigest()}
+with open(out, 'w', encoding='utf-8') as handle:
+    json.dump({'schemaVersion': 1, 'files': files}, handle, ensure_ascii=False, sort_keys=True)
+    handle.write('\n')
+PY
+  fi
   python3 "$HELPER" sync-scripts "$scripts" "$runtime/script" --previous "${STATE_DIR}/previous-script-manifest.json" --manifest-out "$STATE_DIR/script-manifest.json"
   local image_archive_meta='{"locale":null,"url":null,"etag":null,"size":null,"sha256":null,"entryCount":0}'
   if ((SKIP_IMAGES)); then
