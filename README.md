@@ -54,8 +54,11 @@ must provision `cards.cdb`, `ygocdb_cards.json`, `script/`, `pics/`, and
 `expansions/` from the matching card-data release (or point
 `server.cards_cdb`/`server.card_names_json` and `pics.*` at an existing
 installation).  Browser-visible names come from `ygocdb_cards.json` in the
-order `sc_name`, `md_name`, `jp_name`; the other localized fields are indexed
-for search.  Card images and generated `assets/pics_avif/` thumbnails are
+order `sc_name`, `md_name`, `jp_name`, `cn_name`, `en_name` (blank values are
+skipped), then fall back to the literal exact-code name in `cards.cdb` when no
+localized value exists. The other localized fields and the CDB name are indexed
+for search. YGOPro token/derivative rows are excluded from every user-facing
+search and cannot be added to a pool. Card images and generated `assets/pics_avif/` thumbnails are
 runtime data; cloning this repository does not create or track local symlinks.
 
 ```bash

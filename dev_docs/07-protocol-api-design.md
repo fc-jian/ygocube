@@ -266,9 +266,11 @@ srvpro 发送精简的 `room_name/start/end/players/first/wins`；每个 player 
 `CardInfo` 字段：`code/name/type/desc/level/lscale/rscale/linkMarkers/race/`
 `attribute/atk/def/alias/setCodes/setNames`。name/code 是 exact 卡表行；alias 只
 用于卡组规则副本上限与合法性检查，不用于卡池、搜索、状态或详情去重。
-name 的显示值来自 `server.card_names_json` 中的 `sc_name` → `md_name` → `jp_name`；
+name 的显示值优先来自 `server.card_names_json` 中的 `sc_name` → `md_name` → `jp_name` → `cn_name` → `en_name`；
+若这些字段均为空或映射缺失，则回退到 exact code 对应的 CDB `texts.name` 原名。
 `cn_name`、`sc_name`、`md_name`、`nwbbs_n`、`cnocg_n`、`jp_ruby`、`jp_name`、`en_name`
-均加入搜索索引，CDB 的 `texts.name` 不作为显示名或搜索别名。
+以及 CDB 原名均加入搜索索引。`TYPE_TOKEN`
+（衍生物）记录不出现在用户搜索结果，也不能进入主卡池或候选池。
 可选 `pickStats: {poolId,poolName,averagePickPosition,averagePickPercentage,packCount,
 tournamentCount,sampleCount}[]` 按 exact code 返回；抓位从 1 开始，百分比按每个牌包
 的实际卡数归一化（末堆按实际大小），只统计完整抽取且比赛名不以 `test` 开头的现存

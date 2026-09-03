@@ -133,10 +133,12 @@ main 仍低于下限的玩家记录 `player_dsq` 并从后续排表排除。
 
 `CardsService` 从配置的 `server.cards_cdb` 导入 `datas/texts`：效果文本、类型、
 种族、属性、攻守、等级/刻度、Link 标记、字段 code/name 等结构化字段来自 CDB；
-浏览器可见的卡名不再读取 `texts.name`，而是由 `server.card_names_json` 指向的
+浏览器可见的卡名优先由 `server.card_names_json` 指向的
 `assets/ygocdb_cards.json` 按 exact code 建立映射，名称优先级为 `sc_name` →
-`md_name` → `jp_name`（空白值跳过）。卡池、搜索、选牌状态和详情均使用 exact code；
-`alias` 只在卡组规则副本上限与合法性检查中作为 rules identity。卡池导入的名称
+`md_name` → `jp_name` → `cn_name` → `en_name`（空白值跳过）；若映射缺失或上述字段均为空，最终回退到同一 exact code 的 `cards.cdb` `texts.name` 原名。卡池、搜索、选牌状态和详情均使用 exact code；
+`alias` 只在卡组规则副本上限与合法性检查中作为 rules identity。YGOPro `TYPE_TOKEN`
+（衍生物）记录保留在元数据中供历史校验，但从所有用户搜索结果中排除，且卡池导入
+和候选池追加均会过滤。卡池导入的名称
 校验使用同一映射得到的字面名称，不会把“规则上视作”的别名名称当成字面名称。
 
 卡池创建/编辑支持：

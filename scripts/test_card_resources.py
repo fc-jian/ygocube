@@ -43,15 +43,23 @@ class CardResourceTests(unittest.TestCase):
                 db.execute("INSERT INTO datas(id,type) VALUES (?,?)", (code, card_type))
                 db.execute("INSERT INTO texts(id,name,desc) VALUES (?,?,?)", (code, f"CDB {code}", ""))
 
-    def test_cdb_integrity_and_name_coverage_only_new_codes(self) -> None:
+    def test_cdb_integrity_and_name_coverage_uses_localized_fallback_and_ignores_tokens(self) -> None:
         cdb = self.root / "cards.cdb"
-        self.make_cdb(cdb, [(100, 1), (200, 0x4000), (300, 1)])
+        self.make_cdb(cdb, [(100, 1), (200, 0x4000), (300, 1), (400, 1), (500, 1), (600, 1)])
+        # A blank CDB name is still a genuine missing display name; code 600
+        # deliberately exercises the final CDB-name fallback instead.
+        with sqlite3.connect(cdb) as db:
+            db.execute("UPDATE texts SET name='' WHERE id=300")
         mapping = self.root / "names.json"
-        mapping.write_text(json.dumps({"old": {"id": 100, "sc_name": "旧"}}), encoding="utf-8")
+        mapping.write_text(json.dumps({
+            "old": {"id": 100, "sc_name": "旧"},
+            "cn": {"id": 400, "sc_name": "", "md_name": "", "jp_name": "", "cn_name": "中文后备"},
+            "en": {"id": 500, "sc_name": "", "md_name": "", "jp_name": "", "cn_name": " ", "en_name": "English fallback"},
+        }), encoding="utf-8")
         info = validate_cdb(cdb)
-        self.assertEqual(info["codeCount"], 3)
+        self.assertEqual(info["codeCount"], 6)
         self.assertEqual(info["tokenCodes"], 1)
-        self.assertEqual(missing_names(cdb, mapping, [100, 200, 300]), [300])
+        self.assertEqual(missing_names(cdb, mapping, [100, 200, 300, 400, 500, 600]), [300])
 
     def test_cdb_diff_reports_added_and_changed_rows(self) -> None:
         old = self.root / "old.cdb"

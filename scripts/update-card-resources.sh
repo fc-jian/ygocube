@@ -397,8 +397,15 @@ PY
   else
     printf '[]\n' > "$only_codes"
   fi
-  local missing
-  missing="$(python3 "$HELPER" missing-names "$cdb" "$ROOT_DIR/assets/ygocdb_cards.json" --only "$only_codes")"
+  local missing name_check_codes="$only_codes"
+  # A name refresh is also a repair pass for older exact-code rows.  Earlier
+  # releases only checked newly added IDs, so expanding the fallback order can
+  # otherwise leave historical alternate-art records permanently unexamined.
+  if ((REFRESH_NAMES)); then
+    name_check_codes="$STATE_DIR/name-refresh-codes.json"
+    python3 "$HELPER" missing-names "$cdb" "$ROOT_DIR/assets/ygocdb_cards.json" > "$name_check_codes"
+  fi
+  missing="$(python3 "$HELPER" missing-names "$cdb" "$ROOT_DIR/assets/ygocdb_cards.json" --only "$name_check_codes")"
   if ((REFRESH_NAMES)) && [[ "$missing" != '[]' ]]; then
     # YGOCDB's bulk archive intentionally omits many alternate-art records.
     # Resolve those exact ids through the read-only card endpoint and copy the
@@ -432,7 +439,7 @@ else:
         if code > 0:
             key = str(code)
             old = normalized.get(key)
-            if old is None or not any(str(old.get(field) or '').strip() for field in ('sc_name', 'md_name', 'jp_name')):
+            if old is None or not any(str(old.get(field) or '').strip() for field in ('sc_name', 'md_name', 'jp_name', 'cn_name', 'en_name')):
                 normalized[key] = value
     mapping = normalized
 with open(records_path, encoding='utf-8') as source:
@@ -447,11 +454,11 @@ with open(records_path, encoding='utf-8') as source:
 with open(mapping_path, 'w', encoding='utf-8') as target:
     json.dump(mapping, target, ensure_ascii=False, indent=2, sort_keys=True); target.write('\n')
 PY
-    missing="$(python3 "$HELPER" missing-names "$cdb" "$ROOT_DIR/assets/ygocdb_cards.json" --only "$only_codes")"
+    missing="$(python3 "$HELPER" missing-names "$cdb" "$ROOT_DIR/assets/ygocdb_cards.json" --only "$name_check_codes")"
   fi
   printf '%s\n' "$missing" > "$STATE_DIR/missing-names.json"
   if [[ "$missing" != '[]' ]]; then
-    warn "new non-token cards missing display names: $missing"
+    warn "non-token cards missing display names: $missing"
     ((ALLOW_MISSING_NAMES)) || die "name coverage is incomplete; use --refresh-names or --allow-missing-names"
   fi
   # On the first run there is no prior state manifest yet.  Bootstrap one

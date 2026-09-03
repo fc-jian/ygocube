@@ -8,10 +8,12 @@ import { getDb } from '../src/db';
 describe('ygopro card metadata decoding', () => {
   beforeEach(() => useTestDb());
 
-  it('selects literal names in sc/md/jp priority order and ignores blank values', () => {
+  it('selects literal names through the complete localized fallback order', () => {
     expect(selectYgocdbCardName({ sc_name: '  简体名  ', md_name: 'Master Duel', jp_name: '日本語' })).toBe('简体名');
     expect(selectYgocdbCardName({ sc_name: ' \t', md_name: '  Master Duel  ', jp_name: '日本語' })).toBe('Master Duel');
     expect(selectYgocdbCardName({ sc_name: '', md_name: ' ', jp_name: ' 日本語 ' })).toBe('日本語');
+    expect(selectYgocdbCardName({ sc_name: '', md_name: '', jp_name: ' ', cn_name: ' 中文后备名 ', en_name: 'English fallback' })).toBe('中文后备名');
+    expect(selectYgocdbCardName({ sc_name: '', md_name: '', jp_name: '', cn_name: ' \t', en_name: ' English fallback ' })).toBe('English fallback');
     expect(selectYgocdbCardName({ sc_name: '', md_name: '', jp_name: ' ' })).toBe('');
   });
 
@@ -40,7 +42,7 @@ describe('ygopro card metadata decoding', () => {
     }
   });
 
-  it('uses mapped names for CDB rows and never falls back to texts.name', () => {
+  it('prefers mapped names and falls back to the literal CDB name', () => {
     const cdbPath = path.join('/tmp', `ygocube-card-cdb-${process.pid}-${Date.now()}.cdb`);
     const namesPath = path.join('/tmp', `ygocube-card-names-${process.pid}-${Date.now()}.json`);
     const Database = require('better-sqlite3');
@@ -79,12 +81,12 @@ describe('ygopro card metadata decoding', () => {
       expect(cards.get(900000010)?.name).toBe('简体名称');
       expect(cards.get(900000011)?.name).toBe('MD 名称');
       expect(cards.get(900000012)?.name).toBe('其他日文名称');
-      expect(cards.get(900000013)?.name).toBe('');
+      expect(cards.get(900000013)?.name).toBe('CDB 名称 900000013');
       expect(cards.search('简体名称').map((card) => card.code)).toEqual([900000010]);
       for (const alias of ['中文名称', '论坛名称', 'OCG 名称', 'JP 假名', 'JP 名称', 'English Name']) {
         expect(cards.search(alias).map((card) => card.code)).toEqual([900000010]);
       }
-      expect(cards.search('CDB 名称')).toEqual([]);
+      expect(cards.search('CDB 名称 900000013').map((card) => card.code)).toEqual([900000013]);
     } finally {
       config.server.cardsCdb = originalCdb;
       config.server.cardNamesJson = originalNames;
@@ -192,11 +194,11 @@ describe('ygopro card metadata decoding', () => {
     const insert = db.prepare(`INSERT OR REPLACE INTO cards
       (code, name, type, desc, level, race, attribute, atk, def, alias, search_text, metadata_version)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
-    insert.run(700000010, '链一', 0x21, '', 4, 1, 1, 0, 0, 700000011, '链一', 5);
-    insert.run(700000011, '链二', 0x21, '', 4, 1, 1, 0, 0, 700000012, '链二', 5);
-    insert.run(700000012, '链三', 0x21, '', 4, 1, 1, 0, 0, 0, '链三', 5);
+    insert.run(700000010, '链一', 0x21, '', 4, 1, 1, 0, 0, 700000011, '链一', 6);
+    insert.run(700000011, '链二', 0x21, '', 4, 1, 1, 0, 0, 700000012, '链二', 6);
+    insert.run(700000012, '链三', 0x21, '', 4, 1, 1, 0, 0, 0, '链三', 6);
     expect(cards.canonicalCode(700000010)).toBe(700000012);
-    insert.run(700000012, '链三', 0x21, '', 4, 1, 1, 0, 0, 700000010, '链三', 5);
+    insert.run(700000012, '链三', 0x21, '', 4, 1, 1, 0, 0, 700000010, '链三', 6);
     // Card metadata is immutable after startup in production, so canonical
     // chains are cached per service instance. A fresh instance models a
     // metadata reload after this direct test-fixture mutation.
@@ -216,6 +218,18 @@ describe('ygopro card metadata decoding', () => {
     }
     expect(cards.search('uncapped')).toHaveLength(60);
     expect(cards.search('uncapped').length).toBeGreaterThan(50);
+  });
+
+  it('never returns token/derivative cards from user-facing search', () => {
+    const cards = new CardsService();
+    cards.poolCodes();
+    const insert = getDb().prepare(`INSERT OR REPLACE INTO cards
+      (code, name, type, desc, level, race, attribute, atk, def, alias, search_text, metadata_version)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
+    insert.run(710000100, '可搜索的普通卡', 0x21, '', 4, 1, 1, 0, 0, 0, 'only-searchable', 5);
+    insert.run(710000101, '不应出现的衍生物', 0x4011, '', 1, 1, 1, 0, 0, 0, 'only-searchable', 5);
+    expect(cards.search('only-searchable').map((card) => card.code)).toEqual([710000100]);
+    expect(cards.poolCodes()).not.toContain(710000101);
   });
 
   it('requires all keywords and ranks literal name matches by count and keyword order', () => {

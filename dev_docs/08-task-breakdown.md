@@ -60,10 +60,10 @@
 
 - 新建/编辑支持每行 `code` 和 `code<TAB>name`；缺失编号、非法行、字面名不匹配
   均逐行报告。字面名读取 `ygocdb_cards.json` 的 exact-code 映射，不会把
-  `cards.cdb` 的 `texts.name` 或 `datas.alias` 规则名称当成原名。
+  `cards.cdb` 的 `texts.name` 仅在所有外部译名字段为空时作为最终原名回退；不得使用 `datas.alias` 的规则名称替换 exact code 原名。
 - cards.cdb 导入效果文本、刻度、Link 标记、系列名；浏览器名称从
-  `assets/ygocdb_cards.json`（`sc_name` → `md_name` → `jp_name`）读取，其他本地化
-  名称字段加入搜索索引；卡图不入库，使用本地 → AVIF
+  `assets/ygocdb_cards.json`（`sc_name` → `md_name` → `jp_name` → `cn_name` → `en_name`，再回退 CDB `texts.name`）读取，其他本地化
+  名称字段加入搜索索引；`TYPE_TOKEN` 衍生物从用户搜索和卡池/候选池导入中过滤；卡图不入库，使用本地 → AVIF
   → 原图只读代理 → 空白卡 fallback。
 
 ## 3. 自动化验证

@@ -13,7 +13,8 @@ server:
   db_path: "data/cube.sqlite"
   cards_cdb: "srvpro/ygopro/cards.cdb"
   # Browser-visible card names are loaded from this exact-code mapping. Each
-  # record uses sc_name, then md_name, then jp_name (ignoring blank values).
+  # record uses sc_name, md_name, jp_name, cn_name, then en_name (ignoring blank values);
+  # if all are blank, the exact cards.cdb texts.name is the final fallback.
   card_names_json: "assets/ygocdb_cards.json"
   strings_conf: "srvpro/ygopro/strings.conf"
   allowed_origins: ["http://localhost:3000", "http://127.0.0.1:3000"]

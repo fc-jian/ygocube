@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { getDb } from '../db';
-import { CardsService } from '../cards/cards.service';
+import { CardsService, TYPE_TOKEN } from '../cards/cards.service';
 
 // Card pools: a main pool is a plain-text list of card codes (one per line) or
 // a random sample from the full card table (dev_docs/05 §9.3), managed by the
@@ -195,7 +195,7 @@ export class PoolsService {
           }
         }
       }
-      if (info.type & 0x4000) {
+      if (info.type & TYPE_TOKEN) {
         filtered++;
         continue;
       }

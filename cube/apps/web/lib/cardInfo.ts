@@ -5,6 +5,12 @@ import { sortCardCodesByPick as sortSharedCardCodesByPick } from '@ygocube/share
 const MONSTER = 0x1;
 const SPELL = 0x2;
 const TRAP = 0x4;
+/** YGOPro TYPE_TOKEN; generated token/derivative cards are not searchable. */
+export const TYPE_TOKEN = 0x4000;
+
+export function isTokenCard(card: Pick<CardInfo, 'type'> | undefined): boolean {
+  return !!card && (card.type & TYPE_TOKEN) !== 0;
+}
 
 // TYPES_EXTRA_DECK（融合 0x40 | 同调 0x2000 | XYZ 0x800000 | 连接 0x4000000）
 export function isExtraDeckType(type: number): boolean {
@@ -159,8 +165,8 @@ function searchableCardText(c: CardInfo): string {
 /** Every whitespace-separated keyword must occur in the card's searchable data. */
 export function matchesCardQuery(c: CardInfo | undefined, query: string): boolean {
   const tokens = cardQueryTokens(query);
+  if (!c || isTokenCard(c)) return false;
   if (!tokens.length) return true;
-  if (!c) return false;
   const text = searchableCardText(c);
   return tokens.every((token) => text.includes(token));
 }
@@ -171,9 +177,13 @@ export function matchesCardQuery(c: CardInfo | undefined, query: string): boolea
  * appears in the literal name, with the original order as the final tie-break.
  */
 export function sortCardSearchResults(cards: CardInfo[], query: string): CardInfo[] {
+  // Keep a client-side guard for stale/older API responses. The API applies
+  // the same predicate, but token rows must not become visible if a browser
+  // cache or another endpoint returns them accidentally.
+  const searchable = cards.filter((card) => !isTokenCard(card));
   const tokens = cardQueryTokens(query);
-  if (!tokens.length) return cards;
-  return cards
+  if (!tokens.length) return searchable;
+  return searchable
     .map((card, index) => {
       const name = card.name.normalize('NFKC').toLowerCase();
       const nameMatches = tokens.map((token) => name.includes(token));

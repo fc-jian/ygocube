@@ -31,6 +31,10 @@ IMAGE_SUFFIXES = {"jpg", "jpeg", "png", "webp"}
 # confusing the two would exempt Link monsters from name coverage while
 # treating actual tokens as cards that must have localized names.
 TOKEN_TYPE = 0x4000
+# Keep this order in lockstep with CardsService.selectYgocdbCardName.  The
+# first non-blank field is the browser-visible name; all five are valid
+# coverage for resource audits, followed by the CDB literal name fallback.
+DISPLAY_NAME_FIELDS = ("sc_name", "md_name", "jp_name", "cn_name", "en_name")
 
 
 def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
@@ -340,15 +344,20 @@ def missing_names(cdb_path: Path, mapping_path: Path, only_codes: Iterable[int] 
             except (TypeError, ValueError):
                 continue
             records[code] = value
-    # Read type for token filtering.  Tokens may intentionally be absent from
-    # the external name mapping; all other cards must have a display name.
+    # Read type and the literal CDB name for coverage.  Tokens may intentionally
+    # be absent from the external name mapping; all other cards must have either
+    # one of the preferred localized names or a non-blank cards.cdb name.
     uri = f"file:{quote(cdb_path.resolve().as_posix())}?mode=ro"
     with sqlite3.connect(uri, uri=True) as connection:
         types = dict(connection.execute("SELECT id, type FROM datas"))
+        cdb_names = dict(connection.execute("SELECT id, name FROM texts"))
     missing: list[int] = []
     for code in sorted(selected):
         record = records.get(code, {})
-        display = next((record.get(key) for key in ("sc_name", "md_name", "jp_name") if isinstance(record.get(key), str) and record.get(key).strip()), "")
+        display = next((record.get(key) for key in DISPLAY_NAME_FIELDS if isinstance(record.get(key), str) and record.get(key).strip()), "")
+        if not display:
+            cdb_name = cdb_names.get(code)
+            display = cdb_name.strip() if isinstance(cdb_name, str) else ""
         if not display and not (int(types.get(code, 0)) & TOKEN_TYPE):
             missing.append(code)
     return missing
@@ -381,7 +390,7 @@ def merge_name_zip(zip_path: Path, mapping_path: Path) -> int:
             if code > 0:
                 key = str(code)
                 previous = existing.get(key)
-                if previous is None or not any(str(previous.get(field) or "").strip() for field in ("sc_name", "md_name", "jp_name")):
+                if previous is None or not any(str(previous.get(field) or "").strip() for field in DISPLAY_NAME_FIELDS):
                     existing[key] = value
     added = 0
     for record in incoming:
@@ -401,11 +410,11 @@ def merge_name_zip(zip_path: Path, mapping_path: Path) -> int:
         previous = existing.get(key)
         incoming_has_display = any(
             str(record.get(field) or "").strip()
-            for field in ("sc_name", "md_name", "jp_name")
+            for field in DISPLAY_NAME_FIELDS
         )
         previous_has_display = isinstance(previous, dict) and any(
             str(previous.get(field) or "").strip()
-            for field in ("sc_name", "md_name", "jp_name")
+            for field in DISPLAY_NAME_FIELDS
         )
         # Some YGOCDB exports contain an alternate-art row with no localized
         # display name. Do not let that blank row erase a useful exact-code
