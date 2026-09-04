@@ -8,7 +8,7 @@ import { TopBar, DeckZone, DraftState, useNowTick } from '@/components/TopBar';
 import { PackZone } from '@/components/PackZone';
 import { TokenPrompt } from '@/components/TokenPrompt';
 import { CardSearchAll } from '@/components/CardSearchAll';
-import { setCardPreviewAction } from '@/components/CardPreview';
+import { closeCardPreview, setCardPreviewAction } from '@/components/CardPreview';
 import { PoolPreview } from '@/components/PoolPreview';
 import { CardInfo } from '@/lib/types';
 import { matchesCardQuery, PickSortMode, safeCardCodes, sortCardSearchResults } from '@/lib/cardInfo';
@@ -33,6 +33,7 @@ export default function DraftPage() {
   const [poolSearch, setPoolSearch] = useState('');
   const [poolResults, setPoolResults] = useState<CardInfo[]>([]);
   const [cardSortMode, setCardSortMode] = useState<PickSortMode>('default');
+  const [draftConfirmBusy, setDraftConfirmBusy] = useState(false);
   const loadBusy = useRef(false);
 
   useEffect(() => {
@@ -153,6 +154,20 @@ export default function DraftPage() {
     }
   }, [identity, pid, tidPath]);
 
+  const confirmDraftStart = useCallback(async () => {
+    if (!identity || draftConfirmBusy) return;
+    setDraftConfirmBusy(true);
+    try {
+      await api(`/t/${tidPath}/player/draft-confirm`, { method: 'POST', identity });
+      await load();
+    } catch (e: any) {
+      setError(readableApiError(e, '确认开始选牌失败'));
+      throw e;
+    } finally {
+      setDraftConfirmBusy(false);
+    }
+  }, [draftConfirmBusy, identity, load, tidPath]);
+
   const leaveRegistration = useCallback(async () => {
     if (!identity) return;
     await api(`/t/${tidPath}/player/withdraw`, { method: 'POST', identity });
@@ -163,6 +178,35 @@ export default function DraftPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // After a player has pressed the preparation/confirmation button, keep a
+  // short polling loop even when SSE is connected.  The one-minute handshake
+  // is intentionally bounded to five-second requests so every page notices a
+  // timeout or the final approval promptly.
+  const startConfirmationPending = state?.status === 'registration' && state.draftStartConfirmation?.pending === true;
+  const registrationReady = state?.status === 'registration' && state.players.find((player) => player.playerId === pid)?.ready === true;
+  useEffect(() => {
+    if (!identity || (!startConfirmationPending && !registrationReady)) return;
+    let busy = false;
+    const poll = async () => {
+      if (busy || document.visibilityState === 'hidden') return;
+      busy = true;
+      try {
+        await load();
+      } finally {
+        busy = false;
+      }
+    };
+    const timer = window.setInterval(() => void poll(), 5_000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void poll();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [identity, load, registrationReady, startConfirmationPending]);
 
   // 未开始选牌时：加载 drop 前卡池 + 全部卡牌元数据，供浏览/搜索（标记是否在池中）
   useEffect(() => {
@@ -222,6 +266,7 @@ export default function DraftPage() {
 
   // 倒计时归零时立即刷新（超时自动选牌可能已发生）。
   const now = useNowTick(true);
+  const confirmationNow = useNowTick(startConfirmationPending);
   const secondsLeft = state?.pack?.deadlineAt ? Math.max(0, Math.ceil((new Date(state.pack.deadlineAt).getTime() - now) / 1000)) : null;
   const wasMyTurn = useRef(false);
   useEffect(() => {
@@ -273,6 +318,10 @@ export default function DraftPage() {
   };
 
   const move = async (code: number, from: string, to: string, index?: number, fromIndex?: number) => {
+    // Actions invoked from the fixed card-detail window must close it
+    // immediately, including failed requests, so it cannot obscure the updated
+    // deck or invite duplicate clicks.
+    closeCardPreview();
     try {
       await api(`/t/${tidPath}/deck/move`, { method: 'POST', body: { card_code: code, from, to, ...(index !== undefined ? { index } : {}), ...(fromIndex !== undefined ? { from_index: fromIndex } : {}) }, identity });
       await load();
@@ -357,8 +406,35 @@ export default function DraftPage() {
         alternativeName={state.pickAlternative !== null && state.pickAlternative !== undefined ? cardMap[state.pickAlternative]?.name : null}
         onDisplayNameChange={updateDisplayName}
         onReadyChange={state.status === 'registration' ? updateReady : undefined}
+        onDraftStartConfirm={state.status === 'registration' ? confirmDraftStart : undefined}
         onLeaveRegistration={state.status === 'registration' ? leaveRegistration : undefined}
       />
+      {state.status === 'registration' && state.draftStartConfirmation?.pending && !state.draftStartConfirmation.confirmed && (
+        <div className="fixed inset-0 z-[900] flex items-center justify-center bg-black/65 px-4" role="dialog" aria-modal="true" aria-labelledby="draft-start-confirm-title">
+          <div className="w-full max-w-md rounded-xl border border-gold/50 bg-felt-deep p-5 shadow-2xl">
+            <h2 id="draft-start-confirm-title" className="text-lg font-bold text-gold">管理员请求开始选牌</h2>
+            <p className="mt-2 text-sm leading-relaxed text-slate-200">
+              请确认你已准备好参加本场选牌。所有玩家都在一分钟内确认后才会开始，否则本次请求自动取消。
+            </p>
+            <p className="mt-2 text-xs text-slate-400">
+              已确认 {state.draftStartConfirmation.confirmedCount}/{state.draftStartConfirmation.total} 人 · 截止 {Math.max(0, Math.ceil((new Date(state.draftStartConfirmation.deadlineAt).getTime() - confirmationNow) / 1000))} 秒
+            </p>
+            <button
+              type="button"
+              disabled={draftConfirmBusy || confirmationNow >= new Date(state.draftStartConfirmation.deadlineAt).getTime()}
+              onClick={() => void confirmDraftStart().catch(() => undefined)}
+              className="mt-4 w-full rounded bg-gold px-4 py-2 font-semibold text-felt-deep hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {draftConfirmBusy ? '提交中…' : '确认开始选牌'}
+            </button>
+          </div>
+        </div>
+      )}
+      {state.status === 'registration' && state.draftStartConfirmation?.pending && state.draftStartConfirmation.confirmed && (
+        <div className="mx-3 mt-3 rounded border border-emerald-300/30 bg-emerald-950/30 px-3 py-2 text-sm text-emerald-200" role="status">
+          已确认开始选牌，等待其他玩家确认（{state.draftStartConfirmation.confirmedCount}/{state.draftStartConfirmation.total}）。
+        </div>
+      )}
       {state.status === 'drafting' && (
         <div className="flex flex-1 flex-col gap-3 p-3 md:flex-row md:overflow-hidden">
           <div className="flex w-full flex-col gap-2 md:w-3/5 md:overflow-y-auto md:pr-1">

@@ -190,6 +190,17 @@ async function buildDecks(tid) {
   }
 }
 
+async function confirmDraftStart(tid) {
+  let result = await apiCall('POST', `/admin/t/${tid}/start_draft`, { admin: true });
+  if (!result.pending) return result;
+  for (const pid of PLAYERS) {
+    result = await apiCall('POST', `/t/${tid}/player/draft-confirm`, { player: { tid, pid } });
+    if (result.started) break;
+  }
+  if (!result.started) throw new Error(`draft confirmation did not start (${result.confirmedCount ?? 0}/${result.total ?? PLAYERS.length})`);
+  return result;
+}
+
 (async () => {
   await apiCall('GET', '/health');
   log('api healthy');
@@ -223,7 +234,7 @@ async function buildDecks(tid) {
   for (const pid of PLAYERS) {
     await apiCall('POST', `/t/${tid}/join`, { body: { player_id: pid, display_name: pid } });
   }
-  await apiCall('POST', `/admin/t/${tid}/start_draft`, { admin: true });
+  await confirmDraftStart(tid);
   await runDraft(tid);
   await buildDecks(tid);
 

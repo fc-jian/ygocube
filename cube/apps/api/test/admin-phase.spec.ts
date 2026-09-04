@@ -12,6 +12,34 @@ const fakeSrvpro = { createRoom: async () => ({ ok: true }), roomStatus: async (
 describe('admin match transition preflight', () => {
   beforeEach(() => useTestDb());
 
+  it('starts drafting only after every player confirms the administrator request', () => {
+    const cards = new CardsService();
+    const pools = new PoolsService(cards);
+    const tournaments = makeTournaments();
+    const matches = new MatchesService(fakeSrvpro as any);
+    const draft = new DraftService(cards, tournaments, pools, matches);
+    const decks = new DecksService(cards, matches);
+    const realtime = { emitPhase: jest.fn(), emitPause: jest.fn(), emitNotice: jest.fn() };
+    const controller = new AdminController(tournaments, draft, decks, matches, pools, cards, realtime as any);
+    const tid = tournaments.create({ name: 'admin-confirm', maxPlayers: 2, cardPool: TEST_POOL, draftMode: 'serial' }, 'creator').tid;
+    tournaments.join(tid, 'p0', 'P0');
+    tournaments.join(tid, 'p1', 'P1');
+    const adminReq = { params: { tid: String(tid) }, identity: { isSuper: true } } as any;
+
+    const requested = controller.startDraft(adminReq) as any;
+    expect(requested).toMatchObject({ ok: true, pending: true, confirmedCount: 0, total: 2 });
+    expect(loadState(tid).status).toBe('registration');
+    expect(loadState(tid).packs).toHaveLength(0);
+    expect(() => tournaments.join(tid, 'p2', 'P2')).toThrow('DRAFT_START_PENDING');
+    expect(() => controller.phase(adminReq, { status: 'matches' })).toThrow('DRAFT_START_PENDING');
+
+    expect(draft.confirmDraftStart(tid, 'p0').pending).toBe(true);
+    expect(loadState(tid).status).toBe('registration');
+    expect(draft.confirmDraftStart(tid, 'p1').started).toBe(true);
+    expect(loadState(tid).status).toBe('drafting');
+    draft.haltAllTimers(tid);
+  });
+
   it('warns without mutation, then repairs overflow and DSQs an undersized player after confirmation', () => {
     const cards = new CardsService();
     const pools = new PoolsService(cards);

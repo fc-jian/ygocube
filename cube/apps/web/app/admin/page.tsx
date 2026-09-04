@@ -20,6 +20,14 @@ interface AdminState {
   pickReserves?: Record<string, number>;
   pickAlternatives?: Record<string, { packIndex: number; card: number } | null>;
   pendingPhase: string | null;
+  draftStartConfirmation?: {
+    pending: boolean;
+    requestedAt: string;
+    deadlineAt: string;
+    confirmedByPlayer: Record<string, boolean>;
+    confirmedCount: number;
+    total: number;
+  } | null;
   pause: { pausedAt: string; actor?: string } | null;
   decks: Record<string, { main: number[]; extra: number[]; side: number[]; lockedAt: string | null }>;
   matches: { id: number; round: number; playerA: string; playerB: string; tableNo: number; roomName: string | null; resultA: number | null; resultB: number | null; faultedAt: string | null; stage?: string; bracketRound?: number }[];
@@ -112,6 +120,7 @@ export default function AdminPage() {
   const [createUsersLoaded, setCreateUsersLoaded] = useState(false);
   const [newCreateUsername, setNewCreateUsername] = useState('');
   const [issuedCreateToken, setIssuedCreateToken] = useState<{ username: string; token: string } | null>(null);
+  const [confirmationNow, setConfirmationNow] = useState(() => Date.now());
   const loadBusy = useRef(false);
 
   useEffect(() => {
@@ -253,12 +262,13 @@ export default function AdminPage() {
     setCanEditPools(false);
   }, [tid]);
 
-  // 控制台低频轮询；后台页没有可携带管理员 header 的 EventSource，
-  // 但隐藏标签页不应持续制造请求。
+  // 控制台低频轮询；开始选牌确认窗口期间提高到 5 秒，使管理员能
+  // 及时看到尚未确认的玩家以及一分钟超时结果。
   useEffect(() => {
+    const confirmationPending = state?.draftStartConfirmation?.pending === true;
     const t = window.setInterval(() => {
       if (document.visibilityState === 'visible') void load();
-    }, 15_000);
+    }, confirmationPending ? 5_000 : 15_000);
     const onVisibilityChange = () => {
       if (document.visibilityState === 'visible') void load();
     };
@@ -267,12 +277,19 @@ export default function AdminPage() {
       window.clearInterval(t);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [load]);
+  }, [load, state?.draftStartConfirmation?.pending]);
+
+  useEffect(() => {
+    if (!state?.draftStartConfirmation?.pending) return;
+    setConfirmationNow(Date.now());
+    const timer = window.setInterval(() => setConfirmationNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [state?.draftStartConfirmation?.pending]);
 
   const actionSuccessMessage = (path: string): string => {
     if (path.endsWith('/pause')) return '比赛已暂停';
     if (path.endsWith('/resume')) return '比赛已恢复';
-    if (path.endsWith('/start_draft')) return '已开始选牌';
+    if (path.endsWith('/start_draft')) return '已发起开始选牌确认，等待所有玩家确认';
     if (path.endsWith('/start-deckbuilding')) return '已进入构筑阶段';
     if (path.endsWith('/phase')) return '比赛阶段已更新';
     if (path.endsWith('/security')) return '令牌鉴权设置已更新';
@@ -669,8 +686,12 @@ export default function AdminPage() {
                   编辑参数
                 </button>
               )}
-              <button onClick={() => void act(`/admin/t/${state.id}/start_draft`)} className="rounded bg-gold px-3 py-1 text-xs font-semibold text-felt-deep hover:brightness-110">
-                开始选牌
+              <button
+                onClick={() => void act(`/admin/t/${state.id}/start_draft`)}
+                disabled={state.status !== 'registration' || state.draftStartConfirmation?.pending === true}
+                className="rounded bg-gold px-3 py-1 text-xs font-semibold text-felt-deep hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {state.draftStartConfirmation?.pending ? '等待玩家确认…' : '开始选牌'}
               </button>
               <button
                 onClick={() => void act(`/admin/t/${state.id}/phase`, { status: 'deckbuilding' })}
@@ -732,6 +753,27 @@ export default function AdminPage() {
               </label>
             </div>
           </div>
+          {state.status === 'registration' && state.draftStartConfirmation?.pending && (
+            <section className="mb-4 rounded-lg border border-amber-300/30 bg-amber-950/25 p-3 text-xs" role="status">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <b className="text-amber-200">等待所有玩家确认开始选牌</b>
+                <span className="font-mono text-amber-100">
+                  {state.draftStartConfirmation.confirmedCount}/{state.draftStartConfirmation.total} 已确认 · 剩余 {Math.max(0, Math.ceil((new Date(state.draftStartConfirmation.deadlineAt).getTime() - confirmationNow) / 1000))} 秒
+                </span>
+              </div>
+              <div className="mt-2 grid grid-cols-1 gap-1 sm:grid-cols-2 lg:grid-cols-3">
+                {state.players.map((player) => {
+                  const confirmed = state.draftStartConfirmation?.confirmedByPlayer[player.playerId] === true;
+                  return (
+                    <div key={player.playerId} className="flex items-center justify-between rounded bg-felt-deep/60 px-2 py-1">
+                      <span className="min-w-0 truncate">{player.displayName || player.playerId}</span>
+                      <span className={confirmed ? 'text-emerald-300' : 'text-red-300'}>{confirmed ? '已确认' : '未确认'}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          )}
           <section className="mb-4 rounded-lg border border-gold/25 bg-felt/60 p-3 text-xs">
             <div className="flex flex-wrap items-center gap-3">
               <b className="text-gold">赛制</b>

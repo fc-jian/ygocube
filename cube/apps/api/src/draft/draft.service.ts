@@ -7,6 +7,7 @@ import {
   persistMeta,
   TournamentState,
   PickState,
+  DraftStartConfirmationState,
   withEventTransaction,
   freeze,
   unfreeze,
@@ -28,6 +29,10 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
   private timers = new Map<number, NodeJS.Timeout>();
   private passTimers = new Map<string, NodeJS.Timeout>(); // passing 模式：key = `${tid}:${playerId}`
   private deckbuildingTimers = new Map<number, NodeJS.Timeout>();
+  private startConfirmationTimers = new Map<number, NodeJS.Timeout>();
+
+  /** The administrator confirmation window is intentionally short and fixed. */
+  static readonly START_CONFIRMATION_MS = 60_000;
 
   constructor(
     private cards: CardsService,
@@ -45,6 +50,16 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
   onModuleInit(): void {
     // re-arm timers after restart (all state server-side; deadlines persisted)
     const db = require('../db').getDb();
+    const registrationRows = db.prepare('SELECT id FROM tournaments WHERE status=?').all('registration') as { id: number }[];
+    for (const r of registrationRows) {
+      try {
+        const state = loadState(r.id);
+        if (state.frozen || !state.draftStartConfirmation) continue;
+        this.armStartConfirmationTimer(r.id, state.draftStartConfirmation.deadlineAt);
+      } catch (e) {
+        console.error('re-arm draft confirmation failed for tournament', r.id, e);
+      }
+    }
     const rows = db.prepare('SELECT id FROM tournaments WHERE status=?').all('drafting') as { id: number }[];
     for (const r of rows) {
       try {
@@ -75,12 +90,240 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     for (const timer of this.timers.values()) clearTimeout(timer);
     for (const timer of this.passTimers.values()) clearTimeout(timer);
     for (const timer of this.deckbuildingTimers.values()) clearTimeout(timer);
+    for (const timer of this.startConfirmationTimers.values()) clearTimeout(timer);
     this.timers.clear();
     this.passTimers.clear();
     this.deckbuildingTimers.clear();
+    this.startConfirmationTimers.clear();
+  }
+
+  /**
+   * Request a start from the administrator.  This does not create packs or
+   * advance the phase; every currently registered player must confirm within
+   * one minute before `confirmDraftStart` commits the real start.
+   */
+  requestStartDraft(tid: number, actor: string): {
+    pending: boolean;
+    requestedAt: string;
+    deadlineAt: string;
+    confirmedCount: number;
+    total: number;
+  } {
+    const result = withEventTransaction(tid, () => this.requestStartDraftCommand(tid, actor));
+    if (result.pending) {
+      this.armStartConfirmationTimer(tid, result.deadlineAt);
+    } else {
+      this.clearStartConfirmationTimer(tid);
+    }
+    return result;
+  }
+
+  private requestStartDraftCommand(tid: number, actor: string): {
+    pending: boolean;
+    requestedAt: string;
+    deadlineAt: string;
+    confirmedCount: number;
+    total: number;
+  } {
+    const state = loadState(tid);
+    if (state.frozen) throw new Error('FROZEN');
+    if (state.status !== 'registration') throw new Error('WRONG_PHASE');
+    if (state.players.length < 2) throw new Error('NOT_ENOUGH_PLAYERS');
+    const now = Date.now();
+    const existing = state.draftStartConfirmation;
+    if (existing && new Date(existing.deadlineAt).getTime() > now) {
+      return this.startConfirmationView(existing);
+    }
+    if (existing) {
+      // A stale request can be retried by the administrator.  The cancellation
+      // is recorded before the new request so replay clearly shows why the
+      // previous window was abandoned.
+      logEvent(tid, 'draft', 'draft_start_cancelled', {
+        reason: 'timeout',
+        requestedAt: existing.requestedAt,
+        deadlineAt: existing.deadlineAt,
+      }, 'system');
+    }
+    const requestedAt = new Date(now).toISOString();
+    const deadlineAt = new Date(now + DraftService.START_CONFIRMATION_MS).toISOString();
+    const participants = state.players.map((player) => player.playerId);
+    const confirmed: Record<string, boolean> = {};
+    for (const playerId of participants) confirmed[playerId] = false;
+    logEvent(tid, 'draft', 'draft_start_requested', {
+      requestedAt,
+      deadlineAt,
+      actor,
+      participants,
+      confirmed,
+    }, actor);
+    persistMeta(tid);
+    return { pending: true, requestedAt, deadlineAt, confirmedCount: 0, total: participants.length };
+  }
+
+  /** Confirm the pending start for one player and start atomically on the last confirmation. */
+  confirmDraftStart(tid: number, playerId: string, actor = playerId): {
+    pending: boolean;
+    started: boolean;
+    expired?: boolean;
+    requestedAt?: string;
+    deadlineAt?: string;
+    confirmed?: boolean;
+    confirmedCount?: number;
+    total?: number;
+  } {
+    let expired = false;
+    const result = withEventTransaction(tid, () => {
+      const state = loadState(tid);
+      if (state.frozen) throw new Error('FROZEN');
+      if (state.status !== 'registration') throw new Error('WRONG_PHASE');
+      const confirmation = state.draftStartConfirmation;
+      if (!confirmation) throw new Error('DRAFT_START_NOT_PENDING');
+      if (!confirmation.participants.includes(playerId) || !state.players.some((p) => p.playerId === playerId)) {
+        throw new Error('PLAYER_NOT_FOUND');
+      }
+      if (new Date(confirmation.deadlineAt).getTime() <= Date.now()) {
+        logEvent(tid, 'draft', 'draft_start_cancelled', {
+          reason: 'timeout',
+          requestedAt: confirmation.requestedAt,
+          deadlineAt: confirmation.deadlineAt,
+        }, 'system');
+        persistMeta(tid);
+        expired = true;
+        return { pending: false, started: false, expired: true };
+      }
+      if (!confirmation.confirmed[playerId]) {
+        logEvent(tid, 'draft', 'draft_start_confirmed', { playerId, confirmedAt: new Date().toISOString() }, actor);
+      }
+      const current = loadState(tid).draftStartConfirmation;
+      if (!current) throw new Error('DRAFT_START_NOT_PENDING');
+      const confirmedCount = current.participants.filter((id) => current.confirmed[id] === true).length;
+      if (confirmedCount < current.participants.length) {
+        persistMeta(tid);
+        return {
+          pending: true,
+          started: false,
+          requestedAt: current.requestedAt,
+          deadlineAt: current.deadlineAt,
+          confirmed: true,
+          confirmedCount,
+          total: current.participants.length,
+        };
+      }
+      logEvent(tid, 'draft', 'draft_start_approved', {
+        requestedAt: current.requestedAt,
+        confirmedAt: new Date().toISOString(),
+        participants: current.participants,
+      }, actor);
+      // This is deliberately inside the same SQLite/event transaction: either
+      // all confirmations and pack creation commit together, or the request
+      // remains pending and can be retried without a half-started draft.
+      this.startDraftCommand(tid, actor);
+      return {
+        pending: false,
+        started: true,
+        requestedAt: current.requestedAt,
+        deadlineAt: current.deadlineAt,
+        confirmed: true,
+        confirmedCount,
+        total: current.participants.length,
+      };
+    });
+    if (result.started || result.expired || !result.pending) this.clearStartConfirmationTimer(tid);
+    if (expired) throw new Error('DRAFT_START_EXPIRED');
+    return result;
+  }
+
+  private startConfirmationView(confirmation: DraftStartConfirmationState): {
+    pending: boolean;
+    requestedAt: string;
+    deadlineAt: string;
+    confirmedCount: number;
+    total: number;
+  } {
+    return {
+      pending: true,
+      requestedAt: confirmation.requestedAt,
+      deadlineAt: confirmation.deadlineAt,
+      confirmedCount: confirmation.participants.filter((id) => confirmation.confirmed[id] === true).length,
+      total: confirmation.participants.length,
+    };
+  }
+
+  private clearStartConfirmationTimer(tid: number): void {
+    const timer = this.startConfirmationTimers.get(tid);
+    if (timer) clearTimeout(timer);
+    this.startConfirmationTimers.delete(tid);
+  }
+
+  private armStartConfirmationTimer(tid: number, deadlineAt: string): void {
+    this.clearStartConfirmationTimer(tid);
+    const deadlineMs = new Date(deadlineAt).getTime();
+    const ms = deadlineMs - Date.now();
+    // A malformed/legacy snapshot must not leave a confirmation request stuck
+    // forever.  Treat an invalid deadline like an expired window and let the
+    // normal event-sourced cancellation path clear it.
+    if (!Number.isFinite(deadlineMs) || !Number.isFinite(ms)) {
+      this.expireStartConfirmation(tid, deadlineAt);
+      return;
+    }
+    if (ms <= 0) {
+      this.expireStartConfirmation(tid, deadlineAt);
+      return;
+    }
+    // Node clamps delays larger than 2^31-1 to 1ms. The normal request is
+    // only one minute, but a corrupted/legacy snapshot must not be cancelled
+    // prematurely because of that overflow; re-arm in bounded chunks instead.
+    const delay = Math.min(ms, 0x7fffffff);
+    const timer = setTimeout(() => {
+      if (delay < ms) this.armStartConfirmationTimer(tid, deadlineAt);
+      else this.expireStartConfirmation(tid, deadlineAt);
+    }, delay);
+    timer.unref();
+    this.startConfirmationTimers.set(tid, timer);
+  }
+
+  private expireStartConfirmation(tid: number, expectedDeadline: string): void {
+    this.startConfirmationTimers.delete(tid);
+    try {
+      const deadlineMs = new Date(expectedDeadline).getTime();
+      if (Number.isFinite(deadlineMs) && deadlineMs > Date.now()) {
+        this.armStartConfirmationTimer(tid, expectedDeadline);
+        return;
+      }
+      withEventTransaction(tid, () => {
+        const state = loadState(tid);
+        const confirmation = state.draftStartConfirmation;
+        if (state.status !== 'registration' || !confirmation || confirmation.deadlineAt !== expectedDeadline) return;
+        if (confirmation.participants.every((id) => confirmation.confirmed[id] === true)) return;
+        logEvent(tid, 'draft', 'draft_start_cancelled', {
+          reason: 'timeout',
+          requestedAt: confirmation.requestedAt,
+          deadlineAt: confirmation.deadlineAt,
+          confirmedCount: confirmation.participants.filter((id) => confirmation.confirmed[id] === true).length,
+          total: confirmation.participants.length,
+        }, 'system');
+        persistMeta(tid);
+      });
+    } catch (error) {
+      // A timer must not crash the API process.  A subsequent admin/player poll
+      // can still observe and retry the request if this transaction failed;
+      // schedule a bounded retry as well so a transient SQLite lock cannot
+      // leave the confirmation window stuck forever.
+      console.error('draft start confirmation timeout failed', tid, (error as Error).message);
+      if ((error as Error).message === 'TOURNAMENT_NOT_FOUND') return;
+      const retry = setTimeout(() => this.expireStartConfirmation(tid, expectedDeadline), 1_000);
+      retry.unref();
+      this.startConfirmationTimers.set(tid, retry);
+    }
   }
 
   startDraft(tid: number, actor: string): void {
+    // Retain this immediate helper for legacy engine/test setup, but do not
+    // let it bypass an administrator's active confirmation window. The last
+    // player confirmation calls the private command directly in-transaction.
+    // Keep this guard outside the rollback cleanup below: rejecting a legacy
+    // call must not clear the live confirmation timeout.
+    if (loadState(tid).draftStartConfirmation) throw new Error('DRAFT_START_PENDING');
     try {
       withEventTransaction(tid, () => this.startDraftCommand(tid, actor));
     } catch (error) {
@@ -515,6 +758,13 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     if (!frozen) {
       this.resumePickTimer(tid);
       this.resumeDeckbuildingTimer(tid);
+      // Hard-revert can restore a registration snapshot containing a pending
+      // start confirmation while clearing all runtime timers. Re-arm that
+      // persisted deadline after the unfreeze transaction commits.
+      if (state.status === 'registration' && state.draftStartConfirmation) {
+        const deadlineAt = state.draftStartConfirmation.deadlineAt;
+        afterEventCommit(tid, () => this.armStartConfirmationTimer(tid, deadlineAt));
+      }
       return;
     }
     if (state.status === 'drafting' && frozen.passing) {
@@ -540,6 +790,10 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     state = loadState(tid);
     if (state.status === 'drafting') this.resumePickTimer(tid);
     if (state.status === 'deckbuilding') afterEventCommit(tid, () => this.armDeckbuildingTimer(tid));
+    if (state.status === 'registration' && state.draftStartConfirmation) {
+      const deadlineAt = state.draftStartConfirmation.deadlineAt;
+      afterEventCommit(tid, () => this.armStartConfirmationTimer(tid, deadlineAt));
+    }
   }
 
   haltAllTimers(tid: number): void {
@@ -547,6 +801,7 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     const deckbuilding = this.deckbuildingTimers.get(tid);
     if (deckbuilding) clearTimeout(deckbuilding);
     this.deckbuildingTimers.delete(tid);
+    this.clearStartConfirmationTimer(tid);
   }
 
   resumePickTimer(tid: number): void {
@@ -968,6 +1223,10 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     withEventTransaction(tid, () => {
       const state = loadState(tid);
       if (state.pause?.pausedAt || state.frozen) return;
+      // The one-minute all-player start handshake is a wall-clock readiness
+      // window, not a draft timer. Refuse a pause while it is pending instead
+      // of leaving an expiring request hidden behind a frozen UI.
+      if (state.draftStartConfirmation) throw new Error('DRAFT_START_PENDING');
       // Persist exact remaining timers before freezing the whole tournament.
       this.freezeTimersCommand(tid, actor);
       logEvent(tid, 'pause', 'pause', { pausedAt: new Date().toISOString(), actor }, actor);

@@ -11,6 +11,21 @@ export type PoolMembershipStatus = 'not_in_pool' | 'in_pool' | 'in_candidate';
 // global truth and may mark a card picked by another player explicitly.
 export type CardVisibilityStatus = 'not_in_pool' | 'dropped' | 'picked' | 'other_picked' | 'seen' | 'unknown';
 
+/**
+ * Administrator start-draft handshake.  The complete participant/confirmation
+ * map is only returned to administrators; player views receive the same shape
+ * with a boolean `confirmed` for their own identity.
+ */
+export interface DraftStartConfirmation {
+  pending: boolean;
+  requestedAt: string;
+  deadlineAt: string;
+  confirmedCount: number;
+  total: number;
+  confirmed?: boolean;
+  confirmedByPlayer?: Record<string, boolean>;
+}
+
 export interface CardInfo {
   code: number;
   name: string;

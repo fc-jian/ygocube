@@ -69,6 +69,14 @@ timeLimit=180
 `start_draft` 返回 `INSUFFICIENT_PACK_RATIO` 及需求/可用数量，且不会写入牌堆或
 阶段事件。比例为空时维持上述三种旧策略和旧的按池比例弃牌逻辑。
 
+管理员开始选牌采用两阶段确认：`POST /admin/t/:tid/start_draft` 只记录
+`draft_start_requested` 并开启固定 60 秒窗口，不生成牌堆。每名报名玩家通过
+`POST /t/:tid/player/draft-confirm`（兼容别名 `/confirm-draft`、`/start-draft-confirm`）
+确认；最后一名确认与牌堆生成在同一事务中提交。窗口超时记录
+`draft_start_cancelled`，比赛仍保持 registration，管理员可重新发起。确认状态进入
+快照与事件回放，服务重启后按 `deadlineAt` 恢复超时定时器；确认窗口期间禁止新增、退出
+或删除玩家，避免参与者集合在确认过程中变化。
+
 passing 模式按轮发堆，每个玩家有 FIFO 队列；队首堆选一张后顺时针传递，整轮
 全部清空才发下一轮。每个玩家自己的 deadline = 基础 40 秒 + 尚未使用的
 reserve；超出基础时间只扣 reserve，reserve 耗尽后才自动随机选，事件记录

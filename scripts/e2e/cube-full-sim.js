@@ -372,6 +372,20 @@ async function buildDecks(tid) {
   log('all decks locked');
 }
 
+// The public administrator start endpoint now opens a persisted one-minute
+// confirmation window.  Use the same player endpoint as real clients so this
+// simulation cannot accidentally bypass the production handshake.
+async function confirmDraftStart(tid) {
+  let result = await apiCall('POST', `/admin/t/${tid}/start_draft`, { admin: true });
+  if (!result.pending) return result;
+  for (const pid of PLAYERS) {
+    result = await apiCall('POST', `/t/${tid}/player/draft-confirm`, { player: { tid, pid } });
+    if (result.started) break;
+  }
+  if (!result.started) throw new Error(`draft confirmation did not start (${result.confirmedCount ?? 0}/${result.total ?? PLAYERS.length})`);
+  return result;
+}
+
 async function playMatches(tid, outDir) {
   const matchLogs = {};
   const mlog = (mid) => (msg) => {
@@ -486,7 +500,7 @@ async function playMatches(tid, outDir) {
       });
     }
     log(`${PLAYERS.length} players joined and ready`);
-    await apiCall('POST', `/admin/t/${tid}/start_draft`, { admin: true });
+    await confirmDraftStart(tid);
 
     const afterDraft = await runDraft(tid);
     if (afterDraft !== 'deckbuilding') {

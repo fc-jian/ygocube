@@ -40,6 +40,14 @@ export interface DraftState {
   draftReserveMs?: number;
   // 本人最后点击的候选牌；超时自动选牌优先使用它。
   pickAlternative?: number | null;
+  draftStartConfirmation?: {
+    pending: boolean;
+    requestedAt: string;
+    deadlineAt: string;
+    confirmed: boolean;
+    confirmedCount: number;
+    total: number;
+  } | null;
   // passing 模式：所有玩家的牌堆队列长度（仅数量，dev_docs/05 §3 信息隐藏）
   queueLengths?: { playerId: string; length: number }[];
   pause: { pausedAt: string; actor?: string } | null;
@@ -73,6 +81,7 @@ export function TopBar({
   alternativeName,
   onDisplayNameChange,
   onReadyChange,
+  onDraftStartConfirm,
   onLeaveRegistration,
 }: {
   state: DraftState;
@@ -82,6 +91,7 @@ export function TopBar({
   alternativeName?: string | null;
   onDisplayNameChange?: (displayName: string) => Promise<void>;
   onReadyChange?: (ready: boolean) => Promise<void>;
+  onDraftStartConfirm?: () => Promise<void>;
   onLeaveRegistration?: () => Promise<void>;
 }) {
   const [showInfo, setShowInfo] = useState(false);
@@ -93,8 +103,10 @@ export function TopBar({
   const cfg = state.config;
   const me = state.players.find((p) => p.playerId === pid);
   const readyCount = state.players.filter((p) => p.ready === true).length;
+  const draftStartConfirmation = state.draftStartConfirmation;
   const formatText = cfg.matchFormat === 'round_robin' ? '单循环' : cfg.matchFormat === 'double_elimination' ? '双败淘汰' : cfg.matchFormat === 'swiss' ? `瑞士 ${String(cfg.swissRoundCount ?? '-')} 轮${Number(cfg.playoffSize ?? 0) ? ` + Top ${String(cfg.playoffSize)} 淘汰` : ''}` : '历史自动赛制';
   const now = useNowTick(!!pack?.isMyTurn && !!pack?.deadlineAt);
+  const confirmationNow = useNowTick(!!draftStartConfirmation?.pending);
 
   const secondsLeft = pack?.pausedRemainingMs !== undefined
     ? Math.max(0, Math.ceil(pack.pausedRemainingMs / 1000))
@@ -115,6 +127,9 @@ export function TopBar({
   };
 
   const pickerName = state.players.find((p) => p.playerId === pack?.currentPicker)?.displayName ?? pack?.currentPicker;
+  const confirmationSecondsLeft = draftStartConfirmation?.pending
+    ? Math.max(0, Math.ceil((new Date(draftStartConfirmation.deadlineAt).getTime() - confirmationNow) / 1000))
+    : null;
 
   return (
     <header className="sticky top-0 z-40 border-b border-felt-edge bg-felt/95 backdrop-blur">
@@ -202,7 +217,20 @@ export function TopBar({
           >
             玩家 {readyCount}/{state.players.length}
           </button>
-          {state.status === 'registration' && onReadyChange && (
+          {state.status === 'registration' && draftStartConfirmation?.pending && onDraftStartConfirm ? (
+            <button
+              type="button"
+              disabled={readyBusy || draftStartConfirmation.confirmed || confirmationSecondsLeft === 0}
+              onClick={() => {
+                setReadyBusy(true);
+                void onDraftStartConfirm().catch(() => undefined).finally(() => setReadyBusy(false));
+              }}
+              className={`rounded px-2.5 py-1 text-xs font-semibold transition-colors disabled:opacity-60 ${draftStartConfirmation.confirmed ? 'bg-emerald-900 text-emerald-200' : 'bg-gold text-felt-deep hover:brightness-110'}`}
+              title={draftStartConfirmation.confirmed ? '已确认开始选牌' : '确认开始选牌'}
+            >
+              {draftStartConfirmation.confirmed ? '已确认开始' : '确认开始选牌'}
+            </button>
+          ) : state.status === 'registration' && onReadyChange ? (
             <button
               type="button"
               disabled={readyBusy}
@@ -215,7 +243,7 @@ export function TopBar({
             >
               {me?.ready === true ? '已准备 ✓' : '准备'}
             </button>
-          )}
+          ) : null}
           {state.status === 'registration' && onLeaveRegistration && (
             <span className="flex flex-wrap items-center gap-1">
               <button
@@ -227,7 +255,7 @@ export function TopBar({
                   setLeaveError('');
                   void onLeaveRegistration()
                     .catch((error: any) => {
-                      setLeaveError(error?.code === 'WRONG_PHASE' ? '选牌已开始，无法退出' : error?.code === 'FROZEN' ? '比赛暂被冻结，请稍后再试' : error?.code === 'PLAYER_NOT_FOUND' ? '报名记录已不存在' : '退出失败，请重试');
+                      setLeaveError(error?.code === 'WRONG_PHASE' ? '选牌已开始，无法退出' : error?.code === 'FROZEN' ? '比赛暂被冻结，请稍后再试' : error?.code === 'PLAYER_NOT_FOUND' ? '报名记录已不存在' : error?.code === 'DRAFT_START_PENDING' ? '管理员正在等待确认，暂时无法退出' : '退出失败，请重试');
                     })
                     .finally(() => setLeaveBusy(false));
                 }}
@@ -258,6 +286,12 @@ export function TopBar({
             <span className={readyCount === state.players.length && state.players.length > 0 ? 'text-emerald-300' : 'text-slate-400'}>
               {readyCount}/{state.players.length} 已准备
             </span>
+            {draftStartConfirmation?.pending && (
+              <span className={draftStartConfirmation.confirmed ? 'text-emerald-300' : 'text-amber-300'}>
+                {draftStartConfirmation.confirmedCount}/{draftStartConfirmation.total} 已确认开始
+                {confirmationSecondsLeft !== null ? ` · 剩余 ${confirmationSecondsLeft} 秒` : ''}
+              </span>
+            )}
           </div>
           <div className="grid max-h-40 grid-cols-1 gap-1 overflow-y-auto sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {state.players.map((player, index) => (
@@ -270,6 +304,11 @@ export function TopBar({
                 <span className={`shrink-0 rounded px-1.5 py-0.5 ${player.ready === true ? 'bg-emerald-950 text-emerald-300' : 'bg-slate-800 text-slate-400'}`}>
                   {player.ready === true ? '已准备' : '未准备'}
                 </span>
+                {draftStartConfirmation?.pending && player.playerId === pid && (
+                  <span className={`shrink-0 rounded px-1.5 py-0.5 ${draftStartConfirmation.confirmed && player.playerId === pid ? 'bg-emerald-950 text-emerald-300' : 'bg-slate-800 text-slate-400'}`}>
+                    {draftStartConfirmation.confirmed ? '已确认' : '待确认'}
+                  </span>
+                )}
               </div>
             ))}
           </div>

@@ -200,6 +200,7 @@ export class TournamentsService {
     const state = loadState(tid);
     if (state.frozen) throw new Error('FROZEN');
     if (state.status !== 'registration') throw new Error('WRONG_PHASE');
+    if (state.draftStartConfirmation) throw new Error('DRAFT_START_PENDING');
     if (state.players.some((p) => p.playerId === playerId)) throw new Error('ALREADY_JOINED');
     if (state.players.length >= getConfig(state).maxPlayers) throw new Error('TOURNAMENT_FULL');
     const token = randomToken();
@@ -280,6 +281,7 @@ export class TournamentsService {
     const state = loadState(tid);
     if (state.frozen) throw new Error('FROZEN');
     if (state.status === 'matches' || state.status === 'finished') throw new Error('WRONG_PHASE');
+    if (state.draftStartConfirmation) throw new Error('DRAFT_START_PENDING');
     if (!state.players.some((p) => p.playerId === playerId)) throw new Error('PLAYER_NOT_FOUND');
     getDb().prepare('UPDATE tournament_players SET active=0 WHERE tournament_id=? AND player_id=?').run(tid, playerId);
     logEvent(tid, 'player', 'player_remove', playerId, actor);
@@ -300,6 +302,7 @@ export class TournamentsService {
       const state = loadState(tid);
       if (state.frozen) throw new Error('FROZEN');
       if (state.status !== 'registration') throw new Error('WRONG_PHASE');
+      if (state.draftStartConfirmation) throw new Error('DRAFT_START_PENDING');
       if (!state.players.some((player) => player.playerId === playerId)) throw new Error('PLAYER_NOT_FOUND');
       getDb().prepare('UPDATE tournament_players SET active=0 WHERE tournament_id=? AND player_id=?').run(tid, playerId);
       logEvent(tid, 'player', 'player_remove', playerId, actor);
@@ -347,6 +350,7 @@ export class TournamentsService {
   private withdrawPlayerCommand(tid: number, playerId: string, actor: string): void {
     const state = loadState(tid);
     if (state.frozen) throw new Error('FROZEN');
+    if (state.draftStartConfirmation) throw new Error('DRAFT_START_PENDING');
     const player = state.players.find((p) => p.playerId === playerId);
     if (!player) throw new Error('PLAYER_NOT_FOUND');
     if (player.withdrawn) return;
@@ -362,6 +366,7 @@ export class TournamentsService {
   private restorePlayerCommand(tid: number, playerId: string, actor: string): void {
     const state = loadState(tid);
     if (state.frozen) throw new Error('FROZEN');
+    if (state.draftStartConfirmation) throw new Error('DRAFT_START_PENDING');
     if (state.matches.length > 0) throw new Error('FORMAT_LOCKED');
     const player = state.players.find((p) => p.playerId === playerId);
     if (!player) throw new Error('PLAYER_NOT_FOUND');
@@ -621,6 +626,17 @@ export class TournamentsService {
     const targetCards = fullFairRounds
       ? Array.from({ length: fairRoundCount }, (_, round) => state.packs[round * n].size).reduce((a, b) => a + b, 0)
       : Math.ceil(state.packs.reduce((sum, p) => sum + p.size, 0) / Math.max(1, n));
+    const startConfirmation = state.draftStartConfirmation;
+    const draftStartConfirmation = startConfirmation
+      ? {
+          pending: true,
+          requestedAt: startConfirmation.requestedAt,
+          deadlineAt: startConfirmation.deadlineAt,
+          confirmed: startConfirmation.confirmed[playerId] === true,
+          confirmedCount: startConfirmation.participants.filter((id) => startConfirmation.confirmed[id] === true).length,
+          total: startConfirmation.participants.length,
+        }
+      : null;
     return {
       id: state.id,
       name: state.name,
@@ -646,6 +662,7 @@ export class TournamentsService {
       phaseDeadline: state.frozen && state.frozenTimers?.deckbuilding !== undefined ? null : state.phaseDeadline,
       phaseDeadlineRemainingMs: state.frozen ? state.frozenTimers?.deckbuilding : undefined,
       pendingPhase: state.pendingPhase,
+      draftStartConfirmation,
       deck: state.decks[playerId],
       matches: state.matches
         .filter((m) => m.round === state.round && (m.playerA === playerId || m.playerB === playerId))
@@ -691,6 +708,10 @@ export class TournamentsService {
       else if (e.entity === 'pick' && e.action === 'pick') summary = `选牌 ${p.playerId} #${p.card}${p.auto ? '（超时自动）' : ''}`;
       else if (e.entity === 'draft' && e.action === 'alternative') summary = `候选牌 ${p.playerId} #${p.card}`;
       else if (e.entity === 'draft' && e.action === 'reserve') summary = `保留时间 +${p.addedSeconds ?? Math.round(Number(p.deltaMs ?? 0) / 1000)} 秒（${p.playerId}）`;
+      else if (e.entity === 'draft' && e.action === 'draft_start_requested') summary = `请求开始选牌（${p.participants?.length ?? 0} 人确认）`;
+      else if (e.entity === 'draft' && e.action === 'draft_start_confirmed') summary = `确认开始选牌（${p.playerId}）`;
+      else if (e.entity === 'draft' && e.action === 'draft_start_cancelled') summary = `开始选牌确认取消（${p.reason === 'timeout' ? '超时' : p.reason ?? '管理员'}）`;
+      else if (e.entity === 'draft' && e.action === 'draft_start_approved') summary = '所有玩家确认，开始选牌';
       else if (e.entity === 'pause' && e.action === 'pause') summary = p?.pausedAt ? '暂停' : '恢复';
       else if (e.entity === 'tournament' && e.action === 'phase') summary = p.status === 'registration' && (p.round ?? 0) === 0 ? `创建比赛（${e.actor}）` : `阶段 → ${p.status} r${p.round ?? ''}`;
       else if (e.entity === 'tournament' && e.action === 'config') summary = '参数修改';
@@ -714,6 +735,14 @@ export class TournamentsService {
         ].join('\n');
       } else if (e.entity === 'draft' && e.action === 'alternative') {
         detail = `玩家：${p.playerId}\n候选牌：${p.card}\n牌堆：${p.packIndex}`;
+      } else if (e.entity === 'draft' && e.action === 'draft_start_requested') {
+        detail = `发起人：${p.actor ?? e.actor}\n确认人数：${p.participants?.length ?? 0}\n截止时间：${p.deadlineAt ?? '未知'}`;
+      } else if (e.entity === 'draft' && e.action === 'draft_start_confirmed') {
+        detail = `玩家：${p.playerId}\n确认时间：${p.confirmedAt ?? e.created_at}`;
+      } else if (e.entity === 'draft' && e.action === 'draft_start_cancelled') {
+        detail = `原因：${p.reason === 'timeout' ? '一分钟内未全部确认' : p.reason ?? '未知'}\n截止时间：${p.deadlineAt ?? '未知'}\n已确认：${p.confirmedCount ?? '未知'}/${p.total ?? '未知'}`;
+      } else if (e.entity === 'draft' && e.action === 'draft_start_approved') {
+        detail = `确认人数：${p.participants?.length ?? 0}\n确认完成时间：${p.confirmedAt ?? e.created_at}`;
       } else if (e.entity === 'deck' && e.action === 'deck') {
         detail = `玩家：${p.playerId}\n主卡组：${p.deck?.main?.length ?? 0} 张\n额外卡组：${p.deck?.extra?.length ?? 0} 张\n副卡组：${p.deck?.side?.length ?? 0} 张`;
       } else if (e.entity === 'draft' && e.action === 'cursor') {
@@ -743,6 +772,17 @@ export class TournamentsService {
     const state = loadState(tid);
     const cfg = getConfig(state);
     const row = getDb().prepare('SELECT auth_required FROM tournaments WHERE id=?').get(tid) as { auth_required: number } | undefined;
+    const startConfirmation = state.draftStartConfirmation;
+    const draftStartConfirmation = startConfirmation
+      ? {
+          pending: true,
+          requestedAt: startConfirmation.requestedAt,
+          deadlineAt: startConfirmation.deadlineAt,
+          confirmedByPlayer: { ...startConfirmation.confirmed },
+          confirmedCount: startConfirmation.participants.filter((id) => startConfirmation.confirmed[id] === true).length,
+          total: startConfirmation.participants.length,
+        }
+      : null;
     return {
       id: state.id,
       name: state.name,
@@ -757,6 +797,7 @@ export class TournamentsService {
       droppedCards: state.droppedCards,
       phaseDeadline: state.phaseDeadline,
       pendingPhase: state.pendingPhase,
+      draftStartConfirmation,
       picks: state.picks,
       pickCursor: state.pickCursor,
       packQueues: state.packQueues,

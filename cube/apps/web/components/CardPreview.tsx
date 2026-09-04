@@ -168,7 +168,15 @@ export function CardPreviewHost() {
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
-                    a.run();
+                    // Moving a card is a terminal action for the details
+                    // window.  Close here as a defensive default so newly
+                    // registered actions cannot leave a stale overlay above
+                    // the updated deck.
+                    try {
+                      a.run();
+                    } finally {
+                      closeCardPreview();
+                    }
                   }}
                   className="flex-1 rounded bg-gold px-3 py-1.5 text-sm font-semibold text-felt-deep hover:brightness-110"
                 >
@@ -178,7 +186,11 @@ export function CardPreviewHost() {
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      a.secondary!.run();
+                      try {
+                        a.secondary!.run();
+                      } finally {
+                        closeCardPreview();
+                      }
                     }}
                     className="rounded bg-felt-edge px-3 py-1.5 text-sm text-slate-200 hover:brightness-110"
                   >

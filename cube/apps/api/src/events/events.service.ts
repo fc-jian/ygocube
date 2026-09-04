@@ -16,6 +16,16 @@ export interface PlayerState {
   ready?: boolean;
 }
 
+/** Pending administrator request to begin drafting.  This is event-sourced so
+ * a restart cannot silently forget a live confirmation window. */
+export interface DraftStartConfirmationState {
+  requestedAt: string;
+  deadlineAt: string;
+  actor: string;
+  participants: string[];
+  confirmed: Record<string, boolean>;
+}
+
 export interface PackState {
   index: number;
   size: number;
@@ -123,6 +133,7 @@ export interface TournamentState {
   matches: MatchState[];
   phaseDeadline: string | null;
   pendingPhase: string | null;
+  draftStartConfirmation: DraftStartConfirmationState | null;
   // 管理员冻结时持久化各阶段计时器的剩余时间；解冻后原样恢复。
   frozenTimers?: FrozenTimerState | null;
   competition?: CompetitionState | null;
@@ -245,7 +256,7 @@ function emptyState(id: number, name: string, configJson: string, createdBy = 'u
     id, name, createdBy, configJson, status: 'registration', round: 0, frozen: false,
     players: [], packs: [], droppedCards: [], picks: [], pickCursor: null, pause: null, decks: {}, matches: [],
     packQueues: {}, pickDeadlines: {}, packsDealt: 0, pickReserves: {}, pickAlternatives: {},
-    phaseDeadline: null, pendingPhase: null, frozenTimers: null, competition: null,
+    phaseDeadline: null, pendingPhase: null, draftStartConfirmation: null, frozenTimers: null, competition: null,
   };
 }
 
@@ -257,6 +268,10 @@ export function apply(state: TournamentState, action: string, payload: any): voi
   // Snapshots created before candidate-card support do not have this field.
   // Normalize lazily so old tournaments remain replayable.
   state.pickAlternatives ??= {};
+  // Snapshots created before the start-confirmation handshake do not have this
+  // field either; treating them as an idle registration state preserves the
+  // existing replay semantics.
+  state.draftStartConfirmation ??= null;
   switch (action) {
     case 'phase': {
       state.status = payload.status;
@@ -285,6 +300,39 @@ export function apply(state: TournamentState, action: string, payload: any): voi
       p.ready ??= false;
       state.players.push(p);
       state.decks[p.playerId] = { main: [], extra: [], side: [], lockedAt: null, status: 'building' };
+      break;
+    }
+    case 'draft_start_requested': {
+      if (!payload || typeof payload !== 'object') throw new Error('INVALID_DRAFT_START_EVENT');
+      const participants = Array.isArray(payload.participants)
+        ? payload.participants.filter((id: unknown): id is string => typeof id === 'string')
+        : [];
+      const confirmed: Record<string, boolean> = {};
+      if (payload.confirmed && typeof payload.confirmed === 'object') {
+        for (const [id, value] of Object.entries(payload.confirmed as Record<string, unknown>)) {
+          if (typeof value === 'boolean') confirmed[id] = value;
+        }
+      }
+      state.draftStartConfirmation = {
+        requestedAt: String(payload.requestedAt ?? ''),
+        deadlineAt: String(payload.deadlineAt ?? ''),
+        actor: String(payload.actor ?? 'admin'),
+        participants,
+        confirmed,
+      };
+      break;
+    }
+    case 'draft_start_confirmed': {
+      const confirmation = state.draftStartConfirmation;
+      const playerId = payload?.playerId;
+      if (confirmation && typeof playerId === 'string' && confirmation.participants.includes(playerId)) {
+        confirmation.confirmed[playerId] = true;
+      }
+      break;
+    }
+    case 'draft_start_cancelled':
+    case 'draft_start_approved': {
+      state.draftStartConfirmation = null;
       break;
     }
     case 'player_ready': {
@@ -495,6 +543,8 @@ export function loadState(tid: number): TournamentState {
     Object.assign(state, snapState);
     startSeq = snap.event_seq as number;
   }
+  state.pickAlternatives ??= {};
+  state.draftStartConfirmation ??= null;
   const rows = getDb()
     .prepare('SELECT seq, tournament_id, entity, action, payload_json, created_at, actor FROM events WHERE tournament_id=? AND seq>? ORDER BY seq')
     .all(tid, startSeq) as EventRow[];
@@ -586,6 +636,8 @@ function stateAt(tid: number, seq: number): TournamentState {
     Object.assign(state, JSON.parse(snap.state_json) as TournamentState);
     startSeq = snap.event_seq as number;
   }
+  state.pickAlternatives ??= {};
+  state.draftStartConfirmation ??= null;
   const rows = getDb()
     .prepare('SELECT seq, tournament_id, entity, action, payload_json, created_at, actor FROM events WHERE tournament_id=? AND seq>? AND seq<=? ORDER BY seq')
     .all(tid, startSeq, seq) as EventRow[];

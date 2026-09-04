@@ -22,6 +22,59 @@ function setupDraft(n: number, pickSeconds = 30) {
 describe('draft engine', () => {
   beforeEach(() => useTestDb());
 
+  it('requires every registered player to confirm before an administrator start', () => {
+    const tournaments = makeTournaments();
+    const cards = new CardsService();
+    const pools = new PoolsService(cards);
+    const draft = new DraftService(cards, tournaments, pools, new MatchesService(fakeSrvpro as any));
+    const tid = tournaments.create({ name: 'confirm-start', maxPlayers: 2, cardPool: TEST_POOL, draftMode: 'serial' }, 'creator').tid;
+    tournaments.join(tid, 'p0', 'P0');
+    tournaments.join(tid, 'p1', 'P1');
+
+    const request = draft.requestStartDraft(tid, 'creator');
+    expect(request.pending).toBe(true);
+    expect(request.confirmedCount).toBe(0);
+    expect(loadState(tid).status).toBe('registration');
+    expect(() => draft.startDraft(tid, 'legacy-helper')).toThrow('DRAFT_START_PENDING');
+    expect(loadState(tid).status).toBe('registration');
+    expect(tournaments.stateForPlayer(tid, 'p0').draftStartConfirmation).toMatchObject({ pending: true, confirmed: false, total: 2 });
+
+    const first = draft.confirmDraftStart(tid, 'p0');
+    expect(first.pending).toBe(true);
+    expect(first.confirmedCount).toBe(1);
+    expect(loadState(tid).status).toBe('registration');
+
+    const last = draft.confirmDraftStart(tid, 'p1');
+    expect(last.started).toBe(true);
+    expect(loadState(tid).status).toBe('drafting');
+    expect(loadState(tid).draftStartConfirmation).toBeNull();
+    draft.haltAllTimers(tid);
+  });
+
+  it('cancels an unconfirmed start request after one minute without creating packs', () => {
+    jest.useFakeTimers();
+    try {
+      const tournaments = makeTournaments();
+      const cards = new CardsService();
+      const pools = new PoolsService(cards);
+      const draft = new DraftService(cards, tournaments, pools, new MatchesService(fakeSrvpro as any));
+      const tid = tournaments.create({ name: 'confirm-timeout', maxPlayers: 2, cardPool: TEST_POOL, draftMode: 'serial' }, 'creator').tid;
+      tournaments.join(tid, 'p0', 'P0');
+      tournaments.join(tid, 'p1', 'P1');
+      draft.requestStartDraft(tid, 'creator');
+
+      jest.advanceTimersByTime(60_001);
+      const state = loadState(tid);
+      expect(state.status).toBe('registration');
+      expect(state.packs).toHaveLength(0);
+      expect(state.draftStartConfirmation).toBeNull();
+      expect(() => draft.confirmDraftStart(tid, 'p0')).toThrow('DRAFT_START_NOT_PENDING');
+      draft.haltAllTimers(tid);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('creates packs of the configured default size and exposes dropped cards (drop_leftover_exact)', () => {
     const { tid, cards } = setupDraft(4);
     const tournaments = makeTournaments();

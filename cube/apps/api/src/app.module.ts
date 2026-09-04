@@ -90,6 +90,21 @@ export class AppModule {
           // player list so every view shows the same status.
           realtime.emitNotice(tid, '玩家准备状态已更新');
           break;
+        case 'draft_start_requested':
+          // Do not broadcast the participant/token details; each client
+          // refetches its own authenticated state and decides whether to show
+          // the confirmation dialog.
+          realtime.emitNotice(tid, '管理员请求开始选牌，请在一分钟内确认');
+          break;
+        case 'draft_start_confirmed':
+          realtime.emitNotice(tid, '有玩家已确认开始选牌');
+          break;
+        case 'draft_start_cancelled':
+          realtime.emitNotice(tid, '玩家未在一分钟内全部确认，选牌未开始');
+          break;
+        case 'draft_start_approved':
+          realtime.emitNotice(tid, '所有玩家已确认，选牌即将开始');
+          break;
         case 'player_remove':
           // A registration cancellation changes the public player list.  Only
           // send a generic notice; the removed player's id is not needed by the

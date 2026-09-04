@@ -48,7 +48,15 @@ const assert = (condition, message) => { if (!condition) throw new Error(message
     for (let i = 0; i < 6; i++) {
       await call('POST', `/admin/t/${tid}/players`, { admin: true, body: { player_id: `swiss${i}`, display_name: `Swiss ${i}` } });
     }
-    await call('POST', `/admin/t/${tid}/phase`, { admin: true, body: { status: 'drafting' } });
+    let start = await call('POST', `/admin/t/${tid}/phase`, { admin: true, body: { status: 'drafting' } });
+    assert(start.pending === true, 'draft phase request did not open confirmation window');
+    for (let i = 0; i < 6; i++) {
+      start = await call('POST', `/t/${tid}/player/draft-confirm`, {
+        player: { tid, pid: `swiss${i}` },
+      });
+      if (start.started) break;
+    }
+    assert(start.started === true, 'all-player draft confirmation did not start drafting');
     await call('POST', `/admin/t/${tid}/phase`, { admin: true, body: { status: 'deckbuilding' } });
     await call('POST', `/admin/t/${tid}/phase`, { admin: true, body: { status: 'matches' } });
 

@@ -1,5 +1,6 @@
-// Online smoke probe for round order, remaining-card count, pause timing, and
-// unlimited deckbuilding. Creates one temporary tournament and always deletes it.
+// Online smoke probe for round order, remaining-card count, administrator
+// confirmation/pause timing, and unlimited deckbuilding. Creates one temporary
+// tournament and always deletes it.
 const http = require('http');
 
 const port = Number(process.argv[2] || 3001);
@@ -65,14 +66,18 @@ const assert = (condition, message) => { if (!condition) throw new Error(message
       body: { name: `draft-state-probe-${Date.now()}`, maxPlayers: 3, cardPool: 'kuro750', packSize: 5, packCount: 6, pickSeconds: 30 },
     });
     tid = created.tid;
-    const resetToken = await call('POST', `/admin/t/${tid}/admin-token`, { admin: true });
-    assert(resetToken.admin_token && resetToken.admin_token !== created.admin_token, 'admin token reset failed');
     const info = await call('GET', `/t/${tid}`);
     assert(info.config.deckbuildingSeconds === null, 'default deckbuildingSeconds is not null');
     for (const pid of ['probeA', 'probeB', 'probeC']) {
       await call('POST', `/t/${tid}/join`, { body: { player_id: pid, display_name: pid } });
     }
-    await call('POST', `/admin/t/${tid}/start_draft`, { admin: true });
+    let start = await call('POST', `/admin/t/${tid}/start_draft`, { admin: true });
+    assert(start.pending === true && start.total === 3, 'draft start did not open all-player confirmation');
+    for (const pid of ['probeA', 'probeB', 'probeC']) {
+      start = await call('POST', `/t/${tid}/player/draft-confirm`, { player: { tid, pid } });
+      if (start.started) break;
+    }
+    assert(start.started === true, 'all players did not confirm draft start');
     let state = await call('GET', `/t/${tid}/state`, { player: { tid, pid: 'probeA' } });
     assert(state.cardsRemainingExact === true && state.cardsRemainingToDraft === 10, 'remaining-card count is not exact 10');
     assert(state.queueLengths.map((q) => q.playerId).join(',') === state.players.map((p) => p.playerId).join(','), 'queue order differs from seat order');
@@ -82,17 +87,15 @@ const assert = (condition, message) => { if (!condition) throw new Error(message
     assert(firstMain, 'probeA first pack contains no main-deck card');
     await call('POST', `/t/${tid}/pick`, { player: { tid, pid: 'probeA' }, body: { card_code: firstMain.code } });
     await call('POST', `/t/${tid}/deck/move`, { player: { tid, pid: 'probeA' }, body: { card_code: firstMain.code, from: 'main', to: 'pool' } });
-    const waiting = await call('GET', `/t/${tid}/state`, { player: { tid, pid: 'probeA' } });
-    assert(waiting.pack === null && waiting.draftReserveMs > 0, 'reserve is hidden while the player queue is empty');
-
-    await call('POST', `/t/${tid}/pause`, { player: { tid, pid: 'probeB' }, body: { action: 'propose' } });
-    await call('POST', `/t/${tid}/pause`, { player: { tid, pid: 'probeC' }, body: { action: 'vote_yes' } });
+    const beforePause = await call('GET', `/t/${tid}/state`, { player: { tid, pid: 'probeB' } });
+    assert(beforePause.draftReserveMs > 0, 'reserve is not visible to a player');
+    await call('POST', `/admin/t/${tid}/pause`, { admin: true });
     const paused1 = await call('GET', `/t/${tid}/state`, { player: { tid, pid: 'probeB' } });
     await wait(1500);
     const paused2 = await call('GET', `/t/${tid}/state`, { player: { tid, pid: 'probeB' } });
     assert(paused1.pack.deadlineAt === null && paused1.pack.pausedRemainingMs > 0, 'pause did not freeze deadline');
     assert(paused1.pack.pausedRemainingMs === paused2.pack.pausedRemainingMs, 'paused countdown continued consuming time');
-    await call('POST', `/t/${tid}/pause`, { player: { tid, pid: 'probeB' }, body: { action: 'resume' } });
+    await call('POST', `/admin/t/${tid}/resume`, { admin: true });
 
     let guard = 0;
     while (guard++ < 100) {
@@ -125,7 +128,7 @@ const assert = (condition, message) => { if (!condition) throw new Error(message
     assert(confirmed.ok === true && confirmed.repairs.every((repair) => repair.disqualified), 'confirmed match transition did not DSQ undersized decks');
     const matchesState = await call('GET', `/t/${tid}/state`, { player: { tid, pid: 'probeA' } });
     assert(matchesState.status === 'matches' && matchesState.disqualified === true, 'player state did not refresh to matches/DSQ');
-    console.log(`PROBE PASS tid=${tid} import=validated token=reset reserve=visible pause=frozen deckbuilding=unlimited shuffle=main-only preflight=confirmed`);
+    console.log(`PROBE PASS tid=${tid} import=validated reserve=visible pause=admin-frozen deckbuilding=unlimited shuffle=main-only preflight=confirmed`);
   } finally {
     if (tid !== null) {
       try { await call('DELETE', `/admin/t/${tid}`, { admin: true }); } catch (error) { console.error(`cleanup failed: ${error.message}`); }

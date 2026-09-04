@@ -87,6 +87,7 @@ swissRoundCount, playoffSize
 | `POST /t/:tid/join` | 报名 `{player_id,display_name}`，返回一次性 token |
 | `POST /t/:tid/player/name` | 报名阶段由本人修改 `{display_name}`；需要玩家身份，记录 `player_rename` 事件 |
 | `POST /t/:tid/player/ready` | 报名阶段由本人设置 `{ready:true|false}`；记录 `player_ready` 事件，准备状态对所有报名玩家公开 |
+| `POST /t/:tid/player/draft-confirm`（`/confirm-draft`、`/start-draft-confirm` 兼容别名） | 管理员发起开始选牌后，由本人在 60 秒内确认；最后一名玩家确认时原子生成牌堆并进入 drafting，超时则取消且不产生牌堆 |
 | `POST /t/:tid/player/withdraw`（`/player/leave` 兼容别名） | 仅报名阶段由本人退出；记录 `player_remove` 事件、释放名额并清除本人报名投影；选牌开始后返回 `WRONG_PHASE` |
 | `GET /t/:tid/state` | 当前玩家视角完整状态（牌堆、队列、reserve、构筑、当前对局） |
 | `GET /t/:tid/pool` | 当前比赛 drop 前卡池（需玩家鉴权） |
@@ -140,7 +141,7 @@ swissRoundCount, playoffSize
 
 | 方法/路径 | 说明 |
 | --- | --- |
-| `POST /admin/t/:tid/start_draft` | 生成牌堆并开始选牌 |
+| `POST /admin/t/:tid/start_draft` | 发起 60 秒全员确认窗口；仅所有报名玩家确认后才生成牌堆并开始选牌，重复请求在窗口内幂等 |
 | `POST /admin/t/:tid/phase` | 阶段切换；进入 matches 先合规预检，确认字段为 `confirm_invalid_decks:true` |
 | `PUT /admin/t/:tid/config` | 报名阶段修改配置 |
 | `PUT /admin/t/:tid/match-format` | 首场前设置/修改明确赛制 |

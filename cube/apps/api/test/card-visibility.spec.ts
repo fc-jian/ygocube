@@ -33,6 +33,7 @@ function stateFor(mode: 'serial' | 'passing'): TournamentState {
     matches: [],
     phaseDeadline: null,
     pendingPhase: null,
+    draftStartConfirmation: null,
     frozenTimers: null,
     competition: null,
   };

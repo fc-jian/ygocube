@@ -157,16 +157,31 @@ export class AdminController {
   @Post('t/:tid/start_draft')
   startDraft(@Req() req: AuthedRequest) {
     const tid = Number(req.params.tid);
-    this.draft.startDraft(tid, this.adminActor(req));
+    const result = this.draft.requestStartDraft(tid, this.adminActor(req));
     const s = loadState(tid);
-    this.realtime.emitPhase(tid, s.status, s.round);
-    return { ok: true };
+    if (!result.pending) this.realtime.emitPhase(tid, s.status, s.round);
+    return { ok: true, ...result };
   }
 
   @Post('t/:tid/phase')
   phase(@Req() req: AuthedRequest, @Body() body: Record<string, unknown>) {
     const tid = Number(req.params.tid);
     const status = String(body.status);
+    const current = loadState(tid);
+    // Starting directly from registration must use the same all-player
+    // confirmation handshake as the dedicated start_draft endpoint.  Keeping
+    // this guard here prevents an alternate phase API call from bypassing it.
+    if (status === 'drafting' && current.status === 'registration') {
+      const result = this.draft.requestStartDraft(tid, this.adminActor(req));
+      return { ok: true, ...result };
+    }
+    // Do not allow an administrator to skip the draft entirely by jumping from
+    // registration straight to matches (the UI has a separate "enter matches"
+    // button, so this must be enforced server-side as well).
+    if (status === 'matches' && current.status === 'registration') {
+      if (current.draftStartConfirmation) throw new Error('DRAFT_START_PENDING');
+      throw new Error('DRAFT_NOT_STARTED');
+    }
     if (status === 'matches') {
       const invalid = this.decks.validationReport(tid);
       if (invalid.length > 0 && body.confirm_invalid_decks !== true) {

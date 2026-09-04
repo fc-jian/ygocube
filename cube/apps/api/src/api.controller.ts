@@ -254,6 +254,16 @@ export class ApiController {
     return this.tournaments.setPlayerReady(id.tournamentId, id.playerId, body.ready === true, id.playerId);
   }
 
+  /** Confirm the administrator's one-minute request to begin drafting. */
+  @Post('t/:tid/player/draft-confirm')
+  @Post('t/:tid/player/confirm-draft')
+  @Post('t/:tid/player/start-draft-confirm')
+  confirmDraftStart(@Req() req: AuthedRequest) {
+    const id = req.identity as Identity;
+    const result = this.draft.confirmDraftStart(id.tournamentId, id.playerId, id.playerId);
+    return { ok: true, ...result };
+  }
+
   // A player may give up their registration only before the draft starts.
   // Authentication still comes from the player identity resolved by AuthGuard;
   // the request body cannot select another player.
