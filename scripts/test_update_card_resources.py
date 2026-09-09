@@ -23,10 +23,41 @@ class UpdateScriptTests(unittest.TestCase):
     def git_status(self) -> str:
         return subprocess.check_output(["git", "status", "--short"], cwd=ROOT, text=True)
 
+    def test_server_payload_excludes_raw_expansion_images(self) -> None:
+        import json
+        import tempfile
+        # Exercise the actual payload copier against a tiny managed expansion.
+        script = SCRIPT.read_text()
+        start = script.index('import json, os, shutil, sys\nsd, ad, ed =')
+        body = script[start:script.index('\nPY\n', start)]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base, payload = root / 'source', root / 'payload'
+            files = ['test-release.cdb', 'script/c123.lua', 'pics/123.jpg']
+            for name in files:
+                source = base / 'srvpro/ygopro/expansions' / name
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_bytes(b'fixture')
+            (payload / 'deletes').mkdir(parents=True)
+            deltas = []
+            for index in range(3):
+                delta = root / f'delta{index}.json'
+                delta.write_text(json.dumps({'changed': files if index == 2 else [], 'removed': []}))
+                deltas.append(str(delta))
+            result = subprocess.run(['python3', '-c', body, *deltas, str(payload), str(base)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((payload / 'srvpro/ygopro/expansions/test-release.cdb').is_file())
+            self.assertTrue((payload / 'srvpro/ygopro/expansions/script/c123.lua').is_file())
+            self.assertFalse((payload / 'srvpro/ygopro/expansions/pics/123.jpg').exists())
+
     def test_dry_run_prepare_is_non_mutating(self) -> None:
         before = self.git_status()
         result = self.run_script("--dry-run", "prepare", "--skip-images")
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git_status(), before)
+        expansion = self.run_script("--dry-run", "prepare", "--skip-images", "--expansion")
+        self.assertEqual(expansion.returncode, 0, expansion.stderr)
+        self.assertIn("expansion", expansion.stdout)
         self.assertEqual(self.git_status(), before)
 
     def test_dry_run_deploy_requires_confirmation_but_does_not_connect(self) -> None:

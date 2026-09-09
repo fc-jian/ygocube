@@ -2,6 +2,7 @@
 const nextConfig = {
   reactStrictMode: true,
   output: 'standalone',
+  assetPrefix: process.env.NEXT_ASSET_PREFIX || undefined,
   async headers() {
     return [
       {

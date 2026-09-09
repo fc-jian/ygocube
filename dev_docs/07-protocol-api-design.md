@@ -335,3 +335,79 @@ pics: {ygopro_root: "", avif_dir: "assets/pics_avif"}
 验收至少包括 `/api/health`、首页引用的静态 JS/CSS 状态码与 MIME、srvpro 协议
 探针和宿主 `ldd`。任何校验失败都保留失败目录和备份，并恢复上一版资源；脚本不
 自动恢复数据库或强制覆盖 Git 冲突。
+
+## 8. 网页对战协议 v1
+
+链路为浏览器 → `/duel/ws` WebSocket（外部 `/api/duel/ws`）→ Cube API → srvpro → 现有宿主。`web_duel.enabled` 默认 false。
+
+- `POST /t/:tid/matches/:mid/duel-session`：玩家三要素，校验本人活动对局，返回 `{version:1,ticket,expiresAt,wsPath}`；票据 30 秒有效、仅消费一次。
+- `POST /public/t/:tid/matches/:mid/watch-session`：匿名只读公开观战票据，是三要素鉴权的显式例外；不返回房间口令。
+- WS 首帧 `{type:"auth",version:1,ticket}`，5 秒内完成；服务端 `{type:"session",generation,role}`。之后下行二进制为单个完整 YGOPro 帧（uint16 LE 长度含 opcode，不含长度本身）。
+- 公开观战加入时先下发 `{type:"snapshot",state}`（共享协议包 `DuelState`），其后按顺序应用二进制帧；不含非公开身份。
+- 服务端 `{type:"prompt",id}` 给出交互代次；客户端 `{type:"action",id,opcode,data:number[]}`，仅允许 RESPONSE/HAND_RESULT/TP_RESULT/UPDATE_DECK/HS_READY/HS_NOTREADY/HS_START/SURRENDER，角色、阶段及长度必须验证，RESPONSE 为 1–256 字节。初始握手和 TIME_CONFIRM 由网关执行。断连重新申请票据，同身份新连接接管旧连接。
+- 只读观众不接受任何 action；SSE 不携带任何对战卡牌内容。内部 `GET /cube/web-stream?room_name=...&view=public` 与 `GET /cube/web-replay?room_name=...` 必须验证 X-Cube-Api-Key，输出 NDJSON `{t,frame:base64}`；录像仅在 Cube 侧确认 tournament finished 后对外提供。
+- `GET /public/t/:tid/matches/:mid/replay`：tournament finished 后匿名全知录像，含版本、消息、完整性标记与卡片元数据；之前返回 403。禁止缓存。新对局保存，不导入历史 yrp。
+- `POST /admin/t/:tid/matches/:mid/replay/delete`：有比赛管理权的管理员清理录像，活动房间禁止清理。
+- `POST /public/duel/cards {codes}`、`/public/duel/descriptions {ids}`（各最多 256 项）及 `/public/duel/declare {q,opcodes}`（文本最多 100 字、指令最多 255 项）只提供卡片数据库信息。
+- 内部 `GET /cube/web-player?room_name=...&player_id=...` 使用 X-Cube-Api-Key，返回当前卡组供网关重连换备恢复；不对浏览器开放。录像响应包含归档时卡片文本、效果描述、消息时间与状态快照；不使用当前资源替换历史文本。
+
+录像使用 srvpro 私有追加日志，与公开流分文件保存；故障标记 incomplete。比赛回溯撤销现有会话并关闭后续录像访问；已下载的文件无法撤回。所有旧二进制协议结构保持不变。
+
+### 8.1 独立网页房间
+
+`/duel` 和 `/duel/decks` 不依赖比赛身份。以下是匿名入口的明确例外，仍受 Origin、输入大小和连接上限约束：
+
+- `GET /public/duel/search?q=...`：全卡库搜索（最多 100 字查询），排除衍生物，返回最多 100 项元数据。
+- `GET /public/duel/options`：返回 srvpro 当前禁限卡表索引与名称。
+- `POST /public/duel/join`：`{name,password,options,deck:{main,extra,side}}`，选项字段为 `mode(0单局/1比赛),lflist,rule,duelRule,timeLimit,startLp,startHand,drawCount,mainMin,mainMax,extraMax,sideMax,noCheck,noShuffle`。密码映射同一个内部房间，首位创建者决定规则；后续加入返回已有规则。返回 `{credential,room,options}`；短期 credential 仅保存当前标签页，用于刷新重连，不能用于 Cube 身份。
+- `POST /public/duel/session {credential}`：换取现有单次 WS 票据。后续操作沿用 §8，卡组由网关上传，房主/准备状态由原生宿主决定。
+- 私有 `GET /cube/standalone-options`、`POST /cube/standalone-room {room_name,hostinfo}`：X-Cube-Api-Key 鉴权，通过同一个 srvpro Room 构造器创建普通房间，不绑定 Cube 卡组与结果。
+- 所有上传与保存的卡组放在浏览器会话 cookie（Path=/duel、SameSite=Strict）；按卡组独立编码，最多 8 副，每副最多 3 KiB、合计最多约 7 KiB。写入失败必须显示错误，不伪报保存成功。页面提供随时查看、编辑、导出和删除。关闭浏览器后是否保留取决于浏览器会话恢复设置。
+
+### 8.2 独立测试部署隔离
+
+独立 Web 可构建 `NEXT_PUBLIC_API_BASE=/duel-api` 与 `NEXT_ASSET_PREFIX=/duel-assets`；默认分别仍为 `/api` 与无前缀，旧 Cube 不变。独立 API 的 `server.host`、srvpro 的 `bind_address` 可指定 `127.0.0.1`，未指定时保持原监听行为。公网仅开放 `/duel`、`/duel/*`、专用静态资源、公开独立对战 API、卡图及 WSS；不开放该实例的 Cube 管理/比赛 API。现有 Cube 继续使用原房间流程和原生客户端。
+
+### 8.3 房间 URL、重连与公开观战
+
+房间 URL 为 `/duel/room/:room`，`:room` 沿用房间密码的服务端 HMAC（`W` 加 18 位十六进制）。链接是房间访问凭据，与密码等价；页面提示仅向参与者分享。
+
+- `POST /public/duel/resolve {password}` 与 `GET /public/duel/rooms/:room` 返回已有房间的 `{room,url,options,players:[{id,connected}],finished}`，不包含私有昵称后缀、卡组或会话凭据。
+- `POST /public/duel/join` 增加可替代 password 的 `room`；`reconnect:true` 时凭房间链接和已登记 `name` 恢复原卡组与席位，不重新上传卡组。正在连接的 ID 仅可用相同 credential 接管，否则拒绝 `PLAYER_CONNECTED`，避免观战者误踢玩家。重复 ID 的普通加入返回 `PLAYER_ID_EXISTS`。
+- `POST /public/duel/watch {room}` 返回只读会话凭据。WSS 下行仅转发 srvpro 的公开观战帧，过滤原生录像与卡组推送，任何上行 action 均断开。支持中途观战；依赖 srvpro `cloud_replay.enable_halfway_watch`。
+- 独立玩家初始/换备卡组和内部重连凭据保存在独立数据库 `standalone_duel_players`，24 小时过期。该表不进入 Cube SSE 或任何公开元数据。
+
+### 8.4 场地区域选择
+
+MSG_SELECT_PLACE / MSG_SELECT_DISFIELD 的可选区域直接映射到场地按钮，不在侧栏列选项。掩码低 16 位为选择者、高 16 位为对手；响应仍为实际 controller/location/sequence 三元组。单区域点击立即提交，多区域可反选，选满自动提交；count=0 提供取消。共享额外怪兽区的双方镜像坐标共用一个点击目标，观战/回放不提供操作。
+
+### 8.5 协议与界面修正
+
+MSG_CONFIRM_CARDS(31) 布局为 player、skip_panel、count、count 个 code/controller/location/sequence，不能与 DECKTOP/EXTRATOP 共用头部。换备界面按卡片类型拆分主卡组、额外卡组、备选卡组，发送时 main 仍合并主卡与额外，保持原生协议。场地中央阶段按钮只发送宿主当次允许的 battle/main2/end 动作。网页仅提供中文界面。srvpro reconnect.wait_time 默认及部署配置统一为 1800000 毫秒，网页/原生客户端使用同一断线恢复策略。
+
+### 8.6 卡片交互与展示
+
+诱发确认按原生 SELECT_EFFECTYN 的描述 ID 进行格式化：200/221 使用区域与卡名，95/96/97/218/219/220 使用卡名；缺少参数时显示中文兜底，不显示 printf 占位符。详情动作绑定 controller/location/sequence/sub 对应的具体卡片，不聚合同名卡。动画仅消费已收到的连锁消息，不延迟或生成协议响应，不增加可见卡片信息。场地使用七列等宽网格；额外怪兽区占第三、第五列，对齐主怪兽区第二、第四格。
+
+### 8.7 独立房间保活与交互规则
+
+独立房间已连接玩家不受 srvpro 五分钟 TCP 空闲清理；WebSocket 心跳负责检测失联，比赛断连仍按 30 分钟保留。独立宿主追加 `--web-action-time` 参数启用有效响应加时：宿主确认主动指令或发动连锁响应非 RETRY 后每次增加 2 秒，选区域/对象等后续步骤不重复增加，洗手牌、取消连锁、阶段跳转及可反复选择/取消的操作不增加；旧 Cube 和传统启动参数不变。选择提示只供下一次选择消费，不能沿用到后续指令菜单。
+
+连锁编号在对应卡片上显示，卡片悬停详情固定在右下角；换备默认仅卡图。怪兽格改为正方形，攻守卡图尺寸相同。阶段栏在场地顶部，双方半场之间只保留共享额外怪兽区。
+
+### 8.8 场地操作入口、公开选卡与胜负展示
+
+前端普通卡片统一尺寸并按可用视口高度布局，详情预览独立放大。command/chain 中带 ref 的操作在对应卡片/区域入口展示，不再汇总到侧栏；多选保留原始 index，允许直接点击场上目标。提示 code 为零时只能从当前视角已经可见的对应实体补全显示，禁止推测对手隐蔽区域。
+
+MSG_CHAINING 保留当前实体 ref 与原始发动位置 originRef，并在短动画队列结束前维持视觉标记。MSG_WIN 的第二字节保存为 winReason，展示投降、基本分、无卡可抽、超时、断连及特殊胜利原因；不改变任何线协议。固定详情区属于局内布局，换备详情在模态框之上贴近卡片显示。
+
+### 独立房间的原生客户端互通与连锁确认
+
+- 独立 srvpro 配置 `modules.cube.web_public_url`（例如 `https://host/duel`）时，为非 Cube 房间提供网页别名：已有 `W` + 18 位十六进制名称保持不变，其余以共享 API key 对完整原生房间密码做 HMAC-SHA256，取前 18 位并加 `W`。禁用配置时不对普通原生房间启用别名；Cube 房间始终排除。
+- 私有 `/cube/standalone-info`、房间状态/观战和原生 JOIN_GAME 均将别名解析到同一个实际房间。网页输入别名或原生密码均加入该房间，不复制宿主、不覆盖已建立的规则。房间页面 `nativeConnection` 返回 `{host,port,password}`；原生密码保留完整规则前缀。`modules.cube.web_native_host/port` 配置公开地址，私有 HTTP 仍绑定回环。
+- 原生加入成功后的房间服务器消息给该参与者发送网页链接与密码，不向其他房间广播。独立原生入口默认使用 17911，不改变 Cube 的 7911 入口。
+- 可选 SELECT_CHAIN 有候选动作时先显示居中确认；确认响应后才能选择动作，仍能取消并发送原生 `-1`。不响应直接发送 `-1` 转移优先权。强制连锁不提供跳过；默认无可用动作自动跳过。确认状态绑定服务端 prompt ID，新提示必须重新确认。
+
+### 先行卡目录索引
+
+卡片服务读取 `server.cards_cdb` 后，按文件名顺序加载同级 `expansions/*.cdb`，同编号后加载者覆盖，保持与 Linux 宿主一致。原始卡库不合并、不修改；搜索、卡池、候选池、卡组校验和对局元数据共用此索引。名称继续按 exact code 外部映射优先、扩展库原名兜底，衍生物仍禁止搜索及入池。每次 API 启动原子重建完整索引，移除已撤回扩展卡。低清卡图生成输入须包括已安装 expansion 的图片。对局描述 ID（code × 16 + slot）与录像效果选项文字同样按扩展库覆盖读取。搜索索引和查询均使用 NFKC，兼容全角字母及符号。

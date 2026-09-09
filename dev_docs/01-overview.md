@@ -11,6 +11,8 @@ YGO Cube 把 YGOPro 的对战引擎、srvpro 的联网房间和一个 Web 控制
 
 `报名 → 选牌（draft）→ 构筑（deck build）→ 排表/对战 → 结果与排名`
 
+网页直接对战、公开观战与新对局录像见 [09 - 网页对战与录像](09-web-duel.md)，默认关闭，通过 `web_duel.enabled` 启用。
+
 当前支持：
 
 - `passing` 传递式选牌（默认）和用于旧比赛回放的 `serial` 串行模式；每堆

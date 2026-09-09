@@ -283,6 +283,15 @@ function isExtraDeckType(type: number): boolean {
   return (type & 0x4802040) !== 0;
 }
 
+// Top-level databases use the same precedence as Linux LoadExpansions().
+export function cardDatabasePaths(base: string): string[] {
+  if (!fs.existsSync(base)) return [];
+  const dir = path.join(path.dirname(base), 'expansions');
+  return [base, ...(fs.existsSync(dir)
+    ? fs.readdirSync(dir).filter(name => name.endsWith('.cdb') && fs.statSync(path.join(dir, name)).isFile()).sort().map(name => path.join(dir, name))
+    : [])];
+}
+
 @Injectable()
 export class CardsService {
   private loaded = false;
@@ -318,58 +327,65 @@ export class CardsService {
     if (fs.existsSync(cdbPath)) {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const Database = require('better-sqlite3');
-      const cdb = new Database(cdbPath, { readonly: true });
-      try {
-        // cdb quirk: `id` is the INTEGER PRIMARY KEY (rowid alias) — select by `id`, not `rowid`
-        const datas = cdb.prepare('SELECT id, type, level, race, attribute, atk, def, alias, CAST(setcode AS TEXT) AS setcode_text FROM datas').all() as DataRow[];
-        const texts = cdb.prepare('SELECT id, name, desc FROM texts').all() as TextRow[];
-        if (cardNameEntries.size === 0) {
-          console.warn(`card name mapping is empty or unavailable (${config.server.cardNamesJson}); using literal cards.cdb names as fallback`);
+      const sources = cardDatabasePaths(cdbPath);
+      const dataByCode = new Map<number, DataRow>();
+      const nameByRow = new Map<number, TextRow>();
+      // Match the host: base first, then top-level expansions in filename order.
+      // Read everything before replacing the cache so an invalid CDB fails atomically.
+      for (const source of sources) {
+        const cdb = new Database(source, { readonly: true });
+        try {
+          // cdb quirk: `id` is the INTEGER PRIMARY KEY (rowid alias) — select by `id`, not `rowid`
+          const datas = cdb.prepare('SELECT id, type, level, race, attribute, atk, def, alias, CAST(setcode AS TEXT) AS setcode_text FROM datas').all() as DataRow[];
+          const texts = cdb.prepare('SELECT id, name, desc FROM texts').all() as TextRow[];
+          for (const d of datas) dataByCode.set(d.id, d);
+          for (const t of texts) nameByRow.set(t.id, t);
+        } finally {
+          cdb.close();
         }
-        const setNameMap = readSetNames(resolveStringsConf(config.server.stringsConf, cdbPath));
-        const nameByRow = new Map<number, TextRow>();
-        for (const t of texts) nameByRow.set(t.id, t);
-        const insert = db.prepare(
-          `INSERT OR REPLACE INTO cards
-           (code, name, type, desc, level, lscale, rscale, link_markers, race, attribute, atk, def, alias,
-            setcodes_json, setnames_json, search_text, metadata_version)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        );
-        db.transaction(() => {
-          // A metadata rebuild is a snapshot replacement, not an upsert. If a
-          // newer cards.cdb removed an entry, retaining the stale old row would
-          // make it searchable and eligible for future pools indefinitely.
-          db.prepare('DELETE FROM cards').run();
-          for (const d of datas) {
-            const t = nameByRow.get(d.id);
-            // Prefer the exact-code external mapping, then use the literal CDB
-            // name as a final fallback.  Alias rows remain exact identities:
-            // datas.alias never replaces the selected name or code.
-            const mappedName = cardNameEntries.get(d.id)?.displayName?.trim() ?? '';
-            const literalName = mappedName || String(t?.name ?? '').trim();
-            const { level, lscale, rscale, linkMarkers, defense } = decodeCardFields(d.type, d.level, d.def);
-            const setCodes = parseSetCodes(d.setcode_text);
-            const setNames = setCodes.map((c) => setNameMap.get(c)).filter((x): x is string => !!x);
-            const labels = [
-              ...(cardNameEntries.get(d.id)?.searchNames ?? []),
-              literalName, String(t?.name ?? '').trim(), String(d.id), String(d.id).padStart(8, '0'), t?.desc ?? '',
-              ...typeLabels(d.type), ...bitLabels(d.race ?? 0, RACE_NAMES), ...bitLabels(d.attribute ?? 0, ATTRIBUTE_NAMES),
-              `等级 ${level}`, `星级 ${level}`, `攻击力 ${d.atk ?? 0}`,
-              ...(d.type & 0x4000000 ? [] : [`守备力 ${defense}`]),
-              ...(d.type & 0x800000 ? [`阶级 ${level}`, `RANK ${level}`] : []),
-              ...(d.type & 0x4000000 ? [`LINK ${level}`, `LINK-${level}`, `连接标记 ${linkMarkers}`] : []),
-              ...(d.type & 0x1000000 ? [`刻度 ${lscale} ${rscale}`] : []),
-              ...setNames,
-              ...setCodes.flatMap((code) => [String(code), `0x${code.toString(16)}`]),
-            ];
-            insert.run(d.id, literalName, d.type, t?.desc ?? '', level, lscale, rscale, linkMarkers,
-              d.race ?? 0, d.attribute ?? 0, d.atk ?? 0, defense, d.alias ?? 0,
-              JSON.stringify(setCodes), JSON.stringify(setNames), labels.join(' ').toLowerCase(), CARD_METADATA_VERSION);
-          }
-        })();
-      } finally {
-        cdb.close();
       }
+      if (cardNameEntries.size === 0) {
+        console.warn(`card name mapping is empty or unavailable (${config.server.cardNamesJson}); using literal cards.cdb names as fallback`);
+      }
+      const setNameMap = readSetNames(resolveStringsConf(config.server.stringsConf, cdbPath));
+      const insert = db.prepare(
+        `INSERT OR REPLACE INTO cards
+         (code, name, type, desc, level, lscale, rscale, link_markers, race, attribute, atk, def, alias,
+          setcodes_json, setnames_json, search_text, metadata_version)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      );
+      db.transaction(() => {
+        // A metadata rebuild is a snapshot replacement, not an upsert. If a
+        // newer cards.cdb removed an entry, retaining the stale old row would
+        // make it searchable and eligible for future pools indefinitely.
+        db.prepare('DELETE FROM cards').run();
+        for (const d of dataByCode.values()) {
+          const t = nameByRow.get(d.id);
+          // Prefer the exact-code external mapping, then use the literal CDB
+          // name as a final fallback.  Alias rows remain exact identities:
+          // datas.alias never replaces the selected name or code.
+          const mappedName = cardNameEntries.get(d.id)?.displayName?.trim() ?? '';
+          const literalName = mappedName || String(t?.name ?? '').trim();
+          const { level, lscale, rscale, linkMarkers, defense } = decodeCardFields(d.type, d.level, d.def);
+          const setCodes = parseSetCodes(d.setcode_text);
+          const setNames = setCodes.map((c) => setNameMap.get(c)).filter((x): x is string => !!x);
+          const labels = [
+            ...(cardNameEntries.get(d.id)?.searchNames ?? []),
+            literalName, String(t?.name ?? '').trim(), String(d.id), String(d.id).padStart(8, '0'), t?.desc ?? '',
+            ...typeLabels(d.type), ...bitLabels(d.race ?? 0, RACE_NAMES), ...bitLabels(d.attribute ?? 0, ATTRIBUTE_NAMES),
+            `等级 ${level}`, `星级 ${level}`, `攻击力 ${d.atk ?? 0}`,
+            ...(d.type & 0x4000000 ? [] : [`守备力 ${defense}`]),
+            ...(d.type & 0x800000 ? [`阶级 ${level}`, `RANK ${level}`] : []),
+            ...(d.type & 0x4000000 ? [`LINK ${level}`, `LINK-${level}`, `连接标记 ${linkMarkers}`] : []),
+            ...(d.type & 0x1000000 ? [`刻度 ${lscale} ${rscale}`] : []),
+            ...setNames,
+            ...setCodes.flatMap((code) => [String(code), `0x${code.toString(16)}`]),
+          ];
+          insert.run(d.id, literalName, d.type, t?.desc ?? '', level, lscale, rscale, linkMarkers,
+            d.race ?? 0, d.attribute ?? 0, d.atk ?? 0, defense, d.alias ?? 0,
+            JSON.stringify(setCodes), JSON.stringify(setNames), labels.join(' ').normalize('NFKC').toLowerCase(), CARD_METADATA_VERSION);
+        }
+      })();
     } else {
       // synthetic pool for tests/dev without a cdb
       const insert = db.prepare(`INSERT OR REPLACE INTO cards

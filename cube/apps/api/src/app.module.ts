@@ -1,3 +1,5 @@
+import { DuelService } from './duel/duel.service';
+import { DuelController } from './duel/duel.controller';
 import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { AuthGuard } from './auth/auth.guard';
@@ -17,8 +19,9 @@ import { SmallWorldController } from './small-world/small-world.controller';
 import { SmallWorldService } from './small-world/small-world.service';
 
 @Module({
-  controllers: [ApiController, AdminController, SmallWorldController],
+  controllers: [DuelController, ApiController, AdminController, SmallWorldController],
   providers: [
+    DuelService,
     { provide: APP_GUARD, useClass: AuthGuard },
     TournamentsService,
     CardsService,

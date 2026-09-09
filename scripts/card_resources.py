@@ -19,7 +19,7 @@ import sqlite3
 import stat
 import subprocess
 from typing import Any, Iterable
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 import zipfile
 
 
@@ -27,6 +27,12 @@ MAX_IMAGE_ENTRIES = 500_000
 MAX_IMAGE_UNCOMPRESSED = 4_000_000_000
 MAX_IMAGE_ENTRY = 20_000_000
 IMAGE_SUFFIXES = {"jpg", "jpeg", "png", "webp"}
+MAX_EXPANSION_ENTRIES = 50_000
+MAX_EXPANSION_UNCOMPRESSED = 1_000_000_000
+MAX_EXPANSION_ENTRY = 200_000_000
+MAX_EXPANSION_LIST_ITEMS = 10_000
+EXPANSION_METADATA_FILES = {"corres_srv.ini", "test-release.json", "version.txt"}
+EXPANSION_IMAGE_SUFFIXES = {"jpg", "jpeg", "png", "webp"}
 # TYPE_TOKEN is 0x4000 in the YGOPro CDB format.  0x4000000 is TYPE_LINK;
 # confusing the two would exempt Link monsters from name coverage while
 # treating actual tokens as cards that must have localized names.
@@ -221,6 +227,199 @@ def extract_image_zip(path: Path, destination: Path) -> list[dict[str, Any]]:
     return entries
 
 
+def _normalise_expansion_path(name: str, *, allow_wrapper_directory: bool = False) -> PurePosixPath:
+    """Return a safe path relative to an expansions directory.
+
+    Official `ygopro-super-pre.ypk` files store resources at archive root.
+    Accepting one optional `expansions/` prefix makes locally repacked server
+    archives interoperable without allowing arbitrary wrapper directories.
+    """
+    if "\\" in name or "\x00" in name:
+        raise ValueError(f"unsafe expansion path: {name!r}")
+    pure = PurePosixPath(name)
+    if pure.is_absolute() or not pure.parts or ".." in pure.parts:
+        raise ValueError(f"unsafe expansion path: {name!r}")
+    parts = list(pure.parts)
+    if parts[0] == "expansions":
+        parts = parts[1:]
+    if not parts and allow_wrapper_directory:
+        return PurePosixPath()
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise ValueError(f"unsafe expansion path: {name!r}")
+    return PurePosixPath(*parts)
+
+
+def _classify_expansion_path(path: PurePosixPath) -> str:
+    """Classify an extracted Super Pre entry or reject it.
+
+    Only files useful to a YGOPro server are extracted.  `pack/`,
+    `corres_srv.ini`, and other client metadata are validated and recorded but
+    intentionally not installed in the server's expansions directory.
+    """
+    parts = path.parts
+    if len(parts) == 1:
+        name = parts[0]
+        suffix = path.suffix.lower()
+        if name in EXPANSION_METADATA_FILES or (name == "README.md"):
+            return "metadata"
+        if suffix == ".cdb" and 1 <= len(path.stem) <= 64:
+            return "cdb"
+        if suffix == ".conf" and 1 <= len(path.stem) <= 64:
+            return "config"
+        raise ValueError(f"unsupported expansion entry: {path.as_posix()!r}")
+    if parts[0] == "script":
+        if path.suffix.lower() != ".lua" or len(parts) > 16:
+            raise ValueError(f"invalid expansion script entry: {path.as_posix()!r}")
+        return "script"
+    if parts[0] == "pics":
+        suffix = path.suffix.lower().lstrip(".")
+        if suffix not in EXPANSION_IMAGE_SUFFIXES or len(parts) > 3:
+            raise ValueError(f"invalid expansion image entry: {path.as_posix()!r}")
+        if parts[1] == "field" and len(parts) == 3:
+            stem = PurePosixPath(parts[2]).stem
+        elif len(parts) == 2:
+            stem = path.stem
+        else:
+            raise ValueError(f"invalid expansion image entry: {path.as_posix()!r}")
+        if not stem.isdecimal() or not (1 <= len(stem) <= 12):
+            raise ValueError(f"invalid expansion image code: {path.as_posix()!r}")
+        code = int(stem)
+        if code <= 0 or code > 2_147_483_647:
+            raise ValueError(f"invalid expansion image code: {path.as_posix()!r}")
+        return "image"
+    if parts[0] == "pack" and len(parts) == 2 and path.suffix.lower() == ".ydk":
+        # Pack lists are useful to clients but are not loaded by the server.
+        return "metadata"
+    raise ValueError(f"unsupported expansion path: {path.as_posix()!r}")
+
+
+def validate_expansion_zip(path: Path) -> list[dict[str, Any]]:
+    """Validate a Super Pre `.ypk`/ZIP before any entry is extracted."""
+    if not path.is_file():
+        raise ValueError(f"expansion archive not found: {path}")
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    total = 0
+    try:
+        with zipfile.ZipFile(path) as archive:
+            infos = archive.infolist()
+            if len(infos) > MAX_EXPANSION_ENTRIES:
+                raise ValueError(f"expansion archive has too many entries: {len(infos)}")
+            for info in infos:
+                normal = _normalise_expansion_path(
+                    info.filename.rstrip("/"), allow_wrapper_directory=info.is_dir()
+                )
+                if info.is_dir():
+                    continue
+                mode = (info.external_attr >> 16) & 0o170000
+                if mode == stat.S_IFLNK or (info.create_system == 3 and (info.external_attr & 0x10)):
+                    raise ValueError(f"symbolic links are not allowed: {info.filename!r}")
+                kind = _classify_expansion_path(normal)
+                key = normal.as_posix()
+                if key in seen:
+                    raise ValueError(f"duplicate expansion entry: {key!r}")
+                if info.file_size > MAX_EXPANSION_ENTRY:
+                    raise ValueError(f"expansion entry is too large: {info.filename!r}")
+                total += int(info.file_size)
+                if total > MAX_EXPANSION_UNCOMPRESSED:
+                    raise ValueError("expansion archive exceeds uncompressed size limit")
+                seen.add(key)
+                entries.append({
+                    "name": info.filename,
+                    "path": key,
+                    "kind": kind,
+                    "size": int(info.file_size),
+                    "crc": int(info.CRC),
+                })
+    except zipfile.BadZipFile as exc:
+        raise ValueError(f"invalid expansion archive: {exc}") from exc
+    return sorted(entries, key=lambda item: item["path"])
+
+
+def _safe_target(root: Path, relative: str) -> Path:
+    if root.is_symlink():
+        raise ValueError(f"symlink root is not allowed: {root}")
+    parts = PurePosixPath(relative).parts
+    if not parts or PurePosixPath(relative).is_absolute() or ".." in parts:
+        raise ValueError(f"unsafe relative path: {relative!r}")
+    target = root.joinpath(*parts)
+    current = root
+    for part in parts[:-1]:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError(f"symlink parent is not allowed: {relative!r}")
+    return target
+
+
+def extract_expansion_zip(path: Path, destination: Path) -> list[dict[str, Any]]:
+    """Extract only server resources from a validated Super Pre archive."""
+    entries = validate_expansion_zip(path)
+    destination.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path) as archive:
+        for entry in entries:
+            if entry["kind"] == "metadata":
+                continue
+            target = _safe_target(destination, entry["path"])
+            if target.exists() and target.is_symlink():
+                raise ValueError(f"symlink target is not allowed: {entry['path']!r}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f".{target.name}.tmp")
+            if temporary.is_symlink():
+                raise ValueError(f"symlink temporary target is not allowed: {entry['path']!r}")
+            with archive.open(entry["name"], "r") as source, temporary.open("wb") as output:
+                shutil.copyfileobj(source, output, length=1024 * 1024)
+            os.replace(temporary, target)
+    return entries
+
+
+def validate_expansion_list(path: Path) -> list[dict[str, Any]]:
+    """Validate the public Super Pre card-list metadata without fetching URLs."""
+    if not path.is_file():
+        raise ValueError(f"expansion card list not found: {path}")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid expansion card list: {exc}") from exc
+    if not isinstance(value, list) or len(value) > MAX_EXPANSION_LIST_ITEMS:
+        raise ValueError("expansion card list must be a bounded JSON array")
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise ValueError(f"expansion card list item {index} is not an object")
+        for field, limit in (("name", 512), ("desc", 1_000_000), ("overallString", 8_192), ("picUrl", 2_048)):
+            value_field = item.get(field, "")
+            if not isinstance(value_field, str) or len(value_field) > limit:
+                raise ValueError(f"expansion card list item {index} has invalid {field}")
+        pic_url = item.get("picUrl", "")
+        if pic_url:
+            parsed = urlparse(pic_url)
+            if parsed.scheme != "https" or not parsed.netloc:
+                raise ValueError(f"expansion card list item {index} has an unsafe picUrl")
+    return value
+
+
+def validate_expansion_release(list_path: Path, cdb_path: Path) -> dict[str, Any]:
+    """Ensure the official release list and its release CDB describe one set."""
+    entries = validate_expansion_list(list_path)
+    listed_codes: list[int] = []
+    for index, item in enumerate(entries):
+        parsed = urlparse(item.get("picUrl", ""))
+        filename = Path(parsed.path).name
+        stem = Path(filename).stem
+        if not stem.isdecimal() or int(stem) <= 0:
+            raise ValueError(f"expansion card list item {index} has no numeric pic code")
+        listed_codes.append(int(stem))
+    if len(set(listed_codes)) != len(listed_codes):
+        raise ValueError("expansion card list contains duplicate pic codes")
+    cdb = validate_cdb(cdb_path)
+    cdb_codes = set(cdb["codes"])
+    listed_set = set(listed_codes)
+    if listed_set != cdb_codes:
+        missing = sorted(cdb_codes - listed_set)
+        extra = sorted(listed_set - cdb_codes)
+        raise ValueError(f"expansion release/list mismatch (missing={missing[:10]}, extra={extra[:10]})")
+    return {"listCount": len(listed_codes), "cdbCount": len(cdb_codes), "codes": sorted(cdb_codes)}
+
+
 def file_manifest(directory: Path, suffix: str | None = None) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     if not directory.exists():
@@ -264,7 +463,36 @@ def sync_managed_scripts(source: Path, destination: Path, previous: Path | None 
     return current
 
 
-def generate_avif(source: Path, destination: Path, previous: Path | None = None) -> dict[str, dict[str, Any]]:
+def sync_managed_expansions(source: Path, destination: Path, previous: Path | None = None) -> dict[str, dict[str, Any]]:
+    """Copy extracted expansion resources and remove only managed old files."""
+    current = file_manifest(source)
+    old: dict[str, Any] = {}
+    if previous and previous.exists():
+        try:
+            old = json.loads(previous.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            old = {}
+    old_files = set(old.get("files", old).keys()) if isinstance(old, dict) else set()
+    for rel in sorted(old_files - set(current)):
+        # The ban-list is a server-local setting loaded from the same
+        # directory, not part of the downloadable Super Pre archive.
+        if rel == "lflist.conf":
+            continue
+        target = _safe_target(destination, rel)
+        if target.is_file() and not target.is_symlink():
+            target.unlink()
+    for rel, metadata in current.items():
+        source_path = _safe_target(source, rel)
+        target = _safe_target(destination, rel)
+        if target.is_symlink():
+            target.unlink()
+        if not target.exists() or target.stat().st_size != metadata["size"] or sha256_file(target) != metadata["sha256"]:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, target)
+    return current
+
+
+def generate_avif(source: Path, destination: Path, previous: Path | None = None, expansion_pics: Path | None = None) -> dict[str, dict[str, Any]]:
     """Generate max-200px Q30 AVIFs; unchanged source CRC/size is skipped."""
     if shutil.which("vips") is None:
         raise ValueError("vips is required to generate AVIF resources")
@@ -292,7 +520,14 @@ def generate_avif(source: Path, destination: Path, previous: Path | None = None)
         if temp.is_file() and not temp.is_symlink():
             temp.unlink()
     current: dict[str, dict[str, Any]] = {}
-    for image in sorted(source.iterdir() if source.exists() else []):
+    images = {}
+    for directory in [source, expansion_pics]:
+        if directory is None or not directory.exists():
+            continue
+        for image in sorted(directory.iterdir()):
+            if image.is_file() and image.suffix.lower().lstrip(".") in IMAGE_SUFFIXES and image.stem.isdecimal():
+                images[int(image.stem)] = image
+    for image in images.values():
         if not image.is_file() or image.suffix.lower().lstrip(".") not in IMAGE_SUFFIXES:
             continue
         if not image.stem.isdecimal():
@@ -304,7 +539,7 @@ def generate_avif(source: Path, destination: Path, previous: Path | None = None)
         if output.exists() and old_sources.get(str(code)) == source_meta:
             continue
         old_output = old_section.get("files", {}).get(f"{code}.avif") if isinstance(old_section, dict) else None
-        if output.exists() and isinstance(old_output, dict):
+        if output.exists() and isinstance(old_output, dict) and str(code) not in old_sources and image.parent != expansion_pics:
             output_meta = {"size": output.stat().st_size, "sha256": sha256_file(output)}
             if output_meta == old_output:
                 continue
@@ -427,7 +662,7 @@ def merge_name_zip(zip_path: Path, mapping_path: Path) -> int:
     return added
 
 
-def build_resource_manifest(cdb: Path, scripts: Path, avif: Path, output: Path, names: Path | None = None, **extra: Any) -> dict[str, Any]:
+def build_resource_manifest(cdb: Path, scripts: Path, avif: Path, output: Path, names: Path | None = None, expansions: Path | None = None, **extra: Any) -> dict[str, Any]:
     cards = validate_cdb(cdb)
     # Absolute build paths are useful in a local diagnostic but must not be
     # published to Aly or embedded in an artifact manifest.
@@ -438,6 +673,8 @@ def build_resource_manifest(cdb: Path, scripts: Path, avif: Path, output: Path, 
         "scripts": {"files": file_manifest(scripts, ".lua")},
         "avif": {"files": file_manifest(avif, ".avif")},
     }
+    if expansions is not None:
+        manifest["expansions"] = {"files": file_manifest(expansions)}
     if names and names.is_file():
         manifest["cardNames"] = {"size": names.stat().st_size, "sha256": sha256_file(names)}
     manifest.update(extra)
@@ -474,12 +711,28 @@ def _main() -> int:
     x = sub.add_parser("extract-zip")
     x.add_argument("path", type=Path)
     x.add_argument("destination", type=Path)
+    ez = sub.add_parser("validate-expansion-zip")
+    ez.add_argument("path", type=Path)
+    el = sub.add_parser("validate-expansion-list")
+    el.add_argument("path", type=Path)
+    em = sub.add_parser("validate-expansion-release")
+    em.add_argument("list", type=Path)
+    em.add_argument("cdb", type=Path)
+    ex = sub.add_parser("extract-expansion-zip")
+    ex.add_argument("path", type=Path)
+    ex.add_argument("destination", type=Path)
     s = sub.add_parser("sync-scripts")
     s.add_argument("source", type=Path)
     s.add_argument("destination", type=Path)
     s.add_argument("--previous", type=Path)
     s.add_argument("--manifest-out", type=Path, required=True)
+    e = sub.add_parser("sync-expansions")
+    e.add_argument("source", type=Path)
+    e.add_argument("destination", type=Path)
+    e.add_argument("--previous", type=Path)
+    e.add_argument("--manifest-out", type=Path, required=True)
     a = sub.add_parser("avif")
+    a.add_argument("--expansion-pics", type=Path)
     a.add_argument("source", type=Path)
     a.add_argument("destination", type=Path)
     a.add_argument("--previous", type=Path)
@@ -495,6 +748,7 @@ def _main() -> int:
     man.add_argument("--cdb", type=Path, required=True)
     man.add_argument("--scripts", type=Path, required=True)
     man.add_argument("--avif", type=Path, required=True)
+    man.add_argument("--expansions", type=Path)
     man.add_argument("--names", type=Path)
     man.add_argument("--out", type=Path, required=True)
     man.add_argument("--extra", default="{}")
@@ -502,7 +756,7 @@ def _main() -> int:
     d = sub.add_parser("delta")
     d.add_argument("current", type=Path)
     d.add_argument("--previous", type=Path)
-    d.add_argument("--section", choices=("scripts", "avif"), required=True)
+    d.add_argument("--section", choices=("scripts", "avif", "expansions"), required=True)
     args = parser.parse_args()
     try:
         if args.command == "validate-cdb":
@@ -513,12 +767,24 @@ def _main() -> int:
             print(json.dumps(validate_image_zip(args.path), ensure_ascii=False, sort_keys=True))
         elif args.command == "extract-zip":
             print(json.dumps(extract_image_zip(args.path, args.destination), ensure_ascii=False, sort_keys=True))
+        elif args.command == "validate-expansion-zip":
+            print(json.dumps(validate_expansion_zip(args.path), ensure_ascii=False, sort_keys=True))
+        elif args.command == "validate-expansion-list":
+            print(json.dumps(validate_expansion_list(args.path), ensure_ascii=False, sort_keys=True))
+        elif args.command == "validate-expansion-release":
+            print(json.dumps(validate_expansion_release(args.list, args.cdb), ensure_ascii=False, sort_keys=True))
+        elif args.command == "extract-expansion-zip":
+            print(json.dumps(extract_expansion_zip(args.path, args.destination), ensure_ascii=False, sort_keys=True))
         elif args.command == "sync-scripts":
             result = sync_managed_scripts(args.source, args.destination, args.previous)
             _json_dump({"schemaVersion": 1, "files": result}, args.manifest_out)
             print(json.dumps({"files": len(result)}, ensure_ascii=False))
+        elif args.command == "sync-expansions":
+            result = sync_managed_expansions(args.source, args.destination, args.previous)
+            _json_dump({"schemaVersion": 1, "files": result}, args.manifest_out)
+            print(json.dumps({"files": len(result)}, ensure_ascii=False))
         elif args.command == "avif":
-            result = generate_avif(args.source, args.destination, args.previous)
+            result = generate_avif(args.source, args.destination, args.previous, args.expansion_pics)
             _json_dump({"schemaVersion": 1, "sources": result, "files": file_manifest(args.destination, ".avif")}, args.manifest_out)
             print(json.dumps({"files": len(result)}, ensure_ascii=False))
         elif args.command == "missing-names":
@@ -532,7 +798,7 @@ def _main() -> int:
             extra = json.loads(args.extra)
             if args.extra_file:
                 extra = json.loads(args.extra_file.read_text(encoding="utf-8"))
-            print(json.dumps(build_resource_manifest(args.cdb, args.scripts, args.avif, args.out, names=args.names, **extra), ensure_ascii=False, sort_keys=True))
+            print(json.dumps(build_resource_manifest(args.cdb, args.scripts, args.avif, args.out, names=args.names, expansions=args.expansions, **extra), ensure_ascii=False, sort_keys=True))
         elif args.command == "delta":
             print(json.dumps(manifest_delta(args.previous, args.current, args.section), ensure_ascii=False, sort_keys=True))
     except (OSError, ValueError, sqlite3.Error, zipfile.BadZipFile, json.JSONDecodeError, subprocess.CalledProcessError) as exc:

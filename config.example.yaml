@@ -27,3 +27,18 @@ pics:
   # 低清 avif 缩略图目录（服务端保存，GET /pics/:code.avif）：本地绑定失败时前端
   # 先回退到这里，再尝试 ygopro_root 原图代理，最后才是空白卡。
   avif_dir: "assets/pics_avif"
+
+# 网页对战：仅影响启用之后新建的房间；需同步更新 srvpro。
+web_duel:
+  enabled: false
+  # 相对 config.yaml 所在目录解析；srvpro 运行用户须有写权限。
+  archive_dir: data/web-replays
+  upstream_host: 127.0.0.1
+  protocol_version: 4962 # 与 ygopro/gframe/config.h 的 PRO_VERSION 一致
+  max_connections: 200
+  # 独立发布器据此生成 srvpro 的 web_public_url / web_native_host / web_native_port。
+  # 原生入口由单独 TCP 代理提供，不开放私有 HTTP 或宿主动态端口。
+  public_url: "" # 例如 https://example.com/duel；空值关闭普通原生房间网页入口
+  native_host: ""
+  native_port: 17911
+  native_bind_address: "" # 独立公网 TCP 代理的本机非回环地址

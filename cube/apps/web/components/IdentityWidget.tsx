@@ -181,7 +181,10 @@ export function LocalPicsSetting() {
   const [bindError, setBindError] = useState('');
 
   useEffect(() => {
-    getDirHandle().then((h) => setBound(h ? h.name : null)).catch(() => setBound(null));
+    const refresh = () => getDirHandle().then((h) => setBound(h ? h.name : null)).catch(() => setBound(null));
+    refresh();
+    window.addEventListener('yc-pics-changed', refresh);
+    return () => window.removeEventListener('yc-pics-changed', refresh);
   }, []);
 
   const bind = async () => {
@@ -193,6 +196,7 @@ export function LocalPicsSetting() {
       }
       const handle = await w.showDirectoryPicker();
       await saveDirHandle(handle);
+      window.dispatchEvent(new Event("yc-pics-changed"));
       setBound(handle.name);
       setBindError('');
     } catch (e: any) {
@@ -202,6 +206,7 @@ export function LocalPicsSetting() {
 
   const unbind = async () => {
     await removeDirHandle();
+    window.dispatchEvent(new Event("yc-pics-changed"));
     setBound(null);
   };
 

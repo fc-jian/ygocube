@@ -253,3 +253,53 @@ describe('ygopro card metadata decoding', () => {
     expect(cards.search('alpha beta').some((card) => card.code === 700000104)).toBe(false);
   });
 });
+
+
+describe('expansion catalogue', () => {
+  beforeEach(() => useTestDb());
+  it('loads host overlays, searches new cards, rejects tokens and removes withdrawn cards on rebuild', () => {
+    const dir = fs.mkdtempSync('/tmp/ygocube-expansion-');
+    const old = config.server.cardsCdb;
+    const Database = require('better-sqlite3');
+    const write = (name: string, rows: [number, string, number][]) => {
+      const cdb = new Database(path.join(dir, name));
+      cdb.exec('CREATE TABLE datas (id INTEGER PRIMARY KEY, type INTEGER, level INTEGER, race INTEGER, attribute INTEGER, atk INTEGER, def INTEGER, alias INTEGER, setcode INTEGER); CREATE TABLE texts (id INTEGER PRIMARY KEY, name TEXT, desc TEXT)');
+      for (const [id, name, type] of rows) {
+        cdb.prepare('INSERT INTO datas VALUES (?, ?, 4, 1, 1, 1500, 1000, 0, 0)').run(id, type);
+        cdb.prepare('INSERT INTO texts VALUES (?, ?, ?)').run(id, name, name + '效果');
+      }
+      cdb.close();
+    };
+    try {
+      fs.mkdirSync(path.join(dir, 'expansions'));
+      write('cards.cdb', [[100200001, '原版', 33]]);
+      write('expansions/test-release.cdb', [[100200002, '先行怪兽Ａ', 33], [100200003, '先行衍生物', 0x4001]]);
+      write('expansions/test-update.cdb', [[100200001, '更新版', 33]]);
+      config.server.cardsCdb = path.join(dir, 'cards.cdb');
+      const cards = new CardsService();
+      expect(cards.get(100200001)?.desc).toBe('更新版效果');
+      expect(cards.search('先行怪兽').map(c => c.code)).toEqual([100200002]);
+      expect(cards.search('先行怪兽Ａ').map(c => c.code)).toEqual([100200002]);
+      expect(cards.search('先行怪兽A').map(c => c.code)).toEqual([100200002]);
+      expect(cards.search('100200002').map(c => c.code)).toEqual([100200002]);
+      expect(cards.search('先行衍生物')).toEqual([]);
+      expect(cards.get(100200002)?.type).toBe(33);
+      const expansion = new Database(path.join(dir, 'expansions/test-release.cdb'));
+      expansion.exec("ALTER TABLE texts ADD COLUMN str1 TEXT; UPDATE texts SET str1='先行效果选项' WHERE id=100200002");
+      expansion.close();
+      const { DuelService } = require('../src/duel/duel.service');
+      const duel = new DuelService(cards);
+      expect(duel.descriptions([100200002 * 16])[100200002 * 16]).toBe('先行效果选项');
+      const { PoolsService } = require('../src/pools/pools.service');
+      expect(new PoolsService(cards).create('expansion-test', [100200002]).pool.codes).toEqual([100200002]);
+      fs.unlinkSync(path.join(dir, 'expansions/test-release.cdb'));
+      expect(new CardsService().get(100200002)).toBeNull();
+      fs.writeFileSync(path.join(dir, 'expansions/broken.cdb'), 'invalid');
+      expect(() => new CardsService().get(100200001)).toThrow();
+      expect(getDb().prepare('SELECT desc FROM cards WHERE code=100200001').get()).toEqual({desc: '更新版效果'});
+    } finally {
+      config.server.cardsCdb = old;
+      fs.rmSync(dir, {recursive: true, force: true});
+    }
+  });
+});

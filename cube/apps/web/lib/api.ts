@@ -4,6 +4,8 @@
 //   Missing token -> the page prompts for input (unless the tournament has auth disabled,
 //   in which case pid alone is enough). The super admin token works as a universal token.
 
+export const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '/api';
+
 export interface Identity {
   tid: string;
   pid: string;
@@ -107,6 +109,8 @@ const API_ERROR_MESSAGES: Record<string, string> = {
   CARD_NOT_AVAILABLE: '这张卡已被选走，请刷新后重试',
   CARD_NOT_IN_POOL: '这张卡不在当前卡池中',
   CARD_NOT_IN_ZONE: '这张卡不在指定区域',
+  PLAYER_CONNECTED: '该 ID 仍在线，请先断开原会话 / Player is still connected',
+  PLAYER_ID_EXISTS: '该 ID 已登记，请使用重连 / Use reconnect for this ID',
   WRONG_ZONE: '该类型卡不能放入此区域',
   FROZEN: '比赛已暂停，请等待管理员恢复',
   PAUSED: '比赛已暂停，请等待管理员恢复',
@@ -191,7 +195,7 @@ export async function api<T = any>(
   if (opts.createUsername) headers['X-Create-User'] = encodeURIComponent(opts.createUsername);
   if (opts.createToken) headers['X-Create-Token'] = encodeURIComponent(opts.createToken);
   if (opts.adminToken) headers['X-Admin-Token'] = encodeURIComponent(opts.adminToken);
-  const res = await fetch(`/api${path}`, {
+  const res = await fetch(`${API_BASE}${path}`, {
     method: opts.method ?? 'GET',
     headers,
     credentials: 'same-origin',
@@ -212,7 +216,7 @@ export async function api<T = any>(
 
 // authenticated file download (e.g. ydk export) — plain <a href> would lack the identity headers
 export async function apiDownload(path: string, identity: Identity | null): Promise<void> {
-  const res = await fetch(`/api${path}`, { headers: identityHeaders(identity) });
+  const res = await fetch(`${API_BASE}${path}`, { headers: identityHeaders(identity) });
   if (!res.ok) throw new ApiError(res.status, 'HTTP_ERROR');
   // 优先使用后端 Content-Disposition 文件名（cube-deck-<tid>-<pid>-<timestamp>.ydk）
   const cd = res.headers.get('content-disposition') ?? '';

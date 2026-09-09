@@ -34,6 +34,7 @@ export default function MatchesPage() {
   const [info, setInfo] = useState<DraftState | null>(null);
   const [copied, setCopied] = useState(false);
   const [server, setServer] = useState<{ host: string; port: number } | null>(null);
+  const [webDuelEnabled, setWebDuelEnabled] = useState(false);
   const [error, setError] = useState('');
   const loadBusy = useRef(false);
 
@@ -89,8 +90,8 @@ export default function MatchesPage() {
 
   // 对局服务器地址和端口由服务端提供。
   useEffect(() => {
-    api<{ srvpro: { host: string; gamePort: number } }>('/meta', { identity: null })
-      .then((m) => setServer({ host: m.srvpro.host, port: m.srvpro.gamePort }))
+    api<{ srvpro: { host: string; gamePort: number }; webDuel?: { enabled: boolean } }>('/meta', { identity: null })
+      .then((m) => { setServer({ host: m.srvpro.host, port: m.srvpro.gamePort }); setWebDuelEnabled(m.webDuel?.enabled === true); })
       .catch(() => setServer({ host: '127.0.0.1', port: 7911 }));
   }, []);
 
@@ -178,7 +179,7 @@ export default function MatchesPage() {
               <td className="px-3 py-2 text-slate-500">vs</td>
               <td className="px-3 py-2">{m.opponent}</td>
               <td className="px-3 py-2 font-mono">{resultCell(m)}</td>
-              <td className="px-3 py-2 font-mono text-xs">{m.roomName ?? '-'}</td>
+              <td className="px-3 py-2 font-mono text-xs">{m.roomName ?? '-'}{webDuelEnabled && m.roomName && <div className="mt-2 flex gap-3"><a href={`/t/${tidPath}/watch/${m.id}`}>观战 / Watch</a><a href={`/t/${tidPath}/replay/${m.id}`}>录像 / Replay</a></div>}</td>
             </tr>
           ))}
         </tbody>
@@ -197,6 +198,7 @@ export default function MatchesPage() {
             ，加入房间 <code className="font-mono text-gold">{myMatch.roomName ?? '等待创建房间…'}</code>
             ，昵称填写 <code className="font-mono text-gold">{pid}</code>。
           </p>
+          {webDuelEnabled && myMatch.roomName && <a className="mt-4 inline-block rounded bg-emerald-700 px-5 py-3 text-white" href={`/t/${tidPath}/duel/${pidPath}`}>进入网页对战 / Play in browser</a>}
           {myMatch.roomName && (
             <button
               onClick={() => {

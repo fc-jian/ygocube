@@ -1,5 +1,6 @@
 'use client';
 
+import { API_BASE } from '@/lib/api';
 import { useEffect, useState } from 'react';
 import { CardInfo } from '@/lib/types';
 import { getDirHandle, readCardImageUrl, requestDirPermission } from '@/lib/pics';
@@ -9,6 +10,8 @@ import { getDirHandle, readCardImageUrl, requestDirPermission } from '@/lib/pics
 // 只尝试 pics/ 与 expansions/pics/），再回退服务端低清 avif（/api/pics/:code.avif）
 // 与服务端原图代理（/api/pics/:code），最终空白卡占位。
 export function CardImage({ code, name, className = '' }: { code: number; name?: string; className?: string }) {
+  const [picsRevision, setPicsRevision] = useState(0);
+  useEffect(()=>{const refresh=()=>setPicsRevision(v=>v+1);window.addEventListener('yc-pics-changed',refresh);return()=>window.removeEventListener('yc-pics-changed',refresh)},[]);
   const [src, setSrc] = useState<string | null>(null);
 
   useEffect(() => {
@@ -22,7 +25,7 @@ export function CardImage({ code, name, className = '' }: { code: number; name?:
         const base = root.replace(/\/+$/, '');
         candidates.push(`${base}/pics/${code}.jpg`, `${base}/expansions/pics/${code}.jpg`);
       }
-      candidates.push(`/api/pics/${code}.avif`, `/api/pics/${code}`);
+      candidates.push(`${API_BASE}/pics/${code}.avif`, `${API_BASE}/pics/${code}`);
       let idx = 0;
       const tryNext = () => {
         if (cancelled || idx >= candidates.length) {
@@ -67,13 +70,14 @@ export function CardImage({ code, name, className = '' }: { code: number; name?:
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [code]);
+  }, [code, picsRevision]);
 
   if (src) {
-    return <img src={src} alt={name ?? String(code)} className={`rounded-md border border-white/10 object-cover shadow-[0_5px_14px_rgba(0,0,0,0.28)] ${className}`} loading="lazy" />;
+    return <img data-card-code={code} src={src} alt={name ?? String(code)} className={`rounded-md border border-white/10 object-cover shadow-[0_5px_14px_rgba(0,0,0,0.28)] ${className}`} loading="lazy" />;
   }
   return (
     <div
+      data-card-code={code}
       className={`flex items-center justify-center rounded-md border border-slate-600/70 bg-gradient-to-b from-slate-700 to-slate-950 p-1 text-center shadow-[0_5px_14px_rgba(0,0,0,0.28)] ${className}`}
     >
       <span className="line-clamp-3 break-all text-[0.625rem] leading-tight text-slate-300">{name ?? code}</span>
@@ -93,6 +97,7 @@ export function CardWithTooltip({ code, card, className = '', pinOnClick = true 
 }) {
   return (
     <div
+      data-card-code={code}
       className={`group relative ${className}`}
       role={pinOnClick ? 'button' : undefined}
       tabIndex={pinOnClick ? 0 : undefined}

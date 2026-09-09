@@ -147,11 +147,15 @@ safe_delete() {
   done < "$list"
 }
 safe_delete "$STAGE/root/srvpro/ygopro/script" "$STAGE/root/deletes/scripts.txt"
+safe_delete "$STAGE/root/srvpro/ygopro/expansions" "$STAGE/root/deletes/expansions.txt"
 safe_delete "$STAGE/root/assets/pics_avif" "$STAGE/root/deletes/avif.txt"
 
 (cd "$STAGE/root" && sha256sum -c metadata/SHA256SUMS)
 [[ -s "$STAGE/root/srvpro/ygopro/cards.cdb" ]]
 [[ -f "$STAGE/root/metadata/resource-manifest.json" ]]
+if grep -q '"expansions"' "$STAGE/root/metadata/resource-manifest.json"; then
+  [[ -d "$STAGE/root/srvpro/ygopro/expansions" ]]
+fi
 
 # The old directories remain available as .pre-$RELEASE_ID until a later
 # cleanup.  Moving complete directories on one filesystem makes the switch

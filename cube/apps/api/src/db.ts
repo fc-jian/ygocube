@@ -33,6 +33,21 @@ export function getDb(): Database.Database {
     }
   }
   db.exec(`
+    CREATE TABLE IF NOT EXISTS web_replay_catalogs (id TEXT PRIMARY KEY, payload BLOB NOT NULL);
+    CREATE TABLE IF NOT EXISTS web_replay_catalog_matches (tournament_id INTEGER NOT NULL, match_id INTEGER NOT NULL, catalog_id TEXT NOT NULL, PRIMARY KEY(tournament_id,match_id));
+    CREATE TABLE IF NOT EXISTS standalone_duel_players (
+      room TEXT NOT NULL, player_id TEXT NOT NULL, credential TEXT NOT NULL UNIQUE,
+      data_json TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY(room, player_id)
+    );
+    CREATE TABLE IF NOT EXISTS web_replays (
+      tournament_id INTEGER NOT NULL, match_id INTEGER NOT NULL, room_name TEXT NOT NULL,
+      complete INTEGER NOT NULL DEFAULT 0, frame_count INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY(tournament_id, match_id)
+    );
+    CREATE TABLE IF NOT EXISTS web_replay_audit (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, tournament_id INTEGER NOT NULL,
+      match_id INTEGER NOT NULL, action TEXT NOT NULL, created_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS tournaments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,

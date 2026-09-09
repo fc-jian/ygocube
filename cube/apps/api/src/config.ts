@@ -16,6 +16,7 @@ export interface AppConfig {
   };
   server: {
     port: number;
+    host?: string;
     dbPath: string;
     cardsCdb: string;
     cardNamesJson: string;
@@ -23,6 +24,7 @@ export interface AppConfig {
     allowedOrigins: string[];
     allowInsecureDefaults: boolean;
   };
+  webDuel: { enabled: boolean; archiveDir: string; upstreamHost: string; version: number; maxConnections: number; };
   pics: {
     ygoproRoot: string;
     avifDir: string;
@@ -54,6 +56,7 @@ function loadConfig(): AppConfig {
   const admin = (raw.admin ?? {}) as Record<string, unknown>;
   const srvpro = (raw.srvpro ?? {}) as Record<string, unknown>;
   const server = (raw.server ?? {}) as Record<string, unknown>;
+  const webDuel = (raw.web_duel ?? {}) as Record<string, unknown>;
   const pics = (raw.pics ?? {}) as Record<string, unknown>;
   // resolve relative paths against the config file's directory
   const base = path.dirname(file);
@@ -83,6 +86,7 @@ function loadConfig(): AppConfig {
       gamePort: Number(srvpro.game_port ?? process.env.SRVPRO_GAME_PORT ?? 7911),
     },
     server: {
+      host: server.host ? String(server.host) : undefined,
       port: Number(server.port ?? process.env.PORT ?? 3001),
       dbPath: resolvePath(server.db_path as string | undefined, process.env.DB_PATH, 'data/cube.sqlite'),
       cardsCdb,
@@ -90,6 +94,13 @@ function loadConfig(): AppConfig {
       stringsConf: resolvePath(server.strings_conf as string | undefined, process.env.STRINGS_CONF, path.join(path.dirname(cardsCdb), 'strings.conf')),
       allowedOrigins,
       allowInsecureDefaults: server.allow_insecure_defaults === true || process.env.CUBE_ALLOW_INSECURE_DEFAULTS === '1',
+    },
+    webDuel: {
+      enabled: webDuel.enabled === true,
+      archiveDir: resolvePath(webDuel.archive_dir as string | undefined, undefined, 'data/web-replays'),
+      upstreamHost: String(webDuel.upstream_host ?? '127.0.0.1'),
+      version: Number(webDuel.protocol_version ?? 4962),
+      maxConnections: Number(webDuel.max_connections ?? 200),
     },
     pics: {
       // Empty disables the original-image proxy. Resolving an empty string
@@ -133,6 +144,10 @@ export function validateStartupSecurity(): void {
   }
   if (!Number.isSafeInteger(config.srvpro.gamePort) || config.srvpro.gamePort < 1 || config.srvpro.gamePort > 65535) {
     throw new Error('srvpro.game_port must be an integer between 1 and 65535');
+  }
+  if (!Number.isSafeInteger(config.webDuel.version) || config.webDuel.version < 1 || config.webDuel.version > 65535 ||
+      !Number.isSafeInteger(config.webDuel.maxConnections) || config.webDuel.maxConnections < 1 || config.webDuel.maxConnections > 10000) {
+    throw new Error('web_duel protocol_version/max_connections are invalid');
   }
   if (config.server.allowedOrigins.length === 0 || config.server.allowedOrigins.some((origin) => {
     try {

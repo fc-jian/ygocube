@@ -18,8 +18,13 @@ from card_resources import (
     generate_avif,
     manifest_delta,
     missing_names,
+    extract_expansion_zip,
     sync_managed_scripts,
+    sync_managed_expansions,
     validate_cdb,
+    validate_expansion_list,
+    validate_expansion_release,
+    validate_expansion_zip,
     validate_image_zip,
     merge_name_zip,
 )
@@ -92,6 +97,77 @@ class CardResourceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_image_zip(self.make_zip("link.zip", [("pics/124.jpg", b"x", stat.S_IFLNK)]))
 
+    def test_expansion_archive_extracts_server_files_and_ignores_client_metadata(self) -> None:
+        cdb = self.root / "test-release.cdb"
+        self.make_cdb(cdb, [(100200292, 1)])
+        archive_path = self.root / "super-pre.ypk"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.writestr("expansions/", b"")
+            archive.writestr("corres_srv.ini", "[YGOProExpansionPack]\n")
+            archive.writestr("pack/example.ydk", "#main\n100200292\n")
+            archive.writestr("test-release.cdb", cdb.read_bytes())
+            archive.writestr("test-strings.conf", "!setname 0x2ea 测试\n")
+            archive.writestr("script/c100200292.lua", "local s,id=GetID()\n")
+            archive.writestr("pics/100200292.jpg", b"image")
+            archive.writestr("pics/field/100200292.jpg", b"field")
+        entries = validate_expansion_zip(archive_path)
+        self.assertEqual(len(entries), 7)
+        self.assertEqual(sum(item["kind"] == "metadata" for item in entries), 2)
+        destination = self.root / "expanded"
+        extracted = extract_expansion_zip(archive_path, destination)
+        self.assertEqual(len(extracted), 7)
+        self.assertTrue((destination / "test-release.cdb").exists())
+        self.assertTrue((destination / "test-strings.conf").exists())
+        self.assertTrue((destination / "script/c100200292.lua").exists())
+        self.assertTrue((destination / "pics/100200292.jpg").exists())
+        self.assertTrue((destination / "pics/field/100200292.jpg").exists())
+        self.assertFalse((destination / "corres_srv.ini").exists())
+        self.assertFalse((destination / "pack/example.ydk").exists())
+
+    def test_expansion_archive_rejects_unsafe_duplicate_and_unknown_entries(self) -> None:
+        with self.assertRaises(ValueError):
+            validate_expansion_zip(self.make_zip("expansion-traversal.ypk", [("../script/x.lua", b"x", None)]))
+        duplicate = self.root / "expansion-duplicate.ypk"
+        with zipfile.ZipFile(duplicate, "w") as archive:
+            archive.writestr("script/c100.lua", b"a")
+            archive.writestr("expansions/script/c100.lua", b"b")
+        with self.assertRaises(ValueError):
+            validate_expansion_zip(duplicate)
+        unknown = self.root / "expansion-unknown.ypk"
+        with zipfile.ZipFile(unknown, "w") as archive:
+            archive.writestr("bin/server", b"not a resource")
+        with self.assertRaises(ValueError):
+            validate_expansion_zip(unknown)
+
+    def test_expansion_card_list_requires_bounded_https_metadata(self) -> None:
+        valid = self.root / "test-release.json"
+        valid.write_text(json.dumps([{
+            "name": "测试卡",
+            "desc": "效果",
+            "overallString": "[魔法]",
+            "picUrl": "https://example.invalid/pics/1.jpg?version=1",
+        }]), encoding="utf-8")
+        self.assertEqual(len(validate_expansion_list(valid)), 1)
+        invalid = self.root / "unsafe-release.json"
+        invalid.write_text(json.dumps([{"name": "x", "picUrl": "http://example.invalid/x.jpg"}]), encoding="utf-8")
+        with self.assertRaises(ValueError):
+            validate_expansion_list(invalid)
+
+    def test_expansion_release_list_must_match_release_cdb(self) -> None:
+        cdb = self.root / "test-release.cdb"
+        self.make_cdb(cdb, [(100200292, 1)])
+        listing = self.root / "matching-release.json"
+        listing.write_text(json.dumps([{
+            "name": "测试卡",
+            "desc": "效果",
+            "overallString": "[魔法]",
+            "picUrl": "https://example.invalid/pics/100200292.jpg",
+        }]), encoding="utf-8")
+        self.assertEqual(validate_expansion_release(listing, cdb)["cdbCount"], 1)
+        listing.write_text(listing.read_text(encoding="utf-8").replace("100200292", "100200293"), encoding="utf-8")
+        with self.assertRaises(ValueError):
+            validate_expansion_release(listing, cdb)
+
     def test_script_delta_preserves_unknown_files(self) -> None:
         source = self.root / "source"
         destination = self.root / "destination"
@@ -106,6 +182,38 @@ class CardResourceTests(unittest.TestCase):
         self.assertIn("nested/a.lua", manifest)
         self.assertEqual((destination / "nested/a.lua").read_text(encoding="utf-8"), "a")
         self.assertTrue((destination / "local.lua").exists())
+
+    def test_expansion_sync_removes_only_previous_managed_files(self) -> None:
+        source = self.root / "expansion-source"
+        destination = self.root / "expansion-destination"
+        (source / "script").mkdir(parents=True)
+        (source / "pics").mkdir(parents=True)
+        (source / "script/new.lua").write_text("new", encoding="utf-8")
+        (source / "test-release.cdb").write_bytes(b"cdb")
+        (destination / "script").mkdir(parents=True)
+        (destination / "script/old.lua").write_text("old", encoding="utf-8")
+        (destination / "lflist.conf").write_text("# server local\n", encoding="utf-8")
+        (destination / "local.conf").write_text("keep", encoding="utf-8")
+        previous = self.root / "expansions.json"
+        previous.write_text(json.dumps({"files": {"script/old.lua": {"size": 3}}}), encoding="utf-8")
+        manifest = sync_managed_expansions(source, destination, previous)
+        self.assertIn("script/new.lua", manifest)
+        self.assertFalse((destination / "script/old.lua").exists())
+        self.assertTrue((destination / "lflist.conf").exists())
+        self.assertTrue((destination / "local.conf").exists())
+
+    def test_expansion_sync_does_not_follow_existing_symlink(self) -> None:
+        source = self.root / "safe-source"
+        destination = self.root / "safe-destination"
+        outside = self.root / "outside.txt"
+        source.mkdir()
+        destination.mkdir()
+        outside.write_text("unchanged", encoding="utf-8")
+        (destination / "test-release.cdb").symlink_to(outside)
+        (source / "test-release.cdb").write_text("replacement", encoding="utf-8")
+        sync_managed_expansions(source, destination)
+        self.assertEqual(outside.read_text(encoding="utf-8"), "unchanged")
+        self.assertEqual((destination / "test-release.cdb").read_text(encoding="utf-8"), "replacement")
 
     def test_avif_generation_is_idempotent_and_bounded(self) -> None:
         try:
@@ -141,12 +249,36 @@ class CardResourceTests(unittest.TestCase):
         generate_avif(source, destination, manifest)
         self.assertFalse((destination / "999.avif").exists())
 
+    def test_avif_includes_expansions_and_preserves_them_on_normal_updates(self) -> None:
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow unavailable")
+        source, expansion, destination = self.root / "base", self.root / "expansion", self.root / "thumbs"
+        source.mkdir()
+        expansion.mkdir()
+        Image.new("RGB", (300, 400), (255, 0, 0)).save(source / "123.jpg")
+        Image.new("RGB", (300, 400), (0, 255, 0)).save(expansion / "123.jpg")
+        Image.new("RGB", (300, 400), (0, 0, 255)).save(expansion / "456.png")
+        first = generate_avif(source, destination, expansion_pics=expansion)
+        self.assertEqual(set(first), {"123", "456"})
+        self.assertEqual(first["123"]["sha256"], hashlib.sha256((expansion / "123.jpg").read_bytes()).hexdigest())
+        manifest = self.root / "thumbs.json"
+        manifest.write_text(json.dumps({"sources": first}), encoding="utf-8")
+        self.assertEqual(generate_avif(source, destination, manifest, expansion), first)
+        (expansion / "456.png").unlink()
+        generate_avif(source, destination, manifest, expansion)
+        self.assertFalse((destination / "456.avif").exists())
+
     def test_manifest_delta_reports_removed_and_changed(self) -> None:
         previous = self.root / "previous.json"
         current = self.root / "current.json"
         previous.write_text(json.dumps({"scripts": {"files": {"a.lua": {"sha256": "old"}, "gone.lua": {}}}}), encoding="utf-8")
         current.write_text(json.dumps({"scripts": {"files": {"a.lua": {"sha256": "new"}, "b.lua": {}}}}), encoding="utf-8")
         self.assertEqual(manifest_delta(previous, current, "scripts"), {"changed": ["a.lua", "b.lua"], "removed": ["gone.lua"]})
+        previous.write_text(json.dumps({"expansions": {"files": {"test-release.cdb": {"sha256": "old"}, "old.lua": {}}}}), encoding="utf-8")
+        current.write_text(json.dumps({"expansions": {"files": {"test-release.cdb": {"sha256": "new"}, "new.lua": {}}}}), encoding="utf-8")
+        self.assertEqual(manifest_delta(previous, current, "expansions"), {"changed": ["new.lua", "test-release.cdb"], "removed": ["old.lua"]})
 
     def test_name_refresh_keys_records_by_exact_code(self) -> None:
         archive = self.root / "names.zip"

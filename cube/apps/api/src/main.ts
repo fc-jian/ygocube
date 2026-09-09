@@ -1,3 +1,4 @@
+import { DuelService } from './duel/duel.service';
 import { NestFactory } from '@nestjs/core';
 import { ArgumentsHost, Catch, ExceptionFilter, HttpException } from '@nestjs/common';
 import { AppModule } from './app.module';
@@ -31,7 +32,7 @@ export function cookieParser(req: Request, _res: Response, next: NextFunction) {
 
 // Uniform error shape: { ok:false, code, ...details } (dev_docs/07 §5)
 const CONFLICT_CODES = new Set([
-  'WRONG_PHASE', 'NOT_YOUR_TURN', 'CARD_NOT_AVAILABLE', 'CARD_NOT_IN_ZONE', 'WRONG_ZONE',
+  'PLAYER_CONNECTED', 'PLAYER_ID_EXISTS', 'WRONG_PHASE', 'NOT_YOUR_TURN', 'CARD_NOT_AVAILABLE', 'CARD_NOT_IN_ZONE', 'WRONG_ZONE',
   'LOCKED', 'ALREADY_LOCKED', 'DECK_INVALID', 'PAUSED', 'PAUSE_EXISTS', 'NO_PAUSE',
   'ALREADY_VOTED', 'NOT_PAUSED', 'FORBIDDEN', 'TOURNAMENT_FULL', 'NOT_ENOUGH_PLAYERS',
   'POOL_EXISTS', 'FROZEN', 'ALREADY_JOINED', 'CARD_NOT_IN_POOL',
@@ -44,6 +45,7 @@ const CONFLICT_CODES = new Set([
 ]);
 
 const BAD_REQUEST_CODES = new Set([
+  'INVALID_DECK',
   'BAD_PLAYER_ID', 'BAD_DISPLAY_NAME', 'BAD_RESULT', 'BAD_PAYLOAD', 'BAD_POOL_IMPORT',
   'BAD_POOL_NAME', 'BAD_CREATE_USERNAME', 'BAD_EXTRA_RATIO', 'INSUFFICIENT_PACK_RATIO',
   'REVERT_CONFIRMATION_MISMATCH', 'BAD_SEAT_ASSIGNMENT', 'BAD_SWISS_ROUNDS',
@@ -70,12 +72,17 @@ export class ApiExceptionFilter implements ExceptionFilter {
       }
     } else if (exception instanceof Error) {
       const candidate = exception.message;
-      if (['PLAYER_NOT_FOUND', 'MATCH_NOT_FOUND', 'CREATE_USER_NOT_FOUND', 'POOL_NOT_FOUND', 'REVERT_EVENT_NOT_FOUND', 'TOURNAMENT_NOT_FOUND'].includes(candidate)) {
+      if (candidate === 'AUTH_REQUIRED') {
+        status = 401; code = candidate;
+      } else if (['PLAYER_NOT_FOUND', 'MATCH_NOT_FOUND', 'CREATE_USER_NOT_FOUND', 'POOL_NOT_FOUND', 'REVERT_EVENT_NOT_FOUND', 'TOURNAMENT_NOT_FOUND'].includes(candidate)) {
         status = 404;
         code = candidate;
         details = (exception as Error & { details?: unknown }).details;
       } else if (candidate === 'FORBIDDEN' || candidate === 'CORS_ORIGIN_DENIED') {
         status = 403;
+        code = candidate;
+      } else if (candidate === 'DUEL_DISABLED' || candidate === 'SESSION_LIMIT') {
+        status = candidate === 'DUEL_DISABLED' ? 503 : 429;
         code = candidate;
       } else if (BAD_REQUEST_CODES.has(candidate)) {
         status = 400;
@@ -176,7 +183,9 @@ async function bootstrap() {
     credentials: true,
   });
   app.useGlobalFilters(new ApiExceptionFilter());
-  await app.listen(config.server.port);
+  app.get(DuelService).attach(app.getHttpServer());
+  if (config.server.host) await app.listen(config.server.port, config.server.host);
+  else await app.listen(config.server.port);
   console.log(`cube api listening on ${config.server.port}`);
 }
 

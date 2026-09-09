@@ -464,7 +464,7 @@ export class ApiController {
   @Public()
   @Get('meta')
   meta() {
-    return { srvpro: { host: config.srvpro.host, gamePort: config.srvpro.gamePort } };
+    return { srvpro: { host: config.srvpro.host, gamePort: config.srvpro.gamePort }, webDuel: { enabled: config.webDuel.enabled } };
   }
 
   @Public()

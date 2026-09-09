@@ -1,3 +1,4 @@
+import { captureReplayCatalog } from '../duel/replay-catalog';
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { getDb } from '../db';
 import {
@@ -415,6 +416,7 @@ export class MatchesService implements OnModuleInit, OnModuleDestroy {
         const syncedAt = this.deckSyncAt(state, m);
         const deckA = state.decks[m.playerA];
         const deckB = state.decks[m.playerB];
+        if (config.webDuel.enabled) captureReplayCatalog(tid, m.id);
         const res = await this.srvpro.createRoom({
           room_name: roomName,
           request_id: `t:${tid}:m:${m.id}:${roomKey}`,
@@ -433,6 +435,7 @@ export class MatchesService implements OnModuleInit, OnModuleDestroy {
             { player_id: m.playerA, name_vpass: m.playerA },
             { player_id: m.playerB, name_vpass: m.playerB },
           ],
+          ...(config.webDuel.enabled ? { web_duel: { archive_dir: config.webDuel.archiveDir } } : {}),
           cube_decks: {
             [m.playerA]: { main: [...deckA.main, ...deckA.extra], side: deckA.side, filename: cubeDeckFileBase(tid, m.playerA, syncedAt) },
             [m.playerB]: { main: [...deckB.main, ...deckB.extra], side: deckB.side, filename: cubeDeckFileBase(tid, m.playerB, syncedAt) },

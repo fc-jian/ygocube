@@ -145,6 +145,7 @@ export interface DeckPayload {
 // srvpro /cube/create_room request body (contract with srvpro)
 export interface SrvproCreateRoomRequest {
   room_name: string;
+  web_duel?: { archive_dir: string };
   password?: string;
   hostinfo: {
     mode: number;
@@ -215,3 +216,16 @@ export function sortCardCodesByPick<T extends {
     })
     .map(({ code }) => code);
 }
+
+export interface DuelSessionTicket { version: 1; ticket: string; expiresAt: number; wsPath: string; }
+export type DuelRole = 'player' | 'watch';
+export interface DuelAction { type: 'action'; id: number; opcode: number; data: number[]; }
+export interface DuelReplayFrame { t: number; frame: string; }
+
+export interface StandaloneDuelOptions {
+  mode: number; lflist: number; rule: number; duelRule: number;
+  timeLimit: number; startLp: number; startHand: number; drawCount: number;
+  mainMin: number; mainMax: number; extraMax: number; sideMax: number;
+  noCheck: boolean; noShuffle: boolean;
+}
+export interface BrowserDeck { name: string; main: number[]; extra: number[]; side: number[]; }
