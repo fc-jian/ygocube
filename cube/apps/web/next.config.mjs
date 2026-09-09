@@ -1,7 +1,10 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  output: 'standalone',
+  distDir: process.env.NEXT_DIST_DIR || '.next',
+  // Windows development uses next start without requiring symlink privileges.
+  // Linux releases retain standalone output; opt in explicitly on Windows if supported.
+  output: process.env.NEXT_STANDALONE === '1' || (process.platform !== 'win32' && process.env.NEXT_STANDALONE !== '0') ? 'standalone' : undefined,
   assetPrefix: process.env.NEXT_ASSET_PREFIX || undefined,
   async headers() {
     return [

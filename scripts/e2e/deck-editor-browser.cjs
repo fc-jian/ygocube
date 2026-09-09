@@ -52,7 +52,7 @@ const cards=[{code:111,name:'测试战士',type:17,desc:'测试通常怪兽。',
   const [left,center,right]=await Promise.all(['.deck-inspector','.deck-zones','.deck-search'].map(s=>page.locator(s).boundingBox()));
   if(width===1440)assert(left.x+left.width<=center.x+1 && center.x+center.width<=right.x+1,'native three-column layout');
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1 && document.documentElement.scrollHeight<=innerHeight+1),'editor fits viewport');
-  await page.screenshot({path:`/tmp/deck-editor-${width}.png`,fullPage:true});
+  await page.screenshot({path:require('node:path').join(require('node:os').tmpdir(), `deck-editor-${width}.png`),fullPage:true});
   assert.deepEqual(errors,[]);console.log('PASS deck editor '+width+': import, move, extra classification, search, save/reload, layout');
   await context.close();
  }}finally{await browser.close();}

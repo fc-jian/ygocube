@@ -16,6 +16,7 @@ import os
 from pathlib import Path, PurePosixPath
 import shutil
 import sqlite3
+from contextlib import closing
 import stat
 import subprocess
 from typing import Any, Iterable
@@ -120,7 +121,7 @@ def compare_cdb_files(previous_path: Path, current_path: Path) -> dict[str, int]
     validate_cdb(current_path)
     def rows(path: Path, table: str) -> dict[int, tuple[Any, ...]]:
         uri = f"file:{quote(path.resolve().as_posix())}?mode=ro"
-        with sqlite3.connect(uri, uri=True) as connection:
+        with closing(sqlite3.connect(uri, uri=True)) as connection, connection:
             columns = [row[1] for row in connection.execute(f"PRAGMA table_info({table})")]
             values = connection.execute(f"SELECT {', '.join(columns)} FROM {table}").fetchall()
         return {int(row[0]): tuple(row[1:]) for row in values}
@@ -583,7 +584,7 @@ def missing_names(cdb_path: Path, mapping_path: Path, only_codes: Iterable[int] 
     # be absent from the external name mapping; all other cards must have either
     # one of the preferred localized names or a non-blank cards.cdb name.
     uri = f"file:{quote(cdb_path.resolve().as_posix())}?mode=ro"
-    with sqlite3.connect(uri, uri=True) as connection:
+    with closing(sqlite3.connect(uri, uri=True)) as connection, connection:
         types = dict(connection.execute("SELECT id, type FROM datas"))
         cdb_names = dict(connection.execute("SELECT id, name FROM texts"))
     missing: list[int] = []

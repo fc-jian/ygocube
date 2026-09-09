@@ -14,7 +14,7 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE_PATH||'playwright');
     });
     assert.equal(style.display,'grid',route+' utility display missing');assert.equal(style.padding,style.rem);assert.equal(style.gap,style.rem);assert.equal(style.color,'rgb(20, 51, 42)');
     assert(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth+1),route+' horizontal overflow');
-    if(route==='/' || route==='/duel/decks')await page.screenshot({path:`/tmp/layout-${route==='/'?'cube':'decks'}-${width}.png`,fullPage:true});
+    if(route==='/' || route==='/duel/decks')await page.screenshot({path:require('node:path').join(require('node:os').tmpdir(), `layout-${route==='/'?'cube':'decks'}-${width}.png`),fullPage:true});
     console.log('PASS computed layout '+route+' '+width);
    }
    await page.close();

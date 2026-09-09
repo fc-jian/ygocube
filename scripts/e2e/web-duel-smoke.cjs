@@ -5,7 +5,7 @@ const fs = require("fs"),
   os = require("os"),
   net = require("net"),
   assert = require("node:assert/strict"),
-  { spawn } = require("child_process");
+  { spawn, spawnSync } = require("child_process");
 const root = path.resolve(__dirname, "../.."),
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ygocube-web-"));
 const apiRoot = path.join(root, "cube/apps/api"),
@@ -16,6 +16,11 @@ const children = [],
 let gamePort, httpPort, apiPort, tid, mid, room, fixtureDeck;
 const standaloneCredentials = {};
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+function linkFixture(source, target) {
+  if (process.platform !== 'win32') return fs.symlinkSync(source, target);
+  if (fs.statSync(source).isDirectory()) return fs.symlinkSync(source, target, 'junction');
+  fs.copyFileSync(source, target);
+}
 async function port() {
   const s = net.createServer();
   await new Promise((r) => s.listen(0, "127.0.0.1", r));
@@ -44,7 +49,8 @@ function child(cmd, args, cwd) {
       LD_LIBRARY_PATH: path.join(root, "envs/ygocube/lib"),
     },
     stdio: ["ignore", log, log],
-    detached: true,
+    detached: process.platform !== "win32",
+    windowsHide: true,
   });
   children.push(p);
   return p;
@@ -201,15 +207,15 @@ async function connect(pid) {
   fs.mkdirSync(serverDir);
   for (const entry of fs.readdirSync(path.join(root, "srvpro"))) {
     if (["config", ".git", "ygopro"].includes(entry)) continue;
-    fs.symlinkSync(
+    linkFixture(
       path.join(root, "srvpro", entry),
       path.join(serverDir, entry),
     );
   }
   fs.mkdirSync(path.join(serverDir, "ygopro"));
   for (const entry of fs.readdirSync(path.join(root, "srvpro/ygopro"))) {
-    if (["replay", "deck"].includes(entry)) continue;
-    fs.symlinkSync(
+    if (["replay", "deck", ...(process.platform === "win32" ? ["ygopro"] : ["ygopro.exe"])].includes(entry)) continue;
+    linkFixture(
       entry === "ygopro" ? path.join(root, "ygopro/bin/release/ygopro") : path.join(root, "srvpro/ygopro", entry),
       path.join(serverDir, "ygopro", entry),
     );
@@ -772,7 +778,8 @@ async function connect(pid) {
       ? []
       : children) {
       try {
-        process.kill(-p.pid, "SIGTERM");
+        if (process.platform === "win32") spawnSync("taskkill.exe", ["/PID", String(p.pid), "/T", "/F"], {windowsHide: true, stdio: "ignore"});
+        else process.kill(-p.pid, "SIGTERM");
       } catch {}
     }
     await delay(100);

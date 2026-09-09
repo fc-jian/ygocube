@@ -7,6 +7,7 @@ import json
 import hashlib
 from pathlib import Path
 import sqlite3
+from contextlib import closing
 import stat
 import tempfile
 import unittest
@@ -39,7 +40,7 @@ class CardResourceTests(unittest.TestCase):
         self.temp.cleanup()
 
     def make_cdb(self, path: Path, codes: list[tuple[int, int]]) -> None:
-        with sqlite3.connect(path) as db:
+        with closing(sqlite3.connect(path)) as db, db:
             db.executescript(
                 "CREATE TABLE datas(id INTEGER PRIMARY KEY, ot INTEGER, alias INTEGER, setcode INTEGER, type INTEGER, atk INTEGER, def INTEGER, level INTEGER, race INTEGER, attribute INTEGER);"
                 "CREATE TABLE texts(id INTEGER PRIMARY KEY, name TEXT, desc TEXT, str1 TEXT, str2 TEXT, str3 TEXT, str4 TEXT, str5 TEXT, str6 TEXT, str7 TEXT, str8 TEXT, str9 TEXT, str10 TEXT, str11 TEXT, str12 TEXT, str13 TEXT, str14 TEXT, str15 TEXT, str16 TEXT);"
@@ -53,7 +54,7 @@ class CardResourceTests(unittest.TestCase):
         self.make_cdb(cdb, [(100, 1), (200, 0x4000), (300, 1), (400, 1), (500, 1), (600, 1)])
         # A blank CDB name is still a genuine missing display name; code 600
         # deliberately exercises the final CDB-name fallback instead.
-        with sqlite3.connect(cdb) as db:
+        with closing(sqlite3.connect(cdb)) as db, db:
             db.execute("UPDATE texts SET name='' WHERE id=300")
         mapping = self.root / "names.json"
         mapping.write_text(json.dumps({
@@ -209,7 +210,12 @@ class CardResourceTests(unittest.TestCase):
         source.mkdir()
         destination.mkdir()
         outside.write_text("unchanged", encoding="utf-8")
-        (destination / "test-release.cdb").symlink_to(outside)
+        try:
+            (destination / "test-release.cdb").symlink_to(outside)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                self.skipTest("Windows file symlink privilege is unavailable")
+            raise
         (source / "test-release.cdb").write_text("replacement", encoding="utf-8")
         sync_managed_expansions(source, destination)
         self.assertEqual(outside.read_text(encoding="utf-8"), "unchanged")

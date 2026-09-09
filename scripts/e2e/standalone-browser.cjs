@@ -56,7 +56,7 @@ const base = process.argv[2] || "http://127.0.0.1:3000",
         .catch(async (e) => {
           console.error(await page.locator("body").innerText());
           await page.screenshot({
-            path: "/tmp/standalone-failed.png",
+            path: require('node:path').join(require('node:os').tmpdir(), "standalone-failed.png"),
             fullPage: true,
           });
           throw e;
@@ -71,7 +71,7 @@ const base = process.argv[2] || "http://127.0.0.1:3000",
       }
     }
     await a.getByRole("button", { name: "开始对战", exact: true }).click();
-    await a.screenshot({path:"/tmp/duel-rps-390.png",fullPage:true});
+    await a.screenshot({path:require('node:path').join(require('node:os').tmpdir(), "duel-rps-390.png"),fullPage:true});
     await a.getByRole("button", { name: "石头", exact: true }).click();
     await b.getByRole("button", { name: "剪刀", exact: true }).click();
     // RPS result chooses one of the two clients.
@@ -97,7 +97,7 @@ const base = process.argv[2] || "http://127.0.0.1:3000",
       await active.locator('.duel-choice-main').first().click();
       await active.getByRole('button',{name:'确认 (1)',exact:true}).click();
       await active.locator('.effect-resolve').waitFor();
-      await active.screenshot({path:'/tmp/duel-live-chain.png',fullPage:true});
+      await active.screenshot({path:require('node:path').join(require('node:os').tmpdir(), 'duel-live-chain.png'),fullPage:true});
       await active.locator('.effect-end').waitFor();
       await active.getByRole('button',{name:'墓地 1',exact:true}).waitFor();
       console.log('PASS real host effect activation, search response during animation, chain resolution');
@@ -117,7 +117,7 @@ const base = process.argv[2] || "http://127.0.0.1:3000",
         "horizontal overflow",
       );
       await p.screenshot({
-        path: `/tmp/standalone-duel-${i}.png`,
+        path: require('node:path').join(require('node:os').tmpdir(), `standalone-duel-${i}.png`),
         fullPage: true,
       });
     }
@@ -159,7 +159,7 @@ const base = process.argv[2] || "http://127.0.0.1:3000",
     await builder.locator(".builder-results .card-preview").first().click();
     await builder.locator(".deck-inspector h2").filter({hasText:"青眼"}).waitFor();
     await builder.screenshot({
-      path: "/tmp/standalone-builder-390.png",
+      path: require('node:path').join(require('node:os').tmpdir(), "standalone-builder-390.png"),
       fullPage: true,
     });
     assert(
@@ -208,7 +208,7 @@ const base = process.argv[2] || "http://127.0.0.1:3000",
   } catch(e) {
     for(const [i,context] of browser.contexts().entries())for(const page of context.pages()){
       console.error('Browser failure',i,await page.locator('body').innerText());
-      await page.screenshot({path:`/tmp/duel-browser-failure-${i}.png`,fullPage:true});
+      await page.screenshot({path:require('node:path').join(require('node:os').tmpdir(), `duel-browser-failure-${i}.png`),fullPage:true});
     }
     throw e;
   } finally {

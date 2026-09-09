@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { access, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 import {
   extractStaticAssetUrls,
@@ -11,9 +12,7 @@ import {
 import { prepareStandaloneAssets } from '../scripts/prepare-standalone.mjs';
 
 async function fixture() {
-  // The development shell may inherit a Windows TMPDIR mounted read-only in
-  // WSL; use the repository test convention's writable Linux temp directory.
-  const root = await mkdtemp('/tmp/ygocube-web-');
+  const root = await mkdtemp(path.join(tmpdir(), 'ygocube-web-'));
   const staticDir = standaloneStaticDir(root);
   await mkdir(path.join(staticDir, 'chunks', 'app'), { recursive: true });
   await writeFile(path.join(staticDir, 'chunks', 'runtime.js'), 'runtime');
@@ -22,8 +21,8 @@ async function fixture() {
 }
 
 test('standalone static directory uses the nested apps/web layout', async () => {
-  const root = '/tmp/release';
-  assert.equal(standaloneStaticDir(root), '/tmp/release/apps/web/.next/static');
+  const root = path.join(tmpdir(), 'release');
+  assert.equal(standaloneStaticDir(root), path.join(root, 'apps/web/.next/static'));
 });
 
 test('reports then accepts static assets with encoded route brackets', async () => {
@@ -50,7 +49,7 @@ test('reports then accepts static assets with encoded route brackets', async () 
 });
 
 test('reports a missing static directory instead of treating a 200 HTML page as healthy', async () => {
-  const root = await mkdtemp('/tmp/ygocube-web-empty-');
+  const root = await mkdtemp(path.join(tmpdir(), 'ygocube-web-empty-'));
   try {
     const result = validateStandaloneStatic({
       standaloneRoot: root,
@@ -95,7 +94,7 @@ test('extracts and de-duplicates only Next static src/href references', () => {
 });
 
 test('postbuild copies static and public assets into the standalone app', async () => {
-  const root = await mkdtemp('/tmp/ygocube-web-prepare-');
+  const root = await mkdtemp(path.join(tmpdir(), 'ygocube-web-prepare-'));
   try {
     const nextDir = path.join(root, '.next');
     const standaloneAppDir = path.join(nextDir, 'standalone', 'apps', 'web');
@@ -115,7 +114,7 @@ test('postbuild copies static and public assets into the standalone app', async 
 });
 
 test('postbuild removes a stale public directory when the source has none', async () => {
-  const root = await mkdtemp('/tmp/ygocube-web-prepare-empty-');
+  const root = await mkdtemp(path.join(tmpdir(), 'ygocube-web-prepare-empty-'));
   try {
     const nextDir = path.join(root, '.next');
     const standaloneAppDir = path.join(nextDir, 'standalone', 'apps', 'web');

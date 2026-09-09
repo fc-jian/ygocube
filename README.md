@@ -5,6 +5,8 @@ YGOPro and srvpro. It keeps tournament state on the server, exposes a player
 and administrator web UI, and coordinates draft packs, deck construction, and
 the match server.
 
+Windows native development and Linux compatibility: [开发环境说明](dev_docs/10-windows-development.md).
+
 ## What it provides
 
 - Passing and legacy serial draft modes, configurable pack sizes/counts,

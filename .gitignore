@@ -22,6 +22,7 @@ node_modules/
 # build output
 cube/apps/api/dist/
 cube/apps/web/.next/
+cube/apps/web/.next-*/
 cube/apps/web/out/
 cube/packages/*/dist/
 *.tsbuildinfo

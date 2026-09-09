@@ -98,3 +98,9 @@ cube web 3000 · cube api 3001 · srvpro 游戏 7911 · srvpro http 7922 · srvp
 
 - 规划/设计文档（dev_docs/、AGENTS.md）：中文。
 - 代码：标识符/注释英文；UI 文案中英双语资源。
+
+## Windows 原生开发与跨平台回归
+
+- Windows 工作目录 `C:\projects\ygocube`；安装、启动、停止与迁移验证见 `dev_docs/10-windows-development.md`。使用 `scripts/setup-windows.ps1` 和 `scripts/dev-windows.ps1`，独立 Duel 添加 `-Duel`。
+- Windows / Linux 共用业务代码；平台差异只在构建、文件路径和进程管理层处理。改动后两端回归，保留 Linux standalone 发布流程。
+- 不跨平台复制 node_modules、Python 环境或宿主二进制；Aly 只能使用 Linux 构建产物。维护脚本保持 LF。

@@ -1,4 +1,4 @@
-import { access, cp, mkdir, rename, rm } from 'node:fs/promises';
+import { access, cp, mkdir, readFile, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -46,7 +46,12 @@ export async function prepareStandaloneAssets({ nextDir, standaloneAppDir, publi
 
 async function main() {
   const appRoot = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
-  const nextDir = path.join(appRoot, '.next');
+  const nextDir = path.join(appRoot, process.env.NEXT_DIST_DIR || '.next');
+  const build = JSON.parse(await readFile(path.join(nextDir, 'required-server-files.json'), 'utf8'));
+  if (build.config.output !== 'standalone') {
+    console.log('Standard Next build: use next start.');
+    return;
+  }
   const result = await prepareStandaloneAssets({
     nextDir,
     standaloneAppDir: path.join(nextDir, 'standalone', 'apps', 'web'),

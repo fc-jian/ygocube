@@ -5,7 +5,7 @@ const {chromium} = require(process.env.PLAYWRIGHT_MODULE_PATH || 'playwright');
 const protocol = require('../../cube/packages/duel-protocol/dist');
 const fixture = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const baseURL = process.argv[3] || 'http://127.0.0.1:3000';
-const output = process.env.BROWSER_OUTPUT_DIR || '/tmp/ygocube-browser';
+const output = process.env.BROWSER_OUTPUT_DIR || require('node:path').join(require('node:os').tmpdir(), 'ygocube-browser');
 fs.mkdirSync(output, {recursive:true});
 (async()=>{
   const browser = await chromium.launch({headless:true,...(process.env.CHROMIUM_PATH?{executablePath:process.env.CHROMIUM_PATH}:{}),args:['--no-sandbox']});
