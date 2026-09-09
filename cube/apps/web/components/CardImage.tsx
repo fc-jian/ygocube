@@ -3,11 +3,11 @@
 import { API_BASE } from '@/lib/api';
 import { useEffect, useState } from 'react';
 import { CardInfo } from '@/lib/types';
-import { getDirHandle, readCardImageUrl, requestDirPermission } from '@/lib/pics';
+import { getDirHandle, localCardImagePaths, readCardImageUrl, requestDirPermission } from '@/lib/pics';
 
 // 卡图组件（dev_docs/06 §5）：优先读取用户显式授权的本地目录句柄（showDirectoryPicker，
-// 相对路径 pics/ 与 expansions/*/pics/），其次手动配置的本地路径（HTTP 无法列目录，
-// 只尝试 pics/ 与 expansions/pics/），再回退服务端低清 avif（/api/pics/:code.avif）
+// 自动查找 expansions/pics/、expansions/*/pics/ 与 pics/），其次手动配置的本地路径（HTTP 无法列目录，
+// 优先 expansions/pics/，兼容常见图片格式），再回退服务端低清 avif（/api/pics/:code.avif）
 // 与服务端原图代理（/api/pics/:code），最终空白卡占位。
 export function CardImage({ code, name, className = '' }: { code: number; name?: string; className?: string }) {
   const [picsRevision, setPicsRevision] = useState(0);
@@ -23,7 +23,7 @@ export function CardImage({ code, name, className = '' }: { code: number; name?:
       const root = localStorage.getItem('yc_local_pics');
       if (root) {
         const base = root.replace(/\/+$/, '');
-        candidates.push(`${base}/pics/${code}.jpg`, `${base}/expansions/pics/${code}.jpg`);
+        candidates.push(...localCardImagePaths(code).map(path => `${base}/${path}`));
       }
       candidates.push(`${API_BASE}/pics/${code}.avif`, `${API_BASE}/pics/${code}`);
       let idx = 0;

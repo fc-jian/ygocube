@@ -313,3 +313,18 @@ Cube 健康检查。当前尚未切换任何生产服务，不能将隔离验证
 
 线上测试仅在新建的独立测试房间进行，未加入用户既有 Cube 比赛；未声称公网原生
 17911 的云安全组已放通，原生侧连接由 Aly 本机发起，网页侧使用公网 HTTPS/WSS。
+
+### 本地 expansion 卡图绑定修复
+
+共享 CardImage 的目录句柄与 HTTP 本地路径统一按 `expansions/pics` 优先于 `pics`
+查找，与 YGOPro 客户端一致；支持 jpg/png/jpeg/webp/avif，避免普通同编号旧图覆盖
+扩展图。目录句柄同时兼容扩展包子目录和直接选中的图片目录，重新绑定清理目录缓存。
+绑定 YGOPro 根目录即可访问主图与扩展图；只授权 `pics` 子目录时浏览器不能越权访问
+其兄弟目录，需重新选择根目录。未找到本地图仍按现有逻辑回退服务器低清图。
+
+新增路径单元测试与 Chromium 实际目录句柄测试：根目录绑定、扩展 PNG 覆盖普通 JPG
+（以像素颜色断言）、空文件回退及保存卡组/刷新后恢复均通过。
+
+已发布至两套 Web 的 `20260909-local-expansion-pics-r11`；首页与 Duel 两页面引用的
+全部 JS/CSS 返回 200、MIME 正确。两套 API、srvpro 和 Nginx 的进程均未重启，
+发布记录保存在各实例 `backups/20260909-local-expansion-pics-r11/verification.json`。

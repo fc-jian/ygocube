@@ -31,6 +31,8 @@ export async function saveDirHandle(handle: PicsDirHandle): Promise<void> {
   });
   db.close();
   cachedHandle = handle;
+  expansionsCache.delete(handle);
+  permissionChecks.delete(handle);
 }
 
 export async function getDirHandle(): Promise<PicsDirHandle | null> {
@@ -108,8 +110,8 @@ async function listExpansionDirs(handle: PicsDirHandle): Promise<string[]> {
   const dirs: string[] = [];
   try {
     const expansions = await handle.getDirectoryHandle('expansions', { create: false });
-    for await (const [name] of (expansions as any).entries()) {
-      dirs.push(name);
+    for await (const [name, entry] of (expansions as any).entries()) {
+      if (entry.kind === 'directory' && name !== 'pics') dirs.push(name);
     }
   } catch {
     // no expansions dir
@@ -118,27 +120,37 @@ async function listExpansionDirs(handle: PicsDirHandle): Promise<string[]> {
   return dirs;
 }
 
-// 按相对路径读取卡图，返回 objectURL；找不到返回 null
+// Expansion art overrides the base image, matching YGOPro ImageManager.
+const imageExtensions = ['jpg', 'png', 'jpeg', 'webp', 'avif'];
+export function localCardImagePaths(code: number): string[] {
+  return ['expansions/pics', 'pics', ''].flatMap(dir =>
+    imageExtensions.map(extension => `${dir ? dir + '/' : ''}${code}.${extension}`));
+}
+
 export async function readCardImageUrl(handle: PicsDirHandle, code: number): Promise<string | null> {
-  const candidates: string[] = [`pics/${code}.jpg`, `expansions/pics/${code}.jpg`];
-  for (const dir of await listExpansionDirs(handle)) {
-    candidates.push(`expansions/${dir}/pics/${code}.jpg`);
-  }
-  for (const rel of candidates) {
-    try {
-      // getFileHandle 不支持含 '/' 的相对路径：逐级进入子目录
-      const parts = rel.split('/');
-      let dir = handle;
-      for (let i = 0; i < parts.length - 1; i++) {
-        dir = await dir.getDirectoryHandle(parts[i]);
+  async function read(paths: string[]): Promise<string | null> {
+    for (const rel of paths) {
+      try {
+        const parts = rel.split('/');
+        let dir = handle;
+        for (let i = 0; i < parts.length - 1; i++)
+          dir = await dir.getDirectoryHandle(parts[i], { create: false });
+        const fileHandle = await dir.getFileHandle(parts[parts.length - 1], { create: false });
+        const file = await fileHandle.getFile();
+        if (file.size) return URL.createObjectURL(file);
+      } catch {
+        // Missing or unreadable files fall through to the next local candidate.
       }
-      const fileHandle = await dir.getFileHandle(parts[parts.length - 1]);
-      const file = await fileHandle.getFile();
-      if (file.size === 0) continue;
-      return URL.createObjectURL(file);
-    } catch {
-      // try next candidate
     }
+    return null;
   }
-  return null;
+  const paths = localCardImagePaths(code);
+  // Try the standard expansion folder before enumerating optional pack folders.
+  const expansion = await read(paths.filter(p => p.startsWith('expansions/')));
+  if (expansion) return expansion;
+  for (const dir of await listExpansionDirs(handle)) {
+    const image = await read(imageExtensions.map(ext => `expansions/${dir}/pics/${code}.${ext}`));
+    if (image) return image;
+  }
+  return read(paths.filter(p => !p.startsWith('expansions/')));
 }
