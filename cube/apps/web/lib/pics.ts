@@ -85,7 +85,8 @@ interface PermissibleDirHandle extends PicsDirHandle {
 
 const permissionChecks = new WeakMap<object, Promise<boolean>>();
 
-export async function requestDirPermission(handle: PicsDirHandle): Promise<boolean> {
+export async function requestDirPermission(handle: PicsDirHandle, refresh = false): Promise<boolean> {
+  if (refresh) permissionChecks.delete(handle);
   const existing = permissionChecks.get(handle);
   if (existing) return existing;
   const check = (async () => {
@@ -127,7 +128,10 @@ export function localCardImagePaths(code: number): string[] {
     imageExtensions.map(extension => `${dir ? dir + '/' : ''}${code}.${extension}`));
 }
 
-export async function readCardImageUrl(handle: PicsDirHandle, code: number): Promise<string | null> {
+export async function readCardImageUrl(
+  handle: PicsDirHandle, code: number,
+  accepts: (url: string) => Promise<boolean> = async () => true,
+): Promise<string | null> {
   async function read(paths: string[]): Promise<string | null> {
     for (const rel of paths) {
       try {
@@ -137,7 +141,15 @@ export async function readCardImageUrl(handle: PicsDirHandle, code: number): Pro
           dir = await dir.getDirectoryHandle(parts[i], { create: false });
         const fileHandle = await dir.getFileHandle(parts[parts.length - 1], { create: false });
         const file = await fileHandle.getFile();
-        if (file.size) return URL.createObjectURL(file);
+        if (file.size) {
+          const url = URL.createObjectURL(file);
+          try {
+            if (await accepts(url)) return url;
+          } catch {
+            // A downloaded or replaced file can exist but fail to decode.
+          }
+          URL.revokeObjectURL(url);
+        }
       } catch {
         // Missing or unreadable files fall through to the next local candidate.
       }

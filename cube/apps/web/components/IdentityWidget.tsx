@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { clearIdentityCookies, encodePathSegment, readableApiError } from '@/lib/api';
-import { getDirHandle, removeDirHandle, saveDirHandle } from '@/lib/pics';
+import { getDirHandle, removeDirHandle, saveDirHandle, requestDirPermission } from '@/lib/pics';
 
 
 
@@ -179,9 +179,10 @@ export function IdentityWidget({
 export function LocalPicsSetting() {
   const [bound, setBound] = useState<string | null>(null);
   const [bindError, setBindError] = useState('');
+  const [boundHandle, setBoundHandle] = useState<FileSystemDirectoryHandle | null>(null);
 
   useEffect(() => {
-    const refresh = () => getDirHandle().then((h) => setBound(h ? h.name : null)).catch(() => setBound(null));
+    const refresh = () => getDirHandle().then((h) => { setBound(h ? h.name : null); setBoundHandle(h); }).catch(() => { setBound(null); setBoundHandle(null); });
     refresh();
     window.addEventListener('yc-pics-changed', refresh);
     return () => window.removeEventListener('yc-pics-changed', refresh);
@@ -204,6 +205,21 @@ export function LocalPicsSetting() {
     }
   };
 
+  const reread = async () => {
+    if (!boundHandle) return;
+    try {
+      if (!await requestDirPermission(boundHandle, true)) {
+        setBindError('请允许读取本地目录，或重新选择 YGOPro 根目录');
+        return;
+      }
+      await saveDirHandle(boundHandle);
+      window.dispatchEvent(new Event('yc-pics-changed'));
+      setBindError('');
+    } catch {
+      setBindError('目录不可读取，请重新选择 YGOPro 根目录');
+    }
+  };
+
   const unbind = async () => {
     await removeDirHandle();
     window.dispatchEvent(new Event("yc-pics-changed"));
@@ -215,6 +231,8 @@ export function LocalPicsSetting() {
       {bound ? (
         <span className="text-emerald-300">
           已绑定：{bound}
+          <button onClick={reread} className="ml-2 rounded bg-felt-edge px-2 py-0.5">重新读取卡图</button>
+          <button onClick={bind} className="ml-2 rounded bg-felt-edge px-2 py-0.5">更换目录</button>
           <button onClick={unbind} className="ml-2 rounded bg-felt-edge px-2 py-0.5 hover:bg-red-900 hover:text-red-100">
             解绑
           </button>

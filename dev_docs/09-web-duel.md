@@ -328,3 +328,23 @@ Cube 健康检查。当前尚未切换任何生产服务，不能将隔离验证
 已发布至两套 Web 的 `20260909-local-expansion-pics-r11`；首页与 Duel 两页面引用的
 全部 JS/CSS 返回 200、MIME 正确。两套 API、srvpro 和 Nginx 的进程均未重启，
 发布记录保存在各实例 `backups/20260909-local-expansion-pics-r11/verification.json`。
+
+### r12：构建目录导致的样式回归与本地图片复查
+
+r11 从仓库根目录调用 Next build，PostCSS/Tailwind 未稳定定位 Web 配置与 content，
+导致 CSS 虽返回 200，实际缺少 grid、间距及主题工具类。此前仅验证状态码和 MIME，
+未能发现此回归。现显式指定 Tailwind 配置路径，并使 content 相对配置文件解析；
+从仓库根构建两套生产包，通过 CSS 语义检查和浏览器 computed style 验证。
+
+用户提供的 100267021 位于 YGOPro 根目录的 `expansions/pics/100267021.jpg`，
+文件为正常的 407×593 JPEG，不能将其故障归因于损坏图片。使用该实际文件在浏览器
+目录句柄夹具中验证：绑定后渲染像素与原图一致，重新读取、保存卡组及刷新恢复通过。
+夹具使用 OPFS，不能证明用户原有外部目录授权仍有效；新增“重新读取卡图”和
+“更换目录”入口，显式重查权限、清理缓存并刷新卡图。另修复非空但无法解码的本地
+图片阻止后续格式回退的问题，增加坏 JPG→正常 PNG 的浏览器验收。
+
+已发布两套 Web 至 `20260909-web-layout-pics-r12`。公网首页、后台、Duel 和构筑页
+在 390/1440 宽度的布局检查通过，首页和构筑页截图复核通过；公网目录绑定夹具的
+实际 JPEG 与损坏 JPG 回退测试均通过。两套 100267021 AVIF 接口均为 200 image/avif。
+两套 API、srvpro 和 Nginx 的 PID/启动时间保持不变，未重启比赛后端。静态资源、
+样式语义与进程校验记录保存在各实例 `backups/20260909-web-layout-pics-r12/verification.json`。

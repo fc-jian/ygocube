@@ -49,7 +49,12 @@ export function CardImage({ code, name, className = '' }: { code: number; name?:
         const handle = await getDirHandle();
         if (handle) {
           if (await requestDirPermission(handle)) {
-            const url = await readCardImageUrl(handle, code);
+            const url = await readCardImageUrl(handle, code, (candidate) => new Promise<boolean>((resolve) => {
+              const image = new Image();
+              image.onload = () => resolve(image.naturalWidth > 0);
+              image.onerror = () => resolve(false);
+              image.src = candidate;
+            }));
             if (url) {
               if (!cancelled) {
                 objectUrl = url;

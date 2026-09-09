@@ -6,7 +6,7 @@ import ts from 'typescript';
 const source=ts.transpileModule(fs.readFileSync(new URL('../lib/pics.ts',import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2021}}).outputText;
 function setup(files) {
  const exports={};
- vm.runInNewContext(source,{exports,URL:{createObjectURL:file=>`blob:${file.path}`}});
+ vm.runInNewContext(source,{exports,URL:{createObjectURL:file=>`blob:${file.path}`,revokeObjectURL:()=>{}}});
  function dir(prefix='') {return {kind:'directory',getDirectoryHandle:async name=>{
   const next=prefix+name+'/';if(!Object.keys(files).some(p=>p.startsWith(next)))throw Error('NotFound');return dir(next);
  },getFileHandle:async name=>{const path=prefix+name;if(!(path in files))throw Error('NotFound');return {getFile:async()=>({size:files[path],path})}},async *entries(){
@@ -36,4 +36,18 @@ test('pack folders, direct image directories and missing files fall back correct
 test('HTTP local roots use the same expansion-first candidate ordering',()=>{
  const {api}=setup({});const paths=api.localCardImagePaths(123);
  assert(paths.indexOf('expansions/pics/123.png')<paths.indexOf('pics/123.jpg'));
+});
+
+test('undecodable expansion image does not suppress PNG or server fallback',async()=>{
+ const {api,handle}=setup({'expansions/pics/123.jpg':10,'expansions/pics/123.png':20});
+ assert.equal(await api.readCardImageUrl(handle,123,async url=>url.endsWith('.png')),'blob:expansions/pics/123.png');
+ assert.equal(await api.readCardImageUrl(handle,123,async()=>false),null);
+});
+test('explicit reread rechecks revoked cached permission',async()=>{
+ const {api}=setup({});let state='granted',requested=0;
+ const handle={queryPermission:async()=>state,requestPermission:async()=>{requested++;return 'denied'}};
+ assert.equal(await api.requestDirPermission(handle),true);
+ state='prompt';
+ assert.equal(await api.requestDirPermission(handle,true),false);
+ assert.equal(requested,1);
 });

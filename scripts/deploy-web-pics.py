@@ -3,7 +3,8 @@
 import hashlib,json,os,pathlib,shutil,subprocess,sys,tarfile,time,urllib.request,re
 P=pathlib.Path
 archive=P(sys.argv[1]);assert hashlib.sha256(archive.read_bytes()).hexdigest()==sys.argv[2]
-release='20260909-local-expansion-pics-r11'
+release=sys.argv[3]
+assert re.fullmatch(r'[a-z0-9-]+',release), 'invalid release id'
 stage=P('/opt/ygocube/.staging')/release;stage.mkdir(parents=True,exist_ok=False)
 with tarfile.open(archive) as t:
  for m in t.getmembers():assert P(m.name).parts[0] in ['ygocube','ygoduel','manifest.json'] and '..' not in P(m.name).parts
@@ -47,9 +48,15 @@ try:
     if attempt==29:raise
     time.sleep(1)
   assets=set(re.findall(r'(?:src|href)="([^" ]+\.(?:js|css)(?:\?[^" ]*)?)"',html));assert assets
+  css=[]
   for asset in assets:
    with urllib.request.urlopen('https://39.96.220.91'+asset,timeout=10) as r:
     assert ('javascript' in r.headers.get('Content-Type','') if '.js' in asset else 'text/css' in r.headers.get('Content-Type',''))
+    if '.css' in asset:css.append(r.read().decode())
+  styles='\n'.join(css)
+  assert re.search(r'\.grid\{display:grid[;}]',styles), 'Missing generated grid utility'
+  assert re.search(r'\.p-4\{padding:1rem[;}]',styles), 'Missing spacing utility'
+  assert '.bg-felt{' in styles, 'Missing configured theme'
   results[route]={'status':200,'assets':len(assets)}
  assert baseline==run('systemctl','show',*protected,'-p','MainPID','-p','ExecMainStartTimestamp')
 except Exception:
