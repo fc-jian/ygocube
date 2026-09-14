@@ -40,6 +40,7 @@ export function typeLabel(c: CardInfo): string {
     if (t & 0x200) kinds.push('灵魂');
     if (t & 0x400) kinds.push('同盟');
     if (t & 0x800) kinds.push('二重');
+    if (t & 0x400000) kinds.push('卡通');
     if (t & 0x2000000) kinds.push('特殊召唤');
     if (t & TYPE_TOKEN) kinds.push('衍生物');
     if (t & 0x40) kinds.push('融合');
@@ -57,7 +58,7 @@ export function typeLabel(c: CardInfo): string {
     else if (t & 0x20000) kinds.push('永续');
     else if (t & 0x40000) kinds.push('装备');
     else if (t & 0x80000) kinds.push('场地');
-    if (t & 0x100000) kinds.push('仪式');
+    if (t & 0x80) kinds.push('仪式');
     kinds.push('魔法');
   } else if (t & TRAP) {
     if (t & 0x20000) kinds.push('永续');
