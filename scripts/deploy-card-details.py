@@ -78,7 +78,9 @@ for n,root in roots.items():
     backup=root/'backups'/a.release
     backup.mkdir(parents=True,exist_ok=False)
     (backup/'previous-release.txt').write_text(str(olds[n]))
-    shutil.copy2(root/'shared/config.yaml',backup/'config.yaml')
+    config_file = root/'current/config.yaml'
+    if not config_file.exists(): config_file = root/'shared/config.yaml'
+    shutil.copy2(config_file,backup/'config.yaml')
 try:
     run('systemctl','stop','ygocube-api','ygoduel-api')
     assert not occupied(), 'Host appeared during maintenance preflight'
