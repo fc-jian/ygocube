@@ -143,7 +143,12 @@ describe("standalone room options", () => {
   it("accepts native default rooms without an explicit deck size extension", () => {
     const host = toHost(standaloneDefaults);
     delete host.deck_size;
-    expect(fromHost(host)).toMatchObject({mainMin: 40, mainMax: 60, extraMax: 15, sideMax: 15});
+    expect(fromHost(host)).toMatchObject({
+      mainMin: 40,
+      mainMax: 60,
+      extraMax: 15,
+      sideMax: 15,
+    });
   });
   it("rejects invalid modes, impossible deck ranges and oversized buffers", () => {
     for (const bad of [
@@ -162,24 +167,111 @@ describe("standalone room options", () => {
   });
 });
 
-describe('standalone room identity',()=>{
-  it('keeps password and room URL equivalent and persists reconnect identity',async()=>{
-    useTestDb();const axios=require('axios').default;
-    const {standaloneDefaults,toHost}=require('../src/duel/standalone');
-    const cards=new CardsService(),main=cards.poolCodes().filter(c=>!cards.isExtraDeck(c)).slice(0,40);
-    const enabled=config.webDuel.enabled;config.webDuel.enabled=true;
-    jest.spyOn(axios,'get').mockImplementation(async(url:any)=>({data:url.endsWith('options')?{lists:[{id:-1,name:'Unlimited'}]}:{hostinfo:toHost(standaloneDefaults),players:[],finished:false}}));
-    jest.spyOn(axios,'post').mockResolvedValue({data:{hostinfo:toHost(standaloneDefaults)}});
-    try{
-      const svc=new DuelService(cards),a=await svc.standaloneJoin({name:'Alice',password:'private-room',options:standaloneDefaults,deck:{main,extra:[],side:[]}});
+describe("standalone room identity", () => {
+  it("keeps password and room URL equivalent and persists reconnect identity", async () => {
+    useTestDb();
+    const axios = require("axios").default;
+    const { standaloneDefaults, toHost } = require("../src/duel/standalone");
+    const cards = new CardsService(),
+      main = cards
+        .poolCodes()
+        .filter((c) => !cards.isExtraDeck(c))
+        .slice(0, 40);
+    const enabled = config.webDuel.enabled;
+    config.webDuel.enabled = true;
+    jest
+      .spyOn(axios, "get")
+      .mockImplementation(async (url: any) => ({
+        data: url.endsWith("options")
+          ? { lists: [{ id: -1, name: "Unlimited" }] }
+          : {
+              hostinfo: toHost(standaloneDefaults),
+              players: [],
+              finished: false,
+            },
+      }));
+    jest
+      .spyOn(axios, "post")
+      .mockResolvedValue({ data: { hostinfo: toHost(standaloneDefaults) } });
+    try {
+      const svc = new DuelService(cards),
+        a = await svc.standaloneJoin({
+          name: "Alice",
+          password: "private-room",
+          options: standaloneDefaults,
+          deck: { main, extra: [], side: [] },
+        });
       expect(a.url).toBe(`/duel/room/${a.room}`);
-      expect((await svc.resolveRoom({password:'private-room'})).room).toBe(a.room);
-      await expect(svc.standaloneJoin({name:'Alice',room:a.room,deck:{main,extra:[],side:[]}})).rejects.toThrow('PLAYER_ID_EXISTS');
-      const restarted=new DuelService(cards),resumed=await restarted.standaloneJoin({room:a.room,name:'Alice',reconnect:true});
+      expect((await svc.resolveRoom({ password: "private-room" })).room).toBe(
+        a.room,
+      );
+      await expect(
+        svc.standaloneJoin({
+          name: "Alice",
+          room: a.room,
+          deck: { main, extra: [], side: [] },
+        }),
+      ).rejects.toThrow("PLAYER_ID_EXISTS");
+      const restarted = new DuelService(cards),
+        resumed = await restarted.standaloneJoin({
+          room: a.room,
+          name: "Alice",
+          reconnect: true,
+        });
       expect(resumed.credential).toBe(a.credential);
       expect(restarted.standaloneSession(a.credential).ticket).toBeTruthy();
-      await expect(svc.roomInfo('../cube')).rejects.toThrow('BAD_PAYLOAD');
-      const info=await svc.roomInfo(a.room);expect(info).not.toHaveProperty('credential');expect(info).not.toHaveProperty('deck');
-    }finally{config.webDuel.enabled=enabled;jest.restoreAllMocks()}
+      await expect(svc.roomInfo("../cube")).rejects.toThrow("BAD_PAYLOAD");
+      const info = await svc.roomInfo(a.room);
+      expect(info).not.toHaveProperty("credential");
+      expect(info).not.toHaveProperty("deck");
+    } finally {
+      config.webDuel.enabled = enabled;
+      jest.restoreAllMocks();
+    }
+  });
+});
+
+describe("standalone deck normalization and diagnostics", () => {
+  const options = require("../src/duel/standalone").standaloneDefaults;
+  const svc = new DuelService({
+    getMany: (codes: number[]) =>
+      codes
+        .filter((c) => c !== 999)
+        .map((code) => ({
+          code,
+          name: `Card ${code}`,
+          type: code === 3 ? 0x4000 : code === 2 ? 0x800001 : 17,
+        })),
+    isExtraDeck: (code: number) => code === 2,
+  } as any);
+  it("classifies extra cards before checking the main cap, preserving side", () => {
+    const d = (svc as any).checkedDeck(
+      { main: [...Array(60).fill(1), 2], extra: [], side: [2] },
+      options,
+    );
+    expect(d.main).toHaveLength(60);
+    expect(d.extra).toEqual([2]);
+    expect(d.side).toEqual([2]);
+  });
+  it.each([
+    [{ main: Array(39).fill(1), extra: [], side: [] }, "主卡组 39 张"],
+    [
+      { main: Array(40).fill(1), extra: Array(16).fill(2), side: [] },
+      "额外卡组 16 张",
+    ],
+    [
+      { main: Array(40).fill(1), extra: [], side: Array(16).fill(1) },
+      "副卡组 16 张",
+    ],
+    [{ main: [999], extra: [], side: [] }, "未知卡片：999"],
+    [{ main: [3], extra: [], side: [] }, "衍生物不能加入卡组"],
+  ])("explains rejected decks", (deck, reason) => {
+    try {
+      (svc as any).checkedDeck(deck, options);
+      throw Error("expected rejection");
+    } catch (e) {
+      expect((e as any).message).toBe("INVALID_DECK");
+      expect((e as any).details.reason).toContain(reason);
+    }
   });
 });

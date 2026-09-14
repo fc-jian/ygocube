@@ -203,14 +203,14 @@ export default function MatchesPage() {
             <button
               onClick={() => {
                 navigator.clipboard.writeText(
-                  `服务器:${server?.host ?? '127.0.0.1'}:${server?.port ?? 7911} 房间号:${myMatch.roomName ?? ''} 昵称:${pid}${ruleText ? ` 规则:${ruleText}` : ''}`,
+                  myMatch.roomName ?? '',
                 );
                 setCopied(true);
                 setTimeout(() => setCopied(false), 1500);
               }}
               className="mt-3 rounded bg-gold px-4 py-1.5 text-sm font-semibold text-felt-deep hover:brightness-110"
             >
-              {copied ? '已复制' : '复制加入信息'}
+              {copied ? '已复制' : '复制房间密码'}
             </button>
           )}
         </div>

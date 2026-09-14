@@ -40,6 +40,7 @@ export interface CardInfo {
   atk: number;
   def: number;
   alias: number;
+  aliasName?: string;
   setCodes: number[];
   setNames: string[];
   inPool?: boolean;
@@ -229,3 +230,7 @@ export interface StandaloneDuelOptions {
   noCheck: boolean; noShuffle: boolean;
 }
 export interface BrowserDeck { name: string; main: number[]; extra: number[]; side: number[]; }
+
+/** Standalone rooms may be entered before choosing a deck. */
+export interface StandaloneJoinRequest { name: string; password?: string; room?: string; options?: StandaloneDuelOptions; deck?: BrowserDeck; reconnect?: boolean; credential?: string; }
+export interface DuelActionError { type: 'error'; code: string; message?: string; }

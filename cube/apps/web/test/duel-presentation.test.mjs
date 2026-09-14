@@ -46,3 +46,14 @@ test('a hand activation moved to grave never marks another copy in its former ha
  assert.equal(exports.chainMatches(link,otherCopy,{cards:[source,otherCopy]}),false);
  assert.equal(exports.chainMatches(link,source,{cards:[source,otherCopy]}),true);
 });
+
+test('overlay choices resolve each public material by its sub-index, preserving unknown entries',()=>{
+ const host={player:1,location:4,sequence:2,code:123,position:1,materials:[222,333,0]};
+ const state={cards:[host]};
+ const choice=sub=>({ref:{player:1,location:132,sequence:2,sub}});
+ assert.equal(exports.publicChoiceCode(choice(0),state,0),222);
+ assert.equal(exports.publicChoiceCode(choice(1),state,0),333);
+ assert.equal(exports.publicChoiceCode(choice(2),state,0),0);
+ assert.equal(exports.publicChoiceCode(choice(3),state,0),0);
+ assert.equal(exports.publicChoiceCode({...choice(0),ref:{...choice(0).ref,sequence:3}},state,0),0);
+});

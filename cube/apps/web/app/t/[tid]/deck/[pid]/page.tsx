@@ -311,7 +311,7 @@ export default function DeckPage() {
               <span>未使用卡池（{discard.length}）</span>
               <span className="font-normal text-slate-500">可拖入此处移出构筑</span>
             </header>
-            <div className="card-grid-5">
+            <div className="card-grid-8">
               {discard.map((c, i) => (
                 <div
                   key={poolIds[i]}

@@ -348,3 +348,75 @@ r11 从仓库根目录调用 Next build，PostCSS/Tailwind 未稳定定位 Web �
 实际 JPEG 与损坏 JPG 回退测试均通过。两套 100267021 AVIF 接口均为 200 image/avif。
 两套 API、srvpro 和 Nginx 的 PID/启动时间保持不变，未重启比赛后端。静态资源、
 样式语义与进程校验记录保存在各实例 `backups/20260909-web-layout-pics-r12/verification.json`。
+
+## 2026-09-10：与原生客户端的交互对照
+
+本轮依据 `ygopro/gframe/deck_con.cpp` 的鼠标处理和 `event_handler.cpp` 的 `ClientField::CancelOrFinish` 调整网页端。Computer Use 的 `@oai/sky` 初始化及重置重试均失败，报 `windows sandbox failed: helper_unknown_error: setup refresh had errors`；浏览器 Computer Use 入口也出现同一错误。本轮未操作 Windows YGOPro GUI，原生客户端实操对照仍待工具恢复后补验，不能把源码对照和 Playwright 测试记作 Computer Use 验收。
+
+- 组卡：搜索卡图右键添加，卡组内右键移除，双击打开大图（Escape、关闭按钮、右键关闭）；同区拖动排序，跨区拖动移动，额外怪兽自动归入额外卡组。按具体索引移动，避免重复卡误删；无效区域和满区不移除来源卡。触屏保留添加及移区按钮。
+- 建房：玩家与卡组、对战规则分栏，较矮桌面调整规则列数，手机排列为单列；显示所选卡组主／额外／副数量，重连和观战仍使用原有密码解析接口。
+- 对战：右键先关闭查看／操作菜单；可选连锁返回响应确认，再次右键可不响应；是非选择发送否；选卡满足条件时提交，未选且允许取消时取消。必选表示形式、场地区域、未满足条件的选卡不会被跳过。区域操作卡片 hover／focus 更新详情。
+- 本轮未改变接口、房间协议、srvpro、宿主或生产环境配置。
+
+验收：Windows／WSL 前端 26 项测试通过；Windows Next 标准构建、WSL Linux standalone 构建和静态资源收集通过。`scripts/e2e/native-ui.cjs` 覆盖 1440×900、1366×768、1024×600、390×844 的右键加删、双击不移卡、拖动排序及页面溢出检查。`scripts/e2e/standalone-browser.cjs` 通过真实浏览器→WebSocket→API→srvpro→原生宿主完成召唤、右键关闭菜单、必选场地区域保护、增援检索右键提交、连锁结算、观战、重连及投降原因测试。测试采用全新的浏览器上下文和临时测试卡组。
+
+运行浏览器回归时设置 `PLAYWRIGHT_MODULE_PATH` 与 `CHROMIUM_PATH`，启动独立本地 Duel 后执行：
+
+```powershell
+node scripts/e2e/native-ui.cjs http://127.0.0.1:3100
+node scripts/e2e/standalone-browser.cjs http://127.0.0.1:3100 测试卡组.ydk
+```
+
+检索用例设置 `EFFECT_TEST=1`，使用无洗牌时初始手牌包含「增援」、卡组中有可检索战士族的 40 主／1 副卡组。修改已有 browser 测试时，先等待宿主发出选区提示，再统计可选区域；否则会把消息尚未到达误判为右键改变了候选数量。
+
+## 2026-09-10：超量素材与响应期间的场面确认
+
+本轮 Computer Use 已成功连接 Windows YGOPro-Cube 1.036.2-cube，实际操作自带 `single/sample3.lua` 超量教学残局：点击对方辉光子 → 查看列表 → 查看两张圣骑士素材与左侧详情；发动增援并开启显示时点 → 选择确认场面 → 询问收起、场地和取消操作仍可访问。测试结束返回主菜单，未保存测试录像。此轮观察覆盖素材列表与响应期间检查场面，并未完成整场 GUI 比赛。
+
+网页修复：
+
+- 素材增加错位叠放、入栈动画及独立数量按钮；对方素材按钮保持正向可读。列表按素材序号保留同名卡，每张支持 hover、键盘焦点和触屏查看详情。详情区域预留固定高度，避免移动端 hover 改变弹窗高度导致点击落空。
+- 素材选择按宿主位置和 `sub` 索引定位，不再点击超量怪兽就默认选第一张素材；取除素材沿用现有选择协议，公开素材名称可从宿主素材数组补全，未知条目继续保持未知。
+- 响应询问取消背景模糊和全屏遮挡，移除场地的 `inert`。摘要按实际卡片位置合并同一张卡的多个效果，只展示可响应卡图/卡名；点击摘要仅查看详情。确认响应后仍可取消，未确认时的查看操作不发送响应。
+- 新增“查看场面 / 返回响应”，可暂时收起中央窗口；当前响应归属提示持续保留。关闭卡片详情或素材列表后保留原响应状态；右侧重复动作在询问期间收起。
+
+验证：Windows 网页 27 项测试、类型检查和生产构建；独立 Linux 临时副本的同样测试及 standalone 构建。`scripts/e2e/material-response-ui.cjs` 使用实际 DuelClient 和受控服务端消息，在 1440/390 宽度验证查看不发动作、重复素材索引、取除后的数量、响应后取消、直接不响应以及透明背景命中。另运行真实 srvpro/无头宿主的检索、连锁处理、观战、重连与投降结果浏览器回归。
+
+Linux 验证使用 `/tmp/ygocube-material-ui.*` 的独立源码副本和 Linux 依赖。直接覆盖 WSL 未提交文件被自动审批拒绝后未执行；既有 WSL 工作目录保持原状。Aly 生产服务未修改。
+
+### r13：独立 Duel 网页交互发布
+
+已发布 Aly `/opt/ygoduel/releases/20260910-duel-material-response-r13`，仅重启 `ygoduel-web`；Cube 三个服务、独立 API/srvpro 及 Nginx 的 PID/启动时间与发布前完全相同。旧 r12 保留，可将 current 原子切回旧 release 并只重启 Web 回滚。
+
+- Linux 独立发布构建使用 `NEXT_PUBLIC_API_BASE=/duel-api`、`NEXT_ASSET_PREFIX=/duel-assets`、`CUBE_API_URL=http://127.0.0.1:3101`。回归用目录曾通过绝对链接借用 WSL 依赖，不能发布；发布构建在新目录复制 Linux 依赖，确认所有归档链接均在包内且可解析。
+- Build ID：`8H1dPaFyuKH2tT8umgN1b`；包 SHA-256：`56fbce4e0505154df6fc06e3f422ebf40c8dc1fc5a4c0cb6cdf900317b092efe`，2919 个文件校验通过。
+- 源码基线 `bd567cd2071e30e0fe30323dd8d9ac140a37fc76`，包含已授权但尚未提交的网页修改；逐文件摘要记录在 release `web/source.json`，源码摘要 `1e53d065f51ad7656ad8cdd3d1be8a75b8dfac12e746b6f6e805d03c2c720da7`，不冒称该基线提交本身包含本轮功能。
+- Aly 临时进程预检通过后才切换 current。公网 `/`、`/duel`、`/duel/decks`、`/duel/play` 引用的所有静态资源均 200/MIME 正确；两套健康检查、低清卡图、私有 API 隔离通过。真实浏览器的建房/组卡在 1440×900、1366×768、1024×600、390×844 通过。截图前等待字体就绪，避免页面字体加载阶段出现瞬时高度误报。
+- **线上对战验收未通过**：专用测试连接返回 `4011 HOST_UNAVAILABLE`，独立 srvpro 日志显示本机代理地址 `BAD IP`，第一次发生于 r13 切换前。当前还有两个保留宿主，因此未为清空进程内封禁而重启 srvpro，也未放松协议检查。本轮 Web 发布成功不能表述为线上完整对战测试通过。
+
+发布和阻断证据位于 `/opt/ygoduel/backups/20260910-duel-material-response-r13/` 下的 `verification.json`、`smoke-verification.json`、`protected-services.txt`、`previous-release.txt`。保留旧 release 及预检目录供后续诊断；本轮未提交或推送 Git。
+
+### r13 重启复验：解除既有代理封禁
+
+随后按用户明确授权关闭独立 Duel 的两个既有宿主，并停止、启动 `ygoduel-srvpro`、`ygoduel-api`、`ygoduel-web`。`KillMode=control-group` 确保旧宿主全部退出；清除 srvpro 进程内封禁并重建 API 会话状态。Cube API/srvpro/Web 和 Nginx 的 PID/启动时间完全不变。
+
+重启后的公网 HTTPS/WSS 测试通过：双方建房/入房、准备、召唤及放置、BO3 换备、两局投降结束；真实浏览器在 390/1440 宽度完成检索效果、连锁处理、观战、身份重连和投降结果验收。所有服务 active，当前 srvpro invocation 内 `BAD IP`、`INVALID_PACKET`、`Oversized CTOS`、`Bad CTOS message length` 均为 0。本次恢复当前服务，不代表已从代码层解决共享代理地址封禁的根本问题。
+
+最新结果存于 Aly `/opt/ygoduel/backups/20260910-duel-material-response-r13/restart-verification.json`，此前失败的 `smoke-verification.json` 保留为历史证据；当前线上对战验收以重启后的记录为准。
+
+### 2026-09-10：房间内选卡组与对局信息回归
+
+- 建房和加入不再要求卡组；房间内上传/选择 cookie 卡组，准备前可以反复修改。无头宿主 UPDATE_DECK 自动准备，代理仅在点击准备时转发卡组，避免提前准备；准备确认期间和已准备状态拒绝换卡组，取消准备后开放。Cube 卡组锁定不变。
+- YDK 导入和服务端均按 CDB 类型区分 main/extra，side 保持原区；校验错误返回中文具体原因，含实际数量、房间上限、未知卡号等。宿主禁限卡表/同名卡/卡片范围错误也显示可读说明。
+- 视口高度跟随 visualViewport 和实际页面顶部位置；TIME_LIMIT 每包重建计时锚点，消除相同秒数的重复包以及提示切换产生的累计偏差。
+- 展示卡片使用可关闭卡图面板；手牌发动卡图展示延长，连锁记录可点击查看；本局最近 2000 条记录保留公开的召唤、移动、攻击、抽卡、展示和连锁卡号，可查看效果。详情复用 Cube CardMeta（字段/类型/属性/种族/刻度/连接等）。
+- 换备显示上一局胜负和宿主原因；除外/额外区区分表里并显示总数(表侧数)，里侧除外不会在对手视角显示卡图。有可操作卡片的区域也可选择查看全部卡片，浏览后点卡优先打开详情。
+- 回归：`scripts/e2e/duel-information-ui.cjs` 覆盖桌面/竖屏高度、重复时钟、隐私、区域查看、展示、字段、手牌发动和换备结果；`native-ui.cjs` 覆盖四种尺寸大厅/组卡器；`standalone-browser.cjs` 覆盖真实检索、连锁、观战/重连；`DUEL_API_BASE=/api DECK_LOBBY_TEST=1 node scripts/e2e/standalone-remote.cjs http://127.0.0.1:3100 data/native-ui-fixture.ydk` 覆盖真实准备锁定、错误说明、归类和 BO3。
+- Linux 在独立临时目录使用 Linux 依赖编译，不覆盖既有 WSL 工作树；生产构建保持 `/duel-api`、`/duel-assets` 前缀。本轮未部署 Aly。
+
+### 2026-09-10：Aly r14 发布与重启验收
+
+- 独立 release：`20260910-duel-room-information-r14`，Web build ID `jHQ-igys3WT3bArB_J4Yq`。同时发布 Linux API、共享/对局协议和 standalone Web（含 static）。宿主与卡牌资源保持原哈希。
+- 构建来源：`bd567cd2071e30e0fe30323dd8d9ac140a37fc76` 加工作区修复；完整文件哈希记录在 release 的 `web/source.json`，应用源码哈希 `6e75227b795b130d9b1795fed0a74b7395e59567cda76f5820d8c8f24a58c143`。归档 SHA-256 `d6780ec39c06059c2fa170a2a1ceff7fd41c0e859d32bb366a2a572656ebaaa1`。
+- 重启独立 API/srvpro/Web；Cube 三服务及 Nginx PID/启动时间不变。备份与回滚来源在 `/opt/ygoduel/backups/20260910-duel-room-information-r14/`，旧 release 为 r13；SQLite backup integrity_check=ok。
+- 公网真实 WSS BO3 两局、换备、空卡组入房、具体校验错误、额外归类、准备锁定/解锁通过；真实浏览器检索/连锁、观战/ID 重连、胜负原因通过。1440/390 对局展示受控帧测试及四尺寸大厅/组卡器通过。七服务 active，静态资源/MIME、卡图、30 分钟重连均通过；新 invocation 中 BAD IP/协议解析错误为零。验收文件为 `verification.json` 和 `restart-verification.json`。

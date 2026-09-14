@@ -257,6 +257,13 @@ Opus/Vorbis 等实际链接到 Release 配置；用 PE 架构检查、依赖检�
 test 验证，而不是只看编译命令成功。若二进制明显小于已知成功产物、音频依赖未
 解析或版本后缀丢失，立即停止，不把该客户端放入发布包。
 
+#### Windows Cube 客户端容量参数验收
+
+- Windows 完整客户端使用仓库的 `scripts/build-ygopro-client.ps1`，默认源码目录为相邻 `../ygopro`、分支为 `cube-server`，默认 extra/side 各 30；需要更大容量时显式传入 `-MaxExtra` / `-MaxSide`，与目标比赛约定一致。
+- 每次构建必须重新生成 VS 工程，显式传 `--max-extra=30 --max-side=30`（或本次约定的容量）及完整音频参数。仅运行 MSBuild 会复用旧工程；`1.036.2-cube` 后缀只能证明代码版本，不能证明容量宏正确。
+- 构建前核对 Release|x64 的 `YGOPRO_MAX_EXTRA`、`YGOPRO_MAX_SIDE` 和音频宏，缺项直接失败。未传容量参数时源码默认 15，会导致组卡/普通加载截断；Cube 推送后保存并重新加载也经过这条路径。
+- 用超出 15 张的真实 YDK 在本次生成的 exe 内打开，核验界面 main/extra/side 实际数量。2026-09-10 回归夹具为 40/30/30；记录新 exe 路径、SHA-256 和实际运行验证，不把头文件常量或项目配置单独当作二进制验收。
+
 ### 6. 完成本地测试和提交审计
 
 标准测试入口会运行资源 helper、Cube API/Web、srvpro 构建和两个真实流程探针：

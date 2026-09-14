@@ -24,6 +24,7 @@ export interface CardInfo {
   atk: number;
   def: number;
   alias: number;
+  aliasName?: string;
   setCodes: number[];
   setNames: string[];
   /** Only populated by public pool-card responses; false means search hit is outside the pool. */
@@ -462,6 +463,7 @@ export class CardsService {
       atk: r.atk ?? 0,
       def: r.def ?? 0,
       alias: r.alias ?? 0,
+      aliasName: r.alias && r.alias !== r.code ? (getDb().prepare('SELECT name FROM cards WHERE code=?').get(r.alias) as { name: string } | undefined)?.name ?? '' : '',
       setCodes: parseArray(r.setcodes_json).filter((value): value is number => typeof value === 'number'),
       setNames: parseArray(r.setnames_json).filter((value): value is string => typeof value === 'string'),
     };

@@ -265,7 +265,7 @@ srvpro 发送精简的 `room_name/start/end/players/first/wins`；每个 player 
 ## 5. 卡牌元数据与错误码
 
 `CardInfo` 字段：`code/name/type/desc/level/lscale/rscale/linkMarkers/race/`
-`attribute/atk/def/alias/setCodes/setNames`。name/code 是 exact 卡表行；alias 只
+`attribute/atk/def/alias/aliasName/setCodes/setNames`。name/code 是 exact 卡表行；alias 只
 用于卡组规则副本上限与合法性检查，不用于卡池、搜索、状态或详情去重。
 name 的显示值优先来自 `server.card_names_json` 中的 `sc_name` → `md_name` → `jp_name` → `cn_name` → `en_name`；
 若这些字段均为空或映射缺失，则回退到 exact code 对应的 CDB `texts.name` 原名。
@@ -411,3 +411,18 @@ MSG_CHAINING 保留当前实体 ref 与原始发动位置 originRef，并在短�
 ### 先行卡目录索引
 
 卡片服务读取 `server.cards_cdb` 后，按文件名顺序加载同级 `expansions/*.cdb`，同编号后加载者覆盖，保持与 Linux 宿主一致。原始卡库不合并、不修改；搜索、卡池、候选池、卡组校验和对局元数据共用此索引。名称继续按 exact code 外部映射优先、扩展库原名兜底，衍生物仍禁止搜索及入池。每次 API 启动原子重建完整索引，移除已撤回扩展卡。低清卡图生成输入须包括已安装 expansion 的图片。对局描述 ID（code × 16 + slot）与录像效果选项文字同样按扩展库覆盖读取。搜索索引和查询均使用 NFKC，兼容全角字母及符号。
+
+### 8.9 房间内选卡组与对局信息
+
+- `POST /public/duel/join` 的 `deck` 改为可选，缺省为空卡组，允许先建房/加入；旧调用携带卡组仍兼容。主卡/额外按 CDB 类型重新分类，副卡保持原区。
+- 独立玩家在 lobby 未准备时可通过既有 action opcode=2 更新卡组，按房间真实规则校验，返回 STOC_CUBE_DECK 和 `{type:"accepted",opcode:2,stage:"lobby"}`；准备后先取消准备。Cube 玩家不开放此路径。换备仍执行原卡总集合及 main/extra/side 数量守恒校验。
+- 卡组错误保持 `INVALID_DECK` code；REST 通过 `details.reason`、WebSocket 通过 `message` 提供中文原因；数量错误含实际数目及允许范围，未知卡/衍生物包含卡号。空卡组不能准备。
+- 展示/连锁历史仅记录协议已向当前视角公开的卡号；新局清空历史，换备保留上一局结果与原因。里侧除外不得向对手显示此前已知卡号。除外和额外区域显示总数(表侧数)。
+- 计时以每个 TIME_LIMIT 包的接收时刻为锚点（相同数值也更新），响应确认冻结已消耗时间，后台恢复时按实际经过时间刷新，不按渲染/提示计数。
+- 无头宿主在 UPDATE_DECK 后自动准备：lobby opcode=2 只在代理持久化选中卡组；点击准备 opcode=0x22 才将卡组发送到宿主。等待宿主准备状态确认期间也锁定改卡组，避免竞态；进入比赛后的重连继续发送原始卡组进行 srvpro 身份比对。
+
+### 8.10 卡片详情与禁限提示
+
+CardInfo 增加可选 aliasName：alias 对应 exact code 的显示卡名，查不到时为空字符串。Cube 与 Duel 构筑共用完整类型、属性、种族、等级/阶级、刻度、连接标记、字段及规则同名详情；Duel 不显示抓位统计。
+
+GET /public/duel/options 与私有 /cube/standalone-options 的 lists 每项增加 limits（卡号到 0/1/2/3 的映射），索引与宿主加载顺序保持一致，无限制为空映射。Duel 构筑默认选日期最新的 OCG 表，允许切换，卡图左上角显示禁/限/准限；按 YGOPro 使用 alias（非零时）查表，未列出为 3。此选项只影响构筑显示，不改房间规则。

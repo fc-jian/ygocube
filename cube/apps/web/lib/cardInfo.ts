@@ -36,6 +36,12 @@ export function typeLabel(c: CardInfo): string {
   const t = c.type;
   const kinds: string[] = [];
   if (t & MONSTER) {
+    if (t & 0x80) kinds.push('仪式');
+    if (t & 0x200) kinds.push('灵魂');
+    if (t & 0x400) kinds.push('同盟');
+    if (t & 0x800) kinds.push('二重');
+    if (t & 0x2000000) kinds.push('特殊召唤');
+    if (t & TYPE_TOKEN) kinds.push('衍生物');
     if (t & 0x40) kinds.push('融合');
     if (t & 0x2000) kinds.push('同调');
     if (t & 0x800000) kinds.push('XYZ');
@@ -124,7 +130,7 @@ export function raceAttrLine(c: CardInfo): string {
 }
 
 export function aliasLine(c: CardInfo): string {
-  return c.alias && c.alias !== c.code ? `规则同名编号：${c.alias}` : '';
+  return c.alias && c.alias !== c.code && c.aliasName ? `规则同名：${c.aliasName}` : '';
 }
 
 /** Resolve a card's rules copy key without replacing the displayed code. */

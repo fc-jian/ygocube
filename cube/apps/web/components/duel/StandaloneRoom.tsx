@@ -2,15 +2,12 @@
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { DuelClient } from "./DuelClient";
-import { readDecks, saveDeck, parseYdk, SavedDeck } from "./deck-cookie";
 import { LocalPicsSetting } from "@/components/IdentityWidget";
 import "./standalone.css";
 export function StandaloneRoom({ room }: { room: string }) {
   const [info, setInfo] = useState<any>(null),
     [session, setSession] = useState<any>(null),
     [name, setName] = useState(""),
-    [decks, setDecks] = useState<SavedDeck[]>([]),
-    [deckId, setDeckId] = useState(""),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
     [copied, setCopied] = useState(false);
@@ -26,7 +23,6 @@ export function StandaloneRoom({ room }: { room: string }) {
         .catch((e) => active && setError(e.message));
     refresh();
     const t = setInterval(refresh, 5000);
-    setDecks(readDecks());
     try {
       const saved = JSON.parse(
         sessionStorage.getItem(`yc_room_${room}`) || "null",
@@ -42,8 +38,6 @@ export function StandaloneRoom({ room }: { room: string }) {
     setBusy(true);
     setError("");
     try {
-      const deck = decks.find((d) => d.id === deckId);
-      if (kind === "join" && !deck) throw Error("请选择卡组");
       const r = await api<any>(
         kind === "watch" ? "/public/duel/watch" : "/public/duel/join",
         {
@@ -55,7 +49,6 @@ export function StandaloneRoom({ room }: { room: string }) {
               : {
                   room,
                   name,
-                  deck,
                   reconnect: kind === "reconnect",
                   credential: session?.credential,
                 },
@@ -143,40 +136,6 @@ export function StandaloneRoom({ room }: { room: string }) {
                   maxLength={12}
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                />
-              </label>
-              <label>
-                卡组
-                <select
-                  value={deckId}
-                  onChange={(e) => setDeckId(e.target.value)}
-                >
-                  <option value="">选择卡组</option>
-                  {decks.map((d) => (
-                    <option key={d.id} value={d.id}>
-                      {d.name} ({d.main.length}/{d.extra.length}/{d.side.length}
-                      )
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                上传 YDK
-                <input
-                  type="file"
-                  accept=".ydk,.txt"
-                  onChange={async (e) => {
-                    try {
-                      const f = e.target.files?.[0];
-                      if (!f) return;
-                      if (f.size > 65536) throw Error("文件过大");
-                      const id = saveDeck(parseYdk(await f.text(), f.name));
-                      setDecks(readDecks());
-                      setDeckId(id);
-                    } catch (e) {
-                      setError((e as Error).message);
-                    }
-                  }}
                 />
               </label>
             </div>

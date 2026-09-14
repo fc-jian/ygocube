@@ -4,7 +4,7 @@ import urllib.request,urllib.error,re,json,subprocess,pathlib
 P=pathlib.Path;base='https://39.96.220.91';result={}
 release=(P('/opt/ygoduel/current')).resolve().name
 backup=P('/opt/ygoduel/backups')/release
-for route in ['/','/duel','/duel/decks']:
+for route in ['/','/duel','/duel/decks','/duel/play']:
  with urllib.request.urlopen(base+route,timeout=15) as r:html=r.read().decode()
  urls=set(re.findall(r'(?:src|href)="([^" ]+\.(?:js|css)(?:\?[^" ]*)?)"',html))
  assert urls

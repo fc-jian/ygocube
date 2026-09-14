@@ -12,6 +12,7 @@ export interface CardInfo {
   atk: number;
   def: number;
   alias?: number;
+  aliasName?: string;
   setCodes: number[];
   setNames: string[];
   inPool?: boolean;

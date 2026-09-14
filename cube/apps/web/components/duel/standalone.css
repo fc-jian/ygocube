@@ -637,3 +637,158 @@
     right: -32px;
   }
 }
+.deck-editor .deck-insert-before::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 -3px;
+  width: 3px;
+  background: #8cf0ff;
+  box-shadow: 0 0 8px #4ce6ff;
+  z-index: 15;
+  pointer-events: none;
+}
+.deck-large-card {
+  margin: auto;
+  width: min(480px, 94vw);
+  max-height: 94dvh;
+  overflow: auto;
+  padding: 16px;
+  color: #e2e8f0;
+  background: #102337;
+  border: 1px solid #72cfea;
+  border-radius: 8px;
+}
+.deck-large-card::backdrop {
+  background: #020813dc;
+}
+.deck-large-card > img {
+  display: block;
+  width: 100%;
+  height: min(65dvh, 620px);
+  object-fit: contain;
+}
+.deck-large-card > button {
+  display: block;
+  margin-left: auto;
+}
+.deck-large-card p {
+  white-space: pre-wrap;
+}
+.duel-lobby {
+  max-width: 1160px;
+  min-height: 100dvh;
+  padding: clamp(12px, 3vh, 28px);
+  background: radial-gradient(ellipse at top, #243e55, #0a1420 80%);
+}
+.duel-lobby h1 {
+  margin: 8px 0;
+  font-size: 24px;
+}
+.duel-lobby .lobby-hint {
+  color: #a8bbca;
+  font-size: 13px;
+}
+.lobby-pics {
+  margin: 10px 0;
+}
+.lobby-pics summary {
+  cursor: pointer;
+  color: #a5f3fc;
+}
+.lobby-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.3fr);
+  gap: 14px;
+  align-items: start;
+}
+.duel-lobby .standalone-panel {
+  margin: 0;
+  padding: 16px;
+  border-radius: 6px;
+  background: #132539e8;
+}
+.duel-lobby .standalone-panel h2 {
+  font-size: 16px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #385368;
+}
+.duel-lobby .standalone-fields {
+  gap: 10px;
+}
+.duel-lobby input,
+.duel-lobby select {
+  padding: 7px;
+  min-height: 36px;
+  width: 100%;
+}
+.duel-lobby input[type="checkbox"] {
+  width: auto;
+}
+.duel-lobby label {
+  font-size: 13px;
+  gap: 5px;
+}
+.lobby-deck-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 12px;
+  background: #0b1827;
+  border-left: 3px solid #67e8f9;
+}
+.lobby-deck-summary span {
+  font-size: 12px;
+  color: #a8bbca;
+}
+.lobby-submit {
+  grid-column: 1/-1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+@media (max-width: 699px) {
+  .lobby-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .lobby-submit {
+    position: sticky;
+    bottom: 0;
+    background: #102337f5;
+    padding: 8px 0;
+    z-index: 2;
+  }
+  .lobby-submit > button {
+    flex: 1;
+  }
+}
+@media (min-width: 700px) and (max-height: 800px) {
+  .duel-lobby {
+    padding: 10px 16px;
+  }
+  .duel-lobby header {
+    margin-bottom: 6px;
+  }
+  .duel-lobby .standalone-panel {
+    padding: 10px;
+  }
+  .duel-lobby .standalone-fields {
+    gap: 6px;
+  }
+  .duel-lobby .standalone-panel:nth-child(2) .standalone-fields {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .duel-lobby input,
+  .duel-lobby select {
+    min-height: 32px;
+    padding: 5px;
+  }
+  .duel-lobby input[type="checkbox"] {
+    min-height: 0;
+  }
+}
+
+.deck-banlist { display: flex; gap: .6rem; align-items: center; margin-bottom: .5rem; }
+.deck-editor .card-preview { position: relative; }
+.deck-limit { position: absolute; top: 2px; left: 2px; z-index: 2; width: 20px; height: 20px; border: 2px solid white; border-radius: 50%; display: grid; place-items: center; background: #d52828; color: white; font: bold 13px/1 sans-serif; pointer-events: none; }
+.deck-limit-2 { background: #bd7200; }

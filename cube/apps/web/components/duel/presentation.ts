@@ -96,6 +96,12 @@ export function publicChoiceCode(
   own: number,
 ) {
   if (choice.code) return choice.code;
+  if (choice.ref && choice.ref.location & 128) {
+    const host = state.cards.find((card) =>
+      sameCard({ ...choice.ref!, location: choice.ref!.location & 127 }, card),
+    );
+    return host?.materials[choice.ref.sub ?? 0] ?? 0;
+  }
   const card = state.cards.find((card) => sameCard(choice.ref, card));
   if (!card?.code) return 0;
   return card.player === own ||
@@ -119,4 +125,21 @@ export function chainMatches(
       link.code === card.code &&
       sameCard(link.originRef, card))
   );
+}
+
+// Only consume card codes that the protocol parser already exposed to this view.
+export function logCardCodes(line: string): number[] {
+  const p = line.split(":");
+  const values = ["move", "summon", "activate", "reveal"].includes(p[0])
+    ? [p[1]]
+    : p[0] === "chain"
+      ? [p[3]]
+      : p[0] === "attack"
+        ? p.slice(1, 3)
+        : p[0] === "draw"
+          ? (p[3] ?? "").split(",")
+          : [];
+  return [
+    ...new Set(values.map(Number).filter((n) => Number.isInteger(n) && n > 0)),
+  ];
 }

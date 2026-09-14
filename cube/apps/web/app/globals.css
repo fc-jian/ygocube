@@ -344,3 +344,5 @@ footer[class*='border-felt-edge'][class*='bg-felt'] {
     transition-duration: 0.01ms !important;
   }
 }
+
+.card-grid-8 { @apply grid gap-1; grid-template-columns: repeat(8, minmax(0, 1fr)); }

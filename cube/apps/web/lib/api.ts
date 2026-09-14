@@ -84,7 +84,7 @@ export function readIdentity(tid?: string): Identity | null {
 
 export class ApiError extends Error {
   constructor(public status: number, public code: string, public details?: unknown) {
-    super(code);
+    super(code === "INVALID_DECK" && details && typeof details === "object" && "reason" in details ? String(details.reason) : code);
   }
 }
 

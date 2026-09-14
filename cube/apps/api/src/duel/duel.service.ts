@@ -142,6 +142,57 @@ export class DuelService implements OnModuleDestroy {
       this.joining.delete(key);
     }
   }
+  private checkedDeck(
+    raw: any,
+    options?: ReturnType<typeof standaloneOptions>,
+  ) {
+    const fail = (reason: string): never => {
+      throw Object.assign(new Error("INVALID_DECK"), { details: { reason } });
+    };
+    if (
+      !raw ||
+      ["main", "extra", "side"].some(
+        (k) =>
+          !Array.isArray(raw[k]) ||
+          raw[k].length > 200 ||
+          raw[k].some(
+            (c: any) => !Number.isInteger(c) || c <= 0 || c > 0xffffffff,
+          ),
+      )
+    )
+      fail("卡组格式错误：每区最多 200 张，卡号必须是正整数");
+    const codes: number[] = [...raw.main, ...raw.extra, ...raw.side];
+    if (codes.length > 500) fail("卡组总数不能超过 500 张");
+    const cards = new Map(
+      this.cards.getMany([...new Set(codes)]).map((c) => [c.code, c]),
+    );
+    for (const code of codes) {
+      const card = cards.get(code);
+      if (!card) fail(`未知卡片：${code}`);
+      if (card!.type & 0x4000)
+        fail(`衍生物不能加入卡组：${card!.name}（${code}）`);
+    }
+    const combined = [...raw.main, ...raw.extra] as number[];
+    const deck = {
+      main: combined.filter((c) => !this.cards.isExtraDeck(c)),
+      extra: combined.filter((c) => this.cards.isExtraDeck(c)),
+      side: [...raw.side] as number[],
+    };
+    if (options && !options.noCheck) {
+      if (
+        deck.main.length < options.mainMin ||
+        deck.main.length > options.mainMax
+      )
+        fail(
+          `主卡组 ${deck.main.length} 张，要求 ${options.mainMin}–${options.mainMax} 张`,
+        );
+      if (deck.extra.length > options.extraMax)
+        fail(`额外卡组 ${deck.extra.length} 张，最多 ${options.extraMax} 张`);
+      if (deck.side.length > options.sideMax)
+        fail(`副卡组 ${deck.side.length} 张，最多 ${options.sideMax} 张`);
+    }
+    return deck;
+  }
   private async joinStandalone(body: any) {
     if (!config.webDuel.enabled) throw new Error("DUEL_DISABLED");
     getDb()
@@ -196,30 +247,10 @@ export class DuelService implements OnModuleDestroy {
       if (e.message !== "MATCH_NOT_FOUND" || body.room) throw e;
       return null;
     });
-    const options = existing?.options ?? standaloneOptions(body.options),
-      d = body.deck;
-    if (
-      !d ||
-      ["main", "extra", "side"].some(
-        (k) =>
-          !Array.isArray(d[k]) ||
-          d[k].length > 200 ||
-          d[k].some(
-            (c: any) => !Number.isInteger(c) || c <= 0 || c > 0xffffffff,
-          ),
-      ) ||
-      d.main.length + d.extra.length + d.side.length > 500
-    )
-      throw new Error("INVALID_DECK");
-    const codes = [...d.main, ...d.extra, ...d.side],
-      cards = this.cards.getMany([...new Set<number>(codes)]);
-    if (
-      new Set(cards.map((c) => c.code)).size !== new Set(codes).size ||
-      cards.some((c) => c.type & 0x4000) ||
-      d.main.some((c: number) => this.cards.isExtraDeck(c)) ||
-      d.extra.some((c: number) => !this.cards.isExtraDeck(c))
-    )
-      throw new Error("INVALID_DECK");
+    const options = existing?.options ?? standaloneOptions(body.options);
+    const d = body.deck
+      ? this.checkedDeck(body.deck, options)
+      : { main: [], extra: [], side: [] };
     const lists = await this.standaloneOptions();
     if (!lists.lists.some((l: any) => l.id === options.lflist))
       throw new Error("BAD_PAYLOAD");
@@ -229,14 +260,7 @@ export class DuelService implements OnModuleDestroy {
       { headers: this.headers(), timeout: 15000 },
     );
     const actual = fromHost(r.data.hostinfo);
-    if (
-      !actual.noCheck &&
-      (d.main.length < actual.mainMin ||
-        d.main.length > actual.mainMax ||
-        d.extra.length > actual.extraMax ||
-        d.side.length > actual.sideMax)
-    )
-      throw new Error("INVALID_DECK");
+    if (body.deck) this.checkedDeck(d, actual);
     const credential = crypto.randomBytes(32).toString("base64url");
     // A private suffix distinguishes players with identical display names in srvpro reconnect.
     const name = body.name.trim() + "$" + credential.slice(0, 5);
@@ -531,12 +555,18 @@ export class DuelService implements OnModuleDestroy {
         if (this.players.get(key) === ws) this.players.delete(key);
       },
     });
-    if (standalone)
-      await axios.get(`${config.srvpro.url}/cube/room_status`, {
-        params: { room_name: t.room },
-        headers: this.headers(),
-        timeout: 5000,
-      });
+    const nativeStatus = standalone
+      ? (
+          await axios.get(`${config.srvpro.url}/cube/room_status`, {
+            params: { room_name: t.room },
+            headers: this.headers(),
+            timeout: 5000,
+          })
+        ).data
+      : undefined;
+    const roomOptions = standalone
+      ? (await this.roomInfo(t.room)).options
+      : undefined;
     const currentDeck = standalone
       ? { data: standalone.current }
       : await axios.get(`${config.srvpro.url}/cube/web-player`, {
@@ -553,7 +583,8 @@ export class DuelService implements OnModuleDestroy {
     const s = initialState(),
       framer = new Framer();
     let id = 0,
-      sentDeck = false;
+      sentDeck = false,
+      readyRequested = false;
     const tcp = net.connect({
       host: config.webDuel.upstreamHost,
       port: config.srvpro.gamePort,
@@ -572,7 +603,7 @@ export class DuelService implements OnModuleDestroy {
         packet(10, encodeDeck(currentDeck.data.main, currentDeck.data.side)),
       ),
     );
-    const initial = standalone?.deck ?? loadState(t.tid).decks[t.pid!];
+    let initial = standalone?.deck ?? loadState(t.tid).decks[t.pid!];
     const initialDeck = encodeDeck(
       [...initial.main, ...initial.extra],
       initial.side,
@@ -594,13 +625,21 @@ export class DuelService implements OnModuleDestroy {
           const previousPrompt = s.prompt,
             previousStage = s.stage;
           applyFrame(s, frame);
+          if ((frame[2] === 0x21 && (frame[3] >>> 4) === s.seat) || frame[2] === 2)
+            readyRequested = !!s.ready[s.seat];
           if (standalone && frame[2] === 0x16)
             getDb()
               .prepare("DELETE FROM standalone_duel_players WHERE credential=?")
               .run(t.standalone!);
           if (frame[2] === 0x12 && !sentDeck) {
             sentDeck = true;
-            write(2, initialDeck);
+            if (
+              (!standalone || nativeStatus.duel_stage !== 0) &&
+              (initial.main.length ||
+                initial.extra.length ||
+                initial.side.length)
+            )
+              write(2, initialDeck);
           }
           if (frame[2] === 0x18) write(0x15);
           if (
@@ -649,8 +688,60 @@ export class DuelService implements OnModuleDestroy {
         )
           throw new Error("STALE_ACTION");
         const data = new Uint8Array(a.data);
-        if (!allowedAction(s, a.opcode, data))
+        const lobbyDeck =
+          !!standalone &&
+          s.stage === "lobby" &&
+          !s.ready[s.seat] &&
+          !readyRequested &&
+          a.opcode === 2 &&
+          data.length >= 8 &&
+          data.length <= 2056;
+        if (!lobbyDeck && !allowedAction(s, a.opcode, data))
           throw new Error("INVALID_ACTION");
+        if (standalone && a.opcode === 0x22) {
+          if (!standalone.deck.main.length)
+            throw Object.assign(new Error("INVALID_DECK"), {
+              details: { reason: "请先选择卡组" },
+            });
+          this.checkedDeck(standalone.deck, roomOptions);
+          readyRequested = true;
+          write(
+            2,
+            encodeDeck(
+              [...standalone.deck.main, ...standalone.deck.extra],
+              standalone.deck.side,
+            ),
+          );
+        }
+        if (lobbyDeck) {
+          const v = new DataView(data.buffer),
+            n = v.getUint32(0, true),
+            k = v.getUint32(4, true);
+          if (n + k > 500 || data.length !== 8 + 4 * (n + k))
+            throw Object.assign(new Error("INVALID_DECK"), {
+              details: { reason: "卡组数据长度错误" },
+            });
+          const codes = Array.from({ length: n + k }, (_, i) =>
+            v.getUint32(8 + i * 4, true),
+          );
+          initial = this.checkedDeck(
+            { main: codes.slice(0, n), extra: [], side: codes.slice(n) },
+            roomOptions,
+          );
+          standalone!.deck = initial;
+          s.deck = {
+            main: [...initial.main, ...initial.extra],
+            side: initial.side,
+          };
+          standalone!.current = s.deck;
+          this.persistStandalone(t.standalone!);
+          this.send(
+            ws,
+            Buffer.from(packet(10, encodeDeck(s.deck.main, s.deck.side))),
+          );
+          this.send(ws, { type: "accepted", opcode: 2, stage: "lobby" });
+          return;
+        }
         if (a.opcode === 2) {
           const v = new DataView(data.buffer);
           const n = v.getUint32(0, true),
@@ -660,7 +751,12 @@ export class DuelService implements OnModuleDestroy {
             n !== initial.main.length + initial.extra.length ||
             k !== initial.side.length
           )
-            throw new Error("INVALID_DECK");
+            throw Object.assign(new Error("INVALID_DECK"), {
+              details: {
+                reason:
+                  "换备必须保持主卡组、额外卡组、副卡组数量及所有卡片总集合不变",
+              },
+            });
           const codes = Array.from({ length: n + k }, (_, i) =>
             v.getUint32(8 + i * 4, true),
           );
@@ -675,11 +771,21 @@ export class DuelService implements OnModuleDestroy {
               .sort((a, b) => a - b)
               .some((c, i) => c !== expected[i])
           )
-            throw new Error("INVALID_DECK");
+            throw Object.assign(new Error("INVALID_DECK"), {
+              details: {
+                reason:
+                  "换备必须保持主卡组、额外卡组、副卡组数量及所有卡片总集合不变",
+              },
+            });
           const main = codes.slice(0, n),
             extra = main.filter((c) => this.cards.isExtraDeck(c));
           if (extra.length !== initial.extra.length)
-            throw new Error("INVALID_DECK");
+            throw Object.assign(new Error("INVALID_DECK"), {
+              details: {
+                reason:
+                  "换备必须保持主卡组、额外卡组、副卡组数量及所有卡片总集合不变",
+              },
+            });
           s.deck = { main, side: codes.slice(n) };
           if (standalone) {
             standalone.current = s.deck;
@@ -694,7 +800,11 @@ export class DuelService implements OnModuleDestroy {
         prompt();
         this.send(ws, { type: "accepted", opcode: a.opcode });
       } catch (e) {
-        this.send(ws, { type: "error", code: (e as Error).message });
+        this.send(ws, {
+          type: "error",
+          code: (e as Error).message,
+          message: (e as any).details?.reason,
+        });
       }
     });
   }
@@ -920,7 +1030,8 @@ export class DuelService implements OnModuleDestroy {
         const m = line.match(/^!system\s+(\d+)\s+(.+)$/);
         if (m) system.set(Number(m[1]), m[2]);
       }
-    for (const id of ids) values[id] = id <= 0x7ff ? system.get(id) ?? String(id) : String(id);
+    for (const id of ids)
+      values[id] = id <= 0x7ff ? (system.get(id) ?? String(id)) : String(id);
     for (const source of cardDatabasePaths(config.server.cardsCdb)) {
       const db = new Database(source, {
         readonly: true,

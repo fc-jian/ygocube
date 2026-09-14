@@ -342,3 +342,17 @@ test('chain activation reveals the card explicitly identified by the host',()=>{
  const s=p.initialState();s.cards=[{player:1,location:2,sequence:0,code:0,position:0,materials:[],counters:{}}];
  p.applyGame(s,bytes(70,u32(123),1,2,0,1,1,2,0,u32(0),1));assert.equal(s.cards[0].code,123);
 });
+
+test('public hand activation and reveal remain inspectable after resolution', () => {
+  const s=p.initialState();
+  s.cards=[{code:0,player:1,location:2,sequence:0,position:2,materials:[],counters:{}}];
+  p.applyFrame(s,p.packet(1,bytes(70,card(32807846,1,2,0,2),1,2,0,u32(0),1)));
+  assert.equal(s.cards[0].code,32807846);
+  assert(s.logs.includes('activate:32807846:1:1:2'));
+  p.applyFrame(s,p.packet(1,bytes(72,1)));
+  p.applyFrame(s,p.packet(1,bytes(74)));
+  assert(s.logs.includes('chain:72:1:32807846'));
+  p.applyFrame(s,p.packet(1,bytes(31,1,0,1,short(89631139,1,2,0))));
+  assert.deepEqual(s.revealed,[89631139]);
+  assert(s.logs.includes('reveal:89631139:1'));
+});

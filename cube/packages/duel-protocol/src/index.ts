@@ -572,6 +572,8 @@ export function applyGame(s: DuelState, bytes: Uint8Array) {
     s.cards = [];
     s.chain = [];
     s.turn = 0;
+    s.logs = [];
+    s.revealed = [];
     s.winner = undefined;
     s.winReason = undefined;
     s.stage = "dueling";
@@ -609,7 +611,7 @@ export function applyGame(s: DuelState, bytes: Uint8Array) {
     for (let i = 0; i < n; i++) {
       const code = r.u32(),
         a = ref(r, false);
-      if (code) s.revealed.push(code & 0x7fffffff);
+      if (code) { s.revealed.push(code & 0x7fffffff); s.logs.push(`reveal:${code & 0x7fffffff}:${player}`); }
       const target =
         m === 31
           ? a
@@ -759,7 +761,7 @@ export function applyGame(s: DuelState, bytes: Uint8Array) {
     Object.assign(ensure(s, a), { code, position: a.sub });
     s.logs.push(`summon:${code}`);
   } else if (m === 70) {
-    const code = r.u32(),
+    const code = r.u32() & 0x7fffffff,
       a = ref(r);
     const originRef = ref(r, false);
     const description = r.u32();
@@ -767,8 +769,10 @@ export function applyGame(s: DuelState, bytes: Uint8Array) {
     const source = s.cards.find((card) => key(card, a));
     if (source) source.code = code;
     s.chain.push({ code, ref: a, originRef, description, index });
+    s.logs.push(`activate:${code}:${a.player}:${index}:${a.location}`);
   } else if ([71, 72, 73, 75, 76].includes(m)) {
-    s.logs.push(`chain:${m}:${r.u8()}`);
+    const index = r.u8();
+    s.logs.push(`chain:${m}:${index}:${s.chain.find(c => c.index === index)?.code ?? 0}`);
   } else if (m === 74) s.chain = [];
   else if (m === 90) {
     const player = r.u8(),
@@ -783,7 +787,7 @@ export function applyGame(s: DuelState, bytes: Uint8Array) {
       c.code = code;
       add(s, c, { player, location: 2, sequence: count(s, player, 2) });
     }
-    s.logs.push(`draw:${player}:${n}`);
+    s.logs.push(`draw:${player}:${n}:${(n ? s.cards.filter(c => c.player === player && c.location === 2).slice(-n) : []).map(c => c.code).join(",")}`);
   } else if ([91, 92, 94, 100].includes(m)) {
     const player = r.u8(),
       n = r.u32();
@@ -839,16 +843,20 @@ export function applyGame(s: DuelState, bytes: Uint8Array) {
       s.chain.push({ index: i, code, ref: a, description: r.u32() });
     }
     s.stage = "dueling";
+  } else if (m === 110) {
+    const attacker = get(s, ref(r)), target = get(s, ref(r));
+    const visible = (c: Card | undefined) => c && (c.player === s.seat || !!(c.position & 5)) ? c.code : 0;
+    s.logs.push(`attack:${visible(attacker)}:${visible(target)}`);
   } else if (
     [
-      61, 63, 65, 80, 81, 83, 110, 111, 112, 113, 114, 120, 130, 131, 133, 160,
+      61, 63, 65, 80, 81, 83, 111, 112, 113, 114, 120, 130, 131, 133, 160,
       163, 164, 165, 170,
     ].includes(m)
   ) {
     s.logs.push(`event:${m}:${Array.from(r.take(r.remaining)).join(",")}`);
   } else throw new Error(`UNSUPPORTED_MESSAGE_${m}`);
   if (r.remaining) throw new Error(`MESSAGE_LAYOUT_${m}`);
-  s.logs = s.logs.slice(-150);
+  s.logs = s.logs.slice(-2000);
 }
 export function applyFrame(s: DuelState, frame: Uint8Array) {
   const r = new Reader(frame);
@@ -916,7 +924,7 @@ export function applyFrame(s: DuelState, frame: Uint8Array) {
         .decode(r.take(r.remaining))
         .replace(/\0.*$/s, ""),
     );
-    s.logs = s.logs.slice(-150);
+    s.logs = s.logs.slice(-2000);
   }
 }
 export function encodeDeck(main: number[], side: number[]) {

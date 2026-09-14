@@ -1,38 +1,38 @@
 "use client";
-import { useEffect, useState } from "react";
+import { importYdk } from "./import-ydk";
+
+import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { CardImage } from "@/components/CardImage";
 import {
   readDecks,
   saveDeck,
   deleteDeck,
-  parseYdk,
   ydk,
   SavedDeck,
 } from "./deck-cookie";
 import type { BrowserDeck } from "@ygocube/shared";
-import { races, attributes } from "./duel-text";
+import { CardMeta } from "@/components/CardPreview";
+import type { CardInfo } from "@/lib/types";
+import { typeLabel, raceAttrLine, statLine, atkDefLine } from "@/lib/cardInfo";
+import { latestOcg, cardLimit, type Banlist } from "@/lib/banlist";
 import { LocalPicsSetting } from "@/components/IdentityWidget";
+import {
+  insertDeckCard,
+  isExtraType,
+  type DeckDrag,
+  type DeckZone,
+} from "./deck-edit";
 import "./standalone.css";
-type Info = {
-  code: number;
-  name: string;
-  desc: string;
-  type: number;
-  atk?: number;
-  def?: number;
-  level?: number;
-  race?: number;
-  attribute?: number;
-};
+type Info = CardInfo;
+const unknownCard = (code: number): Info => ({ code, name: String(code), desc: "", type: 0, atk: -1, def: -1, level: 0, race: 0, attribute: 0, lscale: 0, rscale: 0, linkMarkers: 0, setCodes: [], setNames: [] });
 const blank = (): BrowserDeck => ({
   name: "新卡组",
   main: [],
   extra: [],
   side: [],
 });
-const isExtra = (c: Info) =>
-  !!(c.type & (0x40 | 0x2000 | 0x800000 | 0x4000000));
+const isExtra = (c: Info) => isExtraType(c.type);
 export function StandaloneDecks() {
   const [saved, setSaved] = useState<SavedDeck[]>([]),
     [deck, setDeck] = useState<BrowserDeck>(blank),
@@ -44,12 +44,28 @@ export function StandaloneDecks() {
     [detail, setDetail] = useState<Info | null>(null),
     [target, setTarget] = useState<"main" | "side">("main"),
     [notice, setNotice] = useState("");
+  const [lists, setLists] = useState<Banlist[]>([]);
+  const [listId, setListId] = useState(-1);
+  useEffect(() => {
+    let active = true;
+    api<{ lists: Banlist[] }>("/public/duel/options", { identity: null }).then(r => {
+      if (active) { setLists(r.lists); setListId(latestOcg(r.lists)); }
+    }).catch(e => active && setNotice(e.message));
+    return () => { active = false; };
+  }, []);
+  const badge = (card: { code: number; alias?: number }) => {
+    const count = cardLimit(lists.find(l => l.id === listId), card);
+    return count < 3 ? <span className={`deck-limit deck-limit-${count}`} aria-label={['禁止', '限制', '准限制'][count]}>{count}</span> : null;
+  };
   const [selectedCard, setSelectedCard] = useState<string | null>(null);
-  const [drag, setDrag] = useState<{
-    code: number;
-    zone?: "main" | "extra" | "side";
-    index?: number;
-  } | null>(null);
+  const [drag, setDrag] = useState<DeckDrag | null>(null);
+  const [enlarged, setEnlarged] = useState<Info | null>(null);
+  const largeCard = useRef<HTMLDialogElement>(null);
+  const [dropAt, setDropAt] = useState<string | null>(null);
+  useEffect(() => {
+    if (enlarged) largeCard.current?.showModal();
+    else largeCard.current?.close();
+  }, [enlarged]);
   const [kind, setKind] = useState(0),
     [sort, setSort] = useState("relevance");
   useEffect(() => {
@@ -158,16 +174,8 @@ export function StandaloneDecks() {
 
   const preview = detail && (infos[detail.code] ?? detail);
   const show = (code: number) =>
-    setDetail(infos[code] ?? { code, name: String(code), desc: "", type: 0 });
-  const summary = (c: Info) =>
-    [
-      c.type & 1 ? "怪兽" : c.type & 2 ? "魔法" : "陷阱",
-      c.attribute ? attributes.zh[Math.log2(c.attribute)] : "",
-      c.race ? races.zh[Math.log2(c.race)] : "",
-      c.level ? `★${c.level}` : "",
-    ]
-      .filter(Boolean)
-      .join(" / ");
+    setDetail(infos[code] ?? unknownCard(code));
+  const summary = (c: Info) => [typeLabel(c), raceAttrLine(c), statLine(c)].filter(Boolean).join(" / ");
   const filtered = results
     .filter((c) => !kind || !!(c.type & kind))
     .slice()
@@ -180,7 +188,7 @@ export function StandaloneDecks() {
             ? (b.level ?? 0) - (a.level ?? 0)
             : 0,
     );
-  const drop = (zone: "main" | "extra" | "side") => {
+  const drop = (zone: DeckZone, index?: number) => {
     if (!drag) return;
     const c = infos[drag.code];
     if (!c) return;
@@ -190,19 +198,13 @@ export function StandaloneDecks() {
       return;
     }
     const to = zone === "main" && isExtra(c) ? "extra" : zone;
-    if (to === drag.zone) {
-      setDrag(null);
-      return;
-    }
-    if (deck[to].length >= 200) {
+    if (to !== drag.zone && deck[to].length >= 200) {
       setNotice("区域已满");
       setDrag(null);
       return;
     }
-    const next = { ...deck };
-    if (drag.zone !== undefined)
-      next[drag.zone] = deck[drag.zone].filter((_, i) => i !== drag.index);
-    next[to] = [...next[to], drag.code];
+    const next = insertDeckCard(deck, drag, zone, c.type, index);
+    setDropAt(null);
     edit(next);
     setDrag(null);
     setSelectedCard(null);
@@ -217,6 +219,12 @@ export function StandaloneDecks() {
           <LocalPicsSetting />
         </details>
       </header>
+      <label className="deck-banlist">禁限卡表
+        <select aria-label="禁限卡表" value={listId} onChange={e => setListId(Number(e.target.value))} disabled={!lists.length}>
+          {!lists.length && <option value={-1}>加载中…</option>}
+          {lists.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+        </select>
+      </label>
       <section className="deck-management" aria-label="卡组管理">
         <select
           aria-label="已保存卡组"
@@ -271,7 +279,7 @@ export function StandaloneDecks() {
                 const f = e.target.files?.[0];
                 if (!f || !replace()) return;
                 if (f.size > 65536) throw Error("文件过大");
-                const d = parseYdk(
+                const d = await importYdk(
                     await f.text(),
                     f.name.replace(/\.ydk$/i, ""),
                   ),
@@ -358,15 +366,7 @@ export function StandaloneDecks() {
               <div className="deck-inspector-copy">
                 <h2>{preview.name}</h2>
                 <small>{preview.code}</small>
-                <p className="deck-card-stats">
-                  {summary(preview)}
-                  {!!(preview.type & 1) && (
-                    <>
-                      <br />
-                      {preview.atk ?? "?"} / {preview.def ?? "?"}
-                    </>
-                  )}
-                </p>
+                <CardMeta card={preview} showPickStats={false} />
                 <p className="deck-effect-text">{preview.desc}</p>
               </div>
             </>
@@ -411,7 +411,19 @@ export function StandaloneDecks() {
                 {deck[z].map((code, i) => (
                   <article
                     key={`${code}-${i}`}
-                    className={selectedCard === `${z}:${i}` ? "selected" : ""}
+                    className={`${selectedCard === `${z}:${i}` ? "selected" : ""} ${dropAt === `${z}:${i}` ? "deck-insert-before" : ""}`}
+                    onDragOver={(e) => {
+                      if (drag) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setDropAt(`${z}:${i}`);
+                      }
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      drop(z, i);
+                    }}
                     onMouseEnter={() => show(code)}
                     draggable={!!infos[code]}
                     onDragStart={(e) => {
@@ -419,7 +431,10 @@ export function StandaloneDecks() {
                       e.dataTransfer.setData("text/plain", String(code));
                       e.dataTransfer.effectAllowed = "move";
                     }}
-                    onDragEnd={() => setDrag(null)}
+                    onDragEnd={() => {
+                      setDrag(null);
+                      setDropAt(null);
+                    }}
                   >
                     <button
                       className="card-preview"
@@ -430,7 +445,11 @@ export function StandaloneDecks() {
                         show(code);
                         setSelectedCard(`${z}:${i}`);
                       }}
-                      onDoubleClick={() => move(z, i)}
+                      onDoubleClick={() =>
+                        setEnlarged(
+                          infos[code] ?? unknownCard(code),
+                        )
+                      }
                       onContextMenu={(e) => {
                         e.preventDefault();
                         edit({
@@ -444,6 +463,7 @@ export function StandaloneDecks() {
                         code={code}
                         name={infos[code]?.name ?? String(code)}
                       />
+                      {badge(infos[code] ?? { code })}
                     </button>
                     <div className="deck-card-controls">
                       <button
@@ -529,22 +549,30 @@ export function StandaloneDecks() {
                   e.dataTransfer.setData("text/plain", String(c.code));
                   e.dataTransfer.effectAllowed = "copy";
                 }}
-                onDragEnd={() => setDrag(null)}
+                onDragEnd={() => {
+                  setDrag(null);
+                  setDropAt(null);
+                }}
               >
                 <button
                   className="card-preview"
                   onFocus={() => setDetail(c)}
                   onClick={() => setDetail(c)}
-                  onDoubleClick={() => add(c)}
+                  onDoubleClick={() => setEnlarged(c)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    add(c);
+                  }}
                 >
                   <CardImage code={c.code} name={c.name} />
+                  {badge(c)}
                 </button>
                 <div className="deck-result-copy">
                   <strong>{c.name}</strong>
                   <small>{summary(c)}</small>
                   {!!(c.type & 1) && (
                     <span>
-                      {c.atk ?? "?"} / {c.def ?? "?"}
+                      {atkDefLine(c)}
                     </span>
                   )}
                   <button aria-label={`添加 ${c.name}`} onClick={() => add(c)}>
@@ -564,8 +592,34 @@ export function StandaloneDecks() {
       </div>
       <footer className="deck-editor-footer">
         <span role="status">{notice || (dirty ? "有未保存修改" : "")}</span>
-        <span>双击移卡 · 右键移除 · 拖动调整区域</span>
+        <span>右键加卡／移除 · 双击放大 · 拖动排序</span>
       </footer>
+      <dialog
+        ref={largeCard}
+        className="deck-large-card"
+        aria-label="卡片大图"
+        onCancel={() => setEnlarged(null)}
+        onClose={() => setEnlarged(null)}
+        onClick={(e) => {
+          if (e.target === e.currentTarget) setEnlarged(null);
+        }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setEnlarged(null);
+        }}
+      >
+        {enlarged && (
+          <>
+            <button autoFocus onClick={() => setEnlarged(null)}>
+              关闭
+            </button>
+            <CardImage code={enlarged.code} name={enlarged.name} />
+            <h2>{enlarged.name}</h2>
+            <CardMeta card={enlarged} showPickStats={false} />
+            <p className="deck-effect-text">{enlarged.desc}</p>
+          </>
+        )}
+      </dialog>
     </main>
   );
 }

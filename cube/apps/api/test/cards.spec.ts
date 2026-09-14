@@ -197,6 +197,8 @@ describe('ygopro card metadata decoding', () => {
     insert.run(700000010, '链一', 0x21, '', 4, 1, 1, 0, 0, 700000011, '链一', 6);
     insert.run(700000011, '链二', 0x21, '', 4, 1, 1, 0, 0, 700000012, '链二', 6);
     insert.run(700000012, '链三', 0x21, '', 4, 1, 1, 0, 0, 0, '链三', 6);
+    expect(cards.getMany([700000010])[0].aliasName).toBe('链二');
+    expect(cards.getMany([700000012])[0].aliasName).toBe('');
     expect(cards.canonicalCode(700000010)).toBe(700000012);
     insert.run(700000012, '链三', 0x21, '', 4, 1, 1, 0, 0, 700000010, '链三', 6);
     // Card metadata is immutable after startup in production, so canonical

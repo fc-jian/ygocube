@@ -1,6 +1,10 @@
 "use client";
+import { RoomDeckPicker } from "./RoomDeckPicker";
+import { CardMeta } from "@/components/CardPreview";
+import type { CardInfo } from "@/lib/types";
 import { victoryReasons } from "./victory";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { secondaryResponse } from "./interaction";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import {
   applyFrame,
   initialState,
@@ -21,6 +25,7 @@ import { LocalPicsSetting } from "@/components/IdentityWidget";
 import "./duel.css";
 import {
   cardActions,
+  logCardCodes,
   sameCard,
   formatSystemText,
   effectQuestion,
@@ -29,15 +34,7 @@ import {
   duelEffect,
   DuelEffect,
 } from "./presentation";
-type Info = {
-  code: number;
-  name: string;
-  desc: string;
-  type: number;
-  atk: number;
-  def: number;
-  level: number;
-};
+type Info = CardInfo;
 type Recording = {
   frames: {
     t: number;
@@ -76,6 +73,7 @@ export function DuelClient({
   mid?: string;
   mode?: "player" | "watch" | "replay";
 }) {
+  const secondarySent = useRef<number | null>(null);
   const [choiceSent, setChoiceSent] = useState<number | null>(null);
   const [lang] = useState<DuelLanguage>("zh"),
     text = duelText[lang];
@@ -94,8 +92,13 @@ export function DuelClient({
     fetching = useRef(new Set<number>());
   const [descriptions, setDescriptions] = useState<Record<number, string>>({}),
     descriptionRequests = useRef(new Set<number>());
+  const [materialRef, setMaterialRef] = useState<Choice["ref"] | null>(null);
   const [fieldPicking, setFieldPicking] = useState(false);
   const [chainAcceptedId, setChainAcceptedId] = useState<number | null>(null);
+  const [chainInspectId, setChainInspectId] = useState<number | null>(null);
+  useEffect(() => {
+    setMaterialRef(null);
+  }, [revision]);
   const [chainPassedId, setChainPassedId] = useState<number | null>(null);
   const [hoverCard, setHoverCard] = useState(0);
   const [hoverPoint, setHoverPoint] = useState({ x: 0, y: 0 });
@@ -106,24 +109,37 @@ export function DuelClient({
   const [pendingOperation, setPendingOperation] = useState<Choice | null>(null);
   const shellRef = useRef<HTMLElement | null>(null);
   const visualChain = useRef<Choice[]>([]);
+  const clockAnchor = useRef(performance.now());
+  const [deckSubmitting, setDeckSubmitting] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [showRevealed, setShowRevealed] = useState(false);
+  useEffect(() => {
+    if (state.revealed?.length) setShowRevealed(true);
+    else setShowRevealed(false);
+  }, [state.revealed]);
   useEffect(() => {
     const shell = shellRef.current;
     if (!shell) return;
+    let frame = 0,
+      previous = "";
     const resize = () => {
+      const viewport = window.visualViewport;
       const height = Math.max(
         240,
-        window.innerHeight - shell.getBoundingClientRect().top,
+        (viewport?.height ?? window.innerHeight) +
+          (viewport?.offsetTop ?? 0) -
+          shell.getBoundingClientRect().top,
       );
-      shell.style.setProperty("--duel-height", `${height}px`);
+      const value = `${Math.floor(height)}px`;
+      if (value !== previous) {
+        shell.style.setProperty("--duel-height", value);
+        previous = value;
+      }
+      frame = requestAnimationFrame(resize);
     };
-    resize();
-    window.addEventListener("resize", resize);
-    const observer = new ResizeObserver(resize);
-    if (shell.parentElement) observer.observe(shell.parentElement);
-    return () => {
-      window.removeEventListener("resize", resize);
-      observer.disconnect();
-    };
+    // Position can change without a resize (fonts, room header, hydration).
+    frame = requestAnimationFrame(resize);
+    return () => cancelAnimationFrame(frame);
   }, []);
   const [lobbyJoined, setLobbyJoined] = useState(false);
   const [detailRef, setDetailRef] = useState<Choice["ref"] | null>(null);
@@ -167,7 +183,13 @@ export function DuelClient({
     if (!effect) return;
     const timer = setTimeout(
       () => setEffects((q) => q.filter((e) => e.id !== effect.id)),
-      effect.kind === "solved" ? 200 : effect.kind === "resolve" ? 850 : 650,
+      effect.kind === "activate"
+        ? 1400
+        : effect.kind === "solved"
+          ? 200
+          : effect.kind === "resolve"
+            ? 850
+            : 650,
     );
     return () => clearTimeout(timer);
   }, [effect?.id]);
@@ -323,6 +345,8 @@ export function DuelClient({
               const v = JSON.parse(e.data);
               if (v.type === "snapshot") {
                 model.current = v.state;
+                clockAnchor.current = performance.now();
+                setElapsed(0);
                 setEffects([]);
                 repaint();
               }
@@ -331,6 +355,7 @@ export function DuelClient({
                 retries = 0;
               }
               if (v.type === "prompt") {
+                secondarySent.current = null;
                 setChainAcceptedId(null);
                 setChainPassedId(null);
                 promptId.current = v.id;
@@ -339,11 +364,25 @@ export function DuelClient({
               if (v.type === "accepted") {
                 setError("");
                 model.current.prompt = null;
+                if (model.current.timePlayer < 2) {
+                  const player = model.current.timePlayer;
+                  model.current.time[player] = Math.max(
+                    0,
+                    model.current.time[player] -
+                      (performance.now() - clockAnchor.current) / 1000,
+                  );
+                }
                 model.current.timePlayer = 2;
-                if (v.opcode === 2) model.current.stage = "waitingSide";
+                if (v.opcode === 2) {
+                  setDeckSubmitting(false);
+                  model.current.stage =
+                    v.stage === "lobby" ? "lobby" : "waitingSide";
+                }
                 repaint();
               }
               if (v.type === "error") {
+                setDeckSubmitting(false);
+                secondarySent.current = null;
                 setChainPassedId(null);
                 zoneSubmitted.current = false;
                 zoneSelected.current = [];
@@ -357,6 +396,10 @@ export function DuelClient({
             const frame = new Uint8Array(e.data);
             if (frame[2] === 3 || frame[2] === 4) setChoiceSent(null);
             applyFrame(model.current, frame);
+            if (frame[2] === 0x18) {
+              clockAnchor.current = performance.now();
+              setElapsed(0);
+            }
             if (frame[2] === 0x13) setLobbyJoined(true);
             animate(frame);
             if (model.current.error === "RETRY") {
@@ -368,23 +411,24 @@ export function DuelClient({
               const code = Number(
                 model.current.error.replace("HOST_ERROR_", ""),
               );
-              const reasons = [
-                "宿主拒绝",
-                "禁限卡表",
-                "仅 OCG",
-                "仅 TCG",
-                "未知卡片",
-                "同名卡数量",
-                "主卡组数量",
-                "额外卡组数量",
-                "备选卡组数量",
-                "卡片范围",
-              ];
+              const kind = code >>> 28,
+                value = code & 0xfffffff;
+              const name = metadataRef.current[value]?.name ?? `卡片 ${value}`;
+              const reasons: Record<number, string> = {
+                1: `「${name}」违反房间禁限卡表`,
+                2: `「${name}」为 OCG 专用卡，房间规则不允许`,
+                3: `「${name}」为 TCG 专用卡，房间规则不允许`,
+                4: `服务器无法识别卡片 ${value}`,
+                5: `「${name}」的同名卡数量超过限制`,
+                6: `主卡组 ${value} 张，不符合房间数量规则`,
+                7: `额外卡组 ${value} 张，不符合房间数量规则`,
+                8: `副卡组 ${value} 张，不符合房间数量规则`,
+                9: `「${name}」不在房间允许的卡片范围内`,
+              };
               setError(
-                Number.isFinite(code)
-                  ? `${reasons[code >>> 28] ?? reasons[0]} · ${code & 0xfffffff}`
-                  : model.current.error,
+                reasons[kind] ?? "服务器未接受操作，请核对房间和卡组规则",
               );
+              model.current.error = undefined;
             }
             repaint();
           } catch (e) {
@@ -437,6 +481,8 @@ export function DuelClient({
   }, [state.stage]);
   useEffect(() => {
     const codes = new Set<number>();
+    for (const line of state.logs)
+      for (const code of logCardCodes(line)) codes.add(code);
     for (const c of state.cards) {
       if (c.code) codes.add(c.code);
       for (const v of c.materials) if (v) codes.add(v);
@@ -578,15 +624,16 @@ export function DuelClient({
     return () => clearInterval(timer);
   }, [playing, recording, speed, repaint]);
   useEffect(() => {
-    setElapsed(0);
-    if (state.timePlayer > 1 || mode === "replay") return;
-    const start = Date.now();
-    const interval = setInterval(
-      () => setElapsed(Math.floor((Date.now() - start) / 1000)),
-      250,
-    );
-    return () => clearInterval(interval);
-  }, [state.timePlayer, state.time[0], state.time[1], mode]);
+    if (mode === "replay") return;
+    const tick = () =>
+      setElapsed(Math.max(0, (performance.now() - clockAnchor.current) / 1000));
+    const interval = setInterval(tick, 100);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", tick);
+    };
+  }, [mode]);
   const zoneSubmitted = useRef(false);
   const zoneSelected = useRef<number[]>([]);
   useEffect(() => {
@@ -648,6 +695,7 @@ export function DuelClient({
       xs.includes(i) ? xs.filter((x) => x !== i) : [...xs, i],
     );
   const choose = (p: Prompt, c: Choice) => {
+    if (chainConfirmation) return;
     if (p.kind === "unselect") action(1, new Uint8Array([1, c.index]));
     else if (["command", "yesno", "chain", "position"].includes(p.kind))
       action(1, integer(c.value ?? c.index));
@@ -670,6 +718,12 @@ export function DuelClient({
         return text.phases[phaseCodes.indexOf(n)] ?? line;
       case "draw":
         return `${state.names[n]} · ${"抽卡"} × ${v}`;
+      case "attack":
+        return `${cardName(n)} 攻击 ${v ? cardName(v) : "目标 / 直接攻击"}`;
+      case "activate":
+        return `${state.names[v]} · ${zoneName(Number(parts[4]))}发动 · 连锁 ${parts[3]} · ${cardName(n)}`;
+      case "reveal":
+        return `${state.names[v]} 展示 · ${cardName(n)}`;
       case "summon":
         return `${text.summon} · ${cardName(n)}`;
       case "move":
@@ -677,7 +731,7 @@ export function DuelClient({
       case "win":
         return `${state.names[n] ?? "平局"} ✓`;
       case "chain":
-        return `${text.chain} ${v}`;
+        return `${text.chain} ${v} · ${{ 71: "形成", 72: "处理中", 73: "处理完成", 75: "发动无效", 76: "效果无效" }[n] ?? ""}`;
       case "hint":
         return formatSystemText(descriptions[v], [], metadata[v]?.name ?? "");
       case "event":
@@ -724,6 +778,59 @@ export function DuelClient({
     setOperationChoices(null);
     action(1, integer(-1));
   };
+  const secondaryAction = (e: React.MouseEvent) => {
+    if (
+      (e.target as HTMLElement).closest(
+        "input, textarea, select, a, [contenteditable=true]",
+      )
+    )
+      return;
+    if (confirmQuit) {
+      e.preventDefault();
+      setConfirmQuit(false);
+      return;
+    }
+    if (materialRef) {
+      e.preventDefault();
+      setMaterialRef(null);
+      return;
+    }
+    if (detail !== null || zone !== null) {
+      e.preventDefault();
+      setDetail(null);
+      setZone(null);
+      return;
+    }
+    if (operationChoices) {
+      e.preventDefault();
+      setOperationChoices(null);
+      setPendingOperation(null);
+      return;
+    }
+    if (mode !== "player" || !state.prompt || status !== "connected") return;
+    const p = state.prompt;
+    if (p.kind === "chain" && p.cancel) {
+      e.preventDefault();
+      if (chainConfirmation) passChain();
+      else if (chainPassedId !== revision) setChainAcceptedId(null);
+      return;
+    }
+    const response = secondaryResponse(
+      p,
+      selected.length,
+      selectionValid(p, selected, amounts),
+    );
+    if (response === "none") return;
+    e.preventDefault();
+    if (secondarySent.current === revision) return;
+    secondarySent.current = revision;
+    action(
+      1,
+      response === "finish"
+        ? encodeSelection(p, selected, amounts)
+        : integer(response === "no" ? 0 : -1),
+    );
+  };
   const playable =
     mode === "player" &&
     !!state.prompt &&
@@ -735,7 +842,7 @@ export function DuelClient({
     : effects.length
       ? visualChain.current
       : [];
-  const cardButton = (c: Card, small = false) => {
+  const cardButton = (c: Card, small = false, inspectOnly = false) => {
     const choices =
       mode === "player"
         ? (state.prompt?.choices ?? []).filter(
@@ -754,74 +861,135 @@ export function DuelClient({
     const chosen = choices.some(
       (choice) => selected.includes(choice.index) || choice.selected,
     );
-    const facedown = !!(c.location & 12) && !!(c.position & 10);
+    const facedown = !!(c.location & (4 | 8 | 32 | 64)) && !!(c.position & 10);
     const knownSet =
       facedown &&
       !!c.code &&
       ((mode === "player" && c.player === own) || mode === "replay");
     const visible = !!c.code && (!facedown || knownSet);
     return (
-      <button
-        key={`${c.player}:${c.location}:${c.sequence}`}
-        className={`duel-card ${canSelect ? "card-selectable" : ""} ${chosen ? "card-chosen" : ""} ${knownSet ? "known-set" : ""} ${effect?.ref && sameCard(effect.ref, c) ? "duel-effect-source" : ""} ${c.player === opponent && c.location === 4 && c.sequence >= 5 ? "opponent-extra" : ""} ${small ? "duel-small" : ""} ${c.location === 4 && c.position & 12 ? "defense" : ""}`}
-        onClick={() => {
-          if (canSelect && state.prompt) {
-            if (playable) {
-              setZone(null);
-              setDetail(null);
-              setOperationRegion(false);
-              setPendingOperation(null);
-              setOperationChoices(choices);
-            } else choose(state.prompt, choices[0]);
-          } else if (visible) openDetail(c.code, c);
-          else setZone({ player: c.player, location: c.location });
-        }}
-        aria-pressed={canSelect ? chosen : undefined}
-        data-card-code={visible ? c.code : undefined}
-        aria-label={visible ? cardName(c.code) : text.unknown}
-      >
-        {knownSet && <span className="duel-back set-back" />}
-        {visible ? (
-          <CardImage
-            code={c.code}
-            name={cardName(c.code)}
-            className="duel-image"
-          />
-        ) : (
-          <span className="duel-back" />
-        )}
-        {c.location === 4 && visible && (
-          <span className="duel-stat">
-            {c.atk ?? metadata[c.code]?.atk ?? "?"} /{" "}
-            {c.def ?? metadata[c.code]?.def ?? "?"}
-          </span>
-        )}
-        {links
-          .filter((link) => chainMatches(link, c, state))
-          .map((link) => (
+      <Fragment key={`${c.player}:${c.location}:${c.sequence}`}>
+        <button
+          className={`duel-card ${canSelect ? "card-selectable" : ""} ${chosen ? "card-chosen" : ""} ${knownSet ? "known-set" : ""} ${effect?.ref && sameCard(effect.ref, c) ? "duel-effect-source" : ""} ${c.player === opponent && c.location === 4 && c.sequence >= 5 ? "opponent-extra" : ""} ${small ? "duel-small" : ""} ${c.location === 4 && c.position & 12 ? "defense" : ""}`}
+          onClick={() => {
+            if (chainConfirmation || inspectOnly) {
+              if (visible) {
+                if (inspectOnly) setZone(null);
+                openDetail(c.code, c);
+              }
+              return;
+            }
+            if (
+              canSelect &&
+              choices.some(
+                (choice) =>
+                  !!(choice.ref?.location && choice.ref.location & 128),
+              )
+            ) {
+              setMaterialRef(c);
+              return;
+            }
+            if (canSelect && state.prompt) {
+              if (playable) {
+                setZone(null);
+                setDetail(null);
+                setOperationRegion(false);
+                setPendingOperation(null);
+                setOperationChoices(choices);
+              } else choose(state.prompt, choices[0]);
+            } else if (visible) openDetail(c.code, c);
+            else setZone({ player: c.player, location: c.location });
+          }}
+          aria-pressed={canSelect ? chosen : undefined}
+          data-card-code={visible ? c.code : undefined}
+          aria-label={visible ? cardName(c.code) : text.unknown}
+        >
+          {!!c.materials.length && (
             <span
-              className={`duel-chain-marker ${effect?.index === link.index ? "resolving" : ""}`}
-              key={link.index}
-              aria-label={`连锁 ${link.index}`}
+              className={`duel-material-stack ${c.position & 12 ? "turned" : ""}`}
+              aria-hidden="true"
             >
-              <small>连锁</small>
-              <b>{link.index}</b>
+              {c.materials.slice(0, 4).map((code, index) => (
+                <span
+                  className="duel-material-layer"
+                  key={`${index}:${code}`}
+                  style={
+                    {
+                      "--material-offset": `${(index + 1) * 4}px`,
+                      "--material-delay": `${index * 65}ms`,
+                      zIndex: -index,
+                    } as React.CSSProperties
+                  }
+                >
+                  {code ? (
+                    <CardImage
+                      code={code}
+                      name={cardName(code)}
+                      className="duel-material-art"
+                    />
+                  ) : (
+                    <span className="duel-back" />
+                  )}
+                </span>
+              ))}
             </span>
-          ))}
-        {canSelect && playable && (
-          <span className="duel-action-vortex" aria-hidden="true" />
-        )}
+          )}
+          {[32, 64].includes(c.location) && (
+            <span className="duel-position-label">
+              {c.position & 5 ? "表侧" : "里侧"}
+            </span>
+          )}
+          {knownSet && <span className="duel-back set-back" />}
+          {visible ? (
+            <CardImage
+              code={c.code}
+              name={cardName(c.code)}
+              className="duel-image"
+            />
+          ) : (
+            <span className="duel-back" />
+          )}
+          {c.location === 4 && visible && (
+            <span className="duel-stat">
+              {c.atk ?? metadata[c.code]?.atk ?? "?"} /{" "}
+              {c.def ?? metadata[c.code]?.def ?? "?"}
+            </span>
+          )}
+          {links
+            .filter((link) => chainMatches(link, c, state))
+            .map((link) => (
+              <span
+                className={`duel-chain-marker ${effect?.index === link.index ? "resolving" : ""}`}
+                key={link.index}
+                aria-label={`连锁 ${link.index}`}
+              >
+                <small>连锁</small>
+                <b>{link.index}</b>
+              </span>
+            ))}
+          {canSelect && playable && (
+            <span className="duel-action-vortex" aria-hidden="true" />
+          )}
+
+          {Object.keys(c.counters).length > 0 && (
+            <span className="duel-counters">
+              {Object.entries(c.counters)
+                .map(([k, v]) => `${k}:${v}`)
+                .join(" ")}
+            </span>
+          )}
+        </button>
         {!!c.materials.length && (
-          <span className="duel-badge">{c.materials.length}</span>
+          <button
+            type="button"
+            className="duel-material-count"
+            aria-label={`查看超量素材（${c.materials.length}）`}
+            onClick={() => setMaterialRef(c)}
+          >
+            素材 {c.materials.length}
+          </button>
         )}
-        {Object.keys(c.counters).length > 0 && (
-          <span className="duel-counters">
-            {Object.entries(c.counters)
-              .map(([k, v]) => `${k}:${v}`)
-              .join(" ")}
-          </span>
-        )}
-      </button>
+      </Fragment>
     );
   };
   const slots = (p: number, l: number, n: number, start = 0) =>
@@ -862,7 +1030,8 @@ export function DuelClient({
     const pileLinks = links.filter(
       (c) => c.ref?.player === p && c.ref.location === l,
     );
-    const visible = top && l !== 1 && (l !== 64 || !!(top.position & 5));
+    const visible =
+      top && l !== 1 && (![32, 64].includes(l) || !!(top.position & 5));
     return (
       <button
         key={l}
@@ -904,7 +1073,13 @@ export function DuelClient({
           </span>
         ))}
         <span className="duel-pile-label">
-          {zoneName(l)} <strong>{cards.length}</strong>
+          {zoneName(l)}{" "}
+          <strong>
+            {cards.length}
+            {[32, 64].includes(l)
+              ? `(${cards.filter((c) => !!(c.position & 5)).length})`
+              : ""}
+          </strong>
         </span>
       </button>
     );
@@ -942,7 +1117,7 @@ export function DuelClient({
         <span className="duel-clock">
           {state.timePlayer === p ? "◷ " : ""}
           {state.time[p]
-            ? `${Math.max(0, state.time[p] - (state.timePlayer === p ? elapsed : 0))}s`
+            ? `${Math.max(0, Math.floor(state.time[p] - (state.timePlayer === p ? elapsed : 0)))}s`
             : ""}
         </span>
       </div>
@@ -988,7 +1163,11 @@ export function DuelClient({
       />
     );
   return (
-    <main ref={shellRef} className="duel-shell duel-playing">
+    <main
+      ref={shellRef}
+      className="duel-shell duel-playing"
+      onContextMenu={secondaryAction}
+    >
       <header className="duel-header">
         <a
           href={
@@ -1010,6 +1189,7 @@ export function DuelClient({
           <summary>{"卡图设置"}</summary>
           <LocalPicsSetting />
         </details>
+        <button onClick={() => setShowHistory(true)}>对局记录</button>
         <strong>
           {mode === "player"
             ? text.title
@@ -1038,10 +1218,6 @@ export function DuelClient({
         </div>
       )}
       <div
-        ref={(element) => {
-          if (chainConfirmation) element?.setAttribute("inert", "");
-          else element?.removeAttribute("inert");
-        }}
         className={`duel-layout ${["lobby", "hand", "turn", "waitingTurn", "starting"].includes(state.stage) ? "pre-duel" : ""}`}
       >
         <aside className="duel-sidebar">
@@ -1076,7 +1252,7 @@ export function DuelClient({
                 <span>{state.names[player]}</span>
                 <small>
                   {state.time[player]
-                    ? `${Math.max(0, state.time[player] - (state.timePlayer === player ? elapsed : 0))}秒`
+                    ? `${Math.max(0, Math.floor(state.time[player] - (state.timePlayer === player ? elapsed : 0)))}秒`
                     : ""}
                 </small>
               </div>
@@ -1239,18 +1415,7 @@ export function DuelClient({
                 </div>
               </div>
             )}
-            {state.chain.length > 0 && (
-              <div className="duel-chain-strip">
-                {[...state.chain].reverse().map((c, i) => (
-                  <span
-                    key={c.index ?? i}
-                    className={effect?.index === c.index ? "active" : ""}
-                  >
-                    ⛓ {c.index} · {cardName(c.code ?? 0)}
-                  </span>
-                ))}
-              </div>
-            )}
+
           </div>
           {row(own)}
           <div className="duel-hand">
@@ -1260,11 +1425,37 @@ export function DuelClient({
           </div>
         </div>
         <aside className="duel-controls">
+            {state.chain.length > 0 && (
+              <div className="duel-chain-strip">
+                {[...state.chain].reverse().map((c, i) => (
+                  <button
+                    data-card-code={c.code}
+                    onClick={() => c.code && openDetail(c.code, c.ref)}
+                    key={c.index ?? i}
+                    className={effect?.index === c.index ? "active" : ""}
+                  >
+                    ⛓ {c.index} · {cardName(c.code ?? 0)}
+                  </button>
+                ))}
+              </div>
+            )}
           {state.revealed?.length > 0 && (
             <details className="duel-revealed" open>
               <summary>{"展示卡片"}</summary>
               {state.revealed.map((code, i) => (
-                <button key={i} onClick={() => openDetail(code)}>
+                <button
+                  key={i}
+                  data-card-code={code}
+                  onClick={() => {
+                    setShowRevealed(true);
+                    setHoverCard(code);
+                  }}
+                >
+                  <CardImage
+                    code={code}
+                    name={cardName(code)}
+                    className="duel-reveal-art"
+                  />
                   {cardName(code)}
                 </button>
               ))}
@@ -1288,8 +1479,34 @@ export function DuelClient({
               </div>
               {state.stage === "lobby" && (
                 <div className="duel-actions">
+                  {credential && (
+                    <RoomDeckPicker
+                      disabled={
+                        deckSubmitting ||
+                        !lobbyJoined ||
+                        !!state.ready[state.seat]
+                      }
+                      onError={setError}
+                      onChoose={(d) => {
+                        setError("");
+                        setDeckSubmitting(true);
+                        action(2, encodeDeck([...d.main, ...d.extra], d.side));
+                      }}
+                    />
+                  )}
+                  {credential && (
+                    <p role="status">
+                      {deckSubmitting
+                        ? "正在检查卡组…"
+                        : `当前卡组：主卡/额外共 ${state.deck.main.length} 张 · 副卡 ${state.deck.side.length} 张${state.ready[state.seat] ? "（取消准备后可更换）" : ""}`}
+                    </p>
+                  )}
                   <button
-                    disabled={!lobbyJoined}
+                    disabled={
+                      !lobbyJoined ||
+                      deckSubmitting ||
+                      (!!credential && !state.deck.main.length)
+                    }
                     onClick={() =>
                       action(state.ready[state.seat] ? 0x23 : 0x22)
                     }
@@ -1460,7 +1677,9 @@ export function DuelClient({
                   <div
                     className="duel-choices"
                     style={
-                      collapsed || (centralPrompt && fieldPicking)
+                      collapsed ||
+                      chainConfirmation ||
+                      (centralPrompt && fieldPicking)
                         ? { display: "none" }
                         : undefined
                     }
@@ -1682,6 +1901,9 @@ export function DuelClient({
                   {metadata[hoverCard]?.def ?? "?"}
                 </p>
               )}
+              {metadata[hoverCard] && (
+                <CardMeta card={metadata[hoverCard]} compact />
+              )}
               <p className="duel-inspector-text">{metadata[hoverCard]?.desc}</p>
             </>
           ) : (
@@ -1701,43 +1923,96 @@ export function DuelClient({
             className="duel-hover-art"
           />
           <strong>{cardName(hoverCard)}</strong>
+          {metadata[hoverCard] && (
+            <CardMeta card={metadata[hoverCard]} compact />
+          )}
           <p>{metadata[hoverCard]?.desc}</p>
         </aside>
       )}
-      {chainConfirmation && (
-        <div className="duel-modal duel-chain-confirmation">
-          <section
-            className="duel-dialog duel-chain-dialog"
-            role="alertdialog"
-            aria-modal="true"
-            aria-labelledby="chain-confirm-title"
-          >
-            <span className="duel-priority-badge">轮到你响应</span>
-            <h2 id="chain-confirm-title">
-              {state.chain.length
-                ? "是否连锁发动卡片或效果？"
-                : "是否发动卡片或效果？"}
-            </h2>
-            <div className="duel-actions">
-              <button
-                disabled={
-                  !state.prompt?.choices.length || chainPassedId === revision
-                }
-                onClick={() => setChainAcceptedId(revision)}
-              >
-                响应
+      {chainConfirmation &&
+        chainInspectId === revision &&
+        !materialRef &&
+        detail === null &&
+        !zone && (
+          <div className="duel-chain-inspection">
+            <span>轮到你响应</span>
+            <button onClick={() => setChainInspectId(null)}>返回响应</button>
+          </div>
+        )}
+      {chainConfirmation &&
+        chainInspectId !== revision &&
+        !materialRef &&
+        detail === null &&
+        !zone && (
+          <div className="duel-modal duel-chain-confirmation">
+            <section
+              className="duel-dialog duel-chain-dialog"
+              role="alertdialog"
+              aria-modal="false"
+              aria-labelledby="chain-confirm-title"
+            >
+              <span className="duel-priority-badge">轮到你响应</span>
+              <h2 id="chain-confirm-title">
+                {state.chain.length
+                  ? "是否连锁发动卡片或效果？"
+                  : "是否发动卡片或效果？"}
+              </h2>
+              <button onClick={() => setChainInspectId(revision)}>
+                查看场面
               </button>
-              <button
-                autoFocus
-                disabled={chainPassedId === revision}
-                onClick={passChain}
-              >
-                不响应
-              </button>
-            </div>
-          </section>
-        </div>
-      )}
+              <div className="duel-response-cards" aria-label="可以响应的卡片">
+                {(state.prompt?.choices ?? [])
+                  .filter(
+                    (c, i, all) =>
+                      all.findIndex(
+                        (other) =>
+                          sameCard(other.ref, c.ref) ||
+                          (!other.ref &&
+                            !c.ref &&
+                            choiceCode(other) === choiceCode(c)),
+                      ) === i,
+                  )
+                  .map((c) => (
+                    <button
+                      key={c.index}
+                      type="button"
+                      data-card-code={choiceCode(c)}
+                      onFocus={() => setHoverCard(choiceCode(c))}
+                      onClick={() => openDetail(choiceCode(c), c.ref)}
+                    >
+                      {choiceCode(c) ? (
+                        <CardImage
+                          code={choiceCode(c)}
+                          name={cardName(choiceCode(c))}
+                          className="duel-response-art"
+                        />
+                      ) : (
+                        <span>？</span>
+                      )}
+                      <span>{cardName(choiceCode(c))}</span>
+                    </button>
+                  ))}
+              </div>
+              <div className="duel-actions">
+                <button
+                  disabled={
+                    !state.prompt?.choices.length || chainPassedId === revision
+                  }
+                  onClick={() => setChainAcceptedId(revision)}
+                >
+                  响应
+                </button>
+                <button
+                  autoFocus
+                  disabled={chainPassedId === revision}
+                  onClick={passChain}
+                >
+                  不响应
+                </button>
+              </div>
+            </section>
+          </div>
+        )}
       {operationChoices && state.prompt && (
         <div
           className="duel-modal duel-operation-modal"
@@ -1745,6 +2020,9 @@ export function DuelClient({
         >
           <section
             className="duel-dialog duel-operation-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label={operationRegion ? "请选择要操作的卡片" : "选择操作"}
             onClick={(e) => e.stopPropagation()}
           >
             <button
@@ -1759,6 +2037,17 @@ export function DuelClient({
               </button>
             )}
             <h2>{operationRegion ? "请选择要操作的卡片" : "选择操作"}</h2>
+            {operationRegion && operationChoices[0]?.ref && (
+              <button
+                onClick={() => {
+                  const ref = operationChoices[0].ref!;
+                  setOperationChoices(null);
+                  setZone({ player: ref.player, location: ref.location & 127 });
+                }}
+              >
+                查看该区域全部卡片
+              </button>
+            )}
             <div className="duel-operation-grid">
               {operationChoices.map((c) => (
                 <button
@@ -1766,6 +2055,8 @@ export function DuelClient({
                   className={`duel-operation ${pendingOperation?.index === c.index ? "chosen" : ""}`}
                   aria-label={operationLabel(c)}
                   data-card-code={choiceCode(c)}
+                  onMouseEnter={() => setHoverCard(choiceCode(c))}
+                  onFocus={() => setHoverCard(choiceCode(c))}
                   onClick={() => {
                     if (operationRegion) setPendingOperation(c);
                     else {
@@ -1823,6 +2114,17 @@ export function DuelClient({
         <div className="duel-modal">
           <section className="duel-dialog">
             <h2>{text.siding}</h2>
+            {state.winner !== undefined && (
+              <p className="duel-side-result" role="status">
+                上一局：
+                {state.winner > 1
+                  ? "平局"
+                  : state.winner === own
+                    ? "胜利"
+                    : "落败"}{" "}
+                · {victoryReasons[state.winReason ?? -1] ?? "特殊胜利"}
+              </p>
+            )}
             <p>点击卡片移入或移出备选卡组</p>
             {(["main", "extra", "side"] as const).map((area) => {
               const loc = area === "extra" ? "main" : area;
@@ -1887,7 +2189,125 @@ export function DuelClient({
           </section>
         </div>
       )}
-      {(detail !== null || zone) && (
+      {materialRef &&
+        (() => {
+          const host = state.cards.find((c) => sameCard(c, materialRef));
+          const materialChoices = (state.prompt?.choices ?? []).filter(
+            (c) =>
+              c.ref &&
+              sameCard(
+                { ...c.ref, location: c.ref.location & 127 },
+                materialRef,
+              ) &&
+              !!(c.ref.location & 128),
+          );
+          return (
+            <div
+              className="duel-modal duel-material-viewer"
+              onClick={() => setMaterialRef(null)}
+            >
+              <section
+                className="duel-dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-label="超量素材"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <button
+                  className="duel-close"
+                  autoFocus
+                  onClick={() => setMaterialRef(null)}
+                >
+                  关闭
+                </button>
+                <h2>超量素材（{host?.materials.length ?? 0}）</h2>
+                {host && (
+                  <p>
+                    {cardName(host.code)} · 怪兽区 {host.sequence + 1}
+                  </p>
+                )}
+                <div className="duel-material-list">
+                  {host?.materials.map((code, sub) => (
+                    <button
+                      key={sub}
+                      type="button"
+                      data-card-code={code}
+                      aria-label={`素材 ${sub + 1}：${cardName(code)}`}
+                      aria-pressed={materialChoices.some(
+                        (c) => c.ref?.sub === sub && selected.includes(c.index),
+                      )}
+                      className={
+                        materialChoices.some(
+                          (c) =>
+                            c.ref?.sub === sub && selected.includes(c.index),
+                        )
+                          ? "card-chosen"
+                          : ""
+                      }
+                      onFocus={() => setHoverCard(code)}
+                      onClick={() => {
+                        setHoverCard(code);
+                        if (!chainConfirmation && state.prompt) {
+                          const choice = state.prompt.choices.find((c) =>
+                            sameCard(c.ref, {
+                              ...materialRef,
+                              location: materialRef.location | 128,
+                              sub,
+                            }),
+                          );
+                          if (choice) choose(state.prompt, choice);
+                        }
+                      }}
+                    >
+                      {code ? (
+                        <CardImage
+                          code={code}
+                          name={cardName(code)}
+                          className="duel-material-art"
+                        />
+                      ) : (
+                        <span className="duel-back" />
+                      )}
+                      <span>{sub + 1}</span>
+                    </button>
+                  ))}
+                </div>
+                {!chainConfirmation &&
+                  materialChoices.length > 0 &&
+                  state.prompt &&
+                  ["cards", "tribute", "sum"].includes(state.prompt.kind) && (
+                    <button
+                      disabled={
+                        !selectionValid(state.prompt, selected, amounts)
+                      }
+                      onClick={() => {
+                        action(
+                          1,
+                          encodeSelection(state.prompt!, selected, amounts),
+                        );
+                        setMaterialRef(null);
+                      }}
+                    >
+                      确认素材（{selected.length}）
+                    </button>
+                  )}
+                <div className="duel-material-description">
+                  <h3>
+                    {host?.materials.includes(hoverCard)
+                      ? cardName(hoverCard)
+                      : "卡片详情"}
+                  </h3>
+                  <p>
+                    {host?.materials.includes(hoverCard)
+                      ? metadata[hoverCard]?.desc
+                      : ""}
+                  </p>
+                </div>
+              </section>
+            </div>
+          );
+        })()}
+      {(detail !== null || zone) && !materialRef && (
         <div
           className="duel-modal"
           onClick={() => {
@@ -1913,6 +2333,7 @@ export function DuelClient({
                   name={cardName(detail)}
                   className="duel-detail-image"
                 />
+                {metadata[detail] && <CardMeta card={metadata[detail]} />}
                 <p className="duel-description">{metadata[detail]?.desc}</p>
                 {state.cards
                   .filter(
@@ -1923,10 +2344,9 @@ export function DuelClient({
                   .map((c, i) => (
                     <div key={i}>
                       {c.materials.length > 0 && (
-                        <p>
-                          {text.material}:{" "}
-                          {c.materials.map(cardName).join(" · ")}
-                        </p>
+                        <button onClick={() => setMaterialRef(c)}>
+                          查看超量素材（{c.materials.length}）
+                        </button>
                       )}
                       {Object.keys(c.counters).length > 0 && (
                         <p>
@@ -1941,7 +2361,7 @@ export function DuelClient({
                     </div>
                   ))}
                 {cardActions(state.prompt, detailRef)
-                  .filter((c) => c.code === detail)
+                  .filter((c) => !chainConfirmation && c.code === detail)
                   .map((c, i) => (
                     <button
                       key={i}
@@ -1973,10 +2393,83 @@ export function DuelClient({
                         c.player === zone!.player &&
                         c.location === zone!.location,
                     )
-                    .map((c) => cardButton(c))}
+                    .map((c) => cardButton(c, false, true))}
                 </div>
               </>
             )}
+          </section>
+        </div>
+      )}
+      {showHistory && (
+        <div className="duel-modal duel-history-modal">
+          <section className="duel-dialog" role="dialog" aria-label="对局记录">
+            <button
+              className="duel-close"
+              onClick={() => setShowHistory(false)}
+            >
+              关闭
+            </button>
+            <h2>本局记录</h2>
+            <div className="duel-history-list">
+              {state.logs.map((line, i) => {
+                const codes = logCardCodes(line);
+                const content = formatLog(line);
+                return content ? (
+                  <div key={i}>
+                    <p>{content}</p>
+                    {codes.map((code) => (
+                      <button
+                        key={code}
+                        data-card-code={code}
+                        onClick={() => {
+                          setShowHistory(false);
+                          openDetail(code);
+                        }}
+                      >
+                        <CardImage
+                          code={code}
+                          name={cardName(code)}
+                          className="duel-history-art"
+                        />
+                        {cardName(code)}
+                      </button>
+                    ))}
+                  </div>
+                ) : null;
+              })}
+            </div>
+          </section>
+        </div>
+      )}
+      {showRevealed && !!state.revealed?.length && (
+        <div className="duel-modal duel-reveal-modal">
+          <section className="duel-dialog" role="dialog" aria-label="展示卡片">
+            <button
+              className="duel-close"
+              onClick={() => setShowRevealed(false)}
+            >
+              关闭
+            </button>
+            <h2>展示卡片</h2>
+            <div className="duel-reveal-grid">
+              {state.revealed.map((code, i) => (
+                <button
+                  key={i}
+                  data-card-code={code}
+                  onClick={() => {
+                    setShowRevealed(false);
+                    openDetail(code);
+                  }}
+                >
+                  <CardImage
+                    code={code}
+                    name={cardName(code)}
+                    className="duel-reveal-art"
+                  />
+                  <span>{cardName(code)}</span>
+                </button>
+              ))}
+            </div>
           </section>
         </div>
       )}

@@ -80,3 +80,11 @@ Windows 无文件符号链接权限时，资源测试中仅该权限相关用例
 - Windows Edge 390 / 1440 宽度布局、真实网页对战、卡组 cookie、旁观／重连及先行卡 100267021 的图片读取／刷新通过。
 - Windows 资源处理 16 项：15 通过、1 项因文件符号链接权限 skip；Linux 执行全部 16 项。
 - WSL 单元测试、资源维护测试、Linux 宿主和 standalone 前端构建回归通过；Aly 线上服务不在本次迁移中重启或发布。
+
+## 2026-09-10：完整客户端 extra/side 容量回归修复
+
+相邻 `C:\projects\ygopro` 的源码确为 `cube-server` / `b56f0d6a`，但此前生成 VS 工程时漏传 `--max-extra=30 --max-side=30`；旧 exe 虽显示 `1.036.2-cube`，Release|x64 不含容量宏，仍回退 extra/side 各 15。Cube 推送时绕过本地限制接收的卡组，保存后还会经过普通 LoadCurrentDeck，故同样会受影响。
+
+新增 `scripts/build-ygopro-client.ps1`：从相邻 Cube 源码生成完整音频客户端，默认 30/30，可显式传 `-MaxExtra` / `-MaxSide`。生成工程后校验 Release|x64 宏及音频参数，失败即停止，编译完成后输出版本和哈希。本地 `../ygopro/build-client.bat` 改为调用此脚本；原 bat 和 exe 已分别备份为 `build-client.before-limits-20260910.bat` 与 `bin/release/x64/YGOPro.before-limits-20260910.exe`。
+
+新产物 `C:\projects\ygopro\bin\release\x64\YGOPro.exe`，版本 `1.036.2-cube`，SHA-256 `BE8E4DC9041AEFDD03C078A2C206759CA65E1A98393AC12721339BFB1CE27FC8`。Computer Use 实际操作此 exe 打开 40/30/30 YDK，界面确认 main 40、extra 30、side 30；之后关闭测试客户端。未修改 Aly，也未替换 MyCard 安装目录中的客户端。本次修复是 Windows 构建参数和验收流程，不改变 Linux/Windows 共用的 C++ 业务代码。

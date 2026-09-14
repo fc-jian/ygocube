@@ -19,8 +19,10 @@ def healthy():
 if not web_only and occupied():raise SystemExit('Active independent host; deployment deferred')
 if new.exists():raise SystemExit('release exists')
 assert hashlib.sha256(archive.read_bytes()).hexdigest()==sys.argv[1]
-baseline=run('systemctl','show','ygocube-api','ygocube-srvpro','ygocube-web','-p','MainPID','-p','ExecMainStartTimestamp')
-backup=root/'backups'/release;backup.mkdir(parents=True)
+baseline=run('systemctl','show','ygocube-api','ygocube-srvpro','ygocube-web','nginx','-p','MainPID','-p','ExecMainStartTimestamp')
+backup=root/'backups'/release;backup.mkdir(parents=True,exist_ok=False)
+(backup/'previous-release.txt').write_text(str(old))
+shutil.copy2(root/'shared/config.yaml',backup/'config.yaml')
 shutil.copytree(old,new,symlinks=True)
 with tarfile.open(archive) as t:
  if web_only:assert all(m.name=='web' or m.name.startswith('web/') or m.name==manifest for m in t.getmembers()),'Web-only archive contains backend files'
@@ -34,6 +36,9 @@ if 'srvpro/ygopro/ygopro' in json.loads((new/manifest).read_text()):
   values=json.loads(resources.read_text());values['ygopro']=hashlib.sha256(native.read_bytes()).hexdigest();resources.write_text(json.dumps(values,indent=2))
 metadata=json.loads((new/'release.json').read_text())
 metadata.update(id=new.name,previousRelease=old.name,webBuildId=(new/'web/apps/web/.next/BUILD_ID').read_text().strip(),artifactSha256=hashlib.sha256(archive.read_bytes()).hexdigest())
+if (new/'web/source.json').exists():
+ provenance=json.loads((new/'web/source.json').read_text())
+ metadata.update({k:provenance[k] for k in ['sourceCommit','workingTreeChanges','webSourceSha256','applicationSourceSha256'] if k in provenance})
 (new/'release.json').write_text(json.dumps(metadata,indent=2))
 # Preserve old immutable assets so open browser tabs can finish loading.
 run('chown','-R','ygoduel:ygoduel',str(new))
@@ -45,7 +50,8 @@ if web_only:
  except Exception:
   (root/'rollback').symlink_to(old);os.replace(root/'rollback',root/'current');run('systemctl','restart','ygoduel-web');raise
  assert protected==run('systemctl','show','ygoduel-api','ygoduel-srvpro','-p','MainPID','-p','ExecMainStartTimestamp')
- assert baseline==run('systemctl','show','ygocube-api','ygocube-srvpro','ygocube-web','-p','MainPID','-p','ExecMainStartTimestamp')
+ assert baseline==run('systemctl','show','ygocube-api','ygocube-srvpro','ygocube-web','nginx','-p','MainPID','-p','ExecMainStartTimestamp')
+ (backup/'previous-release.txt').write_text(str(old))
  (backup/'cube-baseline.txt').write_text(baseline)
  (backup/'duel-backend-baseline.txt').write_text(protected)
  print(json.dumps({'ok':True,'release':str(new),'webOnly':True,'backendsUnchanged':True,'build':metadata['webBuildId']}))
@@ -55,11 +61,12 @@ if occupied():
  run('systemctl','start','ygoduel-api','ygoduel-web');raise SystemExit('Host appeared; old release resumed')
 run('systemctl','stop','ygoduel-srvpro')
 try:
- db=sqlite3.connect(root/'shared/data/duel.sqlite');out=sqlite3.connect(backup/'duel.sqlite');db.backup(out);out.close();db.close()
+ db=sqlite3.connect(root/'shared/data/duel.sqlite');out=sqlite3.connect(backup/'duel.sqlite');db.backup(out);assert out.execute('PRAGMA integrity_check').fetchone()[0]=='ok';out.close();db.close()
+ shutil.copytree(root/'shared/srvpro-config',backup/'srvpro-config')
  (root/'next').symlink_to(new);os.replace(root/'next',root/'current')
  run('systemctl','start','ygoduel-api','ygoduel-srvpro','ygoduel-web');healthy()
 except Exception:
  (root/'rollback').symlink_to(old);os.replace(root/'rollback',root/'current');run('systemctl','restart','ygoduel-api','ygoduel-srvpro','ygoduel-web');raise
-assert baseline==run('systemctl','show','ygocube-api','ygocube-srvpro','ygocube-web','-p','MainPID','-p','ExecMainStartTimestamp')
+assert baseline==run('systemctl','show','ygocube-api','ygocube-srvpro','ygocube-web','nginx','-p','MainPID','-p','ExecMainStartTimestamp')
 (backup/'cube-baseline.txt').write_text(baseline)
 print(json.dumps({'ok':True,'release':str(new),'cubeUnchanged':True,'build':(new/'web/apps/web/.next/BUILD_ID').read_text().strip()}))

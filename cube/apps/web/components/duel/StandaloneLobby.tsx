@@ -2,7 +2,6 @@
 import { useEffect, useState } from "react";
 import type { StandaloneDuelOptions } from "@ygocube/shared";
 import { api } from "@/lib/api";
-import { readDecks, saveDeck, parseYdk, SavedDeck } from "./deck-cookie";
 import { LocalPicsSetting } from "@/components/IdentityWidget";
 import "./standalone.css";
 export function StandaloneLobby() {
@@ -13,37 +12,30 @@ export function StandaloneLobby() {
         name: string;
       }[]
     >([]),
-    [decks, setDecks] = useState<SavedDeck[]>([]),
-    [deckId, setDeckId] = useState(""),
     [name, setName] = useState(""),
     [password, setPassword] = useState(""),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
-  const refresh = () => setDecks(readDecks());
   useEffect(() => {
-    refresh();
-    window.addEventListener("focus", refresh);
     api<any>("/public/duel/options", { identity: null })
       .then((r) => {
         setOptions(r.defaults);
         setLists(r.lists);
       })
       .catch((e) => setError(e.message));
-    return () => window.removeEventListener("focus", refresh);
   }, []);
   const change = (k: keyof StandaloneDuelOptions, v: any) =>
     setOptions((o) => (o ? { ...o, [k]: v } : o));
   async function join(e: React.FormEvent) {
     e.preventDefault();
+    if (busy) return;
     setError("");
     setBusy(true);
     try {
-      const deck = decks.find((d) => d.id === deckId);
-      if (!deck) throw Error("请选择卡组");
       const r = await api<any>("/public/duel/join", {
         method: "POST",
         identity: null,
-        body: { name, password, options, deck },
+        body: { name, password, options },
       });
       sessionStorage.setItem("yc_standalone", JSON.stringify(r));
       sessionStorage.setItem(`yc_room_${r.room}`, JSON.stringify(r));
@@ -55,39 +47,25 @@ export function StandaloneLobby() {
     }
   }
   return (
-    <main className="standalone">
+    <main className="standalone duel-lobby">
       <header>
         <a href="/">YGO Cube</a>
         <a href="/duel/decks">我的卡组</a>
       </header>
       <h1>网页对战</h1>
-      <p>相同密码进入同一房间。首位创建者决定规则，双方准备后由房主开始。</p>
+      <p className="lobby-hint">
+        相同密码进入同一房间；房间已存在时沿用房主规则。
+      </p>
 
-      <LocalPicsSetting />
+      <details className="lobby-pics">
+        <summary>卡图设置</summary>
+        <LocalPicsSetting />
+      </details>
 
-      <button
-        type="button"
-        disabled={busy || !password}
-        onClick={async () => {
-          setError("");
-          try {
-            const r = await api<any>("/public/duel/resolve", {
-              method: "POST",
-              identity: null,
-              body: { password },
-            });
-            location.assign(r.url);
-          } catch (e) {
-            setError((e as Error).message);
-          }
-        }}
-      >
-        用密码打开已有房间（重连 / 观战）
-      </button>
       {error && <p role="alert">{error}</p>}
-      <form onSubmit={join}>
+      <form onSubmit={join} className="lobby-workspace">
         <section className="standalone-panel">
-          <h2>加入房间</h2>
+          <h2>玩家与房间</h2>
           <div className="standalone-fields">
             <label>
               昵称
@@ -109,48 +87,12 @@ export function StandaloneLobby() {
                 onChange={(e) => setPassword(e.target.value)}
               />
             </label>
-            <label>
-              卡组
-              <select
-                required
-                value={deckId}
-                onChange={(e) => setDeckId(e.target.value)}
-              >
-                <option value="">选择已保存卡组</option>
-                {decks.map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.name} · {d.main.length}/{d.extra.length}/{d.side.length}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              上传 YDK
-              <input
-                type="file"
-                accept=".ydk,.txt"
-                onChange={async (e) => {
-                  try {
-                    const f = e.target.files?.[0];
-                    if (!f) return;
-                    if (f.size > 65536) throw Error("文件过大");
-                    const id = saveDeck(
-                      parseYdk(await f.text(), f.name.replace(/\.ydk$/i, "")),
-                    );
-                    refresh();
-                    setDeckId(id);
-                    setError("");
-                  } catch (e) {
-                    setError((e as Error).message);
-                  }
-                }}
-              />
-            </label>
           </div>
+          <p>进入房间后选择卡组，准备前可以更换。</p>
         </section>
         {options && (
           <section className="standalone-panel">
-            <h2>建房选项</h2>
+            <h2>对战规则</h2>
 
             <div className="standalone-fields">
               <label>
@@ -186,7 +128,7 @@ export function StandaloneLobby() {
                     "OCG",
                     "TCG",
                     "简体中文",
-                    "Custom",
+                    "自定义",
                     "同时 OCG/TCG",
                     "全部",
                   ].map((v, i) => (
@@ -204,7 +146,7 @@ export function StandaloneLobby() {
                 >
                   {[1, 2, 3, 4, 5].map((v) => (
                     <option key={v} value={v}>
-                      {v === 5 ? "MR2020" : `MR${v}`}
+                      {v === 5 ? "大师规则（2020）" : `大师规则 ${v}`}
                     </option>
                   ))}
                 </select>
@@ -215,10 +157,10 @@ export function StandaloneLobby() {
                   ["startLp", "初始 LP", 1, 99999],
                   ["startHand", "初始手牌", 1, 40],
                   ["drawCount", "每回合抽牌", 0, 35],
-                  ["mainMin", "Main 最小", 1, 200],
-                  ["mainMax", "Main 最大", 1, 200],
-                  ["extraMax", "Extra 最大", 0, 200],
-                  ["sideMax", "Side 最大", 0, 200],
+                  ["mainMin", "主卡组下限", 1, 200],
+                  ["mainMax", "主卡组上限", 1, 200],
+                  ["extraMax", "额外卡组上限", 0, 200],
+                  ["sideMax", "副卡组上限", 0, 200],
                 ] as const
               ).map(([k, l, min, max]) => (
                 <label key={k}>
@@ -252,9 +194,33 @@ export function StandaloneLobby() {
             </div>
           </section>
         )}
-        <button className="primary" disabled={busy || !options}>
-          {busy ? "连接中" : "创建 / 加入房间"}
-        </button>
+        <div className="lobby-submit">
+          <button className="primary" disabled={busy || !options}>
+            {busy ? "连接中" : "创建 / 加入房间"}
+          </button>
+          <button
+            type="button"
+            disabled={busy || !password}
+            onClick={async () => {
+              setError("");
+              setBusy(true);
+              try {
+                const r = await api<any>("/public/duel/resolve", {
+                  method: "POST",
+                  identity: null,
+                  body: { password },
+                });
+                location.assign(r.url);
+              } catch (e) {
+                setError((e as Error).message);
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            重连 / 观战
+          </button>
+        </div>
       </form>
     </main>
   );
