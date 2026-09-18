@@ -22,7 +22,8 @@
 - 玩家默认需要 `tid + pid + token`。比赛路由以 path 中的 `tid` 为准；浏览器使用
   按比赛隔离的 `yc_pid_<tid>/yc_token_<tid>` cookie，普通 fetch 也可使用
   `X-Tournament-Id/X-Player-Id/X-Token`。旧全局 cookie/query 仅作非敏感 ID 兼容入口；
-  token 只接受比赛隔离 cookie 或 header。
+  token 只接受比赛隔离 cookie 或 header。显式玩家 header 身份优先于 cookie；一旦提供
+  `X-Player-Id` 或 `X-Token`，两者必须完整且配对，不从其他标签页的 cookie 补齐。
 - `/admin/*` 使用两种身份：超级管理员使用 `X-Admin-Token`；比赛创建者使用
   `X-Create-User` + `X-Create-Token`，且只能访问 `created_by` 与该用户名一致的
   `/admin/t/:tid/*` 路由。比赛专有 admin token 已取消，旧 token 立即失效。

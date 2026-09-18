@@ -1,6 +1,6 @@
 import { useTestDb, makeTournaments, TEST_POOL } from './helpers';
 import { config } from '../src/config';
-import { AuthGuard, sha256 } from '../src/auth/auth.guard';
+import { AuthGuard, extractIdentity, sha256 } from '../src/auth/auth.guard';
 import { Reflector } from '@nestjs/core';
 import { getDb } from '../src/db';
 import { AdminController } from '../src/admin.controller';
@@ -43,6 +43,22 @@ function expectCode(fn: () => boolean, code: string): void {
 
 describe('auth model', () => {
   beforeEach(() => useTestDb());
+
+  it('explicit player headers cannot be replaced or completed by another tab cookie', () => {
+    const tournaments = makeTournaments();
+    const tid = tournaments.create({ name: 'tabs', maxPlayers: 3, cardPool: TEST_POOL }, 'test').tid;
+    tournaments.join(tid, 'alice', 'Alice');
+    tournaments.join(tid, 'bob', 'Bob');
+    const request: any = { path: `/t/${tid}/state`, query: {}, headers: { 'x-player-id': 'alice', 'x-token': config.admin.superToken },
+      cookies: { [`yc_pid_${tid}`]: 'bob', [`yc_token_${tid}`]: config.admin.superToken } };
+    expect(extractIdentity(request)?.playerId).toBe('alice');
+    request.headers['x-token'] = 'wrong';
+    expect(extractIdentity(request)).toBeNull();
+    delete request.headers['x-token'];
+    expect(extractIdentity(request)).toBeNull();
+    request.headers = {};
+    expect(extractIdentity(request)?.playerId).toBe('bob');
+  });
 
   it('player triple still required on player routes', () => {
     const tournaments = makeTournaments();

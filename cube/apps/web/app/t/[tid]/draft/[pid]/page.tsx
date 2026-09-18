@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { TransientNotice } from '@/components/TransientNotice';
 import { useParams, useRouter } from 'next/navigation';
 import { api, apiDownload, clearStoredToken, encodePathSegment, Identity, readableApiError, resolvePlayerIdentity } from '@/lib/api';
 import { useTournamentStream } from '@/lib/sse';
@@ -159,6 +160,7 @@ export default function DraftPage() {
     setDraftConfirmBusy(true);
     try {
       await api(`/t/${tidPath}/player/draft-confirm`, { method: 'POST', identity });
+      setError('');
       await load();
     } catch (e: any) {
       setError(readableApiError(e, '确认开始选牌失败'));
@@ -192,7 +194,8 @@ export default function DraftPage() {
       if (busy || document.visibilityState === 'hidden') return;
       busy = true;
       try {
-        await load();
+        setError('');
+      await load();
       } finally {
         busy = false;
       }
@@ -261,7 +264,7 @@ export default function DraftPage() {
   };
 
   const { connected } = useTournamentStream(tid, identity, useCallback((event: string) => {
-    if (event === 'pack' || event === 'pick' || event === 'pause' || event === 'phase' || event === 'deck' || event === 'notice') void load();
+    if (event === 'reconnect' || event === 'pack' || event === 'pick' || event === 'pause' || event === 'phase' || event === 'deck' || event === 'notice') void load();
   }, [load]));
 
   // 倒计时归零时立即刷新（超时自动选牌可能已发生）。
@@ -298,6 +301,7 @@ export default function DraftPage() {
     }
     try {
       await api(`/t/${tidPath}/pick`, { method: 'POST', body: { card_code: code, ...(targetZone ? { target_zone: targetZone } : {}) }, identity });
+      setError('');
       await load();
     } catch (e: any) {
       setError(e.code === 'NOT_YOUR_TURN' ? '当前没有可选择的牌堆（等待传递）' : (e.code === 'CARD_NOT_AVAILABLE' ? '该卡已被选走' : readableApiError(e, '选牌失败')));
@@ -324,6 +328,7 @@ export default function DraftPage() {
     closeCardPreview();
     try {
       await api(`/t/${tidPath}/deck/move`, { method: 'POST', body: { card_code: code, from, to, ...(index !== undefined ? { index } : {}), ...(fromIndex !== undefined ? { from_index: fromIndex } : {}) }, identity });
+      setError('');
       await load();
     } catch (e: any) {
       setError(e.code === 'WRONG_ZONE' ? '该类型卡不能放入此区域' : readableApiError(e));
@@ -333,6 +338,7 @@ export default function DraftPage() {
   const sortDeck = async () => {
     try {
       await api(`/t/${tidPath}/deck/sort`, { method: 'POST', identity });
+      setError('');
       await load();
     } catch (e: any) {
       setError(readableApiError(e, '整理卡组失败'));
@@ -513,7 +519,7 @@ export default function DraftPage() {
           比赛已由管理员暂停；倒计时已冻结，等待后台恢复。
         </div>
       )}
-      {error && <div className="mx-3 mb-2 rounded bg-red-900/60 px-3 py-1 text-xs text-red-200">{error}</div>}
+      <TransientNotice message={error} onDismiss={() => setError('')} />
     </main>
   );
 }

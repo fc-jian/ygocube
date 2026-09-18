@@ -237,7 +237,8 @@ export async function apiDownload(path: string, identity: Identity | null): Prom
 // resolve identity for a player page: pid from URL, token from store/cookie.
 // Returns { identity } or { needToken: true } when the token is missing.
 export function resolvePlayerIdentity(tid: string, pid: string): { identity: Identity } | { needToken: true } {
-  const token = getStoredToken(tid, pid) ?? readIdentity(tid)?.token;
+  const cookieIdentity = readIdentity(tid);
+  const token = getStoredToken(tid, pid) ?? (cookieIdentity?.pid === pid ? cookieIdentity.token : undefined);
   if (!token) return { needToken: true };
   return { identity: { tid, pid, token } };
 }
