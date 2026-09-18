@@ -78,7 +78,7 @@ export function CardImage({ code, name, className = '' }: { code: number; name?:
   }, [code, picsRevision]);
 
   if (src) {
-    return <img data-card-code={code} src={src} alt={name ?? String(code)} className={`rounded-md border border-white/10 object-cover shadow-[0_5px_14px_rgba(0,0,0,0.28)] ${className}`} loading="lazy" />;
+    return <img draggable={false} data-card-code={code} src={src} alt={name ?? String(code)} className={`rounded-md border border-white/10 object-cover shadow-[0_5px_14px_rgba(0,0,0,0.28)] ${className}`} loading="lazy" />;
   }
   return (
     <div

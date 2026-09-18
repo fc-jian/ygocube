@@ -28,7 +28,7 @@ export default function DeckPage() {
   const [state, setState] = useState<DraftState | null>(null);
   const [cardMap, setCardMap] = useState<Record<number, CardInfo>>({});
   const [error, setError] = useState('');
-  const loadBusy = useRef(false);
+  const loadSequence = useRef(0);
   const flip = useFlip<HTMLDivElement>();
 
   useEffect(() => {
@@ -59,8 +59,10 @@ export default function DeckPage() {
   }, [tidPath, pid]);
 
   const load = useCallback(async () => {
-    if (!identity || loadBusy.current) return;
-    loadBusy.current = true;
+    if (!identity) return;
+    // A post-move refresh must run even if an older SSE/poll request is pending.
+    // Only the newest request may publish state or errors.
+    const sequence = ++loadSequence.current;
     try {
       const raw = await api<unknown>(`/t/${tidPath}/state`, { identity });
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('INVALID_STATE_RESPONSE');
@@ -77,15 +79,17 @@ export default function DeckPage() {
           side: safeCardCodes(s.deck.side),
         } : { main: [], extra: [], side: [], lockedAt: null },
       } as DraftState;
+      if (sequence !== loadSequence.current) return;
       setState(normalized);
       const codes = new Set<number>(normalized.pickedCards);
       if (codes.size) {
         const cards = await fetchCardMetadata(`/t/${tidPath}/cards`, [...codes], identity);
         const map: Record<number, CardInfo> = {};
         for (const c of cards) map[c.code] = c;
-        setCardMap((m) => ({ ...m, ...map }));
+        if (sequence === loadSequence.current) setCardMap((m) => ({ ...m, ...map }));
       }
     } catch (e: any) {
+      if (sequence !== loadSequence.current) return;
       if (e.code === 'AUTH_REQUIRED') {
         setIdentity(null);
         setNeedToken(true);
@@ -94,8 +98,6 @@ export default function DeckPage() {
       } else {
         setError(readableApiError(e, '比赛状态加载失败'));
       }
-    } finally {
-      loadBusy.current = false;
     }
   }, [tidPath, identity]);
 
@@ -199,7 +201,11 @@ export default function DeckPage() {
       const inSide = state.deck?.side?.includes(card.code);
       const inMain = state.deck?.main?.includes(card.code);
       const inExtra = state.deck?.extra?.includes(card.code);
-      if (inSide) return { label: '移动到主卡组', run: () => act(card.code, 'side', 'main') };
+      if (inSide) return {
+        label: isExtraDeckType(card.type) ? '移动到额外卡组' : '移动到主卡组',
+        run: () => act(card.code, 'side', isExtraDeckType(card.type) ? 'extra' : 'main'),
+        secondary: { label: '移出构筑', run: () => act(card.code, 'side', 'pool') },
+      };
       if (inMain || inExtra)
         return {
           label: '移动到副卡组',
