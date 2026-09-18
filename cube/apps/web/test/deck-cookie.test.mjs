@@ -28,3 +28,11 @@ test('full cookie library rejects the new write while preserving old decks',()=>
  assert.throws(()=>api.saveDeck(d,'f'.repeat(32)),/空间不足/);
  assert.equal(api.readDecks().length,8);
 });
+
+test('corrupt saved decks are skipped without breaking valid decks',()=>{
+ const {api,cookies}=harness();api.saveDeck(api.parseYdk('#main\n123','valid'));
+ for(const value of [null, ['bad','!', '', ''], ['bad','0','',''], ['bad','zzzzzzzz','','']]) {
+  cookies.set('yc_dueldeck_'+'f'.repeat(32),encodeURIComponent(JSON.stringify(value)));
+  assert.equal(api.readDecks().length,1);assert.equal(api.readDecks()[0].name,'valid');
+ }
+});

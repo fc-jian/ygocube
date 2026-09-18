@@ -788,7 +788,8 @@
   }
 }
 
-.deck-banlist { display: flex; gap: .6rem; align-items: center; margin-bottom: .5rem; }
+.deck-management .deck-banlist { display: flex; flex-direction: row; gap: .4rem; align-items: center; margin: 0 0 0 auto; min-width: 0; }
+.deck-banlist select { width: 165px; max-width: 45vw; }
 .deck-editor .card-preview { position: relative; }
 .deck-limit { position: absolute; top: 2px; left: 2px; z-index: 2; width: 20px; height: 20px; border: 2px solid white; border-radius: 50%; display: grid; place-items: center; background: #d52828; color: white; font: bold 13px/1 sans-serif; pointer-events: none; }
 .deck-limit-2 { background: #bd7200; }

@@ -44,6 +44,7 @@ export function StandaloneDecks() {
     [detail, setDetail] = useState<Info | null>(null),
     [target, setTarget] = useState<"main" | "side">("main"),
     [notice, setNotice] = useState("");
+  const [searching, setSearching] = useState(false);
   const [lists, setLists] = useState<Banlist[]>([]);
   const [listId, setListId] = useState(-1);
   useEffect(() => {
@@ -83,6 +84,8 @@ export function StandaloneDecks() {
   }, [dirty]);
   useEffect(() => {
     let active = true;
+    setResults([]);
+    setSearching(!!q.trim());
     const timer = setTimeout(() => {
       if (!q.trim()) {
         setResults([]);
@@ -100,7 +103,8 @@ export function StandaloneDecks() {
             }));
           }
         })
-        .catch((e) => active && setNotice(e.message));
+        .catch((e) => active && setNotice(e.message))
+        .finally(() => active && setSearching(false));
     }, 250);
     return () => {
       active = false;
@@ -173,6 +177,7 @@ export function StandaloneDecks() {
   }
 
   const preview = detail && (infos[detail.code] ?? detail);
+  const enlargedCard = enlarged && (infos[enlarged.code] ?? enlarged);
   const show = (code: number) =>
     setDetail(infos[code] ?? unknownCard(code));
   const summary = (c: Info) => [typeLabel(c), raceAttrLine(c), statLine(c)].filter(Boolean).join(" / ");
@@ -219,12 +224,6 @@ export function StandaloneDecks() {
           <LocalPicsSetting />
         </details>
       </header>
-      <label className="deck-banlist">禁限卡表
-        <select aria-label="禁限卡表" value={listId} onChange={e => setListId(Number(e.target.value))} disabled={!lists.length}>
-          {!lists.length && <option value={-1}>加载中…</option>}
-          {lists.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
-        </select>
-      </label>
       <section className="deck-management" aria-label="卡组管理">
         <select
           aria-label="已保存卡组"
@@ -353,6 +352,12 @@ export function StandaloneDecks() {
         >
           清空
         </button>
+      <label className="deck-banlist">禁限卡表
+        <select aria-label="禁限卡表" value={listId} onChange={e => setListId(Number(e.target.value))} disabled={!lists.length}>
+          {!lists.length && <option value={-1}>加载中…</option>}
+          {lists.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+        </select>
+      </label>
       </section>
       <div className="deck-workspace">
         <aside className="deck-inspector" aria-label="卡片详情">
@@ -586,12 +591,13 @@ export function StandaloneDecks() {
                 </div>
               </article>
             ))}
-            {q.trim() && !filtered.length && <p>没有匹配的卡片</p>}
+            {searching && <p role="status">搜索中…</p>}
+            {!searching && q.trim() && !filtered.length && <p>没有匹配的卡片</p>}
           </div>
         </section>
       </div>
       <footer className="deck-editor-footer">
-        <span role="status">{notice || (dirty ? "有未保存修改" : "")}</span>
+        <span role="status">{notice || (dirty ? "有未保存修改" : "")}{notice && <button aria-label="关闭提示" onClick={() => setNotice("")}>×</button>}</span>
         <span>右键加卡／移除 · 双击放大 · 拖动排序</span>
       </footer>
       <dialog
@@ -608,15 +614,15 @@ export function StandaloneDecks() {
           setEnlarged(null);
         }}
       >
-        {enlarged && (
+        {enlargedCard && (
           <>
             <button autoFocus onClick={() => setEnlarged(null)}>
               关闭
             </button>
-            <CardImage code={enlarged.code} name={enlarged.name} />
-            <h2>{enlarged.name}</h2>
-            <CardMeta card={enlarged} showPickStats={false} />
-            <p className="deck-effect-text">{enlarged.desc}</p>
+            <CardImage code={enlargedCard.code} name={enlargedCard.name} />
+            <h2>{enlargedCard.name}</h2>
+            <CardMeta card={enlargedCard} showPickStats={false} />
+            <p className="deck-effect-text">{enlargedCard.desc}</p>
           </>
         )}
       </dialog>

@@ -36,6 +36,14 @@ export function readDecks(): SavedDeck[] {
       try {
         const [key, value] = v.split("="),
           a = JSON.parse(decodeURIComponent(value));
+        if (!Array.isArray(a) || a.length !== 4 || typeof a[0] !== "string" || a[0].length > 100 || !/^[a-f0-9]{32}$/.test(key.slice(prefix.length))) return [];
+        const zones = a.slice(1).map((v: unknown) => {
+          if (typeof v !== "string" || (v && !/^[a-z0-9]+(?:\.[a-z0-9]+)*$/.test(v))) throw Error("Invalid saved deck");
+          const codes = v ? v.split(".").map(c => parseInt(c, 36)) : [];
+          if (codes.length > 200 || codes.some(c => !Number.isInteger(c) || c <= 0 || c > 0xffffffff)) throw Error("Invalid saved deck");
+          return codes;
+        });
+        if (zones.reduce((sum, zone) => sum + zone.length, 0) > 500) return [];
         return [
           {
             id: key.slice(prefix.length),
@@ -43,9 +51,7 @@ export function readDecks(): SavedDeck[] {
             ...Object.fromEntries(
               ["main", "extra", "side"].map((z, i) => [
                 z,
-                a[i + 1]
-                  ? a[i + 1].split(".").map((c: string) => parseInt(c, 36))
-                  : [],
+                zones[i],
               ]),
             ),
           } as SavedDeck,
@@ -91,7 +97,7 @@ export function saveDeck(
     throw Error(
       "Cookie \u7A7A\u95F4\u4E0D\u8DB3\uFF0C\u8BF7\u5148\u5BFC\u51FA\u5E76\u5220\u9664\u65E7\u5361\u7EC4",
     );
-  document.cookie = `${prefix}${id}=${value}; Path=/duel; SameSite=Strict${location.protocol === "https:" ? "; Secure" : ""}`;
+  document.cookie = `${prefix}${id}=${value}; Path=/duel; Max-Age=31536000; SameSite=Strict${location.protocol === "https:" ? "; Secure" : ""}`;
   if (!document.cookie.split("; ").includes(`${prefix}${id}=${value}`))
     throw Error("\u6D4F\u89C8\u5668\u672A\u5141\u8BB8\u4FDD\u5B58 Cookie");
   return id;
