@@ -190,8 +190,7 @@ export default function DeckPage() {
   // 固定预览的快捷操作：主/额外 <-> 副卡组、移出构筑（回到未使用区）、未使用卡移回卡组；
   // 操作执行后立即关闭详情窗口（dev_docs/06 §4）
   useEffect(() => {
-    if (error && !state) return <main className="p-8 text-red-300" role="alert">{error}<button className="ml-3 underline" onClick={() => location.reload()}>重新加载</button></main>;
-  if (!state || !identity) return;
+    if (!state || !identity) return;
     const act = (card: number, from: string, to: string) => {
       void move(card, from, to);
       closeCardPreview();
