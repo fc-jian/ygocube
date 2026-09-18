@@ -9,6 +9,10 @@ const cards=[{code:111,name:'灵魂测试卡',type:0x221,desc:'完整效果第�
   page.on('pageerror',e=>errors.push(e.message));
   await page.route('**/public/duel/**',route=>route.fulfill({json:route.request().url().includes('/options')?{lists:[{id:-1,name:'无限制',limits:{}},{id:0,name:'2026.01.01 OCG',limits:{222:0}},{id:1,name:'2026.04.01 OCG',limits:{222:1}},{id:2,name:'2026.07.01 TCG',limits:{222:2}}]}:cards}));
   await page.goto(base+'/duel/decks');
+  if(width===1440){
+   const box=await page.locator('.deck-banlist').boundingBox(),clear=await page.getByRole('button',{name:'清空',exact:true}).boundingBox();
+   assert(Math.abs(box.y-clear.y)<4 && box.x>clear.x,'banlist must sit to the right of existing buttons');
+  }
   await page.getByLabel('搜索卡片',{exact:true}).fill('测试');
   await page.locator('.builder-results article').first().waitFor();
   assert.equal(await page.getByLabel('禁限卡表',{exact:true}).inputValue(),'1');
