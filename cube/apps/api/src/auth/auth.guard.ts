@@ -143,8 +143,9 @@ export function extractIdentity(req: AuthedRequest): Identity | null {
   // intentionally omit the legacy global yc_tid cookie so concurrent browser
   // tabs for different tournaments cannot overwrite one another.
   const tid = pathTid ?? get('yc_tid', 'tid');
-  const pid = get('yc_pid', 'pid');
-  const token =
+  const explicitPlayer = hget('x-player-id') !== undefined || hget('x-token') !== undefined;
+  const pid = explicitPlayer ? hget('x-player-id') : get('yc_pid', 'pid');
+  const token = explicitPlayer ? hget('x-token') :
     (pathTid ? cookies[`yc_token_${pathTid}`] : undefined) ??
     cookies.yc_token ??
     hget('x-token') ??

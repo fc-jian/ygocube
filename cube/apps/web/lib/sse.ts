@@ -30,6 +30,8 @@ export function useTournamentStream(tid: string | null, identity: Identity | nul
       es.onopen = () => {
         retry = 0;
         setConnected(true);
+        // Events missed while offline are recovered by fetching current state.
+        onEventRef.current?.('reconnect', null);
       };
       es.onerror = () => {
         setConnected(false);

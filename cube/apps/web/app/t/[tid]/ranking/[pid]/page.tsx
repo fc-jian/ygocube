@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { TransientNotice } from '@/components/TransientNotice';
 import { useParams } from 'next/navigation';
 import { api, encodePathSegment, Identity, readableApiError, resolvePlayerIdentity } from '@/lib/api';
 import { useTournamentFallbackPolling, useTournamentStream } from '@/lib/sse';
@@ -129,7 +130,7 @@ export default function RankingPage() {
       </table>
       </div>
       <p className="mt-3 text-xs text-slate-500">计分：胜 3 分、平 1 分、负 0 分；同分按净胜局 → 对手胜率（OMW%）→ 对手积分排序。榜单随对局结果实时更新。</p>
-      {error && <div className="mt-3 rounded bg-red-900/60 px-3 py-2 text-xs text-red-200" role="alert">{error}</div>}
+      <TransientNotice message={error} onDismiss={() => setError('')} />
     </main>
   );
 }

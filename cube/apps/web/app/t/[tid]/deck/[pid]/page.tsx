@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { TransientNotice } from '@/components/TransientNotice';
 import { useParams } from 'next/navigation';
 import { api, apiDownload, encodePathSegment, Identity, readableApiError, resolvePlayerIdentity } from '@/lib/api';
 import { useTournamentStream } from '@/lib/sse';
@@ -147,6 +148,7 @@ export default function DeckPage() {
         body: { card_code: card, from, to, ...(index !== undefined ? { index } : {}), ...(fromIndex !== undefined ? { from_index: fromIndex } : {}) },
         identity,
       });
+      setError('');
       await load();
     } catch (e: any) {
       setError(e.code === 'WRONG_ZONE' ? '该类型卡不能放入此区域' : readableApiError(e));
@@ -157,6 +159,7 @@ export default function DeckPage() {
     try {
       flip.snapshot();
       await api(`/t/${tidPath}/deck/sort`, { method: 'POST', identity });
+      setError('');
       await load();
     } catch (e: any) {
       setError(readableApiError(e, '整理卡组失败'));
@@ -167,6 +170,7 @@ export default function DeckPage() {
     try {
       flip.snapshot();
       await api(`/t/${tidPath}/deck/shuffle`, { method: 'POST', identity });
+      setError('');
       await load();
     } catch (e: any) {
       setError(readableApiError(e, '随机排序失败'));
@@ -176,16 +180,18 @@ export default function DeckPage() {
   const lock = async () => {
     try {
       await api(`/t/${tidPath}/deck/lock`, { method: 'POST', identity });
+      setError('');
       await load();
     } catch (e: any) {
-      setError(e.details ? (e.details as string[]).join('；') : readableApiError(e, '锁定卡组失败'));
+      setError(Array.isArray(e.details) ? e.details.join('；') : readableApiError(e, '锁定卡组失败'));
     }
   };
 
   // 固定预览的快捷操作：主/额外 <-> 副卡组、移出构筑（回到未使用区）、未使用卡移回卡组；
   // 操作执行后立即关闭详情窗口（dev_docs/06 §4）
   useEffect(() => {
-    if (!state || !identity) return;
+    if (error && !state) return <main className="p-8 text-red-300" role="alert">{error}<button className="ml-3 underline" onClick={() => location.reload()}>重新加载</button></main>;
+  if (!state || !identity) return;
     const act = (card: number, from: string, to: string) => {
       void move(card, from, to);
       closeCardPreview();
@@ -215,6 +221,7 @@ export default function DeckPage() {
   const unlock = async () => {
     try {
       await api(`/t/${tidPath}/deck/unlock`, { method: 'POST', identity });
+      setError('');
       await load();
     } catch (e: any) {
       setError(readableApiError(e, '解除卡组锁定失败'));
@@ -231,6 +238,7 @@ export default function DeckPage() {
         </a>
       </main>
     );
+  if (error && !state) return <main className="p-8 text-red-300" role="alert">{error}<button className="ml-3 underline" onClick={() => location.reload()}>重新加载</button></main>;
   if (!state || !identity) return <main className="p-8 text-slate-400">加载中…</main>;
 
   const locked = !!deck.lockedAt;
@@ -354,7 +362,7 @@ export default function DeckPage() {
         )}
         </div>
       </footer>
-      {error && <div className="mx-3 mb-2 rounded bg-red-900/60 px-3 py-1 text-xs text-red-200">{error}</div>}
+      <TransientNotice message={error} onDismiss={() => setError('')} />
     </main>
   );
 }

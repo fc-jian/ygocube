@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { TransientNotice } from '@/components/TransientNotice';
 import { useParams } from 'next/navigation';
 import { api, apiDownload, encodePathSegment, Identity, readableApiError, resolvePlayerIdentity } from '@/lib/api';
 import { useTournamentFallbackPolling, useTournamentStream } from '@/lib/sse';
@@ -201,12 +202,16 @@ export default function MatchesPage() {
           {webDuelEnabled && myMatch.roomName && <a className="mt-4 inline-block rounded bg-emerald-700 px-5 py-3 text-white" href={`/t/${tidPath}/duel/${pidPath}`}>进入网页对战 / Play in browser</a>}
           {myMatch.roomName && (
             <button
-              onClick={() => {
-                navigator.clipboard.writeText(
-                  myMatch.roomName ?? '',
-                );
-                setCopied(true);
-                setTimeout(() => setCopied(false), 1500);
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(myMatch.roomName ?? '');
+                  setError('');
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 1500);
+                } catch {
+                  setCopied(false);
+                  setError('复制失败，请手动复制上方房间密码');
+                }
               }}
               className="mt-3 rounded bg-gold px-4 py-1.5 text-sm font-semibold text-felt-deep hover:brightness-110"
             >
@@ -226,7 +231,7 @@ export default function MatchesPage() {
       <div className="mt-4 text-xs text-slate-500">
         服务器地址与端口由管理员配置；进房昵称就是你的玩家 ID，请确认不要填错房间。
       </div>
-      {error && <div className="mt-3 rounded bg-red-900/60 px-3 py-2 text-xs text-red-200" role="alert">{error}</div>}
+      <TransientNotice message={error} onDismiss={() => setError('')} />
     </main>
   );
 }
