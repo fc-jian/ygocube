@@ -27,6 +27,9 @@ const cards=[{code:111,name:'灵魂测试卡',type:0x221,desc:'完整效果第�
   assert.equal(await page.locator('.builder-zone .deck-limit').innerText(),'0');
   await page.getByLabel('禁限卡表',{exact:true}).selectOption('-1');
   assert.equal(await page.locator('.deck-limit').count(),0);
+  await page.getByRole('button',{name:'保存*',exact:true}).click();
+  const savedCookies=await page.context().cookies();
+  assert(savedCookies.some(c=>c.name.startsWith('yc_dueldeck_') && c.expires>Date.now()/1000+86400),'saved deck must survive browser restart');
   await page.locator('.builder-zone .card-preview').dblclick();
   assert((await page.locator('dialog').innerText()).includes('测试字段'));
   await page.getByRole('button',{name:'关闭',exact:true}).click();
