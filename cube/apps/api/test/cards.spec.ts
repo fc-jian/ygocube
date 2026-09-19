@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { decodeCardFields, parseSetCodes, CardsService, readCardNameEntries, readCardNameMap, selectYgocdbCardName } from '../src/cards/cards.service';
+import { cardAliasKind, decodeCardFields, parseSetCodes, CardsService, readCardNameEntries, readCardNameMap, selectYgocdbCardName } from '../src/cards/cards.service';
 import { config } from '../src/config';
 import { useTestDb } from './helpers';
 import { getDb } from '../src/db';
@@ -92,6 +92,46 @@ describe('ygopro card metadata decoding', () => {
       config.server.cardNamesJson = originalNames;
       fs.rmSync(cdbPath, { force: true });
       fs.rmSync(namesPath, { force: true });
+    }
+  });
+
+  it('distinguishes artwork names from rules-name aliases without changing exact identities', () => {
+    const dir = fs.mkdtempSync(path.join('/tmp', 'ygocube-artwork-'));
+    const cdbPath = path.join(dir, 'cards.cdb');
+    const namesPath = path.join(dir, 'names.json');
+    const Database = require('better-sqlite3');
+    const cdb = new Database(cdbPath);
+    cdb.exec('CREATE TABLE datas (id INTEGER PRIMARY KEY, type INTEGER, level INTEGER, race INTEGER, attribute INTEGER, atk INTEGER, def INTEGER, alias INTEGER, setcode INTEGER)');
+    cdb.exec('CREATE TABLE texts (id INTEGER PRIMARY KEY, name TEXT, desc TEXT)');
+    for (const [id, alias] of [[1000,0],[1001,1000],[1002,1000],[1019,1000],[1020,1000],[2000,1000],[3001,3000]]) {
+      cdb.prepare('INSERT INTO datas VALUES (?,33,4,1,1,1500,1000,?,0)').run(id, alias);
+      cdb.prepare('INSERT INTO texts VALUES (?,?,?)').run(id, `CDB-${id}`, `Effect-${id}`);
+    }
+    cdb.close();
+    fs.writeFileSync(namesPath, JSON.stringify([
+      {id:1000,sc_name:'原版译名',en_name:'OriginalName'},
+      {id:1002,sc_name:'异画独立译名'},
+      {id:2000,sc_name:'规则卡独立译名'},
+    ]));
+    const originalCdb = config.server.cardsCdb, originalNames = config.server.cardNamesJson;
+    config.server.cardsCdb = cdbPath; config.server.cardNamesJson = namesPath;
+    try {
+      const cards = new CardsService();
+      expect(cards.get(1001)).toMatchObject({code:1001,name:'原版译名',alias:1000,aliasKind:'artwork',aliasName:'原版译名',desc:'Effect-1001'});
+      expect(cards.get(1002)?.name).toBe('异画独立译名');
+      expect(cards.get(1019)?.aliasKind).toBe('artwork');
+      expect(cards.get(1020)).toMatchObject({name:'CDB-1020',aliasKind:'rule'});
+      expect(cards.get(2000)).toMatchObject({name:'规则卡独立译名',aliasKind:'rule',aliasName:'原版译名'});
+      expect(cards.get(3001)?.name).toBe('CDB-3001');
+      expect(cards.search('OriginalName').map(c=>c.code).sort()).toEqual([1000,1001,1002,1019]);
+      expect(cards.search('1001').some(c=>c.code===1001)).toBe(true);
+      expect(cards.canonicalCode(1001)).toBe(1000);
+      expect(cards.canonicalCode(2000)).toBe(1000);
+      expect(cardAliasKind(5405695,5405694)).toBe('rule');
+      expect(cardAliasKind(1000,1000)).toBeUndefined();
+    } finally {
+      config.server.cardsCdb = originalCdb; config.server.cardNamesJson = originalNames;
+      fs.rmSync(dir, {recursive:true,force:true});
     }
   });
 

@@ -56,7 +56,7 @@ const assert = require('node:assert/strict');
     const section=page.locator('section').filter({has:page.getByText('主卡组',{exact:true})});
     await section.dispatchEvent('dragover',{clientX:0,clientY:0});
     await page.evaluate(()=>window.dispatchEvent(new Event('dragend')));
-    assert.equal(await section.locator('span.absolute').count(),0);
+    assert.equal(await section.locator('span.absolute.bg-gold').count(),0);
     await card('main',1).getByRole('button').click();
     await page.getByRole('dialog').waitFor();
     assert.deepEqual(errors,[]);

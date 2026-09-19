@@ -131,7 +131,7 @@ export function raceAttrLine(c: CardInfo): string {
 }
 
 export function aliasLine(c: CardInfo): string {
-  return c.alias && c.alias !== c.code && c.aliasName ? `规则同名：${c.aliasName}` : '';
+  return c.alias && c.alias !== c.code && c.aliasName ? `${c.aliasKind === 'artwork' ? '异画版本' : '规则同名'}：${c.aliasName}` : '';
 }
 
 /** Resolve a card's rules copy key without replacing the displayed code. */
