@@ -341,6 +341,17 @@ export function DeckZone({ title, zone, codes, limit, cardMap, onCardDrop, onCar
   onCardMove?: (code: number, from: string, to: string, index?: number, fromIndex?: number) => void;
 }) {
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  useEffect(() => {
+    const reset = () => setHoverIdx(null);
+    window.addEventListener('dragend', reset);
+    window.addEventListener('drop', reset);
+    window.addEventListener('blur', reset);
+    return () => {
+      window.removeEventListener('dragend', reset);
+      window.removeEventListener('drop', reset);
+      window.removeEventListener('blur', reset);
+    };
+  }, []);
   const draggable = !!onCardMove || !!onCardDrop;
   const acceptsDrop = !!onCardPick || !!onCardMove || !!onCardDrop;
   // Always render the server order. New cards therefore remain at the end and

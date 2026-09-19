@@ -12,6 +12,7 @@ type PreviewAction = { label: string; run: () => void; secondary?: { label: stri
 let setPreviewState: React.Dispatch<React.SetStateAction<PreviewState>> | null = null;
 let previewAction: ((card: CardInfo) => PreviewAction) | null = null;
 let pinnedRef = false;
+let dragging = false;
 
 function supportsFineHover(): boolean {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return true;
@@ -24,7 +25,7 @@ export function setCardPreviewAction(getAction: ((card: CardInfo) => PreviewActi
 }
 
 export function showCardPreview(card: CardInfo, e: { clientX: number; clientY: number }): void {
-  if (pinnedRef || !supportsFineHover()) return; // 触摸设备使用点击固定详情，不显示跟手 hover 窗口
+  if (dragging || pinnedRef || !supportsFineHover()) return; // 触摸设备使用点击固定详情，不显示跟手 hover 窗口
   setPreviewState?.({ card, x: e.clientX, y: e.clientY });
 }
 
@@ -37,7 +38,7 @@ export function pinCardPreview(card: CardInfo, e: { clientX: number; clientY: nu
 let setPinnedState: React.Dispatch<React.SetStateAction<boolean>> | null = null;
 
 export function moveCardPreview(e: { clientX: number; clientY: number }): void {
-  if (pinnedRef || !supportsFineHover()) return;
+  if (dragging || pinnedRef || !supportsFineHover()) return;
   setPreviewState?.((s) => (s ? { ...s, x: e.clientX, y: e.clientY } : s));
 }
 
@@ -83,9 +84,24 @@ export function CardPreviewHost() {
   const [pinned, setPinned] = useState(false);
 
   useEffect(() => {
+    const startDrag = () => {
+      dragging = true;
+      closeCardPreview();
+    };
+    const endDrag = () => { dragging = false; };
+    window.addEventListener('dragstart', startDrag);
+    window.addEventListener('dragend', endDrag);
+    window.addEventListener('drop', endDrag);
+    window.addEventListener('blur', endDrag);
     setPreviewState = setPreview;
     setPinnedState = setPinned;
     return () => {
+      window.removeEventListener('dragstart', startDrag);
+      window.removeEventListener('dragend', endDrag);
+      window.removeEventListener('drop', endDrag);
+      window.removeEventListener('blur', endDrag);
+      dragging = false;
+      pinnedRef = false;
       setPreviewState = null;
       setPinnedState = null;
     };

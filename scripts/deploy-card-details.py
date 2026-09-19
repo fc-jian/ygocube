@@ -7,6 +7,7 @@ ap.add_argument('archive', type=P)
 ap.add_argument('sha256')
 ap.add_argument('release')
 ap.add_argument('--activate', action='store_true')
+ap.add_argument('--web-only', action='store_true', help='Preserve API/srvpro and restart only Web services')
 a = ap.parse_args()
 assert re.fullmatch(r'[a-z0-9-]+', a.release)
 roots = {n: P('/opt')/n for n in ['ygocube', 'ygoduel']}
@@ -49,10 +50,11 @@ for n,new in news.items():
     shutil.copytree(olds[n], new, symlinks=True)
     shutil.rmtree(new/'web')
     shutil.copytree(stage/n/'web', new/'web', symlinks=True)
-    shutil.rmtree(new/'api/dist')
-    shutil.copytree(stage/'api/dist', new/'api/dist')
-    shutil.copytree(stage/'api/node_modules', new/'api/node_modules', dirs_exist_ok=True)
-    shutil.copytree(stage/'srvpro', new/'srvpro', dirs_exist_ok=True)
+    if not a.web_only:
+        shutil.rmtree(new/'api/dist')
+        shutil.copytree(stage/'api/dist', new/'api/dist')
+        shutil.copytree(stage/'api/node_modules', new/'api/node_modules', dirs_exist_ok=True)
+        shutil.copytree(stage/'srvpro', new/'srvpro', dirs_exist_ok=True)
     app = new/'web'/('standalone/apps/web' if n == 'ygocube' else 'apps/web')
     assert (app/'.next/static').is_dir() and (app/'.next/BUILD_ID').is_file()
     old_static = olds[n]/'web'/('standalone/apps/web/.next/static' if n == 'ygocube' else 'apps/web/.next/static')
@@ -71,8 +73,10 @@ for n,new in news.items():
 if not a.activate:
     print(json.dumps({'prepared':True,'release':a.release,'sourceCommit':manifest['sourceCommit']}))
     raise SystemExit()
-assert not occupied(), 'Active duel host; deployment deferred'
-services = [n+'-'+s for n in roots for s in ['api','srvpro','web']]
+assert a.web_only or not occupied(), 'Active duel host; deployment deferred'
+services = [n+'-'+s for n in roots for s in (['web'] if a.web_only else ['api','srvpro','web'])]
+unchanged = [n+'-'+s for n in roots for s in ['api','srvpro']] if a.web_only else []
+unchanged_state = {s: run('systemctl','show',s,'-p','MainPID','-p','ExecMainStartTimestamp') for s in unchanged}
 nginx = run('systemctl','show','nginx','-p','MainPID','-p','ExecMainStartTimestamp')
 for n,root in roots.items():
     backup=root/'backups'/a.release
@@ -82,9 +86,10 @@ for n,root in roots.items():
     if not config_file.exists(): config_file = root/'shared/config.yaml'
     shutil.copy2(config_file,backup/'config.yaml')
 try:
-    run('systemctl','stop','ygocube-api','ygoduel-api')
-    assert not occupied(), 'Host appeared during maintenance preflight'
-    run('systemctl','stop','ygocube-srvpro','ygoduel-srvpro','ygocube-web','ygoduel-web')
+    if not a.web_only:
+        run('systemctl','stop','ygocube-api','ygoduel-api')
+        assert not occupied(), 'Host appeared during maintenance preflight'
+    run('systemctl','stop',*services)
     for n,root in roots.items():
         dbfile=root/'shared/data'/('cube.sqlite' if n=='ygocube' else 'duel.sqlite')
         with sqlite3.connect(dbfile) as db, sqlite3.connect(root/'backups'/a.release/dbfile.name) as out:
@@ -108,13 +113,14 @@ try:
                 assert r.status==200
                 assert ('javascript' in r.headers.get('Content-Type','') if '.js' in asset else 'text/css' in r.headers.get('Content-Type',''))
         results[route]={'status':200,'assets':len(assets)}
-    assert all(s=='active' for s in run('systemctl','is-active',*services,'nginx').splitlines())
+    assert all(s=='active' for s in run('systemctl','is-active',*services,*unchanged,'nginx').splitlines())
+    assert all(unchanged_state[s] == run('systemctl','show',s,'-p','MainPID','-p','ExecMainStartTimestamp') for s in unchanged)
     assert nginx==run('systemctl','show','nginx','-p','MainPID','-p','ExecMainStartTimestamp')
 except Exception:
     for n,root in roots.items():
         if (root/'current').resolve()!=olds[n]: switch(root,olds[n])
     run('systemctl','restart',*services)
     raise
-result={'ok':True,'release':a.release,'commit':manifest['sourceCommit'],'pages':results,'services':services+['nginx']}
+result={'ok':True,'release':a.release,'commit':manifest['sourceCommit'],'pages':results,'services':services+unchanged+['nginx'],'webOnly':a.web_only}
 for n,root in roots.items(): (root/'backups'/a.release/'verification.json').write_text(json.dumps(result,indent=2))
 print(json.dumps(result))
