@@ -8,8 +8,14 @@ import type { CardPickStat } from './card-pick-stats.service';
 // Card metadata: structural/effect data is imported from cards.cdb (itself a
 // sqlite db with datas/texts tables, aligned by rowid).  The browser-visible
 // card name prefers the external exact-code ygocdb mapping.  When all of its
-// localized fields are blank or unavailable, cards.cdb's literal texts.name
-// is the final fallback so every non-token card still has a useful name.
+// localized fields are blank, artwork may inherit the original's mapping;
+// cards.cdb's literal texts.name remains the final fallback.
+// Match gframe/data_manager.cpp, including its explicit rule-code exception.
+export function cardAliasKind(code: number, alias: number): 'artwork' | 'rule' | undefined {
+  if (!alias || alias === code) return undefined;
+  return code !== 5405695 && Math.abs(code - alias) < 20 ? 'artwork' : 'rule';
+}
+
 export interface CardInfo {
   code: number;
   name: string;
@@ -25,6 +31,7 @@ export interface CardInfo {
   def: number;
   alias: number;
   aliasName?: string;
+  aliasKind?: 'artwork' | 'rule';
   setCodes: number[];
   setNames: string[];
   /** Only populated by public pool-card responses; false means search hit is outside the pool. */
@@ -362,16 +369,19 @@ export class CardsService {
         db.prepare('DELETE FROM cards').run();
         for (const d of dataByCode.values()) {
           const t = nameByRow.get(d.id);
-          // Prefer the exact-code external mapping, then use the literal CDB
-          // name as a final fallback.  Alias rows remain exact identities:
-          // datas.alias never replaces the selected name or code.
-          const mappedName = cardNameEntries.get(d.id)?.displayName?.trim() ?? '';
+          // Artwork keeps its exact identity/image but can inherit the original's
+          // localized name. A rules-name alias never replaces the printed name.
+          const artwork = cardAliasKind(d.id, d.alias) === 'artwork';
+          const originalEntry = artwork ? cardNameEntries.get(d.alias) : undefined;
+          const mappedName = cardNameEntries.get(d.id)?.displayName?.trim() || originalEntry?.displayName?.trim() || '';
           const literalName = mappedName || String(t?.name ?? '').trim();
+          const searchNames = [...(cardNameEntries.get(d.id)?.searchNames ?? []), ...(originalEntry?.searchNames ?? [])];
+          this.cardSearchNames.set(d.id, searchNames);
           const { level, lscale, rscale, linkMarkers, defense } = decodeCardFields(d.type, d.level, d.def);
           const setCodes = parseSetCodes(d.setcode_text);
           const setNames = setCodes.map((c) => setNameMap.get(c)).filter((x): x is string => !!x);
           const labels = [
-            ...(cardNameEntries.get(d.id)?.searchNames ?? []),
+            ...searchNames,
             literalName, String(t?.name ?? '').trim(), String(d.id), String(d.id).padStart(8, '0'), t?.desc ?? '',
             ...typeLabels(d.type), ...bitLabels(d.race ?? 0, RACE_NAMES), ...bitLabels(d.attribute ?? 0, ATTRIBUTE_NAMES),
             `等级 ${level}`, `星级 ${level}`, `攻击力 ${d.atk ?? 0}`,
@@ -463,6 +473,7 @@ export class CardsService {
       atk: r.atk ?? 0,
       def: r.def ?? 0,
       alias: r.alias ?? 0,
+      aliasKind: cardAliasKind(r.code, r.alias ?? 0),
       aliasName: r.alias && r.alias !== r.code ? (getDb().prepare('SELECT name FROM cards WHERE code=?').get(r.alias) as { name: string } | undefined)?.name ?? '' : '',
       setCodes: parseArray(r.setcodes_json).filter((value): value is number => typeof value === 'number'),
       setNames: parseArray(r.setnames_json).filter((value): value is string => typeof value === 'string'),

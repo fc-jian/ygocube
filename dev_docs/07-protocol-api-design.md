@@ -266,10 +266,11 @@ srvpro 发送精简的 `room_name/start/end/players/first/wins`；每个 player 
 ## 5. 卡牌元数据与错误码
 
 `CardInfo` 字段：`code/name/type/desc/level/lscale/rscale/linkMarkers/race/`
-`attribute/atk/def/alias/aliasName/setCodes/setNames`。name/code 是 exact 卡表行；alias 只
+`attribute/atk/def/alias/aliasName/aliasKind/setCodes/setNames`。name/code 是 exact 卡表行；alias 只
 用于卡组规则副本上限与合法性检查，不用于卡池、搜索、状态或详情去重。
 name 的显示值优先来自 `server.card_names_json` 中的 `sc_name` → `md_name` → `jp_name` → `cn_name` → `en_name`；
-若这些字段均为空或映射缺失，则回退到 exact code 对应的 CDB `texts.name` 原名。
+若这些字段均为空或映射缺失，异画卡先尝试原版 alias 的名称映射，最后回退到 exact code 对应的 CDB `texts.name` 原名。
+`aliasKind` 为 `artwork`（异画）、`rule`（规则同名）或省略（无有效 alias）。按 YGOPro 原生约定：非零且非自身 alias、编号差绝对值小于 20 为异画，但编号 5405695 始终按规则同名处理。异画继承原版映射的搜索别名；规则同名卡不继承目标卡名。异画详情显示“异画版本”，规则同名显示“规则同名”；保留各自 exact code、卡图、效果和抓位统计。
 `cn_name`、`sc_name`、`md_name`、`nwbbs_n`、`cnocg_n`、`jp_ruby`、`jp_name`、`en_name`
 以及 CDB 原名均加入搜索索引。`TYPE_TOKEN`
 （衍生物）记录不出现在用户搜索结果，也不能进入主卡池或候选池。

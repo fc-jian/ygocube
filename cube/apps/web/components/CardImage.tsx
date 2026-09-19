@@ -1,7 +1,8 @@
 'use client';
 
+import { observeCardViewport } from '@/lib/cardViewport';
 import { API_BASE } from '@/lib/api';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { CardInfo } from '@/lib/types';
 import { getDirHandle, localCardImagePaths, readCardImageUrl, requestDirPermission } from '@/lib/pics';
 
@@ -10,14 +11,21 @@ import { getDirHandle, localCardImagePaths, readCardImageUrl, requestDirPermissi
 // 优先 expansions/pics/，兼容常见图片格式），再回退服务端低清 avif（/api/pics/:code.avif）
 // 与服务端原图代理（/api/pics/:code），最终空白卡占位。
 export function CardImage({ code, name, className = '' }: { code: number; name?: string; className?: string }) {
+  const container = useRef<HTMLDivElement>(null);
+  const [visibleCode, setVisibleCode] = useState<number | null>(null);
+  useEffect(() => {
+    if (!container.current) return;
+    return observeCardViewport(container.current, () => setVisibleCode(code));
+  }, [code]);
   const [picsRevision, setPicsRevision] = useState(0);
   useEffect(()=>{const refresh=()=>setPicsRevision(v=>v+1);window.addEventListener('yc-pics-changed',refresh);return()=>window.removeEventListener('yc-pics-changed',refresh)},[]);
   const [src, setSrc] = useState<string | null>(null);
 
   useEffect(() => {
+    setSrc(null);
+    if (visibleCode !== code) return;
     let cancelled = false;
     let objectUrl: string | null = null;
-    setSrc(null);
     const fallback = async () => {
       const candidates: string[] = [];
       const root = localStorage.getItem('yc_local_pics');
@@ -75,17 +83,28 @@ export function CardImage({ code, name, className = '' }: { code: number; name?:
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [code, picsRevision]);
+  }, [code, picsRevision, visibleCode]);
 
-  if (src) {
-    return <img draggable={false} data-card-code={code} src={src} alt={name ?? String(code)} className={`rounded-md border border-white/10 object-cover shadow-[0_5px_14px_rgba(0,0,0,0.28)] ${className}`} loading="lazy" />;
-  }
   return (
     <div
+      ref={container}
+      data-card-image
       data-card-code={code}
-      className={`flex items-center justify-center rounded-md border border-slate-600/70 bg-gradient-to-b from-slate-700 to-slate-950 p-1 text-center shadow-[0_5px_14px_rgba(0,0,0,0.28)] ${className}`}
+      className={`relative aspect-[7/10] object-cover rounded-md border border-white/10 shadow-[0_5px_14px_rgba(0,0,0,0.28)] ${className}`}
     >
-      <span className="line-clamp-3 break-all text-[0.625rem] leading-tight text-slate-300">{name ?? code}</span>
+      {/* Keep searchable text in layout even before the image is loaded. Do not
+          use display:none/visibility:hidden: browser Find must reach this card. */}
+      <span data-card-search aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden text-[10px] text-transparent">
+        {name ?? ''} {String(code).padStart(8, '0')}
+      </span>
+      {src && visibleCode === code ? (
+        <img draggable={false} data-card-code={code} src={src} alt={name ?? String(code)}
+          className="absolute inset-0 h-full w-full rounded-md" style={{ objectFit: 'inherit' }} loading="lazy" />
+      ) : (
+        <span className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-md bg-gradient-to-b from-slate-700 to-slate-950 p-1 text-center">
+          <span className="line-clamp-3 break-all text-[0.625rem] leading-tight text-slate-300">{name ?? code}</span>
+        </span>
+      )}
     </div>
   );
 }

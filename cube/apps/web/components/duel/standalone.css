@@ -661,7 +661,7 @@
 .deck-large-card::backdrop {
   background: #020813dc;
 }
-.deck-large-card > img {
+.deck-large-card > [data-card-image] {
   display: block;
   width: 100%;
   height: min(65dvh, 620px);
@@ -793,3 +793,5 @@
 .deck-editor .card-preview { position: relative; }
 .deck-limit { position: absolute; top: 2px; left: 2px; z-index: 2; width: 20px; height: 20px; border: 2px solid white; border-radius: 50%; display: grid; place-items: center; background: #d52828; color: white; font: bold 13px/1 sans-serif; pointer-events: none; }
 .deck-limit-2 { background: #bd7200; }
+
+.deck-large-card > [data-card-image] img { object-fit: contain; }

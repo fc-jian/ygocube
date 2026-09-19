@@ -14,6 +14,7 @@ test('complete monster subtypes and named rules identity', () => {
  assert.equal(info.typeLabel({type:0x82}), '仪式·魔法');
  assert.equal(info.aliasLine({code:2,alias:1,aliasName:'原卡名'}), '规则同名：原卡名');
  assert.equal(info.aliasLine({code:2,alias:1}), '');
+ assert.equal(info.aliasLine({code:2,alias:1,aliasName:'原卡名',aliasKind:'artwork'}), '异画版本：原卡名');
  assert.equal(info.statLine({type:0x1000001,level:4,lscale:2,rscale:8}), '等级 4 刻度 2/8');
  assert.equal(info.setNameLine({setNames:['字段甲','字段乙']}), '字段：字段甲|字段乙');
 });

@@ -13,6 +13,7 @@ export interface CardInfo {
   def: number;
   alias?: number;
   aliasName?: string;
+  aliasKind?: 'artwork' | 'rule';
   setCodes: number[];
   setNames: string[];
   inPool?: boolean;
