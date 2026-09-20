@@ -78,6 +78,15 @@ for n,new in news.items():
 if not a.activate:
     print(json.dumps({'prepared':True,'release':a.release,'sourceCommit':manifest['sourceCommit']}))
     raise SystemExit()
+# Parse both JSON-style and block YAML before stopping any service.
+windbot_config = None
+if a.windbot_root:
+    cfg = roots['ygoduel']/'shared/config.yaml'
+    windbot_config = json.loads(run('/usr/bin/node','-e',
+        "const fs=require('fs'),yaml=require(process.argv[1]);process.stdout.write(JSON.stringify(yaml.parse(fs.readFileSync(process.argv[2],'utf8'))))",
+        str(olds['ygoduel']/'api/node_modules/yaml'),str(cfg)))
+    assert isinstance(windbot_config, dict) and 'windbot' not in windbot_config, 'WindBot already configured'
+    windbot_config['windbot'] = dict(enabled=True, executable=str(a.windbot_root/'run-windbot'), cwd=str(a.windbot_root), database=str(a.windbot_root/'cards.cdb'), max_processes=4)
 assert a.web_only or not occupied(), 'Active duel host; deployment deferred'
 services = [n+'-'+s for n in roots for s in (['web'] if a.web_only else ['api','srvpro','web'])]
 unchanged = [n+'-'+s for n in roots for s in ['api','srvpro']] if a.web_only else []
@@ -96,11 +105,7 @@ try:
         assert not occupied(), 'Host appeared during maintenance preflight'
     run('systemctl','stop',*services)
     if a.windbot_root:
-        cfg = roots['ygoduel']/'shared/config.yaml'
-        content = cfg.read_text()
-        assert not re.search(r'^windbot:', content, re.M), 'WindBot already configured; use an explicit config update'
-        content += '\nwindbot:\n  enabled: true\n  executable: '+json.dumps(str(a.windbot_root/'run-windbot'))+'\n  cwd: '+json.dumps(str(a.windbot_root))+'\n  database: '+json.dumps(str(a.windbot_root/'cards.cdb'))+'\n  max_processes: 4\n'
-        cfg.write_text(content)
+        (roots['ygoduel']/'shared/config.yaml').write_text(json.dumps(windbot_config, indent=2)+'\n')
     for n,root in roots.items():
         dbfile=root/'shared/data'/('cube.sqlite' if n=='ygocube' else 'duel.sqlite')
         with sqlite3.connect(dbfile) as db, sqlite3.connect(root/'backups'/a.release/dbfile.name) as out:
