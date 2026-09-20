@@ -6,6 +6,7 @@ release=sys.argv[2];assert re.fullmatch(r'[a-z0-9-]+',release)
 new=root/'releases'/release;old=(root/'current').resolve();archive=P(sys.argv[3]);manifest=sys.argv[4]
 assert P(manifest).name==manifest
 web_only=len(sys.argv)>5 and sys.argv[5]=="--web-only"
+api_only=len(sys.argv)>5 and sys.argv[5]=="--api-only"
 def run(*args):return subprocess.check_output(args,text=True).strip()
 def occupied():return subprocess.run(['pgrep','-u','ygoduel','-x','ygopro'],stdout=subprocess.DEVNULL).returncode==0
 def healthy():
@@ -42,6 +43,24 @@ if (new/'web/source.json').exists():
 (new/'release.json').write_text(json.dumps(metadata,indent=2))
 # Preserve old immutable assets so open browser tabs can finish loading.
 run('chown','-R','ygoduel:ygoduel',str(new))
+if api_only:
+ # A follow-up API fix must preserve the already verified frontend and srvpro.
+ for path,digest in json.loads((new/manifest).read_text()).items():
+  if path.startswith('web/') and path!='web/source.json':assert (old/path).is_file() and hashlib.sha256((old/path).read_bytes()).hexdigest()==digest,path
+ protected=run('systemctl','show','ygoduel-web','ygoduel-srvpro','-p','MainPID','-p','ExecMainStartTimestamp')
+ run('systemctl','stop','ygoduel-api')
+ try:
+  db=sqlite3.connect(root/'shared/data/duel.sqlite');out=sqlite3.connect(backup/'duel.sqlite');db.backup(out);assert out.execute('PRAGMA integrity_check').fetchone()[0]=='ok';out.close();db.close()
+  (root/'next').symlink_to(new);os.replace(root/'next',root/'current')
+  run('systemctl','start','ygoduel-api');healthy()
+ except Exception:
+  (root/'rollback').symlink_to(old);os.replace(root/'rollback',root/'current');run('systemctl','restart','ygoduel-api');raise
+ assert protected==run('systemctl','show','ygoduel-web','ygoduel-srvpro','-p','MainPID','-p','ExecMainStartTimestamp')
+ assert baseline==run('systemctl','show','ygocube-api','ygocube-srvpro','ygocube-web','nginx','-p','MainPID','-p','ExecMainStartTimestamp')
+ (backup/'cube-baseline.txt').write_text(baseline)
+ (backup/'duel-protected-baseline.txt').write_text(protected)
+ print(json.dumps({'ok':True,'release':str(new),'apiOnly':True,'otherServicesUnchanged':True,'build':metadata['webBuildId']}))
+ raise SystemExit(0)
 if web_only:
  protected=run('systemctl','show','ygoduel-api','ygoduel-srvpro','-p','MainPID','-p','ExecMainStartTimestamp')
  try:
