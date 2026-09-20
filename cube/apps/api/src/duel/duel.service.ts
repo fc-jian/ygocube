@@ -592,9 +592,12 @@ export class DuelService implements OnModuleDestroy {
                 { room_name: t.room },
                 { headers: this.headers(), timeout: 5000 },
               )
-              .catch(() =>
-                console.error("Unable to close disconnected bot room"),
-              );
+              .catch((error) => {
+                // srvpro may already have removed a finished or empty room.
+                if (axios.isAxiosError(error) && error.response?.status === 404)
+                  return;
+                console.error("Unable to close disconnected bot room");
+              });
           }
         }
       },

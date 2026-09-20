@@ -291,7 +291,7 @@ describe("bot room lifetime", () => {
     );
     jest.restoreAllMocks();
   });
-  it.each(["bot", "human", "takeover"])(
+  it.each(["bot", "human", "takeover", "already-closed"])(
     "cleans only disconnected bot owners: %s",
     async (kind) => {
       const axios = require("axios").default;
@@ -305,13 +305,21 @@ describe("bot room lifetime", () => {
       const post = jest
         .spyOn(axios, "post")
         .mockResolvedValue({ data: { ok: true } });
+      const log = jest.spyOn(console, "error").mockImplementation(() => {});
+      if (kind === "already-closed")
+        post.mockRejectedValue({
+          isAxiosError: true,
+          response: { status: 404 },
+        });
       try {
         await expect(
           svc.player(ws, { standalone: "test", room: "W123456789012345678" }),
         ).rejects.toThrow("test connection");
         if (kind === "takeover") svc.players.set("test", {});
         svc.active.get(ws).close();
-        if (kind === "bot") {
+        if (kind === "bot" || kind === "already-closed") {
+          await Promise.resolve();
+          expect(log).not.toHaveBeenCalled();
           expect(stop).toHaveBeenCalledWith("W123456789012345678");
           expect(post).toHaveBeenCalledWith(
             expect.stringContaining("/cube/close_room"),
