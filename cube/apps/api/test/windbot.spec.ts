@@ -1,4 +1,4 @@
-import { WindBots } from "../src/duel/windbot";
+import { WindBots, BOT_CATALOG } from "../src/duel/windbot";
 import { config } from "../src/config";
 import fs from "fs";
 import { EventEmitter } from "events";
@@ -36,6 +36,28 @@ describe("WindBot process boundaries", () => {
     jest.useRealTimers();
     Object.assign(config.windbot, old);
     config.webDuel.enabled = enabled;
+  });
+  it("covers all bundled decks with the configured character and dialog", () => {
+    expect(BOT_CATALOG).toHaveLength(70);
+    expect(new Set(BOT_CATALOG.map((b) => b.id)).size).toBe(70);
+    expect(new Set(BOT_CATALOG.map((b) => b.robot)).size).toBe(24);
+    expect(BOT_CATALOG.find((b) => b.id === "Blue-Eyes")).toMatchObject({
+      robot: "复制植物",
+      dialog: "copy.zh-CN",
+    });
+    expect(BOT_CATALOG.find((b) => b.id === "MalissOCG")).toMatchObject({
+      robot: "今晚有宵夜吗",
+      dialog: "Xiaoye.zh-CN",
+    });
+    expect(manager.catalog().every((b) => b.robot)).toBe(true);
+    manager.start("W123456789012345678", "Level VIII", jest.fn());
+    expect((spawn as jest.Mock).mock.calls[0][1]).toEqual(
+      expect.arrayContaining([
+        "Deck=Level VIII",
+        "Name=谜之剑士LV4",
+        "Dialog=swordsman.zh-CN",
+      ]),
+    );
   });
   it("rejects disabled instances and untrusted deck or room paths", () => {
     config.windbot.enabled = false;

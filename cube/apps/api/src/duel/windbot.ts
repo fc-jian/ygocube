@@ -2,31 +2,22 @@ import { spawn, ChildProcess } from "child_process";
 import fs from "fs";
 import { config } from "../config";
 import type { DuelBot } from "@ygocube/shared";
-export const BOT_CATALOG: DuelBot[] = [
-  {
-    id: "Blue-Eyes",
-    name: "青眼白龙",
-    description: "以高攻击力龙族展开，适合熟悉基本对战。",
-  },
-  {
-    id: "DarkMagician",
-    name: "黑魔术师",
-    description: "通过魔法陷阱配合展开与干扰。",
-  },
-  {
-    id: "Altergeist",
-    name: "幻变骚灵",
-    description: "陷阱与怪兽效果连锁，练习应对干扰。",
-  },
-  { id: "Burn", name: "效果伤害", description: "以效果伤害为主的练习对手。" },
-];
+import { BOT_CATALOG } from "./bot-catalog";
+export { BOT_CATALOG } from "./bot-catalog";
 export class WindBots {
   private running = new Map<
     string,
     { child: ChildProcess; timer: NodeJS.Timeout }
   >();
   catalog() {
-    return config.windbot.enabled ? BOT_CATALOG : [];
+    return config.windbot.enabled
+      ? BOT_CATALOG.map(({ id, name, description, robot }) => ({
+          id,
+          name,
+          description,
+          robot,
+        }))
+      : [];
   }
   check(id: unknown) {
     if (!config.webDuel.enabled || !config.windbot.enabled)
@@ -49,12 +40,14 @@ export class WindBots {
     if (this.running.has(room)) return;
     this.check(id);
     if (!/^W[a-f0-9]{18}$/.test(room)) throw new Error("BAD_PAYLOAD");
+    const selected = BOT_CATALOG.find((b) => b.id === id)!;
     const child = spawn(
       config.windbot.executable,
       [
         ...config.windbot.args,
         `Deck=${id}`,
-        "Name=机器人",
+        `Name=${selected.robot}`,
+        `Dialog=${selected.dialog}`,
         `Host=${config.webDuel.upstreamHost}`,
         `Port=${config.srvpro.gamePort}`,
         `HostInfo=${room}`,

@@ -1,6 +1,6 @@
 # WindBot 独立对战
 
-入口 `/duel/bot/`，选择机器人与昵称后自动生成独立房间。玩家首先入房成为房主，然后 API 启动原生 WindBot 作为第二位玩家。入房后选择自己的卡组，准备并开始。首版固定单局、无限制禁限卡表，正常校验卡组张数；青眼、黑魔术师、幻变骚灵与效果伤害四套上游卡组可选。
+入口 `/duel/bot/`，选择机器人与昵称后自动生成独立房间。玩家首先入房成为房主，然后 API 启动原生 WindBot 作为第二位玩家。入房后选择自己的卡组，准备并开始。固定单局、无限制禁限卡表，正常校验卡组张数。页面使用“机器人 → 机器人卡组”双层下拉框，按上游角色配置提供 24 个分组、70 套随包卡组；切换角色时重置为该角色的首套卡组。
 
 ## 构建与配置
 
@@ -38,3 +38,12 @@ python3 scripts/windbot/prepare-database.py /path/to/ygopro/cards.cdb /path/to/o
 - 本地与公网均验证四套机器人：选机器人、自动建房、卡组上传、准备、猜拳、实际出牌／效果、投降结算。另在本地黑魔术师完成玩家 LP 归零结算。公网桌面 1440 和竖屏 390 无横向溢出或页面异常。
 - HTTPS 首页、Duel、组卡、机器人页及所引用静态 JS/CSS 的状态和 MIME 正常；七个服务均 active；两个实例的原生宿主和正式 CDB 哈希保持不变；Cube 的 bot API 为 disabled，Duel 返回四套可选 bot。验收结束未残留 WindBot 或 ygopro 对局宿主；本地测试服务已关闭。
 - 首次 r21 尝试因把 block YAML 追加到 JSON 格式的 `config.yaml` 导致启动校验失败，自动回滚到 r20。r22 改为停服前解析完整配置、再序列化为 JSON（合法 YAML），已通过。后续发布不得对配置盲目追加文本。
+
+
+## 完整机器人目录
+
+`scripts/windbot/generate-catalog.py SOURCE OUTPUT` 从锁定版本的 `BotWrapper/bot.conf`、Executor 的 Deck 声明及 Dialog 文件生成 `cube/apps/api/src/duel/bot-catalog.ts`。优先保持上游机器人名称、卡组名、说明与 Dialog 对应关系；未写入 bot.conf 但有实体 YDK 的 9 套卡组归入“默认机器人”。后台只接受目录内 Deck ID，固定传入 Name 和 Dialog；旧版四个 Deck ID 保持兼容。
+
+上游 72 个 Executor 中，Test 与 Lucky 指向未提供的 AI_Test.ydk；P2 是需要用户另选卡组的包装器入口，不能作为随包预设直接开局。随机难度条目是包装器的选牌策略，不是额外的 AI 卡组。此目录覆盖全部 70 套实际附带卡组，不把这些占位条目伪装成可用预设。
+
+更新目录后必须用 `scripts/e2e/windbot-catalog.cjs RUNTIME CDB CATALOG_JSON` 对实际生产运行时逐项检查角色、台词加载、协议握手、提交卡组与自动准备；`scripts/e2e/windbot-selection.cjs BASE` 检查两层下拉框所有分组与切换重置、桌面和移动布局。数据库生成器也须遍历全部 YDK 校验卡号。

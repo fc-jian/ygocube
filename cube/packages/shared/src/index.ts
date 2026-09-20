@@ -236,5 +236,5 @@ export interface BrowserDeck { name: string; main: number[]; extra: number[]; si
 export interface StandaloneJoinRequest { name: string; password?: string; room?: string; options?: StandaloneDuelOptions; deck?: BrowserDeck; reconnect?: boolean; credential?: string; }
 export interface DuelActionError { type: 'error'; code: string; message?: string; }
 
-export interface DuelBot { id: string; name: string; description: string; }
+export interface DuelBot { id: string; name: string; description: string; robot: string; }
 export interface DuelBotJoinRequest { name: string; bot: string; }

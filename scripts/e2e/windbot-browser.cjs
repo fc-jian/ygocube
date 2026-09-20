@@ -17,11 +17,20 @@ const assert = require("node:assert/strict"),
     const base = process.argv[2] || "http://127.0.0.1:3100",
       fixture = process.argv[3],
       bot = process.argv[4] || "Blue-Eyes";
+    const catalogResponse = page.waitForResponse((r) =>
+      r.url().endsWith("/public/duel/bots"),
+    );
     await page.goto(base + "/duel/bot/");
+    const catalog = await (await catalogResponse).json();
     await page
       .getByLabel("昵称", { exact: true })
       .fill("BotTest" + Date.now().toString().slice(-5));
-    await page.locator(`input[value="${bot}"]`).check();
+    const selectedBot = catalog.bots.find((b) => b.id === bot);
+    assert(selectedBot);
+    await page
+      .getByLabel("机器人", { exact: true })
+      .selectOption(selectedBot.robot);
+    await page.getByLabel("机器人卡组", { exact: true }).selectOption(bot);
     await page
       .getByRole("button", { name: "建立房间并进入", exact: true })
       .click();

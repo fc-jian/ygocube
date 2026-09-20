@@ -5,7 +5,8 @@ import { api } from "@/lib/api";
 import "@/components/duel/standalone.css";
 export default function BotPage() {
   const [bots, setBots] = useState<DuelBot[]>([]),
-    [bot, setBot] = useState("");
+    [bot, setBot] = useState(""),
+    [robot, setRobot] = useState("");
   const [name, setName] = useState(""),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
@@ -20,6 +21,7 @@ export default function BotPage() {
         }
         setBots(r.bots);
         setBot(r.bots[0]?.id || "");
+        setRobot(r.bots[0]?.robot || "");
       })
       .catch((e) => setError(e.message));
   }, []);
@@ -63,32 +65,47 @@ export default function BotPage() {
             onChange={(e) => setName(e.target.value)}
           />
         </label>
-        <fieldset>
-          <legend>选择对手</legend>
-          {bots.map((b) => (
-            <label
-              key={b.id}
-              style={{
-                display: "block",
-                padding: "12px",
-                border: "1px solid #52657d",
-                borderRadius: 8,
-                margin: "10px 0",
-                background: bot === b.id ? "#17344a" : undefined,
+        <div className="standalone-fields">
+          <label>
+            机器人
+            <select
+              required
+              aria-label="机器人"
+              value={robot}
+              disabled={busy || !bots.length}
+              onChange={(e) => {
+                setRobot(e.target.value);
+                setBot(bots.find((b) => b.robot === e.target.value)?.id || "");
               }}
             >
-              <input
-                type="radio"
-                name="bot"
-                value={b.id}
-                checked={bot === b.id}
-                onChange={() => setBot(b.id)}
-              />{" "}
-              <strong>{b.name}</strong>
-              <p>{b.description}</p>
-            </label>
-          ))}
-        </fieldset>
+              {[...new Set(bots.map((b) => b.robot))].map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            机器人卡组
+            <select
+              required
+              aria-label="机器人卡组"
+              value={bot}
+              disabled={busy || !robot}
+              onChange={(e) => setBot(e.target.value)}
+            >
+              {bots
+                .filter((b) => b.robot === robot)
+                .map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.name}
+                  </option>
+                ))}
+            </select>
+          </label>
+        </div>
+        <p aria-live="polite">{bots.find((b) => b.id === bot)?.description}</p>
+
         <button disabled={busy || !bot}>
           {busy ? "正在建立房间…" : "建立房间并进入"}
         </button>
