@@ -53,3 +53,14 @@ python3 scripts/windbot/prepare-database.py /path/to/ygopro/cards.cdb /path/to/o
 独立 Duel 已于 2026-09-20 更新到 `20260920-windbot-catalog-r23`，应用源码 `518b974b8e367d40f7d4f1097998f83e065bdd08`（已推送）。Build ID：`uG1clXg_wlKia4PNpi-S6`；应用包 SHA-256：`8a451a529e350f6f1d67867f3bb90968f1da8093762be4bee48583539de84141`。Cube 仍为 r22，服务 PID 与启动时间未变；WindBot 二进制、卡库、srvpro 代码均未修改。
 
 70 套配置逐一通过 Aly 实际运行时的 Name/Dialog 加载、提交卡组与自动准备检查；全部卡号存在。Windows／Linux API 测试各 21 项及生产构建通过。公网桌面 1440、竖屏 390 的 24 个分组和全部 70 个选项、切换重置、页面资源检查通过；“尼亚 / 拉比林斯迷宫”真实效果、连锁与投降结算通过。完整握手日志、JSON 验收结果和发布备份位于 `/opt/ygoduel/backups/20260920-windbot-catalog-r23/`。本地测试服务已关闭。
+
+
+## 2026-09-20 对局动画与机器人生命周期发布
+
+- 当前独立 Duel：`20260920-duel-feedback-r25`，源码 `d3c66e40b8669edacd952dbd52096d5dda9fb9ca`；Web build `iEO4PYMRtQQ-ElHGVnP-0`。发布包 SHA-256：`14b5171f7b028547ef463e25f459dad8df45318879246177e519b0479d8c3bff`。
+- r24 安装完整应用；公网测试发现 srvpro 已先删除房间时重复清理产生错误日志，r25 将 404 视为清理完成。r25 使用 `scripts/deploy-standalone-duel-update.py --api-only`（放在清单参数之后），校验前端哈希一致，仅重启 API；网页、srvpro、Cube、Nginx 进程保持不变。
+- 卡片移动到达前隐藏目标卡片，卡堆显示已到达的顶卡；低动态偏好跳过移动动画。发动提示缺少元数据时不再显示编号。房间失效显示返回大厅确认弹窗，取消后轮询不重复弹出。
+- 机器人规则 `timeLimit=0`；在线对战不再有两小时进程上限；玩家断连停止机器人并关闭房间。连接接管及真人房间不触发该清理。
+- Windows / Linux：27 项 Duel/Bot API 测试、46 项网页测试及应用构建通过。公网五种尺寸回归验证移动中隐藏／到达显示、场面操作与输入保护。
+- 最终版本真实机器人验证：Labrynth 实际出牌并投降结算；Blue-Eyes 实际出牌后在对局中关闭玩家页面。两者均确认不限时、房间删除、中文关闭弹窗、取消后不重复弹出及返回大厅链接。
+- 备份与验收记录：`/opt/ygoduel/backups/20260920-duel-feedback-r25/`；完整更新前备份另在 r24 同名目录。Cube 保持 r22，真人房间重连保留仍为 30 分钟。资源、原生宿主和机器人目录未变。
