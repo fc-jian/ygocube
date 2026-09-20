@@ -145,9 +145,7 @@ const base = process.argv[2] || "http://127.0.0.1:3000",
         .filter({ hasText: "卡片" })
         .waitFor();
       await active.locator(".duel-choice-main").first().click();
-      await active
-        .getByRole("button", { name: "确认 (1)", exact: true })
-        .click({ button: "right" });
+      // Native single-card search confirms as soon as its only required card is chosen.
       await active.locator(".effect-resolve").waitFor();
       await active.screenshot({
         path: require("node:path").join(
@@ -283,7 +281,7 @@ const base = process.argv[2] || "http://127.0.0.1:3000",
         (c) =>
           c.name.startsWith("yc_dueldeck_") &&
           c.path === "/duel" &&
-          c.expires === -1,
+          c.expires > Date.now() / 1000 + 300 * 86400,
       ),
     );
     await builder.getByText("卡图设置", { exact: true }).click();

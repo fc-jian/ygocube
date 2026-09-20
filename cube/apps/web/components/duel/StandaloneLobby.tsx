@@ -50,6 +50,7 @@ export function StandaloneLobby() {
     <main className="standalone duel-lobby">
       <header>
         <a href="/">YGO Cube</a>
+        <a href="/duel/bot/">机器人对战</a>
         <a href="/duel/decks">我的卡组</a>
       </header>
       <h1>网页对战</h1>

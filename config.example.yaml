@@ -42,3 +42,12 @@ web_duel:
   native_host: ""
   native_port: 17911
   native_bind_address: "" # 独立公网 TCP 代理的本机非回环地址
+
+# 独立 Duel 可选机器人；Windows 直接使用 WindBot.exe，Linux 使用独立 Mono 启动器。
+windbot:
+  enabled: false
+  executable: data/windbot/WindBot.exe
+  args: []
+  cwd: data/windbot
+  database: data/windbot/cards.cdb
+  max_processes: 4

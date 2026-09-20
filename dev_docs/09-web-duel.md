@@ -420,3 +420,7 @@ Linux 验证使用 `/tmp/ygocube-material-ui.*` 的独立源码副本和 Linux �
 - 构建来源：`bd567cd2071e30e0fe30323dd8d9ac140a37fc76` 加工作区修复；完整文件哈希记录在 release 的 `web/source.json`，应用源码哈希 `6e75227b795b130d9b1795fed0a74b7395e59567cda76f5820d8c8f24a58c143`。归档 SHA-256 `d6780ec39c06059c2fa170a2a1ceff7fd41c0e859d32bb366a2a572656ebaaa1`。
 - 重启独立 API/srvpro/Web；Cube 三服务及 Nginx PID/启动时间不变。备份与回滚来源在 `/opt/ygoduel/backups/20260910-duel-room-information-r14/`，旧 release 为 r13；SQLite backup integrity_check=ok。
 - 公网真实 WSS BO3 两局、换备、空卡组入房、具体校验错误、额外归类、准备锁定/解锁通过；真实浏览器检索/连锁、观战/ID 重连、胜负原因通过。1440/390 对局展示受控帧测试及四尺寸大厅/组卡器通过。七服务 active，静态资源/MIME、卡图、30 分钟重连均通过；新 invocation 中 BAD IP/协议解析错误为零。验收文件为 `verification.json` 和 `restart-verification.json`。
+
+### 2026-09-20：原生交互与视觉审查
+
+对照 YGOPro 场地绘制、ClientAnalyze 和 CancelOrFinish，补齐移动/抽卡、召唤、目标、攻击、生命值与阶段视觉反馈；修正选择上限和自动完成、重复提交、动作菜单、实时攻守、连锁来源、旧规则额外区和墓地禁看。详细源码依据、测试范围及未覆盖的原生效果见 [14-native-duel-review.md](14-native-duel-review.md)。本轮只完成本地实现与跨平台验收，未发布 Aly。

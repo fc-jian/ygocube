@@ -12,13 +12,15 @@ export default function Page() {
     <>
       <details style={{ padding: "8px 16px" }}>
         <summary>
-          房间实际规则 / Room rules · {s.options.mode ? "BO3" : "Single"} ·{" "}
-          {s.options.timeLimit}s · Main {s.options.mainMin}–{s.options.mainMax}{" "}
-          / Extra {s.options.extraMax} / Side {s.options.sideMax}
+          房间规则 · {s.options.mode ? "三局两胜" : "单局"}
+          {s.options.timeLimit ? ` · ${s.options.timeLimit} 秒` : ""}
         </summary>
         <p>
-          Banlist {s.options.lflist} · MR {s.options.duelRule} · LP{" "}
-          {s.options.startLp} · Hand {s.options.startHand} · Draw{" "}
+          主卡 {s.options.mainMin}–{s.options.mainMax} · 额外{" "}
+          {s.options.extraMax} · 副卡 {s.options.sideMax}
+          <br />
+          禁限卡表 {s.options.lflist} · 大师规则 {s.options.duelRule} · 初始生命{" "}
+          {s.options.startLp} · 初始手牌 {s.options.startHand} · 每回合抽卡{" "}
           {s.options.drawCount}
         </p>
       </details>
@@ -26,7 +28,7 @@ export default function Page() {
     </>
   ) : (
     <main>
-      <a href="/duel">返回建房 / Join a room</a>
+      <a href="/duel">返回建房</a>
     </main>
   );
 }

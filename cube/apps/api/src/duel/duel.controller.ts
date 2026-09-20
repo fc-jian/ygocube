@@ -14,6 +14,16 @@ import { DuelService } from "./duel.service";
 export class DuelController {
   constructor(private duel: DuelService) {}
   @Public()
+  @Get("public/duel/bots")
+  bots() {
+    return this.duel.botOptions();
+  }
+  @Public()
+  @Post("public/duel/bot")
+  bot(@Body() body: any) {
+    return this.duel.joinBot(body);
+  }
+  @Public()
   @Get("public/duel/rooms/:room")
   room(@Param("room") room: string) {
     return this.duel.roomInfo(room);

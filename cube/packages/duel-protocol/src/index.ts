@@ -71,6 +71,7 @@ export const LOC = {
   EXTRA: 64,
   OVERLAY: 128,
 };
+const CARD_QUESTION = 38723936; // gframe/client_field.h
 export interface Ref {
   player: number;
   location: number;
@@ -82,6 +83,9 @@ export interface Card extends Ref {
   position: number;
   atk?: number;
   def?: number;
+  baseAtk?: number;
+  baseDef?: number;
+  status?: number;
   type?: number;
   level?: number;
   rank?: number;
@@ -155,6 +159,7 @@ export interface DuelState {
   time: number[];
   timePlayer: number;
   revealed: number[];
+  graveLocked?: boolean[];
   handResult?: [number, number];
   winner?: number;
   winReason?: number;
@@ -190,6 +195,7 @@ export function initialState(): DuelState {
     deck: { main: [], side: [] },
     ready: [false, false],
     revealed: [],
+    graveLocked: [false, false],
   };
 }
 const ref = (r: Reader, sub = true): Ref => ({
@@ -575,6 +581,7 @@ export function applyGame(s: DuelState, bytes: Uint8Array) {
     s.logs = [];
     s.revealed = [];
     s.winner = undefined;
+    s.graveLocked = [false, false];
     s.winReason = undefined;
     s.stage = "dueling";
     s.prompt = null;
@@ -816,6 +823,7 @@ export function applyGame(s: DuelState, bytes: Uint8Array) {
     s.cards = [];
     s.chain = [];
     s.prompt = null;
+    s.graveLocked = [false, false];
     s.rule = r.u8();
     for (let player = 0; player < 2; player++) {
       s.lp[player] = r.u32();
@@ -844,13 +852,41 @@ export function applyGame(s: DuelState, bytes: Uint8Array) {
     }
     s.stage = "dueling";
   } else if (m === 110) {
-    const attacker = get(s, ref(r)), target = get(s, ref(r));
+    const attackerRef = ref(r), targetRef = ref(r);
+    const attacker = get(s, attackerRef),
+      target = targetRef.location ? get(s, targetRef) : undefined;
     const visible = (c: Card | undefined) => c && (c.player === s.seat || !!(c.position & 5)) ? c.code : 0;
-    s.logs.push(`attack:${visible(attacker)}:${visible(target)}`);
+    s.logs.push(`attack:${visible(attacker)}:${visible(target)}:${targetRef.location === 0 ? 1 : 0}`);
+  } else if (m === 111) {
+    const attackerRef = ref(r),
+      attackerAtk = r.i32(),
+      attackerDef = r.i32();
+    r.u8(); // Battle result flag; movement is handled by its own message.
+    const targetRef = ref(r),
+      targetAtk = r.i32(),
+      targetDef = r.i32();
+    r.u8();
+    if (r.remaining) throw new Error("MESSAGE_LAYOUT_111");
+    // Battle refs do not reveal card identity or change battle position.
+    const attacker = attackerRef.location ? get(s, attackerRef) : undefined,
+      target = targetRef.location ? get(s, targetRef) : undefined;
+    if (attacker) Object.assign(attacker, { atk: attackerAtk, def: attackerDef });
+    if (target) Object.assign(target, { atk: targetAtk, def: targetDef });
+    s.logs.push(`event:${m}:${Array.from(bytes.subarray(1)).join(",")}`);
+  } else if (m === 165) {
+    const player = r.u8(), hintType = r.u8(), value = r.u32();
+    if (player > 1) throw new Error("INVALID_PLAYER");
+    if (r.remaining) throw new Error("MESSAGE_LAYOUT_165");
+    if (value === CARD_QUESTION && (hintType === 6 || hintType === 7)) {
+      // Index the affected viewer, not the owner of either graveyard.
+      s.graveLocked = [...(s.graveLocked ?? [false, false])];
+      s.graveLocked[player] = hintType === 6;
+    }
+    s.logs.push(`event:${m}:${Array.from(bytes.subarray(1)).join(",")}`);
   } else if (
     [
-      61, 63, 65, 80, 81, 83, 111, 112, 113, 114, 120, 130, 131, 133, 160,
-      163, 164, 165, 170,
+      61, 63, 65, 80, 81, 83, 112, 113, 114, 120, 130, 131, 133, 160,
+      163, 164, 170,
     ].includes(m)
   ) {
     s.logs.push(`event:${m}:${Array.from(r.take(r.remaining)).join(",")}`);

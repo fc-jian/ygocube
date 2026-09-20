@@ -8,7 +8,12 @@ ap.add_argument('sha256')
 ap.add_argument('release')
 ap.add_argument('--activate', action='store_true')
 ap.add_argument('--web-only', action='store_true', help='Preserve API/srvpro and restart only Web services')
+ap.add_argument('--windbot-root', type=P, help='Enable the verified WindBot runtime only on independent Duel')
 a = ap.parse_args()
+if a.windbot_root:
+    assert not a.web_only
+    assert a.windbot_root.resolve().is_relative_to(P('/opt/ygoduel/windbot'))
+    assert all((a.windbot_root/f).is_file() for f in ['run-windbot','WindBot.exe','cards.cdb'])
 assert re.fullmatch(r'[a-z0-9-]+', a.release)
 roots = {n: P('/opt')/n for n in ['ygocube', 'ygoduel']}
 stage = roots['ygocube']/'.staging'/a.release
@@ -62,7 +67,7 @@ for n,new in news.items():
         target = app/'.next/static'/src.relative_to(old_static)
         if src.is_file() and not target.exists():
             target.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src, target)
-    metadata = dict(id=a.release, sourceCommit=manifest['sourceCommit'], sourceBranch='main', workingTreeChanges=False,
+    metadata = dict(id=a.release, sourceCommit=manifest['sourceCommit'], sourceBranch=manifest.get('sourceBranch','unknown'), workingTreeChanges=False,
                     previousRelease=olds[n].name, webBuildId=(app/'.next/BUILD_ID').read_text().strip(),
                     artifactSha256=a.sha256, srvproCommit=manifest['srvproCommit'])
     (new/'release.json').write_text(json.dumps(metadata, indent=2))
@@ -90,6 +95,12 @@ try:
         run('systemctl','stop','ygocube-api','ygoduel-api')
         assert not occupied(), 'Host appeared during maintenance preflight'
     run('systemctl','stop',*services)
+    if a.windbot_root:
+        cfg = roots['ygoduel']/'shared/config.yaml'
+        content = cfg.read_text()
+        assert not re.search(r'^windbot:', content, re.M), 'WindBot already configured; use an explicit config update'
+        content += '\nwindbot:\n  enabled: true\n  executable: '+json.dumps(str(a.windbot_root/'run-windbot'))+'\n  cwd: '+json.dumps(str(a.windbot_root))+'\n  database: '+json.dumps(str(a.windbot_root/'cards.cdb'))+'\n  max_processes: 4\n'
+        cfg.write_text(content)
     for n,root in roots.items():
         dbfile=root/'shared/data'/('cube.sqlite' if n=='ygocube' else 'duel.sqlite')
         with sqlite3.connect(dbfile) as db, sqlite3.connect(root/'backups'/a.release/dbfile.name) as out:
@@ -99,7 +110,7 @@ try:
     run('systemctl','start',*services)
     health()
     results={}
-    for route in ['/','/duel','/duel/decks']:
+    for route in ['/','/duel','/duel/decks','/duel/bot/']:
         for attempt in range(30):
             try:
                 with urllib.request.urlopen('https://39.96.220.91'+route,timeout=10) as r: html=r.read().decode()
@@ -117,6 +128,8 @@ try:
     assert all(unchanged_state[s] == run('systemctl','show',s,'-p','MainPID','-p','ExecMainStartTimestamp') for s in unchanged)
     assert nginx==run('systemctl','show','nginx','-p','MainPID','-p','ExecMainStartTimestamp')
 except Exception:
+    if a.windbot_root:
+        shutil.copy2(roots['ygoduel']/'backups'/a.release/'config.yaml', roots['ygoduel']/'shared/config.yaml')
     for n,root in roots.items():
         if (root/'current').resolve()!=olds[n]: switch(root,olds[n])
     run('systemctl','restart',*services)

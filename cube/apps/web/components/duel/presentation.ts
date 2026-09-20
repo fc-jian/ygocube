@@ -119,7 +119,7 @@ export function chainMatches(
     (source) => sameCard(link.ref, source) && source.code === link.code,
   );
   return (
-    sameCard(link.ref, card) ||
+    (sameCard(link.ref, card) && !!link.code && link.code === card.code) ||
     (!sourceExists &&
       !!link.code &&
       link.code === card.code &&

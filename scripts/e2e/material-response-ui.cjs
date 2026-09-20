@@ -187,6 +187,7 @@ const base = process.argv[2] || "http://127.0.0.1:3100";
         .click();
       assert.deepEqual(actions.at(-1).data, [255, 255, 255, 255]);
       const before = actions.length;
+      ws.send(JSON.stringify({ type: "snapshot", state }));
       ws.send(JSON.stringify({ type: "prompt", id: 2 }));
       await confirm.waitFor();
       await confirm
@@ -218,9 +219,7 @@ const base = process.argv[2] || "http://127.0.0.1:3100";
       await viewer
         .locator(".duel-material-list button[aria-pressed=true]")
         .waitFor();
-      await viewer
-        .getByRole("button", { name: "确认素材（1）", exact: true })
-        .click();
+      await page.waitForTimeout(50); // Native max=1 selection submits immediately.
       assert.deepEqual(
         actions.at(-1).data,
         [1, 1],

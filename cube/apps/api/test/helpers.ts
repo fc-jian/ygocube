@@ -1,3 +1,5 @@
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { config } from '../src/config';
 import { CreateTournamentInput, TournamentsService } from '../src/tournaments/tournaments.service';
 import { CardsService } from '../src/cards/cards.service';
@@ -8,11 +10,11 @@ import { PoolsService } from '../src/pools/pools.service';
 // resets), so the file is physically deleted before opening — collisions cannot leak data.
 export function useTestDb(): void {
   const unique = require('crypto').randomUUID();
-  config.server.dbPath = `/tmp/ygocube-test-${process.pid}-${unique}.sqlite`;
+  config.server.dbPath = join(tmpdir(), `ygocube-test-${process.pid}-${unique}.sqlite`);
   // Unit tests exercise metadata behavior with explicit fixtures. Importing a
   // deployment-sized cards.cdb for every isolated database made the suite
   // slow and environment-dependent; force the deterministic synthetic catalog.
-  config.server.cardsCdb = `/tmp/ygocube-no-test-cards-${process.pid}.cdb`;
+  config.server.cardsCdb = join(tmpdir(), `ygocube-no-test-cards-${process.pid}.cdb`);
   const { closeDb, getDb } = require('../src/db');
   closeDb();
   // eslint-disable-next-line @typescript-eslint/no-var-requires

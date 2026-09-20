@@ -47,6 +47,14 @@ test('a hand activation moved to grave never marks another copy in its former ha
  assert.equal(exports.chainMatches(link,source,{cards:[source,otherCopy]}),true);
 });
 
+test('a replacement occupying the activation slot cannot inherit the old chain marker',()=>{
+ const ref={player:0,location:4,sequence:2};
+ const link={code:123,ref};
+ assert.equal(exports.chainMatches(link,{...ref,code:456},{cards:[]}),false);
+ assert.equal(exports.chainMatches(link,{...ref,code:0},{cards:[]}),false);
+ assert.equal(exports.chainMatches(link,{...ref,code:123},{cards:[]}),true);
+});
+
 test('overlay choices resolve each public material by its sub-index, preserving unknown entries',()=>{
  const host={player:1,location:4,sequence:2,code:123,position:1,materials:[222,333,0]};
  const state={cards:[host]};

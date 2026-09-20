@@ -4,6 +4,7 @@ import {
   toHost,
   fromHost,
 } from "./standalone";
+import { WindBots } from "./windbot";
 import { readReplayCatalog } from "./replay-catalog";
 import { Injectable, OnModuleDestroy } from "@nestjs/common";
 import Database from "better-sqlite3";
@@ -91,6 +92,34 @@ export function allowedAction(s: DuelState, op: number, data: Uint8Array) {
 }
 @Injectable()
 export class DuelService implements OnModuleDestroy {
+  private bots = new WindBots();
+  private botCreating = false;
+  private botCreatedAt = 0;
+  botOptions() {
+    return {
+      enabled: config.webDuel.enabled && config.windbot.enabled,
+      bots: config.webDuel.enabled ? this.bots.catalog() : [],
+    };
+  }
+  async joinBot(body: any) {
+    this.bots.check(body?.bot);
+    if (this.botCreating || Date.now() - this.botCreatedAt < 3000)
+      throw new Error("BOT_BUSY");
+    this.botCreating = true;
+    try {
+      const result = await this.standaloneJoin({
+        name: body?.name,
+        password: crypto.randomBytes(24).toString("hex"),
+        options: { ...standaloneDefaults, mode: 0, lflist: -1 },
+      });
+      this.standalonePlayers.get(result.credential)!.bot = body.bot;
+      this.persistStandalone(result.credential);
+      this.botCreatedAt = Date.now();
+      return result;
+    } finally {
+      this.botCreating = false;
+    }
+  }
   private tickets = new Tickets();
   private wss?: WebSocketServer;
   private timer?: NodeJS.Timeout;
@@ -114,6 +143,7 @@ export class DuelService implements OnModuleDestroy {
   private standalonePlayers = new Map<
     string,
     {
+      bot?: string;
       role?: "player" | "watch";
       room: string;
       name: string;
@@ -625,7 +655,10 @@ export class DuelService implements OnModuleDestroy {
           const previousPrompt = s.prompt,
             previousStage = s.stage;
           applyFrame(s, frame);
-          if ((frame[2] === 0x21 && (frame[3] >>> 4) === s.seat) || frame[2] === 2)
+          if (
+            (frame[2] === 0x21 && frame[3] >>> 4 === s.seat) ||
+            frame[2] === 2
+          )
             readyRequested = !!s.ready[s.seat];
           if (standalone && frame[2] === 0x16)
             getDb()
@@ -640,6 +673,32 @@ export class DuelService implements OnModuleDestroy {
                 initial.side.length)
             )
               write(2, initialDeck);
+          }
+          if (
+            frame[2] === 0x13 &&
+            standalone?.bot &&
+            s.host &&
+            s.stage === "lobby"
+          ) {
+            try {
+              this.bots.start(
+                t.room,
+                standalone.bot,
+                () =>
+                  this.send(ws, {
+                    type: "error",
+                    code: "BOT_FAILED",
+                    message: "机器人已退出，请重新建立机器人房间",
+                  }),
+                () => this.players.get(key)?.readyState === WebSocket.OPEN,
+              );
+            } catch {
+              this.send(ws, {
+                type: "error",
+                code: "BOT_FAILED",
+                message: "机器人启动失败，请稍后重新建房",
+              });
+            }
           }
           if (frame[2] === 0x18) write(0x15);
           if (
@@ -1066,6 +1125,7 @@ export class DuelService implements OnModuleDestroy {
       .slice(0, 50);
   }
   onModuleDestroy() {
+    this.bots.close();
     if (this.timer) clearInterval(this.timer);
     for (const ws of this.active.keys()) ws.terminate();
     for (const g of this.watchers.values()) g.abort.abort();

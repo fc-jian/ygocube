@@ -25,6 +25,7 @@ export interface AppConfig {
     allowInsecureDefaults: boolean;
   };
   webDuel: { enabled: boolean; archiveDir: string; upstreamHost: string; version: number; maxConnections: number; };
+  windbot: { enabled: boolean; executable: string; args: string[]; cwd: string; database: string; maxProcesses: number; };
   pics: {
     ygoproRoot: string;
     avifDir: string;
@@ -57,6 +58,7 @@ function loadConfig(): AppConfig {
   const srvpro = (raw.srvpro ?? {}) as Record<string, unknown>;
   const server = (raw.server ?? {}) as Record<string, unknown>;
   const webDuel = (raw.web_duel ?? {}) as Record<string, unknown>;
+  const windbot = (raw.windbot ?? {}) as Record<string, unknown>;
   const pics = (raw.pics ?? {}) as Record<string, unknown>;
   // resolve relative paths against the config file's directory
   const base = path.dirname(file);
@@ -101,6 +103,14 @@ function loadConfig(): AppConfig {
       upstreamHost: String(webDuel.upstream_host ?? '127.0.0.1'),
       version: Number(webDuel.protocol_version ?? 4962),
       maxConnections: Number(webDuel.max_connections ?? 200),
+    },
+    windbot: {
+      enabled: windbot.enabled === true,
+      executable: resolvePath(windbot.executable as string | undefined, undefined, "data/windbot/WindBot.exe"),
+      args: Array.isArray(windbot.args) ? windbot.args.map(String) : [],
+      cwd: resolvePath(windbot.cwd as string | undefined, undefined, "data/windbot"),
+      database: resolvePath(windbot.database as string | undefined, undefined, cardsCdb),
+      maxProcesses: Math.max(1, Math.min(16, Number(windbot.max_processes) || 4)),
     },
     pics: {
       // Empty disables the original-image proxy. Resolving an empty string

@@ -157,9 +157,200 @@ test("queries decode attack, materials and counters in flag order", () => {
   assert.deepEqual(s.cards[0].materials, [111, 222]);
   assert.equal(s.cards[0].counters[3], 2);
 });
+test("base stats and status queries preserve signed values and clear with hidden data", () => {
+  for (const hiddenFlags of [0, 1]) {
+    const s = p.initialState();
+    const payload = bytes(
+      u32(1 | 1024 | 2048 | 524288),
+      u32(91231901), u32(-1), u32(2500), u32(0x4000001),
+    );
+    p.applyGame(s, bytes(7, 1, 4, 2, u32(payload.length + 4), payload));
+    assert.equal(s.cards[0].baseAtk, -1);
+    assert.equal(s.cards[0].baseDef, 2500);
+    assert.equal(s.cards[0].status, 0x4000001);
+    const hidden = hiddenFlags ? bytes(u32(1), u32(0)) : bytes(u32(0));
+    p.applyGame(s, bytes(7, 1, 4, 2, u32(hidden.length + 4), hidden));
+    assert.equal(s.cards[0].code, 0);
+    for (const field of ["baseAtk", "baseDef", "status"])
+      assert.equal(Object.hasOwn(s.cards[0], field), false);
+  }
+});
+test("battle updates existing combatants' signed stats without changing identity or position", () => {
+  const s = p.initialState();
+  s.cards = [
+    { player: 0, location: 4, sequence: 1, code: 32807846, position: 1,
+      atk: 1800, def: 1200, baseAtk: 1800, baseDef: 1200, status: 1,
+      counters: { 3: 2 }, materials: [123] },
+    { player: 1, location: 4, sequence: 3, code: 91231901, position: 4,
+      atk: 2500, def: 2000, baseAtk: 2500, baseDef: 2000,
+      counters: {}, materials: [] },
+    { player: 1, location: 4, sequence: 1, code: 89631139, position: 1,
+      atk: 3000, def: 2500, counters: {}, materials: [] },
+  ];
+  const existing = [...s.cards], expected = structuredClone(s.cards);
+  Object.assign(expected[0], { atk: 2300, def: -1 });
+  Object.assign(expected[1], { atk: -2, def: 2700 });
+  const battle = bytes(111,
+    0, 4, 1, 8, u32(2300), u32(-1), 1,
+    1, 4, 3, 1, u32(-2), u32(2700), 1);
+  p.applyFrame(s, p.packet(1, battle));
+  assert.deepEqual(s.cards, expected);
+  existing.forEach((c, i) => assert.strictEqual(s.cards[i], c));
+  assert.deepEqual(s.revealed, []);
+  assert.deepEqual(s.logs, [`event:111:${Array.from(battle.subarray(1)).join(",")}`]);
+});
+test("battle preserves an unknown facedown target and attack logs expose no identity", () => {
+  const s = p.initialState();
+  s.cards = [
+    { player: 0, location: 4, sequence: 0, code: 32807846, position: 1,
+      counters: {}, materials: [] },
+    { player: 1, location: 4, sequence: 2, code: 0, position: 8,
+      counters: {}, materials: [] },
+  ];
+  const expected = structuredClone(s.cards);
+  Object.assign(expected[0], { atk: 1900, def: 1200 });
+  Object.assign(expected[1], { atk: 1500, def: 2100 });
+  p.applyFrame(s, p.packet(1, bytes(111,
+    0, 4, 0, 1, u32(1900), u32(1200), 0,
+    1, 4, 2, 1, u32(1500), u32(2100), 0)));
+  assert.deepEqual(s.cards, expected);
+  assert.deepEqual(s.revealed, []);
+  p.applyGame(s, bytes(110, 0, 4, 0, 1, 1, 4, 2, 1));
+  assert.equal(s.logs.at(-1), "attack:32807846:0:0");
+  assert.equal(s.logs.some((line) => line.startsWith("reveal:")), false);
+});
+test("battle tolerates missing combatants and direct attacks without creating cards", () => {
+  const battle = (targetLocation) => bytes(111,
+    0, 4, 0, 1, u32(1900), u32(1200), 0,
+    1, targetLocation, 2, 4, u32(1500), u32(2100), 0);
+  for (const [player, targetLocation, atk, def] of [
+    [0, 4, 1900, 1200], // Missing target.
+    [1, 4, 1500, 2100], // Missing attacker.
+    [0, 0, 1900, 1200], // Direct attack has no target card.
+  ]) {
+    const s = p.initialState();
+    s.cards = [{ player, location: 4, sequence: player ? 2 : 0,
+      code: 0, position: 8, counters: {}, materials: [] }];
+    const expected = { ...s.cards[0], atk, def };
+    p.applyGame(s, battle(targetLocation));
+    assert.deepEqual(s.cards, [expected]);
+    assert.deepEqual(s.revealed, []);
+  }
+  const empty = p.initialState();
+  p.applyGame(empty, battle(4));
+  assert.deepEqual(empty.cards, []);
+});
+test("attack logs append directness while retaining code positions and hiding known facedown targets", () => {
+  for (const player of [0, 1]) {
+    for (const seat of [player, 2]) {
+      const s = p.initialState();
+      s.seat = seat;
+      s.cards = [
+        { player, location: 4, sequence: 0, code: 32807846, position: 1,
+          counters: {}, materials: [] },
+        { player: 1 - player, location: 4, sequence: 2, code: 91231901, position: 8,
+          counters: {}, materials: [] },
+      ];
+      p.applyGame(s, bytes(110, player, 4, 0, 1, 1 - player, 4, 2, 1));
+      assert.equal(s.logs.at(-1), "attack:32807846:0:0");
+      p.applyGame(s, bytes(110, player, 4, 0, 1, 1 - player, 0, 0, 0));
+      assert.equal(s.logs.at(-1), "attack:32807846:0:1");
+      assert.equal(s.logs.join("\n").includes("91231901"), false);
+      assert.equal(s.cards[1].position, 8);
+      assert.deepEqual(s.revealed, []);
+      s.cards[1].position = 4;
+      p.applyGame(s, bytes(110, player, 4, 0, 1, 1 - player, 4, 2, 4));
+      assert.deepEqual(s.logs.at(-1).split(":"), ["attack", "32807846", "91231901", "0"]);
+      s.cards.pop();
+      p.applyGame(s, bytes(110, player, 4, 0, 1, 1 - player, 4, 2, 4));
+      assert.equal(s.logs.at(-1), "attack:32807846:0:0");
+      assert.equal(s.cards.length, 1);
+    }
+  }
+});
+test("battle rejects every truncated payload and trailing bytes before changing state", () => {
+  const initial = p.initialState();
+  initial.cards = [{ player: 0, location: 4, sequence: 0, code: 32807846,
+    position: 1, atk: 1800, def: 1200, counters: {}, materials: [] }];
+  const battle = bytes(111,
+    0, 4, 0, 1, u32(1900), u32(1200), 0,
+    1, 4, 2, 1, u32(1500), u32(2100), 0);
+  for (let length = 1; length < battle.length; length++) {
+    const s = structuredClone(initial);
+    assert.throws(() => p.applyFrame(s, p.packet(1, battle.slice(0, length))), /TRUNCATED_PACKET/);
+    assert.deepEqual(s, initial);
+  }
+  const s = structuredClone(initial);
+  assert.throws(() => p.applyGame(s, bytes(battle, 0)), /MESSAGE_LAYOUT_111/);
+  assert.deepEqual(s, initial);
+});
 test("unsupported and truncated gameplay fails closed", () => {
   assert.throws(() => p.applyGame(p.initialState(), bytes(199)), /UNSUPPORTED/);
   assert.throws(() => p.decodePrompt(bytes(15, 0)));
+});
+test("Question hints lock each viewer independently without changing public grave data", () => {
+  const s = p.initialState();
+  s.seat = 1;
+  s.cards = [0, 1].map((player) => ({ player, location: 16, sequence: 0,
+    code: 32807846 + player, position: 1, counters: {}, materials: [] }));
+  s.revealed = [91231901];
+  const cards = structuredClone(s.cards), revealed = [...s.revealed];
+  for (const [player, hintType, expected] of [
+    [0, 6, [true, false]],
+    [0, 6, [true, false]],
+    [1, 6, [true, true]],
+    [0, 7, [false, true]],
+    [0, 7, [false, true]],
+    [1, 7, [false, false]],
+  ]) {
+    const hint = bytes(165, player, hintType, u32(38723936));
+    p.applyFrame(s, p.packet(1, hint));
+    assert.deepEqual(s.graveLocked, expected);
+    assert.deepEqual(s.cards, cards);
+    assert.deepEqual(s.revealed, revealed);
+    assert.equal(s.logs.at(-1), `event:165:${Array.from(hint.subarray(1)).join(",")}`);
+  }
+});
+test("Question hints support legacy snapshots and ignore unrelated player hints", () => {
+  const s = p.initialState();
+  delete s.graveLocked;
+  p.applyGame(s, bytes(165, 1, 7, u32(38723936)));
+  assert.deepEqual(s.graveLocked, [false, false]);
+  delete s.graveLocked;
+  p.applyGame(s, bytes(165, 1, 6, u32(38723936)));
+  assert.deepEqual(s.graveLocked, [false, true]);
+  for (const [hintType, value] of [[6, 123], [7, 123], [1, 38723936], [5, 38723936]]) {
+    p.applyGame(s, bytes(165, 1, hintType, u32(value)));
+    assert.deepEqual(s.graveLocked, [false, true]);
+  }
+});
+test("grave inspection locks default to false and reset on start and field reload", () => {
+  const s = p.initialState();
+  assert.deepEqual(s.graveLocked, [false, false]);
+  const start = bytes(4, 0, 5, u32(8000), u32(8000), new Uint8Array(8));
+  // Each empty player field has 7 monster, 8 spell, 5 pile, and 1 extra-up bytes.
+  const emptyField = bytes(u32(8000), new Uint8Array(21));
+  const reload = bytes(162, 5, emptyField, emptyField, 0);
+  for (const frame of [start, reload]) {
+    s.graveLocked = [true, true];
+    p.applyFrame(s, p.packet(1, frame));
+    assert.deepEqual(s.graveLocked, [false, false]);
+  }
+});
+test("malformed player hints cannot partially change inspection locks", () => {
+  const initial = p.initialState();
+  initial.graveLocked = [false, true];
+  const hint = bytes(165, 1, 7, u32(38723936));
+  const invalid = [
+    ...Array.from({ length: hint.length - 1 }, (_, i) => hint.slice(0, i + 1)),
+    bytes(hint, 0),
+    bytes(165, 2, 6, u32(38723936)),
+  ];
+  for (const frame of invalid) {
+    const s = structuredClone(initial);
+    assert.throws(() => p.applyGame(s, frame), /TRUNCATED_PACKET|MESSAGE_LAYOUT_165|INVALID_PLAYER/);
+    assert.deepEqual(s, initial);
+  }
 });
 test("declarable stack evaluates filters and excludes tokens/aliases", () => {
   const c = {

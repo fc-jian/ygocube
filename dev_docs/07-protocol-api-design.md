@@ -429,3 +429,23 @@ MSG_CHAINING 保留当前实体 ref 与原始发动位置 originRef，并在短�
 CardInfo 增加可选 aliasName：alias 对应 exact code 的显示卡名，查不到时为空字符串。Cube 与 Duel 构筑共用完整类型、属性、种族、等级/阶级、刻度、连接标记、字段及规则同名详情；Duel 不显示抓位统计。
 
 GET /public/duel/options 与私有 /cube/standalone-options 的 lists 每项增加 limits（卡号到 0/1/2/3 的映射），索引与宿主加载顺序保持一致，无限制为空映射。Duel 构筑默认选日期最新的 OCG 表，允许切换，卡图左上角显示禁/限/准限；按 YGOPro 使用 alias（非零时）查表，未列出为 3。此选项只影响构筑显示，不改房间规则。
+
+### 8.11 战斗数值与攻击日志
+
+- 共享协议模型 `Card` 显式声明可选数字字段 `status`、`baseAtk`、`baseDef`，对应已支持的 QUERY_STATUS、QUERY_BASE_ATTACK、QUERY_BASE_DEF；缺失表示当前视角尚未收到该字段，不补零或推测。隐蔽查询清理时仍移除这些字段。
+- `MSG_BATTLE(111)` 沿用原生布局：攻击者 controller/location/sequence/第四字节、int32 ATK、int32 DEF、uint8 战斗标志，随后为相同布局的目标。完整校验后只更新对应已存在卡片的 `atk` / `def`，保留有符号数值；不创建缺失卡片，不改变 `code`、`position`、基础数值或展示记录。目标 location=0 表示无卡片目标。第四字节和战斗标志仅消费，不用于推断身份、翻面或移除卡片；保留原有 `event:111:<原始负载字节>` 日志。
+- `MSG_ATTACK(110)` 的日志在原三段之后追加一段：`attack:<attackerCode>:<targetCode>:<direct>`。原卡号位置不变，仍按当前视角屏蔽隐蔽卡号；`direct` 仅由消息中的目标 location 判定，0 为对卡片攻击，1 为直接攻击。因此未知里侧目标记为 `attack:<attackerCode>:0:0`，直接攻击记为 `attack:<attackerCode>:0:1`。读取旧三段日志时，缺少 direct 表示未知，不能仅凭 targetCode=0 判定直接攻击。
+- 此处仅补全现有消息的模型更新与本地日志语义，不改变任何二进制线协议、WebSocket 消息封装或 API 路由。
+
+### 8.12 墓地查看限制（CARD_QUESTION）
+
+- `MSG_PLAYER_HINT(165)` 按原生布局读取 uint8 player、uint8 hintType、uint32 value。`CARD_QUESTION=38723936`（以 `ygopro/gframe/client_field.h` 为准）且 hintType 为 `PHINT_DESC_ADD(6)` 时，设置 `DuelState.graveLocked[player]=true`；`PHINT_DESC_REMOVE(7)` 时设为 false。重复 ADD/REMOVE 与原生一致，按布尔开关处理，不做引用计数；其他提示保留原有日志，不改变锁。
+- `graveLocked?: boolean[]` 按协议玩家编号 0/1 索引，表示该玩家作为查看者受到限制，并非对应玩家的墓地被锁。受限查看者不能浏览双方墓地；前端按当前实际玩家身份读取该项，不按场地朝向判断，也不据此限制另一个未受影响的查看者。
+- 初始状态、`MSG_START(4)` 和 `MSG_RELOAD_FIELD(162)` 均重置为 `[false,false]`；旧快照缺少该字段时按未锁处理，后续提示可正常恢复锁状态。此标记只约束查看入口，不删除、掩码或改写已有公开卡片、墓地内容及展示历史；仍保留 `event:165:<原始负载字节>` 日志，不改变线协议或 API 路由。
+
+
+### 独立 WindBot 对战
+- `GET /public/duel/bots` 返回 `{enabled,bots:[{id,name,description}]}`，仅配置启用的独立 Duel 实例提供机器人。
+- `POST /public/duel/bot` 输入 `{name,bot}`，返回现有 standalone join 凭证、房间 URL 和规则。服务端生成随机密码，固定单局、不限禁限卡表，玩家入房后照常选卡组、准备、开始。
+- 玩家成为房主后才启动机器人。机器人通过固定的本机 srvpro 地址及原生协议连接；客户端不能指定可执行文件、Host、Port 或 DeckFile。全局并发上限、创建冷却和进程超时限制由服务端负责；重连不得重复启动机器人。
+- `windbot` 根配置：`enabled`（默认 false）、`executable`、`args`、`cwd`、`database`、`max_processes`（默认 4）。路径相对 config.yaml；独立 Duel 启用，Cube 保持关闭。数据库为当前正式卡及 expansion 合并的只读构建产物。
