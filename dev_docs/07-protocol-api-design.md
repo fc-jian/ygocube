@@ -137,6 +137,7 @@ swissRoundCount, playoffSize
 牌面才会出现在 `pack.cards`。`cardsRemainingToDraft` 在整轮公平时是精确值，
 否则标记 `cardsRemainingExact=false`。`pickAlternative` 只返回当前玩家最后点击
 的候选牌编号；它不会改变牌堆，超时自动选择时若仍可用则优先选中。
+无当前牌堆的有效预选时，使用比赛绑定 `cardPoolId` 的 exact code 历史统计，选择未舍入的 `averagePickPercentage` 最低者；最低值并列时均匀随机。无统计的卡不优先于有统计的卡；全部无统计或未绑定有效卡池时，在剩余卡中均匀随机。串行和传堆模式一致；最终选择仍写入既有选牌事件，回放不重新抽签。
 
 ### 2.4 管理端点
 

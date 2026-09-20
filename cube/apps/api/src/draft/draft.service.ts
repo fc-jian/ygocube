@@ -12,6 +12,7 @@ import {
   freeze,
   unfreeze,
 } from '../events/events.service';
+import { CardPickStatsService } from '../cards/card-pick-stats.service';
 import { CardsService } from '../cards/cards.service';
 import { normalizeExtraRatioPercent, TournamentsService } from '../tournaments/tournaments.service';
 import { PoolsService } from '../pools/pools.service';
@@ -40,6 +41,7 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     private pools: PoolsService,
     private matches: MatchesService,
     private decks?: DecksService,
+    private pickStats: CardPickStatsService = new CardPickStatsService(pools),
   ) {}
 
   // passing 模式判定：packs_created 事件携带 queues 即启用（与配置无关，回放安全）
@@ -935,8 +937,27 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     const alternative = state.pickAlternatives?.[state.pickCursor.playerId];
     const card = alternative?.packIndex === state.pickCursor.packIndex && remaining.includes(alternative.card)
       ? alternative.card
-      : remaining[Math.floor(Math.random() * remaining.length)];
+      : this.rankedTimeoutCard(state, remaining);
     this.doPick(tid, state.pickCursor.playerId, card, true, 'system');
+  }
+
+  private rankedTimeoutCard(state: TournamentState, remaining: number[]): number {
+    const poolId = getConfig(state).cardPoolId;
+    const stats = typeof poolId === 'number' ? this.pickStats.forPoolId(poolId) : new Map();
+    let best = Infinity;
+    let candidates: number[] = [];
+    for (const code of remaining) {
+      const percentage = stats.get(code)?.averagePickPercentage;
+      if (typeof percentage !== 'number' || !Number.isFinite(percentage) || percentage < 0 || percentage > 100) continue;
+      if (percentage < best) {
+        best = percentage;
+        candidates = [code];
+      } else if (percentage === best) {
+        candidates.push(code);
+      }
+    }
+    if (!candidates.length) candidates = remaining;
+    return candidates[Math.floor(Math.random() * candidates.length)];
   }
 
   pick(tid: number, playerId: string, card: number, targetZone?: 'main' | 'extra' | 'side'): void {
@@ -1100,7 +1121,7 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     const alternative = state.pickAlternatives?.[playerId];
     const card = alternative?.packIndex === queue[0] && remaining.includes(alternative.card)
       ? alternative.card
-      : remaining[Math.floor(Math.random() * remaining.length)];
+      : this.rankedTimeoutCard(state, remaining);
     this.doPassPick(tid, playerId, card, true, 'system');
   }
 
