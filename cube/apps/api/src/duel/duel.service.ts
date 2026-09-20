@@ -110,7 +110,7 @@ export class DuelService implements OnModuleDestroy {
       const result = await this.standaloneJoin({
         name: body?.name,
         password: crypto.randomBytes(24).toString("hex"),
-        options: { ...standaloneDefaults, mode: 0, lflist: -1 },
+        options: { ...standaloneDefaults, mode: 0, lflist: -1, timeLimit: 0 },
       });
       this.standalonePlayers.get(result.credential)!.bot = body.bot;
       this.persistStandalone(result.credential);
@@ -582,7 +582,21 @@ export class DuelService implements OnModuleDestroy {
       t,
       close: () => {
         upstream?.destroy();
-        if (this.players.get(key) === ws) this.players.delete(key);
+        if (this.players.get(key) === ws) {
+          this.players.delete(key);
+          if (standalone?.bot) {
+            this.bots.stop(t.room);
+            void axios
+              .post(
+                `${config.srvpro.url}/cube/close_room`,
+                { room_name: t.room },
+                { headers: this.headers(), timeout: 5000 },
+              )
+              .catch(() =>
+                console.error("Unable to close disconnected bot room"),
+              );
+          }
+        }
       },
     });
     const nativeStatus = standalone

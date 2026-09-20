@@ -17,7 +17,7 @@ python3 scripts/windbot/prepare-database.py /path/to/ygopro/cards.cdb /path/to/o
 
 根 `config.yaml` 的 `windbot` 配置见示例。所有路径相对配置文件，生产只在 `/opt/ygoduel/shared/config.yaml` 启用。WindBot CDB 由正式 CDB 加按名称排序的 expansion CDB 合并，后加载覆盖同号；不改原资源。以后卡库更新须重新生成并核验此派生文件。
 
-不开放 WindBot 自带 HTTP ServerMode；API 直接使用无 shell 的参数数组启动固定程序，Host/Port/密码由服务端决定。默认最多 4 个进程，建房全局冷却 3 秒；同房重连不重复创建。玩家离线保留 30 分钟，单进程最多 2 小时，API 停止时回收子进程。机器人继承独立 Duel 服务的普通用户权限及 systemd 生命周期，不接入 Cube srvpro。
+不开放 WindBot 自带 HTTP ServerMode；API 直接使用无 shell 的参数数组启动固定程序，Host/Port/密码由服务端决定。默认最多 4 个进程，建房全局冷却 3 秒；同房重连不重复创建。机器人对战不限时，玩家 WebSocket 断连后立即关闭房间、宿主与机器人；连接接管除外，API 停止时回收子进程。机器人继承独立 Duel 服务的普通用户权限及 systemd 生命周期，不接入 Cube srvpro。
 
 ## 验收与发布
 

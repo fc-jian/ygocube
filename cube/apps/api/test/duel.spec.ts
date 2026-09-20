@@ -179,17 +179,15 @@ describe("standalone room identity", () => {
         .slice(0, 40);
     const enabled = config.webDuel.enabled;
     config.webDuel.enabled = true;
-    jest
-      .spyOn(axios, "get")
-      .mockImplementation(async (url: any) => ({
-        data: url.endsWith("options")
-          ? { lists: [{ id: -1, name: "Unlimited" }] }
-          : {
-              hostinfo: toHost(standaloneDefaults),
-              players: [],
-              finished: false,
-            },
-      }));
+    jest.spyOn(axios, "get").mockImplementation(async (url: any) => ({
+      data: url.endsWith("options")
+        ? { lists: [{ id: -1, name: "Unlimited" }] }
+        : {
+            hostinfo: toHost(standaloneDefaults),
+            players: [],
+            finished: false,
+          },
+    }));
     jest
       .spyOn(axios, "post")
       .mockResolvedValue({ data: { hostinfo: toHost(standaloneDefaults) } });
@@ -274,4 +272,59 @@ describe("standalone deck normalization and diagnostics", () => {
       expect((e as any).details.reason).toContain(reason);
     }
   });
+});
+
+describe("bot room lifetime", () => {
+  it("creates unlimited games", async () => {
+    const svc: any = new DuelService(new CardsService());
+    jest.spyOn(svc.bots, "check").mockImplementation(() => {});
+    svc.standalonePlayers.set("test", {});
+    const join = jest
+      .spyOn(svc, "standaloneJoin")
+      .mockResolvedValue({ credential: "test" });
+    jest.spyOn(svc, "persistStandalone").mockImplementation(() => {});
+    await svc.joinBot({ name: "Alice", bot: "Burn" });
+    expect(join).toHaveBeenCalledWith(
+      expect.objectContaining({
+        options: expect.objectContaining({ timeLimit: 0, mode: 0 }),
+      }),
+    );
+    jest.restoreAllMocks();
+  });
+  it.each(["bot", "human", "takeover"])(
+    "cleans only disconnected bot owners: %s",
+    async (kind) => {
+      const axios = require("axios").default;
+      const svc: any = new DuelService(new CardsService());
+      svc.standalonePlayers.set("test", {
+        bot: kind === "human" ? undefined : "Burn",
+      });
+      const ws = { close: jest.fn() };
+      const stop = jest.spyOn(svc.bots, "stop");
+      jest.spyOn(axios, "get").mockRejectedValue(new Error("test connection"));
+      const post = jest
+        .spyOn(axios, "post")
+        .mockResolvedValue({ data: { ok: true } });
+      try {
+        await expect(
+          svc.player(ws, { standalone: "test", room: "W123456789012345678" }),
+        ).rejects.toThrow("test connection");
+        if (kind === "takeover") svc.players.set("test", {});
+        svc.active.get(ws).close();
+        if (kind === "bot") {
+          expect(stop).toHaveBeenCalledWith("W123456789012345678");
+          expect(post).toHaveBeenCalledWith(
+            expect.stringContaining("/cube/close_room"),
+            { room_name: "W123456789012345678" },
+            expect.anything(),
+          );
+        } else {
+          expect(stop).not.toHaveBeenCalled();
+          expect(post).not.toHaveBeenCalled();
+        }
+      } finally {
+        jest.restoreAllMocks();
+      }
+    },
+  );
 });

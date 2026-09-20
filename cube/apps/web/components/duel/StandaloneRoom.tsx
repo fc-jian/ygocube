@@ -4,6 +4,7 @@ import { api } from "@/lib/api";
 import { DuelClient } from "./DuelClient";
 import { LocalPicsSetting } from "@/components/IdentityWidget";
 import "./standalone.css";
+import { RoomDeletedDialog } from "./RoomDeletedDialog";
 export function StandaloneRoom({ room }: { room: string }) {
   const [info, setInfo] = useState<any>(null),
     [session, setSession] = useState<any>(null),
@@ -65,6 +66,7 @@ export function StandaloneRoom({ room }: { room: string }) {
   }
   return (
     <>
+      <RoomDeletedDialog missing={error === "MATCH_NOT_FOUND"} />
       <section
         className={`standalone room-heading ${session ? "in-session" : ""}`}
       >
@@ -112,13 +114,16 @@ export function StandaloneRoom({ room }: { room: string }) {
           {info && (
             <p>
               {info.options.mode ? "三局两胜" : "单局"} ·{" "}
-              {info.options.timeLimit}s · LP {info.options.startLp} · 主卡组{" "}
-              {info.options.mainMin}–{info.options.mainMax} · 额外{" "}
-              {info.options.extraMax} · 副卡组 {info.options.sideMax}
+              {info.options.timeLimit
+                ? `${info.options.timeLimit} 秒`
+                : "不限时"}{" "}
+              · LP {info.options.startLp} · 主卡组 {info.options.mainMin}–
+              {info.options.mainMax} · 额外 {info.options.extraMax} · 副卡组{" "}
+              {info.options.sideMax}
             </p>
           )}
         </details>
-        {error && <p role="alert">{error}</p>}
+        {error && error !== "MATCH_NOT_FOUND" && <p role="alert">{error}</p>}
         {!session && (
           <section className="standalone-panel">
             <h1>房间</h1>

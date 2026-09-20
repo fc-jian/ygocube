@@ -81,12 +81,24 @@ describe("WindBot process boundaries", () => {
     expect(failed).toHaveBeenCalledTimes(1);
     expect(() => manager.check("Burn")).not.toThrow();
   });
-  it("bounds process lifetime and handles spawn errors exactly once", () => {
+  it("keeps connected games unlimited and stops disconnected bots", () => {
+    const failed = jest.fn();
+    let connected = true;
+    manager.start("W123456789012345678", "Burn", failed, () => connected);
+    const child = (spawn as jest.Mock).mock.results[0].value;
+    jest.advanceTimersByTime(2 * 60 * 60 * 1000);
+    expect(child.kill).not.toHaveBeenCalled();
+    connected = false;
+    jest.advanceTimersByTime(1000);
+    expect(child.kill).toHaveBeenCalledTimes(1);
+    child.emit("error", new Error("ENOENT"));
+    child.emit("exit", 1);
+    expect(failed).not.toHaveBeenCalled();
+  });
+  it("reports spawn errors only once", () => {
     const failed = jest.fn();
     manager.start("W123456789012345678", "Burn", failed);
     const child = (spawn as jest.Mock).mock.results[0].value;
-    jest.advanceTimersByTime(2 * 60 * 60 * 1000);
-    expect(child.kill).toHaveBeenCalledTimes(1);
     child.emit("error", new Error("ENOENT"));
     child.emit("exit", 1);
     expect(failed).toHaveBeenCalledTimes(1);

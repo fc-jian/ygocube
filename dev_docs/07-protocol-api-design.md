@@ -445,8 +445,9 @@ GET /public/duel/options 与私有 /cube/standalone-options 的 lists 每项增�
 
 
 ### 独立 WindBot 对战
+- 机器人房间仅在玩家连接期间保留；玩家 WebSocket 断开后停止机器人并调用 srvpro close_room 清理宿主，不适用真人房间的 30 分钟重连保留。连接接管不触发清理。房间不存在时网页提供返回对战大厅的确认弹窗。
 - 机器人目录由固定版本的 `BotWrapper/bot.conf`、Executor Deck 声明与 Dialog 文件生成；`bots` 每项新增 `robot`（机器人名称）。旧 `id` 保持 Deck ID，POST `{name,bot}` 不变；页面按 robot 分组，先选机器人再选卡组。原生进程的 Name、Dialog、Deck 均取服务端目录，不能由请求传入任意参数。
 - `GET /public/duel/bots` 返回 `{enabled,bots:[{id,name,description}]}`，仅配置启用的独立 Duel 实例提供机器人。
-- `POST /public/duel/bot` 输入 `{name,bot}`，返回现有 standalone join 凭证、房间 URL 和规则。服务端生成随机密码，固定单局、不限禁限卡表，玩家入房后照常选卡组、准备、开始。
+- `POST /public/duel/bot` 输入 `{name,bot}`，返回现有 standalone join 凭证、房间 URL 和规则。服务端生成随机密码，固定单局、不限时（timeLimit=0）、不限禁限卡表，玩家入房后照常选卡组、准备、开始。
 - 玩家成为房主后才启动机器人。机器人通过固定的本机 srvpro 地址及原生协议连接；客户端不能指定可执行文件、Host、Port 或 DeckFile。全局并发上限、创建冷却和进程超时限制由服务端负责；重连不得重复启动机器人。
 - `windbot` 根配置：`enabled`（默认 false）、`executable`、`args`、`cwd`、`database`、`max_processes`（默认 4）。路径相对 config.yaml；独立 Duel 启用，Cube 保持关闭。数据库为当前正式卡及 expansion 合并的只读构建产物。

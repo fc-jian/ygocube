@@ -270,6 +270,20 @@ const u32 = (n) => [
         "opponent draw uses a card back",
       );
       await snap();
+      send(50, [...u32(89631139), own, 4, 0, 1, own, 4, 3, 1, ...u32(0)]);
+      await page.locator(".duel-travel-card").waitFor();
+      assert.equal(
+        await entity(own, 4, 3).evaluate((e) => getComputedStyle(e).visibility),
+        "hidden",
+        "arrival card stays hidden during movement",
+      );
+      await page.locator(".duel-travel-card").waitFor({ state: "detached" });
+      assert.equal(
+        await entity(own, 4, 3).evaluate((e) => getComputedStyle(e).visibility),
+        "visible",
+        "arrival card appears after movement",
+      );
+      await snap();
       send(41, [4, 0]);
       await page.locator(".duel-phase-banner").waitFor();
       state.disabled = 1 << (own * 16 + 5);

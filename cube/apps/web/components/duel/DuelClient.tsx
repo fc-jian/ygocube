@@ -41,6 +41,7 @@ import { duelText, DuelLanguage, races, attributes } from "./duel-text";
 import { LocalPicsSetting } from "@/components/IdentityWidget";
 import "./duel.css";
 import "./battle-feedback.css";
+import { RoomDeletedDialog } from "./RoomDeletedDialog";
 import {
   cardActions,
   logCardCodes,
@@ -841,8 +842,7 @@ export function DuelClient({
     opponent = 1 - own;
   const zoneName = (loc: number) =>
     text.zones[zones.indexOf(loc)] ?? String(loc);
-  const cardName = (code: number) =>
-    metadata[code]?.name ?? (code ? `卡片 ${code}` : text.unknown);
+  const cardName = (code: number) => metadata[code]?.name ?? text.unknown;
   const formatLog = (line: string) => {
     const parts = line.split(":");
     const n = Number(parts[1]),
@@ -1024,6 +1024,7 @@ export function DuelClient({
     return (
       <Fragment key={`${c.player}:${c.location}:${c.sequence}`}>
         <button
+          style={feedback.moving(c) ? { visibility: "hidden" } : undefined}
           className={`duel-card ${relation ? "duel-related" : ""} ${canSelect ? "card-selectable" : ""} ${chosen ? "card-chosen" : ""} ${knownSet ? "known-set" : ""} ${effect?.ref && sameCard(effect.ref, c) && effect.code === c.code ? "duel-effect-source" : ""} ${c.player === opponent && c.location === 4 && c.sequence >= 5 ? "opponent-extra" : ""} ${small ? "duel-small" : ""} ${c.location === 4 && c.position & 12 ? "defense" : ""}`}
           data-duel-ref={`${c.player}:${c.location}:${c.sequence}`}
           onPointerEnter={() => {
@@ -1230,7 +1231,8 @@ export function DuelClient({
     const cards = state.cards
       .filter((c) => c.player === p && c.location === l)
       .sort((a, b) => a.sequence - b.sequence);
-    const top = cards[cards.length - 1];
+    const arrived = cards.filter((c) => !feedback.moving(c));
+    const top = arrived[arrived.length - 1];
     const operations = playable
       ? state.prompt!.choices.filter(
           (c) => c.ref?.player === p && c.ref.location === l,
@@ -1267,7 +1269,7 @@ export function DuelClient({
               name={cardName(top.code)}
               className="duel-image"
             />
-          ) : cards.length ? (
+          ) : arrived.length ? (
             <span className="duel-back" />
           ) : (
             <span className="duel-empty-pile">
@@ -1422,7 +1424,8 @@ export function DuelClient({
           {(text as any)[status] ?? status}
         </span>
       </header>
-      {error && (
+      <RoomDeletedDialog missing={error === "MATCH_NOT_FOUND"} />
+      {error && error !== "MATCH_NOT_FOUND" && (
         <div className="duel-error" role="alert">
           {error}{" "}
           <button

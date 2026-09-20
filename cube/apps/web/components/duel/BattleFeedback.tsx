@@ -58,7 +58,12 @@ export function useBattleFeedback(shell: RefObject<HTMLElement>) {
       reset();
       return;
     }
-    if (typeof document !== "undefined" && document.hidden) return;
+    if (
+      typeof document !== "undefined" &&
+      (document.hidden ||
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches)
+    )
+      return;
     const now = performance.now();
     const additions = nativeVisuals(state, frame, previousLP).map(
       (event): Visual => ({
@@ -67,7 +72,7 @@ export function useBattleFeedback(shell: RefObject<HTMLElement>) {
         expires:
           now +
           (event.kind === "move"
-            ? 500 + event.delay
+            ? 480 + event.delay
             : event.kind === "banner"
               ? 950
               : 1300),
@@ -92,6 +97,16 @@ export function useBattleFeedback(shell: RefObject<HTMLElement>) {
           ...previous.filter(
             (v) =>
               v.expires > now &&
+              !(
+                v.kind === "move" &&
+                additions.some(
+                  (a) =>
+                    a.kind === "move" &&
+                    a.from.player === v.to.player &&
+                    a.from.location === v.to.location &&
+                    a.from.sequence === v.to.sequence,
+                )
+              ) &&
               !(
                 additions.some((a) => a.kind === "banner") &&
                 v.kind === "banner"
@@ -119,7 +134,18 @@ export function useBattleFeedback(shell: RefObject<HTMLElement>) {
     document.addEventListener("visibilitychange", clear);
     return () => document.removeEventListener("visibilitychange", clear);
   }, []);
-  return { visuals, publish, reset };
+  const moving = (ref: Ref & { code?: number }) =>
+    visuals.some(
+      (v) =>
+        v.kind === "move" &&
+        v.a &&
+        v.b &&
+        v.to.player === ref.player &&
+        v.to.location === ref.location &&
+        v.to.sequence === ref.sequence &&
+        (!v.code || !ref.code || v.code === ref.code),
+    );
+  return { visuals, publish, reset, moving };
 }
 
 export function BattleFeedback({

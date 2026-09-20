@@ -332,7 +332,7 @@
     left: var(--to-x);
     top: var(--to-y);
     transform: translate(-50%, -50%) rotate(var(--arrival-angle));
-    opacity: 0;
+    opacity: 1;
   }
 }
 @keyframes attack-ready {

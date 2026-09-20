@@ -70,21 +70,14 @@ export class WindBots {
       stream?.on("data", (b) => {
         diagnostic = (diagnostic + b.toString()).slice(-2048);
       });
-    const started = Date.now();
-    let lastConnected = started;
     const timer = setInterval(() => {
-      if (connected()) lastConnected = Date.now();
-      if (
-        Date.now() - lastConnected >= 30 * 60 * 1000 ||
-        Date.now() - started >= 2 * 60 * 60 * 1000
-      )
-        child.kill();
-    }, 30000);
+      if (!connected()) this.stop(room);
+    }, 1000);
     timer.unref();
     this.running.set(room, { child, timer });
     let done = false;
     const finish = (error: boolean) => {
-      if (done) return;
+      if (done || this.running.get(room)?.child !== child) return;
       done = true;
       clearTimeout(timer);
       this.running.delete(room);
@@ -100,6 +93,13 @@ export class WindBots {
           /Run Error|Could not|Unhandled Exception/.test(diagnostic),
       ),
     );
+  }
+  stop(room: string) {
+    const running = this.running.get(room);
+    if (!running) return;
+    clearInterval(running.timer);
+    this.running.delete(room);
+    running.child.kill();
   }
   close() {
     for (const { child, timer } of this.running.values()) {
