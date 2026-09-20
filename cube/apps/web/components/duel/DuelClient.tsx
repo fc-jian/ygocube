@@ -5,6 +5,7 @@ import {
   LifePoints,
   useBattleFeedback,
 } from "./BattleFeedback";
+import { DuelTimeline, framePause } from "./timeline";
 import { monsterStatus } from "./native-visuals";
 import { CardMeta } from "@/components/CardPreview";
 import type { CardInfo } from "@/lib/types";
@@ -175,7 +176,9 @@ export function DuelClient({
     setDetailRef(ref ?? null);
     setDetail(code);
   };
-  const [effects, setEffects] = useState<(DuelEffect & { id: number })[]>([]);
+  const [effects, setEffects] = useState<
+    (DuelEffect & { id: number; duration: number; scale: number })[]
+  >([]);
   useEffect(() => {
     const over = (event: PointerEvent) => {
       const target = event.target as HTMLElement;
@@ -199,34 +202,38 @@ export function DuelClient({
   }, [state.stage]);
   const effectSerial = useRef(0);
   const effect = effects[0];
-  const animate = (frame: Uint8Array, previousLP: number[]) => {
-    if (mode === "replay" && speed >= 4) {
+  const animate = (frame: Uint8Array, previousLP: number[], scale = 1) => {
+    if (
+      !scale ||
+      document.hidden ||
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches ||
+      (mode === "replay" && speed >= 4)
+    ) {
       feedback.reset();
       setEffects([]);
       return;
     }
-    feedback.publish(model.current, frame, previousLP);
+    feedback.publish(model.current, frame, previousLP, scale);
     if (frame[2] === 1 && [4, 5, 162].includes(frame[3])) {
       setEffects([]);
       return;
     }
     const event = duelEffect(model.current, frame);
     if (event) {
-      const next = { ...event, id: ++effectSerial.current };
-      setEffects((queue) => [...queue.slice(-11), next]);
+      const next = {
+        ...event,
+        id: ++effectSerial.current,
+        duration: framePause(frame) * scale,
+        scale,
+      };
+      setEffects([next]);
     }
   };
   useEffect(() => {
     if (!effect) return;
     const timer = setTimeout(
       () => setEffects((q) => q.filter((e) => e.id !== effect.id)),
-      effect.kind === "activate"
-        ? 1400
-        : effect.kind === "solved"
-          ? 200
-          : effect.kind === "resolve"
-            ? 850
-            : 650,
+      effect.duration,
     );
     return () => clearTimeout(timer);
   }, [effect?.id]);
@@ -347,6 +354,12 @@ export function DuelClient({
       timer: ReturnType<typeof setTimeout> | undefined,
       retries = 0,
       ws: WebSocket | undefined;
+    let latestPromptRevision = -1;
+    const timeline = new DuelTimeline();
+    const visibility = () => {
+      if (document.hidden) timeline.flush();
+    };
+    document.addEventListener("visibilitychange", visibility);
     const connect = async () => {
       try {
         setStatus("connect");
@@ -390,6 +403,7 @@ export function DuelClient({
         ws = new WebSocket(url);
         ws.binaryType = "arraybuffer";
         socket.current = ws;
+        timeline.clear();
         model.current = initialState();
         snapshotPrompt.current = null;
         responseGate.current.begin(-1);
@@ -404,7 +418,7 @@ export function DuelClient({
               ticket: session.ticket,
             }),
           );
-        ws.onmessage = (e) => {
+        const receive = (e: MessageEvent, scale = 1) => {
           if (disposed) return;
           try {
             if (typeof e.data === "string") {
@@ -429,7 +443,7 @@ export function DuelClient({
                   responseGate.current.bind(snapshotPrompt.current);
                   snapshotPrompt.current = null;
                 }
-                setResponsePending(false);
+                setResponsePending(v.id !== latestPromptRevision);
                 selectedRef.current = [];
                 setSelected([]);
                 setOperationChoices(null);
@@ -498,7 +512,7 @@ export function DuelClient({
               setElapsed(0);
             }
             if (frame[2] === 0x13) setLobbyJoined(true);
-            animate(frame, previousLP);
+            animate(frame, previousLP, scale);
             if (model.current.error === "RETRY") {
               zoneSubmitted.current = false;
               zoneSelected.current = [];
@@ -534,7 +548,46 @@ export function DuelClient({
             ws!.close(4010, "PROTOCOL_ERROR");
           }
         };
+        ws.onmessage = (e) => {
+          if (disposed) return;
+          if (typeof e.data === "string") {
+            let type: string;
+            try {
+              const message = JSON.parse(e.data);
+              type = message.type;
+              if (type === "prompt") {
+                latestPromptRevision = message.id;
+                setResponsePending(true);
+              }
+            } catch {
+              receive(e);
+              return;
+            }
+            if (type === "snapshot" || type === "session") {
+              timeline.clear();
+              receive(e);
+              return;
+            }
+            if (document.hidden) receive(e, 0);
+            else timeline.push((scale) => receive(e, scale));
+            return;
+          }
+          const frame = new Uint8Array(e.data);
+          // Clock packets are authoritative immediately, even while scenery is playing.
+          if (frame[2] === 0x18) {
+            receive(e);
+            return;
+          }
+          if (
+            document.hidden ||
+            window.matchMedia("(prefers-reduced-motion: reduce)").matches
+          ) {
+            timeline.flush();
+            receive(e, 0);
+          } else timeline.push((scale) => receive(e, scale), framePause(frame));
+        };
         ws.onclose = (e) => {
+          timeline.flush();
           if (disposed) return;
           if (model.current.stage === "ended") {
             setStatus("ended");
@@ -558,6 +611,8 @@ export function DuelClient({
     void connect();
     return () => {
       disposed = true;
+      timeline.clear();
+      document.removeEventListener("visibilitychange", visibility);
       if (timer) clearTimeout(timer);
       ws?.close();
       socket.current = null;
@@ -700,9 +755,14 @@ export function DuelClient({
   );
   useEffect(() => {
     if (!playing || !recording) return;
-    let last = performance.now();
+    let last = performance.now(),
+      holdUntil = 0;
     const timer = setInterval(() => {
       const now = performance.now();
+      if (now < holdUntil) {
+        last = now;
+        return;
+      }
       timeRef.current += (now - last) * speed;
       last = now;
       let i = cursorRef.current;
@@ -714,7 +774,18 @@ export function DuelClient({
           const frame = decode(recording.frames[i++].frame);
           const previousLP = [...model.current.lp];
           applyFrame(model.current, frame);
-          animate(frame, previousLP);
+          animate(frame, previousLP, 1 / speed);
+          const pause =
+            speed < 4 &&
+            !document.hidden &&
+            !window.matchMedia("(prefers-reduced-motion: reduce)").matches
+              ? framePause(frame) / speed
+              : 0;
+          if (pause) {
+            holdUntil = now + pause;
+            timeRef.current = recording.frames[i - 1].t;
+            break;
+          }
         }
         cursorRef.current = i;
         setCursor(i);
@@ -1603,6 +1674,7 @@ export function DuelClient({
               <div
                 key={effect.id}
                 className={`duel-effect-animation effect-${effect.kind}`}
+                style={{ animationDuration: `${500 * effect.scale}ms` }}
                 role="status"
                 aria-live="polite"
               >

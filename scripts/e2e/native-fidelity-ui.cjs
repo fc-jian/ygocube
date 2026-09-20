@@ -362,6 +362,43 @@ const u32 = (n) => [
       await blue.click();
       await page.waitForTimeout(60);
       assert.equal(actions.length, 2, "old selection cannot submit again");
+      state.prompt = null;
+      await snap();
+      send(41, [1, 0]);
+      send(41, [2, 0]);
+      send(41, [4, 0]);
+      ws.send(Buffer.from(packet(0x18, Uint8Array.from([own, 0, 30, 0]))));
+      const banner = page.locator(".duel-phase-banner strong");
+      await banner.filter({ hasText: "抽卡阶段" }).waitFor();
+      assert(
+        await page
+          .locator(".duel-clock")
+          .filter({ hasText: /[23]\d+s/ })
+          .count(),
+        "clock updates during phase animation",
+      );
+      await page.waitForTimeout(350);
+      assert.equal(
+        await banner.innerText(),
+        "抽卡阶段",
+        "rapid phases do not overwrite current banner",
+      );
+      await banner.filter({ hasText: "准备阶段" }).waitFor();
+      await page.waitForTimeout(250);
+      assert.equal(await banner.innerText(), "准备阶段");
+      await banner.filter({ hasText: "主要阶段一" }).waitFor();
+      await snap();
+      send(41, [1, 0]);
+      send(41, [2, 0]);
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      send(41, [4, 0]);
+      await page.waitForTimeout(100);
+      assert.equal(
+        await page.locator(".duel-phase-banner").count(),
+        0,
+        "reduced motion catches up without stale animations",
+      );
+      await page.emulateMedia({ reducedMotion: "no-preference" });
       assert.deepEqual(errors, []);
       console.log(
         "PASS native field feedback, context actions, privacy, input guard",

@@ -17,6 +17,7 @@ type Visual = NativeVisual & {
   a?: Point;
   b?: Point;
   own: boolean;
+  scale: number;
 };
 
 function point(shell: HTMLElement | null, ref: Ref): Point | undefined {
@@ -44,7 +45,7 @@ function point(shell: HTMLElement | null, ref: Ref): Point | undefined {
   };
 }
 
-// Effects run alongside authoritative state; they never delay prompts or the clock.
+// Visual lifetime follows the ordered presentation timeline; clocks bypass it.
 export function useBattleFeedback(shell: RefObject<HTMLElement>) {
   const [visuals, setVisuals] = useState<Visual[]>([]);
   const serial = useRef(0);
@@ -53,6 +54,7 @@ export function useBattleFeedback(shell: RefObject<HTMLElement>) {
     state: DuelState,
     frame: Uint8Array,
     previousLP: number[],
+    scale = 1,
   ) => {
     if (frame[2] === 1 && [4, 5, 162].includes(frame[3])) {
       reset();
@@ -68,14 +70,17 @@ export function useBattleFeedback(shell: RefObject<HTMLElement>) {
     const additions = nativeVisuals(state, frame, previousLP).map(
       (event): Visual => ({
         ...event,
+        scale,
+        ...(event.kind === "move" ? { delay: event.delay * scale } : {}),
         id: ++serial.current,
         expires:
           now +
-          (event.kind === "move"
-            ? 480 + event.delay
-            : event.kind === "banner"
-              ? 950
-              : 1300),
+          scale *
+            (event.kind === "move"
+              ? 480 + event.delay
+              : event.kind === "banner"
+                ? 950
+                : 1300),
         a:
           "from" in event
             ? point(shell.current, event.from)
@@ -163,6 +168,7 @@ export function BattleFeedback({
             <div
               key={v.id}
               className={`duel-phase-banner ${v.own ? "own" : "opponent"}`}
+              style={{ animationDuration: `${950 * v.scale}ms` }}
             >
               <small>{names[v.player]}</small>
               <strong>{v.label}</strong>
@@ -234,6 +240,7 @@ export function BattleFeedback({
                   "--to-y": `${v.b.y}%`,
                   "--arrival-angle": `${(v.own ? 0 : 180) + (v.to.location === 4 && v.position & 12 ? 90 : 0)}deg`,
                   animationDelay: `${v.delay}ms`,
+                  animationDuration: `${480 * v.scale}ms`,
                 } as CSSProperties
               }
             >
