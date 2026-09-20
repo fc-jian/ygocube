@@ -47,3 +47,9 @@ python3 scripts/windbot/prepare-database.py /path/to/ygopro/cards.cdb /path/to/o
 上游 72 个 Executor 中，Test 与 Lucky 指向未提供的 AI_Test.ydk；P2 是需要用户另选卡组的包装器入口，不能作为随包预设直接开局。随机难度条目是包装器的选牌策略，不是额外的 AI 卡组。此目录覆盖全部 70 套实际附带卡组，不把这些占位条目伪装成可用预设。
 
 更新目录后必须用 `scripts/e2e/windbot-catalog.cjs RUNTIME CDB CATALOG_JSON` 对实际生产运行时逐项检查角色、台词加载、协议握手、提交卡组与自动准备；`scripts/e2e/windbot-selection.cjs BASE` 检查两层下拉框所有分组与切换重置、桌面和移动布局。数据库生成器也须遍历全部 YDK 校验卡号。
+
+### r23 完整目录发布
+
+独立 Duel 已于 2026-09-20 更新到 `20260920-windbot-catalog-r23`，应用源码 `518b974b8e367d40f7d4f1097998f83e065bdd08`（已推送）。Build ID：`uG1clXg_wlKia4PNpi-S6`；应用包 SHA-256：`8a451a529e350f6f1d67867f3bb90968f1da8093762be4bee48583539de84141`。Cube 仍为 r22，服务 PID 与启动时间未变；WindBot 二进制、卡库、srvpro 代码均未修改。
+
+70 套配置逐一通过 Aly 实际运行时的 Name/Dialog 加载、提交卡组与自动准备检查；全部卡号存在。Windows／Linux API 测试各 21 项及生产构建通过。公网桌面 1440、竖屏 390 的 24 个分组和全部 70 个选项、切换重置、页面资源检查通过；“尼亚 / 拉比林斯迷宫”真实效果、连锁与投降结算通过。完整握手日志、JSON 验收结果和发布备份位于 `/opt/ygoduel/backups/20260920-windbot-catalog-r23/`。本地测试服务已关闭。
