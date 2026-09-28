@@ -1005,9 +1005,9 @@ cmd_deploy() {
   fi
   local expected_cdb_sha expected_manifest_sha
   expected_cdb_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["cards"]["sha256"])' "$STATE_DIR/resource-manifest.json")"
-  expected_manifest_sha="$(sha256sum "$STATE_DIR/resource-manifest.json" | awk '{print $1}')"
+  expected_manifest_sha="$(sha256sum "$staging/payload/metadata/resource-manifest.json" | awk '{print $1}')"
   remote_health "$expected_cdb_sha" "$expected_manifest_sha"
-  cp -f "$STATE_DIR/resource-manifest.json" "$STATE_DIR/deployed-resource-manifest.json"
+  cp -f "$staging/payload/metadata/resource-manifest.json" "$STATE_DIR/deployed-resource-manifest.json"
   if ((EXPANSION_ENABLED)) && [[ -f "$STATE_DIR/expansion-manifest.json" ]]; then
     cp -f "$STATE_DIR/expansion-manifest.json" "$STATE_DIR/deployed-expansion-manifest.json"
   fi
