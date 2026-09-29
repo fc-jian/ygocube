@@ -1069,7 +1069,7 @@ PY
   html="$(curl --fail --silent --show-error --retry 3 --max-time 30 "$ALY_PUBLIC_URL/")" || die "Aly homepage request failed"
   duel_page="$(curl --fail --silent --show-error --retry 3 --max-time 30 "$ALY_PUBLIC_URL/duel/decks")" || die "Aly /duel/decks request failed"
   grep -Eq '卡组构筑|deck-editor|_next/static|duel-assets' <<<"$duel_page" || die "Aly /duel/decks returned unexpected HTML"
-  assets="$(printf '%s\n%s' "$html" "$duel_page" | grep -Eo "/_next/static/[^\"' ]+\.(js|css)" | sort -u || true)"
+  assets="$(printf '%s\n%s' "$html" "$duel_page" | grep -Eo "/(duel-assets/)?_next/static/[^\"' ]+\.(js|css)" | sort -u || true)"
   [[ -n "$assets" ]] || die "homepage and /duel/decks did not reference Next static assets"
   while IFS= read -r asset; do
     [[ -z "$asset" ]] && continue
