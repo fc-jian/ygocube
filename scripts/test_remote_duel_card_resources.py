@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import os
 from pathlib import Path
+import tarfile
 import tempfile
 import unittest
 
@@ -17,8 +18,35 @@ assert SPEC is not None and SPEC.loader is not None
 REMOTE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(REMOTE)
 
+PACKAGE_SPEC = importlib.util.spec_from_file_location(
+    "package_card_resource_payload", Path(__file__).with_name("package-card-resource-payload.py")
+)
+assert PACKAGE_SPEC is not None and PACKAGE_SPEC.loader is not None
+PACKAGE = importlib.util.module_from_spec(PACKAGE_SPEC)
+PACKAGE_SPEC.loader.exec_module(PACKAGE)
+
 
 class RemoteDuelResourceApplyTests(unittest.TestCase):
+    def test_resource_payload_archive_contains_files_without_directory_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            payload = root / "payload"
+            (payload / "srvpro" / "ygopro").mkdir(parents=True)
+            (payload / "assets" / "pics_avif").mkdir(parents=True)
+            (payload / "srvpro" / "ygopro" / "cards.cdb").write_bytes(b"cdb fixture")
+            (payload / "assets" / "pics_avif" / "1.avif").write_bytes(b"avif fixture")
+            archive_path = root / "payload.tar.gz"
+
+            PACKAGE.package_payload(payload, archive_path)
+
+            with tarfile.open(archive_path, "r:gz") as archive:
+                members = archive.getmembers()
+            self.assertEqual({member.name for member in members}, {
+                "assets/pics_avif/1.avif",
+                "srvpro/ygopro/cards.cdb",
+            })
+            self.assertTrue(all(member.isfile() for member in members))
+
     def test_atomic_write_does_not_mutate_hardlinked_previous_release(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -979,7 +979,7 @@ with open(sys.argv[2], 'w', encoding='utf-8') as handle:
     json.dump(manifest, handle, ensure_ascii=False, sort_keys=True)
 PYMANIFEST
   (cd "$payload" && find srvpro assets -type f -print0 | sort -z | xargs -0 sha256sum > metadata/SHA256SUMS)
-  tar -C "$payload" -czf "$STATE_DIR/card-resources-${RELEASE_ID}.tar.gz" .
+  python3 "$ROOT_DIR/scripts/package-card-resource-payload.py" "$payload" "$STATE_DIR/card-resources-${RELEASE_ID}.tar.gz"
   printf '%s\n' "$STATE_DIR/card-resources-${RELEASE_ID}.tar.gz"
 }
 
@@ -1084,7 +1084,7 @@ PY
 
 cmd_deploy() {
   ((CONFIRM_MAINTENANCE)) || die "deploy stops Aly services; pass --confirm-maintenance explicitly"
-  require_command tar; require_command curl
+  require_command python3; require_command curl
   state_init
   ((DRY_RUN)) && { info "dry-run: would package, back up, stop services, atomically publish, restart and verify Aly"; return 0; }
   local archive staging="$STATE_DIR/deploy-$RELEASE_ID"

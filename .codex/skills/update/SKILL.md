@@ -253,7 +253,9 @@ WebP 不进入运行 release、回滚快照或备份。部署须清除旧运行�
   避免在运行目录直接覆盖 Lua/CDB。
 - 用户明确要求清理历史备份时，先核对 current、systemd 与备份指针，再保留 current
   和一个可回滚 release/资源快照，清理更旧的备份与 `.pre-*`。不得删除失败发布的
-  staging；新备份与原图检查通过后再清理旧备份。
+  staging；新备份与原图检查通过后再清理旧备份。删除 release 前还要检查相关
+  systemd unit 的 `ExecStart`、`WorkingDirectory`、`ReadWritePaths`、`ReadOnlyPaths`
+  和 bind 路径；若仍引用旧目录，先迁移到 `current`/`shared` 并重启验证，或保留被引用目录。
 - 资源和 API 同时修复时走完整应用发布：备份数据库/配置/current，验证完整包，
   原子切换，按影响范围重启，并具备回滚。不得为 API 修改重启无关 Web、Nginx
   或 Cube 宿主；确需中断的范围应在维护授权上下文中说明。
