@@ -1026,12 +1026,12 @@ remote_health() {
       remote_check+="; test -d '$ALY_ROOT/shared/srvpro/ygopro/expansions'; find '$ALY_ROOT/shared/srvpro/ygopro/expansions' -maxdepth 1 -type f -name '*.cdb' -print | grep -q ."
     fi
   fi
-  ssh_exec "$remote_check" 120
-  curl --fail --silent --show-error --retry 5 --retry-delay 2 --max-time 30 "$ALY_PUBLIC_URL/api/health" >/dev/null
+  ssh_exec "$remote_check" 120 || die "Aly remote release, services, or resource checks failed"
+  curl --fail --silent --show-error --retry 5 --retry-delay 2 --max-time 30 "$ALY_PUBLIC_URL/api/health" >/dev/null || die "Aly Cube API health endpoint failed"
   if [[ -n "$expected_names_sha" && -n "$expected_banlist_sha" ]]; then
     local duel_options_file="$STATE_DIR/duel-options-postdeploy.json" duel_search_file="$STATE_DIR/duel-search-postdeploy.json" duel_probe_code
-    curl --fail --silent --show-error --retry 5 --retry-delay 2 --max-time 30 "$ALY_PUBLIC_URL/duel-api/public/duel/options" -o "$duel_options_file"
-    python3 - "$duel_options_file" "$ROOT_DIR/ygopro/lflist.conf" "$ROOT_DIR/scripts/remote-duel-resource-apply.py" <<'PY'
+    curl --fail --silent --show-error --retry 5 --retry-delay 2 --max-time 30 "$ALY_PUBLIC_URL/duel-api/public/duel/options" -o "$duel_options_file" || die "Aly independent Duel options endpoint failed"
+    python3 - "$duel_options_file" "$ROOT_DIR/ygopro/lflist.conf" "$ROOT_DIR/scripts/remote-duel-resource-apply.py" <<'PY' || die "Aly independent Duel is missing the latest upstream OCG or TCG ban-list"
 import importlib.util, json, sys
 lists = {str(item.get('name', '')) for item in json.load(open(sys.argv[1], encoding='utf-8')).get('lists', [])}
 headers = [line[1:].strip() for line in open(sys.argv[2], encoding='utf-8') if line.startswith('!')]
@@ -1044,37 +1044,37 @@ for expected in [value for value in module.banlist_api_names(headers) if value.e
 PY
     duel_probe_code="$(python3 -c 'import json,sys; codes=json.load(open(sys.argv[1], encoding="utf-8")).get("codes", []); print(codes[0] if codes else "")' "$STATE_DIR/expansion-release-match.json")"
     [[ "$duel_probe_code" =~ ^[0-9]+$ ]] || die "missing expansion search probe code"
-    curl --fail --silent --show-error --retry 5 --retry-delay 2 --max-time 30 "$ALY_PUBLIC_URL/duel-api/public/duel/search?q=$duel_probe_code" -o "$duel_search_file"
-    python3 - "$duel_search_file" "$duel_probe_code" <<'PY'
+    curl --fail --silent --show-error --retry 5 --retry-delay 2 --max-time 30 "$ALY_PUBLIC_URL/duel-api/public/duel/search?q=$duel_probe_code" -o "$duel_search_file" || die "Aly independent Duel search endpoint failed"
+    python3 - "$duel_search_file" "$duel_probe_code" <<'PY' || die "Aly independent Duel public search missed extension card $duel_probe_code"
 import json, sys
 code = int(sys.argv[2])
 if not any(int(row.get('code', 0)) == code for row in json.load(open(sys.argv[1], encoding='utf-8'))):
     raise SystemExit(f'independent Duel public search missed extension card {code}')
 PY
-    curl --fail --silent --show-error --retry 3 --max-time 30 "$ALY_PUBLIC_URL/duel/decks" -o "$STATE_DIR/duel-decks-postdeploy.html"
+    curl --fail --silent --show-error --retry 3 --max-time 30 "$ALY_PUBLIC_URL/duel/decks" -o "$STATE_DIR/duel-decks-postdeploy.html" || die "Aly /duel/decks page failed"
     grep -Eq '卡组构筑|deck-editor|_next/static|duel-assets' "$STATE_DIR/duel-decks-postdeploy.html" || die "Aly /duel/decks returned unexpected HTML"
-    local duel_pic_headers duel_pic_type duel_pic_file="$STATE_DIR/duel-pic-postdeploy.avif"
-    duel_pic_headers="$(curl --fail --silent --show-error --head --max-time 30 "$ALY_PUBLIC_URL/pics/$duel_probe_code.avif")"
-    duel_pic_type="$(printf '%s\n' "$duel_pic_headers" | awk 'BEGIN{IGNORECASE=1} /^content-type:/ {sub("^[^:]*:[[:space:]]*",""); gsub("\r",""); print; exit}')"
-    [[ "$duel_pic_type" == *image/avif* ]] || die "Aly expansion card image has wrong MIME: $duel_pic_type"
-    curl --fail --silent --show-error --max-time 30 "$ALY_PUBLIC_URL/pics/$duel_probe_code.avif" -o "$duel_pic_file"
-    python3 - "$duel_pic_file" <<'PY'
+    local duel_pic_type duel_pic_file="$STATE_DIR/duel-pic-postdeploy.avif" duel_pic_url
+    for duel_pic_url in "$ALY_PUBLIC_URL/api/pics/$duel_probe_code.avif" "$ALY_PUBLIC_URL/duel-api/pics/$duel_probe_code.avif"; do
+      duel_pic_type="$(curl --fail --silent --show-error --max-time 30 --output "$duel_pic_file" --write-out '%{content_type}' "$duel_pic_url")" || die "Aly card image request failed: $duel_pic_url"
+      [[ "$duel_pic_type" == image/avif* ]] || die "Aly card image has wrong MIME: $duel_pic_url ($duel_pic_type)"
+      python3 - "$duel_pic_file" <<'PY' || die "Aly card image is not a valid AVIF payload: $duel_pic_url"
 import pathlib, sys
 data = pathlib.Path(sys.argv[1]).read_bytes()[:32]
 if len(data) < 16 or data[4:8] != b'ftyp' or b'avif' not in data[:32]:
     raise SystemExit('Aly expansion card image is not a valid AVIF payload')
 PY
+    done
   fi
   local html duel_page assets asset
-  html="$(curl --fail --silent --show-error --retry 3 --max-time 30 "$ALY_PUBLIC_URL/")"
-  duel_page="$(curl --fail --silent --show-error --retry 3 --max-time 30 "$ALY_PUBLIC_URL/duel/decks")"
+  html="$(curl --fail --silent --show-error --retry 3 --max-time 30 "$ALY_PUBLIC_URL/")" || die "Aly homepage request failed"
+  duel_page="$(curl --fail --silent --show-error --retry 3 --max-time 30 "$ALY_PUBLIC_URL/duel/decks")" || die "Aly /duel/decks request failed"
   grep -Eq '卡组构筑|deck-editor|_next/static|duel-assets' <<<"$duel_page" || die "Aly /duel/decks returned unexpected HTML"
   assets="$(printf '%s\n%s' "$html" "$duel_page" | grep -Eo "/_next/static/[^\"' ]+\.(js|css)" | sort -u || true)"
   [[ -n "$assets" ]] || die "homepage and /duel/decks did not reference Next static assets"
   while IFS= read -r asset; do
     [[ -z "$asset" ]] && continue
     local asset_headers content_type
-    asset_headers="$(curl --fail --silent --show-error --head --max-time 30 -H 'Accept: */*' "$ALY_PUBLIC_URL$asset")"
+    asset_headers="$(curl --fail --silent --show-error --head --max-time 30 -H 'Accept: */*' "$ALY_PUBLIC_URL$asset")" || die "Aly static asset request failed: $asset"
     content_type="$(printf '%s\n' "$asset_headers" | awk 'BEGIN{IGNORECASE=1} /^content-type:/ {sub("^[^:]*:[[:space:]]*",""); gsub("\r",""); print; exit}')"
     case "$asset" in
       *.js) [[ "$content_type" == *javascript* || "$content_type" == *ecmascript* ]] || die "JS asset has wrong MIME: $asset ($content_type)" ;;
@@ -1115,7 +1115,7 @@ cmd_deploy() {
   expected_manifest_sha="$(sha256sum "$staging/payload/metadata/resource-manifest.json" | awk '{print $1}')"
   expected_names_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["cardNames"]["sha256"])' "$STATE_DIR/resource-manifest.json")"
   expected_banlist_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["banlist"]["files"]["lflist.conf"]["sha256"])' "$STATE_DIR/resource-manifest.json")"
-  if ! remote_health "$expected_cdb_sha" "$expected_manifest_sha" "$expected_names_sha" "$expected_banlist_sha"; then
+  if ! (remote_health "$expected_cdb_sha" "$expected_manifest_sha" "$expected_names_sha" "$expected_banlist_sha"); then
     warn "post-deploy verification failed; attempting to restore both resource releases"
     remote_rollback "$RELEASE_ID" || die "verification failed and automatic rollback also failed; retain backups and inspect Aly immediately"
     die "post-deploy verification failed and the resource releases were rolled back"
