@@ -229,6 +229,9 @@ PY
 
 `/duel/decks` 由独立 Duel Web 提供，搜索请求走 `/duel-api/public/duel/search`，其
 API 和卡库 release 位于 `/opt/ygoduel`；不能用 Cube 的 `/api` 搜索结果代表该页面。
+Nest API 内部卡图路由是 `/pics/:code.avif`；公网 Cube 前缀为 `/api/pics/:code.avif`，
+独立 Duel 前缀为 `/duel-api/pics/:code.avif`。验收必须分别请求这两条完整 URL；裸
+`/pics/:code.avif` 会落到 Web 前端路由，不能代表任一 API 的卡图服务。
 标准 `deploy` 在 `/opt/ygocube` 资源发布成功后，还会把同一代主 CDB、Super Pre、
 脚本、两处 `lflist.conf`、AVIF 与 YGOCDB 映射安装到新的独立 Duel release，并使其
 卡片元数据缓存失效。部署前若发现独立 Duel 的 `ygopro` 宿主仍运行则中止，避免中断
@@ -381,6 +384,8 @@ API → srvpro → Web → Nginx 启动。输出中的 release/backup ID 必须�
 宿主后仅重启 `ygoduel-api` 与 `ygoduel-srvpro`。Web、Nginx 和 Cube srvpro 不因这一步
 重启。其备份保存在 `/opt/ygoduel/backups/card-sync-<release-id>/`。两步任一失败或
 发布后校验失败都通过同一 ID 回滚两套资源。
+部署后健康检查失败必须把非零状态返回给 `cmd_deploy`，以触发上述回滚；若检查函数
+使用 `die()`/`exit`，须在可捕获的子 shell 中调用，避免直接退出主脚本而跳过回滚。
 
 本 Skill 的 deploy 更新 Cube 与独立 Duel 两套卡片资源和无头宿主；如果同一变更还包含 API/Web 代码，
 使用项目的完整应用发布流程，并确保 standalone Web 同时安装 `.next/static`
@@ -400,9 +405,11 @@ ssh aly 'systemctl is-active ygoduel-api ygoduel-srvpro ygoduel-web'
 ssh aly "ldd /opt/ygocube/shared/srvpro/ygopro/ygopro | grep -F 'not found' && exit 1 || true"
 ```
 
-公网首页和 `/duel/decks` HTML 中引用的每个 `/_next/static/*.js`、`*.css` 都必须返回 200，且 JS
-为 JavaScript MIME、CSS 为 `text/css`；检查新卡片 API、`/pics/<code>.avif`、
-Cube `/api` 与独立 Duel `/duel-api` 搜索、最新禁限表、`/pics/<code>.avif`、
+公网首页和 `/duel/decks` HTML 中引用的每个静态文件都必须返回 200，且 JS 为
+JavaScript MIME、CSS 为 `text/css`。解析 HTML 时保留 `/duel-assets/_next/static/` 前缀；
+不能把它截成 `/_next/static/`，否则会误查 Cube Web 路由并产生假 404。检查新卡片 API、
+Cube `/api/pics/<code>.avif` 与独立 Duel `/duel-api/pics/<code>.avif`、
+Cube `/api` 与独立 Duel `/duel-api` 搜索、最新禁限表、
 srvpro HTTP/TCP/Cube 协议探针和实际宿主启动。两套数据库完整性、七个 systemd 服务、
 资源 hash、音频客户端（若构建）均通过后才宣布成功。
 
@@ -435,7 +442,8 @@ srvpro HTTP/TCP/Cube 协议探针和实际宿主启动。两套数据库完整�
 
 ## 先行卡发布后补充验收
 
-- 两套服务分别访问公网实际搜索路由和 `/pics/<code>.avif`，检查 MIME 和实体内容；
+- 两套服务分别访问公网实际搜索路由及 Cube `/api/pics/<code>.avif`、独立 Duel
+  `/duel-api/pics/<code>.avif`，检查 MIME 和实体内容；
   页面 200、文件存在、staging 测试通过均不代表生产已生效。
 - 用先行卡进入实际房间、准备并完成比赛；验证 BO3 换备和重连。独立 Duel 还需
   测试网页建房→原生客户端加入、原生建房→网页加入两个方向。
