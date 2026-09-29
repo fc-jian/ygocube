@@ -137,6 +137,75 @@ class RemoteDuelResourceApplyTests(unittest.TestCase):
 
             self.assertFalse(destination.exists())
 
+    def test_resource_set_hardlinks_cube_and_duel_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_host = root / "cube" / "srvpro" / "ygopro"
+            target_host = root / "duel" / "srvpro" / "ygopro"
+            source_assets = root / "cube" / "assets"
+            target_assets = root / "duel" / "assets"
+            contents = {
+                "cards.cdb": b"main database",
+                "strings.conf": b"strings",
+                "lflist.conf": b"root banlist",
+                "expansions/lflist.conf": b"expansion banlist",
+                "script/card.lua": b"return 1",
+                "expansions/super-pre.cdb": b"expansion database",
+            }
+            for relative, content in contents.items():
+                source = source_host / relative
+                target = target_host / relative
+                source.parent.mkdir(parents=True, exist_ok=True)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source.write_bytes(content)
+                target.write_bytes(content)
+            source_assets.mkdir(parents=True)
+            target_assets.mkdir(parents=True)
+            for asset_name, content in (("ygocdb_cards.json", b"{}"), ("pics_avif/1.avif", b"avif")):
+                source = source_assets / asset_name
+                target = target_assets / asset_name
+                source.parent.mkdir(parents=True, exist_ok=True)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source.write_bytes(content)
+                target.write_bytes(content)
+
+            def metadata(path: Path) -> dict[str, int | str]:
+                content = path.read_bytes()
+                return {"sha256": hashlib.sha256(content).hexdigest(), "size": len(content)}
+
+            manifest = {
+                "scripts": {"files": {"card.lua": metadata(source_host / "script/card.lua")}},
+                "expansions": {
+                    "files": {
+                        "super-pre.cdb": metadata(source_host / "expansions/super-pre.cdb"),
+                        "lflist.conf": metadata(source_host / "expansions/lflist.conf"),
+                    }
+                },
+                "avif": {"files": {"1.avif": metadata(source_assets / "pics_avif/1.avif")}},
+            }
+            self.assertTrue(
+                REMOTE.managed_resource_sets_match(
+                    source_host, target_host, source_assets, target_assets, manifest
+                )
+            )
+            checked = REMOTE.hardlink_resource_set(
+                source_host, target_host, source_assets, target_assets, manifest
+            )
+            self.assertGreaterEqual(checked, 9)
+            for relative in contents:
+                self.assertEqual(
+                    (source_host / relative).stat().st_ino,
+                    (target_host / relative).stat().st_ino,
+                )
+            self.assertEqual(
+                (source_assets / "ygocdb_cards.json").stat().st_ino,
+                (target_assets / "ygocdb_cards.json").stat().st_ino,
+            )
+            self.assertEqual(
+                (source_assets / "pics_avif/1.avif").stat().st_ino,
+                (target_assets / "pics_avif/1.avif").stat().st_ino,
+            )
+
     def test_avif_directory_fingerprint_matches_manifest_and_detects_extras(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

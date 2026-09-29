@@ -258,7 +258,8 @@ WebP 不进入运行 release、回滚快照或备份。部署须清除旧运行�
   两处 `lflist.conf`、卡名映射和 AVIF 逐文件硬链接到 Cube shared 同一 inode；遇到
   `EXDEV` 必须失败并回滚，禁止退化为复制。只有资源清单及内容完全相同的上一版
   Duel rollback release 才能在停服后重链接到当前 Cube 资源；版本不同则保留其旧资源
-  供回滚。Cube 资源备份及 rollback 用 `cp -al` 保留这些共享 inode。
+  供回滚。Cube 资源备份及 rollback 用 `cp -al` 保留这些共享 inode；恢复 Cube 后，
+  还要把当前 Duel release 中内容匹配的资源重新硬链接到已恢复的 Cube 文件。
 - 用户明确要求清理历史备份时，先核对 current、systemd 与备份指针，再保留 current
   和一个可回滚 release/资源快照，清理更旧的备份与 `.pre-*`。不得删除失败发布的
   staging；新备份与原图检查通过后再清理旧备份。删除 release 前还要检查相关

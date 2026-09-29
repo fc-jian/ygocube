@@ -227,6 +227,34 @@ def managed_resource_sets_match(
     return True
 
 
+def hardlink_resource_set(
+    source_host: Path,
+    target_host: Path,
+    source_assets: Path,
+    target_assets: Path,
+    manifest: dict,
+) -> int:
+    for source_relative, target_relative in (
+        ("cards.cdb", "cards.cdb"),
+        ("strings.conf", "strings.conf"),
+        ("lflist.conf", "lflist.conf"),
+        ("expansions/lflist.conf", "expansions/lflist.conf"),
+    ):
+        link_resource_file(source_host / source_relative, target_host / target_relative)
+    for lua in (source_host / "script").rglob("*.lua"):
+        relative = lua.relative_to(source_host / "script")
+        link_resource_file(lua, target_host / "script" / relative)
+    hardlink_manifest_files(
+        source_host / "expansions",
+        target_host / "expansions",
+        manifest.get("expansions", {}).get("files", {}),
+        "Super Pre",
+    )
+    replace_directory(source_assets / "pics_avif", target_assets / "pics_avif")
+    link_resource_file(source_assets / "ygocdb_cards.json", target_assets / "ygocdb_cards.json")
+    return verify_resource_hardlinks(source_host, target_host, source_assets, target_assets, manifest)
+
+
 def replace_directory(source: Path, destination: Path, *, ignore=None) -> None:
     if destination.is_symlink():
         destination.unlink()
@@ -494,6 +522,40 @@ def rollback(duel_root: Path, release_id: str) -> dict:
     return {"rolledBack": True, "previousRelease": previous.name}
 
 
+def relink_current_to_cube(cube_root: Path, duel_root: Path) -> dict:
+    manifest_path = cube_root / "shared" / "assets" / "resource-manifest.json"
+    if not manifest_path.is_file():
+        return {"ok": True, "relinked": False, "reason": "Cube resource manifest is missing"}
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    verify_cube_resources(cube_root, manifest)
+    current = (duel_root / "current").resolve(strict=True)
+    if not current.is_relative_to((duel_root / "releases").resolve(strict=True)):
+        raise RuntimeError("independent Duel current link resolves outside its releases directory")
+    source_host = cube_root / "shared" / "srvpro" / "ygopro"
+    source_assets = cube_root / "shared" / "assets"
+    target_host = current / "srvpro" / "ygopro"
+    target_assets = current / "assets"
+    if not managed_resource_sets_match(source_host, target_host, source_assets, target_assets, manifest):
+        return {
+            "ok": True,
+            "relinked": False,
+            "release": current.name,
+            "reason": "rollback release contains a different resource generation",
+        }
+    if active_standalone_host():
+        raise RuntimeError("an independent Duel host is active; resource relinking was not started")
+    run("systemctl", "stop", "ygoduel-api", "ygoduel-srvpro")
+    try:
+        linked = hardlink_resource_set(source_host, target_host, source_assets, target_assets, manifest)
+        run("systemctl", "start", "ygoduel-api", "ygoduel-srvpro")
+        wait_healthy(target_host / "lflist.conf")
+    except Exception:
+        for service in ("ygoduel-api", "ygoduel-srvpro"):
+            subprocess.run(["systemctl", "start", service], check=False)
+        raise
+    return {"ok": True, "relinked": True, "release": current.name, "managedResourceHardlinks": linked}
+
+
 def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
     stage = cube_root / ".staging" / f"card-sync-{release_id}"
     stage_root = stage / "root"
@@ -656,25 +718,7 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
             # The old release is the rollback target. When its complete managed
             # resource set is byte-for-byte identical, point it at the same
             # immutable inodes too; otherwise preserve its older generation.
-            link_resource_file(source_host / "cards.cdb", old_host / "cards.cdb")
-            link_resource_file(source_host / "strings.conf", old_host / "strings.conf")
-            link_resource_file(source_host / "lflist.conf", old_host / "lflist.conf")
-            link_resource_file(
-                source_host / "expansions" / "lflist.conf",
-                old_host / "expansions" / "lflist.conf",
-            )
-            for lua in (source_host / "script").rglob("*.lua"):
-                relative = lua.relative_to(source_host / "script")
-                link_resource_file(lua, old_host / "script" / relative)
-            hardlink_manifest_files(
-                source_host / "expansions",
-                old_host / "expansions",
-                manifest.get("expansions", {}).get("files", {}),
-                "Super Pre",
-            )
-            replace_directory(image_source, old_assets / "pics_avif")
-            link_resource_file(names_source, old_assets / "ygocdb_cards.json")
-            verify_resource_hardlinks(source_host, old_host, source_assets, old_assets, manifest)
+            hardlink_resource_set(source_host, old_host, source_assets, old_assets, manifest)
         atomic_current(duel_root, new, release_id)
         with sqlite3.connect(database) as db:
             db.execute("UPDATE cards SET metadata_version=0")
@@ -737,6 +781,7 @@ def main() -> None:
     parser.add_argument("--duel-root", type=Path, default=Path("/opt/ygoduel"))
     parser.add_argument("--id", required=True)
     parser.add_argument("--rollback", action="store_true")
+    parser.add_argument("--relink-current-to-cube", action="store_true")
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9._-]+", args.id):
         raise SystemExit("invalid resource release ID")
@@ -746,6 +791,8 @@ def main() -> None:
     try:
         if args.rollback:
             result = rollback(args.duel_root.resolve(), args.id)
+        elif args.relink_current_to_cube:
+            result = relink_current_to_cube(args.cube_root.resolve(), args.duel_root.resolve())
         else:
             result = deploy(args.cube_root.resolve(), args.duel_root.resolve(), args.id)
     except Exception as exc:
