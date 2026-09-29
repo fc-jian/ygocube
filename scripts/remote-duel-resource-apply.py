@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import date, timedelta
 import errno
 import hashlib
 import json
@@ -41,7 +42,24 @@ def read_json(url: str) -> object:
         return json.loads(response.read())
 
 
+def banlist_api_name(header: str) -> str:
+    match = re.match(r"^\s*(\d{4})\.(\d{1,2})(?:\.(\d{1,2}))?", header)
+    if not match:
+        raise RuntimeError(f"invalid ban-list date header: {header!r}")
+    year, month, day = (int(value) if value is not None else None for value in match.groups())
+    # srvpro parses dates in the host's local timezone, then applies -08:00.
+    # Aly runs in UTC+08:00, so its public date is one day before the source header.
+    public_date = date(year, month, day or 1) - timedelta(days=1)
+    suffix = "TCG" if "TCG" in header else "OCG"
+    return f"{public_date:%Y.%m.%d} {suffix}"
+
+
+def banlist_api_names(headers: list[str]) -> list[str]:
+    return [banlist_api_name(header) for header in headers]
+
+
 def wait_healthy(banlist_path: Path | None = None) -> None:
+    last_error: Exception | None = None
     for _ in range(40):
         try:
             if read_json("http://127.0.0.1:3101/health") is None:
@@ -51,14 +69,15 @@ def wait_healthy(banlist_path: Path | None = None) -> None:
             names = {str(item.get("name", "")) for item in options.get("lists", [])}
             if banlist_path is not None:
                 headers = [line[1:].strip() for line in banlist_path.read_text(encoding="utf-8").splitlines() if line.startswith("!")]
-                expected = [value if "TCG" in value else value + " OCG" for value in headers]
+                expected = banlist_api_names(headers)
                 missing = [name for name in expected if name not in names]
                 if missing:
                     raise RuntimeError(f"the standalone Duel API did not load upstream ban-lists: {missing[:5]}")
             return
-        except Exception:
+        except Exception as exc:
+            last_error = exc
             time.sleep(1)
-    raise RuntimeError("standalone Duel API health check failed")
+    raise RuntimeError(f"standalone Duel API health check failed: {last_error}")
 
 
 def checked_copy_file(source: Path, destination: Path) -> None:

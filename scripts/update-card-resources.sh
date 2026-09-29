@@ -1031,12 +1031,14 @@ remote_health() {
   if [[ -n "$expected_names_sha" && -n "$expected_banlist_sha" ]]; then
     local duel_options_file="$STATE_DIR/duel-options-postdeploy.json" duel_search_file="$STATE_DIR/duel-search-postdeploy.json" duel_probe_code
     curl --fail --silent --show-error --retry 5 --retry-delay 2 --max-time 30 "$ALY_PUBLIC_URL/duel-api/public/duel/options" -o "$duel_options_file"
-    python3 - "$duel_options_file" "$ROOT_DIR/ygopro/lflist.conf" <<'PY'
-import json, sys
+    python3 - "$duel_options_file" "$ROOT_DIR/ygopro/lflist.conf" "$ROOT_DIR/scripts/remote-duel-resource-apply.py" <<'PY'
+import importlib.util, json, sys
 lists = {str(item.get('name', '')) for item in json.load(open(sys.argv[1], encoding='utf-8')).get('lists', [])}
 headers = [line[1:].strip() for line in open(sys.argv[2], encoding='utf-8') if line.startswith('!')]
-for header in [value for value in headers if 'TCG' in value][:1] + [value for value in headers if 'TCG' not in value][:1]:
-    expected = header if 'TCG' in header else header + ' OCG'
+spec = importlib.util.spec_from_file_location('remote_duel_resource_apply', sys.argv[3])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+for expected in [value for value in module.banlist_api_names(headers) if value.endswith(' TCG')][:1] + [value for value in module.banlist_api_names(headers) if value.endswith(' OCG')][:1]:
     if expected not in lists:
         raise SystemExit(f'independent Duel is missing upstream ban-list {expected}')
 PY

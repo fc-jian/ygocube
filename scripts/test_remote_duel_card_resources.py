@@ -28,6 +28,11 @@ PACKAGE_SPEC.loader.exec_module(PACKAGE)
 
 
 class RemoteDuelResourceApplyTests(unittest.TestCase):
+    def test_banlist_api_names_match_srvpro_timezone_normalization(self) -> None:
+        self.assertEqual(REMOTE.banlist_api_name("2026.10"), "2026.09.30 OCG")
+        self.assertEqual(REMOTE.banlist_api_name("2026.9 TCG"), "2026.08.31 TCG")
+        self.assertEqual(REMOTE.banlist_api_name("2025.04.01 OCG"), "2025.03.31 OCG")
+
     def test_resource_payload_archive_contains_files_without_directory_entries(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
