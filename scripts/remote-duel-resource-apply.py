@@ -92,13 +92,13 @@ def safe_remove_list(root: Path, list_path: Path) -> None:
             target.unlink()
 
 
-def verify_staged_resources(stage_root: Path, manifest: dict) -> None:
-    host = stage_root / "srvpro" / "ygopro"
+def verify_cube_resources(cube_root: Path, manifest: dict) -> None:
+    host = cube_root / "shared" / "srvpro" / "ygopro"
     card = host / "cards.cdb"
     if not card.is_file() or sha256(card) != manifest.get("cards", {}).get("sha256"):
         raise RuntimeError("staged main cards.cdb does not match its manifest")
     names_meta = manifest.get("cardNames", {})
-    names = stage_root / "assets" / "ygocdb_cards.json"
+    names = cube_root / "shared" / "assets" / "ygocdb_cards.json"
     if not names.is_file() or sha256(names) != names_meta.get("sha256"):
         raise RuntimeError("staged YGOCDB mapping does not match its manifest")
     for relative, metadata in manifest.get("banlist", {}).get("files", {}).items():
@@ -219,7 +219,10 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
     if not manifest_path.is_file():
         raise RuntimeError("verified Cube resource staging directory is missing")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    verify_staged_resources(stage_root, manifest)
+    # The Cube apply step atomically moves the payload's complete host and AVIF
+    # tree into shared/. Read the now-live, hash-verified resources from there;
+    # only the manifest and delete lists remain in the staging directory.
+    verify_cube_resources(cube_root, manifest)
     if active_standalone_host():
         raise RuntimeError("an independent Duel host is active; resource deployment was not started")
 
@@ -244,7 +247,7 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
             metadata = json.loads(release_metadata.read_text(encoding="utf-8"))
             metadata.update(id=release_name, previousRelease=old.name, resourceManifestSha256=sha256(manifest_path))
             release_metadata.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        source_host = stage_root / "srvpro" / "ygopro"
+        source_host = cube_root / "shared" / "srvpro" / "ygopro"
         target_host = new / "srvpro" / "ygopro"
         for name in ("cards.cdb", "strings.conf", "lflist.conf"):
             checked_copy_file(source_host / name, target_host / name)
@@ -280,11 +283,11 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
         # a separate resource so --skip-expansion cannot freeze ban-list dates.
         checked_copy_file(source_host / "lflist.conf", target_host / "expansions" / "lflist.conf")
 
-        image_source = stage_root / "assets" / "pics_avif"
+        image_source = cube_root / "shared" / "assets" / "pics_avif"
         if not image_source.is_dir():
             raise RuntimeError("staged AVIF directory is missing")
         replace_directory(image_source, new / "assets" / "pics_avif")
-        checked_copy_file(stage_root / "assets" / "ygocdb_cards.json", new / "assets" / "ygocdb_cards.json")
+        checked_copy_file(cube_root / "shared" / "assets" / "ygocdb_cards.json", new / "assets" / "ygocdb_cards.json")
 
         resources_path = new / "resources.json"
         resources = json.loads(resources_path.read_text(encoding="utf-8")) if resources_path.is_file() else {}
