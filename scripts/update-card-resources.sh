@@ -42,7 +42,7 @@ REFRESH_NAMES=0
 CONFIRM_MAINTENANCE=0
 BACKUP_ID=""
 IMAGE_URL_OVERRIDE=0
-EXPANSION_ENABLED=0
+EXPANSION_ENABLED=1
 
 usage() {
   sed -n '1,55p' "$0"
@@ -64,7 +64,8 @@ Options:
   --dry-run                 Print actions without changing files or remote services.
   --locale <locale>         Image locale (default: zh-CN).
   --images-url <https-url>  Override the image archive URL.
-  --expansion               Fetch and publish the official Super Pre expansion.
+  --expansion               Compatibility alias; Super Pre updates are enabled by default.
+  --skip-expansion          Preserve the current Super Pre version explicitly.
   --expansion-url <url>     Override the Super Pre .ypk URL (enables expansion).
   --aly-host <ssh-alias>    SSH alias (default: aly).
   --aly-root <path>         Aly installation root (default: /opt/ygocube).
@@ -151,6 +152,7 @@ parse_args() {
       --locale) [[ $# -ge 2 ]] || die "--locale needs a value"; IMAGE_LOCALE="$2"; shift 2; ((IMAGE_URL_OVERRIDE)) || IMAGE_URL="https://cdn02.moecube.com:444/images/ygopro-images-${IMAGE_LOCALE}.zip" ;;
       --images-url) [[ $# -ge 2 ]] || die "--images-url needs a value"; IMAGE_URL="$2"; IMAGE_URL_OVERRIDE=1; shift 2 ;;
       --expansion|--with-expansion) EXPANSION_ENABLED=1; shift ;;
+      --skip-expansion) EXPANSION_ENABLED=0; shift ;;
       --expansion-url) [[ $# -ge 2 ]] || die "--expansion-url needs a value"; EXPANSION_URL="$2"; EXPANSION_ENABLED=1; shift 2 ;;
       --aly-host) [[ $# -ge 2 ]] || die "--aly-host needs a value"; ALY_HOST="$2"; shift 2 ;;
       --aly-root) [[ $# -ge 2 ]] || die "--aly-root needs a value"; ALY_ROOT="$2"; shift 2 ;;
@@ -776,10 +778,8 @@ with open(temporary, 'w', encoding='utf-8') as handle:
 os.replace(temporary, manifest_path)
 PY
   fi
-  # Expansion publication is opt-in. A normal card/image update must not
-  # remove or overwrite a Super Pre installation that may only exist on Aly.
-  # Preserve the last successful expansion section when one is available;
-  # otherwise omit it until --expansion explicitly establishes a baseline.
+  # An explicit opt-out preserves Aly's last successful Super Pre section.
+  # Standard prepares fetch and manage the current official package.
   if ((EXPANSION_ENABLED == 0)); then
     python3 - "$STATE_DIR/resource-manifest.json" "$STATE_DIR/previous-resource-manifest.json" <<'PY'
 import json, os, sys
@@ -861,8 +861,8 @@ make_payload() {
   [[ -f "$current" ]] || die "run prepare before deploy"
   # A first publish must not install a manifest that advertises expansion
   # files while sending an empty expansion delta. Once a successful deploy has
-  # recorded a deployed manifest, ordinary updates intentionally preserve the
-  # existing expansion directory unless --expansion is explicitly used.
+  # recorded a deployed manifest, an explicit --skip-expansion preserves the
+  # existing expansion directory.
   local current_expansion_count
   current_expansion_count="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1], encoding="utf-8")).get("expansions", {}).get("files", {})))' "$current")"
   if ((EXPANSION_ENABLED == 0 && current_expansion_count > 0)) && [[ ! -f "$previous" ]]; then

@@ -1,6 +1,6 @@
 ---
 name: update
-description: Safely synchronize YGOPro upstream card resources (cards.cdb, scripts, images and Super Pre expansions), build/test the Cube stack, and deploy or roll back Aly releases.
+description: Safely synchronize YGOPro upstream card resources and the current official Super Pre expansion by default, build/test the Cube stack, and deploy or roll back Aly releases.
 ---
 
 # YGOPro 资源更新
@@ -142,15 +142,18 @@ bash scripts/update-card-resources.sh prepare --refresh-names
   影响范围的人工审计例外才可以显式使用 `--allow-missing-names`；不能用它隐藏
   大批缺失。
 
-#### 官方先行卡 expansion（可选、显式开启）
+#### 官方先行卡 expansion（标准资源更新默认同步）
 
 官方 srvpro 的先行卡包由 [srvpro 先行卡功能](https://github.com/mycard/srvpro/blob/master/README.md)
-和 [Super Pre 页面](https://mycard.world/ygopro/arena/#/superpre)提供。普通更新默认
-不触碰现有 expansion；只有明确需要发布先行卡时才加 `--expansion`：
+和 [Super Pre 页面](https://mycard.world/ygopro/arena/#/superpre)提供。每次标准卡池更新
+都同步当前官方 Super Pre 包与列表；编排脚本默认启用该输入，因此标准流程直接运行
+`check`、`prepare` 和 `deploy` 即会检查、准备并发布上游版本。`--expansion` 仅为兼容旧命令
+保留。只有用户明确要求保留 Aly 当前先行卡版本时，才传 `--skip-expansion`，并核验
+expansion 差量为空：
 
 ```bash
-bash scripts/update-card-resources.sh check --expansion
-bash scripts/update-card-resources.sh prepare --refresh-names --expansion
+bash scripts/update-card-resources.sh check
+bash scripts/update-card-resources.sh prepare --refresh-names
 ```
 
 脚本默认读取官方 HTTPS 地址：
@@ -174,8 +177,8 @@ AVIF 输入，远端发布清单与归档必须排除它们。`pack/*.ydk`、`co
 脚本在 `.card-resource-sync/resource-manifest.json` 中保存
 `expansionArchive`（URL、列表 URL、ETag、SHA-256、条目和列表计数）及
 `expansions.files`。先行卡差量与脚本一样只删除上次清单管理且本次确实移除的文件，
-未知本地文件保留；未启用 `--expansion` 时不生成 expansion 删除清单，避免普通更新
-清空 Aly 上现有的先行卡。
+未知本地文件保留；用户显式传入 `--skip-expansion` 时不生成 expansion 删除清单，保留
+Aly 上现有的先行卡。无论默认更新还是旧 `--expansion` 别名，`lflist.conf` 都不得被删除。
 
 检查清单和摘要：
 
@@ -272,18 +275,24 @@ test 验证，而不是只看编译命令成功。若二进制明显小于已知
 bash scripts/update-card-resources.sh test
 ```
 
-启用先行卡时，先完成不联网的 archive/list 验收，再把 expansion 纳入完整测试：
+每次标准更新都启用先行卡。完成默认的 `prepare` 后，先完成 archive/list 验收，
+再把扩展卡资源纳入本地测试：
 
 ```bash
 python3 scripts/card_resources.py validate-expansion-zip /path/to/ygopro-super-pre.ypk
 python3 scripts/card_resources.py validate-expansion-list /path/to/test-release.json
+EXPANSION_CODE=100268001 STANDALONE_ONLY=1 STANDALONE_MATCH=1 node scripts/e2e/web-duel-smoke.cjs
+EXPANSION_EFFECT=1 STANDALONE_ONLY=1 STANDALONE_MATCH=1 node scripts/e2e/web-duel-smoke.cjs
 bash scripts/update-card-resources.sh test --skip-e2e
 ```
 
 测试必须确认 `test-release.cdb`、`test-update.cdb` 均能通过 SQLite 校验，扩展脚本
 进入 `srvpro/ygopro/expansions/script`，低清卡图进入 API 的 AVIF 目录；原图、
 客户端 `pack/` 与 `corres_srv.ini` 不在发布归档，
-重复 `prepare --expansion` 的 manifest 和文件哈希稳定。正式发布前仍需补跑完整 E2E。
+重复 `prepare --refresh-names` 的 expansion manifest 和受管理文件哈希稳定。
+在隔离 API/数据库中检查新扩展卡可搜索、编号查询和卡图可用，并用当前包中的固定夹具
+（默认 `100268005`）实际执行至少一个扩展卡效果；正式发布前仍需补跑完整 Cube E2E
+和 BO3 模拟赛。
 
 服务尚未启动时可以先运行：
 
@@ -318,14 +327,15 @@ ssh aly 'hostname; test -d /opt/ygocube; systemctl is-active ygocube-api ygocube
 “完成更新/继续发布”且上下文明确包含服务重启时，不重复询问。确认后运行：
 
 ```bash
-bash scripts/update-card-resources.sh deploy --expansion --confirm-maintenance  # 本次包含先行卡时
-# 未启用先行卡的普通资源发布可省略 --expansion
+bash scripts/update-card-resources.sh deploy --confirm-maintenance
+# 仅用户明确要求保留 Aly 当前 Super Pre 版本时才加 --skip-expansion
 ```
 
-`--expansion` 必须在需要首次发布或更新先行卡时同时传给 `prepare` 和 `deploy`。
-已经成功发布并记录 `deployed-resource-manifest.json` 后，普通更新可以省略它，脚本会
-保留远端现有 expansion；如果这是第一次发布而 manifest 已包含 expansion，省略该参数
-会在本地预检阶段拒绝，避免出现“manifest 已更新但远端文件未上传”的不一致状态。
+标准资源更新默认在 `check`、`prepare` 和 `deploy` 中同步 Super Pre，确保检查、准备和发布
+使用同一官方 `.ypk` 与列表版本。只有用户明确要求保留现有 Super Pre 时才传
+`--skip-expansion`；此时核对 `deletes/expansions.txt` 为空且发布 manifest 保留远端
+expansion 清单。即使已有 `deployed-resource-manifest.json`，也不能因此跳过上游检查。
+兼容参数 `--expansion` 仍可显式启用默认行为。
 
 发布脚本的远端顺序是：取得发布锁 → 停止 API/srvpro/Web/Nginx → 对 SQLite 做
 WAL checkpoint 和 `PRAGMA integrity_check` → 备份数据库（含 WAL/SHM）、配置、
@@ -370,9 +380,9 @@ srvpro HTTP/TCP/Cube 协议探针和实际宿主启动。数据库完整性、�
 | script/ocgcore gitlink 不匹配 | 检查 `.gitmodules`、fork 上的提交和 `YGOPRO_*_COMMIT`；未确认 nested submodule 内容前不发布。 |
 | CDB 无法打开、表缺失、增删改异常 | 停止并保留旧运行时；重新取得同一上游提交的 CDB，使用 `validate-cdb` 和 `compare-cdb`，不得直接覆盖。 |
 | 先行卡 `.ypk` 被拒绝、列表 JSON 不合法或没有服务器 CDB | 保留旧 expansion 不变；检查 HTTPS 镜像、完整下载和官方包结构。不要绕过 ZIP/JSON 校验，也不要手动把客户端 `.ypk` 放入运行目录。 |
-| expansion 与普通资源更新互相覆盖 | 普通更新不带 `--expansion`；检查 manifest 是否保留旧的 `expansions` section，确认 `deletes/expansions.txt` 为空。需要切换版本时显式启用 expansion 并审核差量。 |
+| expansion 与普通资源更新互相覆盖 | 标准更新默认启用 Super Pre 并以 Aly 已部署 manifest 计算差量；检查只删除此前受清单管理且官方包已移除的文件，未知文件与 `lflist.conf` 保留。仅用户明确要求跳过 Super Pre 时传 `--skip-expansion`，并确认 expansion 删除清单为空。 |
 | 先行卡 CDB 中的脚本或卡图缺失 | 核对 `.ypk` 的 `script/`、`pics/` 和两个 CDB 是否完整；确认目标宿主启用了 `LoadExpansions()`。不要把扩展卡并入主 `cards.cdb` 作为临时修复。 |
-| manifest 已包含 expansion 但远端没有对应文件 | 检查是否在 `prepare --expansion` 后漏传了 `deploy --expansion`；首次发布必须补带该参数。脚本现在会在上传前直接拒绝这类组合，保留远端旧状态。 |
+| manifest 已包含 expansion 但远端没有对应文件 | 检查是否在默认 `prepare` 后又用 `--skip-expansion` 部署；首次发布需在默认模式重新准备和发布。脚本会在上传前拒绝 manifest 与 payload 不一致的组合，保留远端旧状态。 |
 | `missing-names.json` 有非衍生物 | `prepare --refresh-names`，按 exact code 修复；只对有编号和理由的少量例外使用 `--allow-missing-names`。 |
 | 搜索出现 TYPE_TOKEN 衍生物或两个编号名称串用 | 检查 exact-code 映射和 token 类型过滤；不要用 alias/cid 合并记录。重新生成名称映射后再测试。 |
 | 图片 HEAD/下载失败、ZIP 被拒绝、ETag 不一致 | 检查 HTTPS、网络代理和缓存摘要；可使用经过信任的 HTTPS 镜像重试。只清理对应损坏的 `.part`/归档，不关闭路径和大小校验。 |
@@ -413,9 +423,10 @@ srvpro HTTP/TCP/Cube 协议探针和实际宿主启动。数据库完整性、�
    资源、原始图片、数据库、token 或临时状态被 Git 追踪；无冲突标记、无 force push。
 3. **资源正确**：CDB SQLite integrity/代码集合通过；exact code 名称按完整 fallback
    选择；衍生物不出现在搜索/卡池；Lua 仅按 manifest 差量同步；AVIF 尺寸、MIME、
-   数量和重复执行幂等性通过。若启用先行卡，`.ypk`/列表校验、两个扩展 CDB、
-   expansion 脚本/卡图清单和客户端元数据排除也必须通过；普通更新不能产生 expansion
-   删除。
+   数量和重复执行幂等性通过。标准更新必须验证当前官方 `.ypk`/列表、两个扩展 CDB、
+   expansion 脚本/卡图清单和客户端元数据排除，并对照上次成功部署清单审计 expansion
+   差量；只允许删除上次清单管理且已从当前官方包移除的文件。用户明确要求保留旧版时，
+   才可跳过扩展更新，且 expansion 删除清单必须为空。
 4. **本地构建测试通过**：helper、API、Web、srvpro、宿主 `ldd`/启动 smoke、E2E
    全部通过；Windows 客户端（若要求）为正确架构、可启动且音频依赖可用。
 5. **Aly 运行正常**：备份的 SQLite/WAL/SHM integrity 为 `ok`；API、srvpro、Web、

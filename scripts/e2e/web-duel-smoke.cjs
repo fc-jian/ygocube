@@ -302,8 +302,27 @@ async function connect(pid) {
   }
 
   if (process.env.EXPANSION_EFFECT) {
-    fixtureDeck.main = cards.getMany(cards.allCodes()).filter(c => (c.type & 0x40002) === 0x40002 && !c.alias).slice(0,39).map(c=>c.code);
-    fixtureDeck.main.splice(20,0,100200292);
+    const effectCode = Number(process.env.EXPANSION_EFFECT_CODE || 100268005);
+    const effectCard = cards.get(effectCode);
+    assert(effectCard, "expansion effect card metadata must exist");
+    assert(fs.existsSync(path.join(root, `srvpro/ygopro/expansions/script/c${effectCode}.lua`)),
+      "expansion effect script must be installed");
+    const target = cards.getMany(cards.allCodes()).find(
+      (card) => card.code !== effectCode && !card.alias &&
+        (card.race & 0x20) !== 0 && (card.attribute & 0x20) !== 0,
+    );
+    assert(target, "expansion effect must have a legal search target");
+    const fillers = normals.filter(
+      (code) => code !== effectCode && code !== target.code,
+    ).slice(0, 38);
+    assert.equal(fillers.length, 38);
+    fixtureDeck.main = [
+      ...fillers.slice(0, 20),
+      effectCode,
+      ...fillers.slice(20),
+      target.code,
+    ];
+    assert.equal(fixtureDeck.main.length, 40);
   }
   if (process.env.STANDALONE_ONLY) {
     child(process.execPath, [path.join(apiRoot, "dist/main.js")], apiRoot);
@@ -394,31 +413,44 @@ async function connect(pid) {
       );
     }, "standalone duel");
     if (process.env.EXPANSION_EFFECT) {
+      const effectCode = Number(process.env.EXPANSION_EFFECT_CODE || 100268005);
+      const targetCode = fixtureDeck.main.at(-1);
       const handled = new Map();
-      let activated = false, selected = false;
+      let summoned = false, activated = false, selected = false;
+      const targetReachedHand = () => [a, b].some((client) =>
+        client.state.cards.some(
+          (card) => card.code === targetCode && card.location === 2,
+        ),
+      );
       await until(() => {
-        if(activated && selected && [a,b].some(c=>c.state.cards.some(x=>x.location===16 && fixtureDeck.main.includes(x.code)))) return true;
+        if (summoned && activated && selected && targetReachedHand()) return true;
         for (const c of [a, b]) {
           assert.deepEqual(c.errors, []);
           const q = c.state.prompt;
           if (!q || handled.get(c) === c.id) continue;
           handled.set(c, c.id);
           if (q.kind === "command") {
-            const action = q.choices.find(x => x.label === "activate" && x.code === 100200292)
-              || q.choices.find(x => x.label === "summon" && x.code === 100200292);
-            assert(action, 'expansion summon or ignition effect available');
-            if (action.label === 'activate') activated = true;
+            const action = q.choices.find(
+              (choice) => choice.label === "activate" && choice.code === effectCode,
+            ) || q.choices.find(
+              (choice) => choice.label === "summon" && choice.code === effectCode,
+            );
+            assert(action, "expansion summon or ignition effect available");
+            if (action.label === "activate") activated = true;
+            if (action.label === "summon") summoned = true;
             c.send(1, proto.integer(action.value));
-          } else if (q.kind === 'place' || q.kind === 'cards') {
-            if(q.kind === 'cards') selected = true;
-            c.send(1, proto.encodeSelection(q, q.choices.slice(0, Math.max(1,q.min)).map(x=>x.index)));
-          } else if(q.cancel) c.send(1,proto.integer(-1));
-          else if(q.kind === 'position') c.send(1,proto.integer(q.choices[0].value));
-          else throw Error('Unexpected expansion prompt '+q.kind);
+          } else if (q.kind === "cards") {
+            selected = true;
+            c.send(1, proto.encodeSelection(q, q.choices.slice(0, Math.max(1, q.min)).map((choice) => choice.index)));
+          } else if (q.kind === "place") {
+            c.send(1, proto.encodeSelection(q, q.choices.slice(0, Math.max(1, q.min)).map((choice) => choice.index)));
+          } else if (q.cancel) c.send(1, proto.integer(-1));
+          else if (q.kind === "position") c.send(1, proto.integer(q.choices[0].value));
+          else throw Error("Unexpected expansion prompt " + q.kind);
         }
-        return activated && selected && [a,b].some(c=>c.state.cards.some(x=>x.location===16 && fixtureDeck.main.includes(x.code)));
+        return summoned && activated && selected && targetReachedHand();
       }, 'expansion ignition effect resolved');
-      console.log('PASS expansion script: summon, activate, select equip from deck, send to graveyard');
+      console.log(`PASS expansion script ${effectCode}: summon, activate, search ${targetCode} from deck`);
     }
     const observed = await rest("/public/duel/watch", null, {
       room: alice.room,
