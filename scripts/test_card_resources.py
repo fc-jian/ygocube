@@ -9,8 +9,10 @@ from pathlib import Path
 import sqlite3
 from contextlib import closing
 import stat
+import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 from card_resources import (
@@ -28,6 +30,8 @@ from card_resources import (
     validate_expansion_zip,
     validate_image_zip,
     merge_name_zip,
+    read_ygocdb_name_archive,
+    parse_ygocdb_md5,
 )
 
 
@@ -203,6 +207,30 @@ class CardResourceTests(unittest.TestCase):
         self.assertTrue((destination / "lflist.conf").exists())
         self.assertTrue((destination / "local.conf").exists())
 
+    def test_resource_manifest_tracks_upstream_banlists_separately(self) -> None:
+        runtime = self.root / "runtime"
+        runtime.mkdir()
+        cdb = runtime / "cards.cdb"
+        self.make_cdb(cdb, [(100, 1)])
+        (runtime / "script").mkdir(parents=True)
+        (runtime / "expansions").mkdir(parents=True)
+        (runtime / "script/example.lua").write_text("return true", encoding="utf-8")
+        (runtime / "lflist.conf").write_text("# upstream\n", encoding="utf-8")
+        (runtime / "expansions/lflist.conf").write_text("# upstream\n", encoding="utf-8")
+        (runtime / "expansions/test-release.cdb").write_bytes(b"fixture")
+        manifest = build_resource_manifest(
+            cdb,
+            runtime / "script",
+            self.root / "avif",
+            self.root / "manifest.json",
+            expansions=runtime / "expansions",
+        )
+        self.assertNotIn("lflist.conf", manifest["expansions"]["files"])
+        self.assertEqual(
+            set(manifest["banlist"]["files"]),
+            {"lflist.conf", "expansions/lflist.conf"},
+        )
+
     def test_expansion_sync_does_not_follow_existing_symlink(self) -> None:
         source = self.root / "safe-source"
         destination = self.root / "safe-destination"
@@ -222,6 +250,8 @@ class CardResourceTests(unittest.TestCase):
         self.assertEqual((destination / "test-release.cdb").read_text(encoding="utf-8"), "replacement")
 
     def test_avif_generation_is_idempotent_and_bounded(self) -> None:
+        if shutil.which("vips") is None:
+            self.skipTest("vips unavailable")
         try:
             from PIL import Image
         except ImportError:  # pragma: no cover - build hosts always provide vips
@@ -255,7 +285,31 @@ class CardResourceTests(unittest.TestCase):
         generate_avif(source, destination, manifest)
         self.assertFalse((destination / "999.avif").exists())
 
+    def test_unchanged_avif_sources_do_not_require_vips(self) -> None:
+        source = self.root / "images-no-change"
+        destination = self.root / "avif-no-change"
+        source.mkdir()
+        destination.mkdir()
+        image_bytes = b"unchanged source image"
+        output_bytes = b"existing AVIF output"
+        (source / "123.jpg").write_bytes(image_bytes)
+        (destination / "123.avif").write_bytes(output_bytes)
+        previous = self.root / "avif-no-change.json"
+        previous.write_text(
+            json.dumps({
+                "sources": {"123": {"size": len(image_bytes), "sha256": hashlib.sha256(image_bytes).hexdigest()}},
+                "files": {"123.avif": {"size": len(output_bytes), "sha256": hashlib.sha256(output_bytes).hexdigest()}},
+            }),
+            encoding="utf-8",
+        )
+        with patch("card_resources.shutil.which", return_value=None):
+            result = generate_avif(source, destination, previous)
+        self.assertEqual(result["123"]["sha256"], hashlib.sha256(image_bytes).hexdigest())
+        self.assertEqual((destination / "123.avif").read_bytes(), output_bytes)
+
     def test_avif_includes_expansions_and_preserves_them_on_normal_updates(self) -> None:
+        if shutil.which("vips") is None:
+            self.skipTest("vips unavailable")
         try:
             from PIL import Image
         except ImportError:
@@ -292,12 +346,14 @@ class CardResourceTests(unittest.TestCase):
             handle.writestr("cards.json", json.dumps([
                 {"id": 1001, "cid": 7, "sc_name": "甲"},
                 {"id": 1002, "cid": 7, "sc_name": "乙"},
+                {"id": 0, "cid": 7, "sc_name": "无效记录"},
             ]))
         mapping = self.root / "names.json"
         mapping.write_text(json.dumps({"7": {"id": 1001, "cid": 7, "sc_name": "旧"}}), encoding="utf-8")
-        self.assertEqual(merge_name_zip(archive, mapping), 1)
+        self.assertEqual(merge_name_zip(archive, mapping), {"added": 1, "updated": 1})
         refreshed = json.loads(mapping.read_text(encoding="utf-8"))
         self.assertNotIn("7", refreshed)
+        self.assertNotIn("0", refreshed)
         self.assertEqual(refreshed["1001"]["sc_name"], "甲")
         self.assertEqual(refreshed["1002"]["sc_name"], "乙")
 
@@ -307,10 +363,59 @@ class CardResourceTests(unittest.TestCase):
             handle.writestr("cards.json", json.dumps([{"id": 1001, "cid": 7, "sc_name": ""}]))
         mapping = self.root / "names.json"
         mapping.write_text(json.dumps({"1001": {"id": 1001, "sc_name": "已有名称"}}), encoding="utf-8")
-        self.assertEqual(merge_name_zip(archive, mapping), 0)
+        self.assertEqual(merge_name_zip(archive, mapping), {"added": 0, "updated": 0})
         refreshed = json.loads(mapping.read_text(encoding="utf-8"))
         self.assertEqual(refreshed["1001"]["sc_name"], "已有名称")
 
+    def test_name_refresh_updates_upstream_fields_and_preserves_local_extensions(self) -> None:
+        archive = self.root / "updated-name.zip"
+        with zipfile.ZipFile(archive, "w") as handle:
+            handle.writestr("cards.json", json.dumps([{
+                "id": 1001,
+                "sc_name": "最新名称",
+                "md_name": "",
+                "jp_name": "日本語",
+            }]))
+        mapping = self.root / "updated-names.json"
+        mapping.write_text(json.dumps({"1001": {
+            "id": 1001,
+            "sc_name": "旧名称",
+            "md_name": "旧 MD 名",
+            "local_extension": "keep-me",
+        }}), encoding="utf-8")
+        self.assertEqual(merge_name_zip(archive, mapping), {"added": 0, "updated": 1})
+        refreshed = json.loads(mapping.read_text(encoding="utf-8"))
+        self.assertEqual(refreshed["1001"]["sc_name"], "最新名称")
+        self.assertEqual(refreshed["1001"]["md_name"], "")
+        self.assertEqual(refreshed["1001"]["jp_name"], "日本語")
+        self.assertEqual(refreshed["1001"]["local_extension"], "keep-me")
+
+    def test_ygocdb_archive_checks_published_md5_of_inner_json(self) -> None:
+        archive_path = self.root / "ygocdb.zip"
+        payload = json.dumps([{"id": 1001, "sc_name": "测试卡"}], ensure_ascii=False).encode("utf-8")
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.writestr("cards.json", payload)
+        expected = hashlib.md5(payload).hexdigest()
+        parsed, metadata = read_ygocdb_name_archive(archive_path, expected)
+        self.assertEqual(parsed[0]["id"], 1001)
+        self.assertEqual(metadata["innerMd5"], expected)
+        with self.assertRaisesRegex(ValueError, "MD5 mismatch"):
+            read_ygocdb_name_archive(archive_path, "0" * 32)
+
+    def test_ygocdb_archive_rejects_noncanonical_or_duplicate_cards_json(self) -> None:
+        archive_path = self.root / "bad-ygocdb.zip"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.writestr("nested/cards.json", b"[]")
+        with self.assertRaisesRegex(ValueError, "exactly one cards.json"):
+            read_ygocdb_name_archive(archive_path)
+
+    def test_ygocdb_md5_endpoint_accepts_json_string(self) -> None:
+        self.assertEqual(
+            parse_ygocdb_md5('"4ccbfbdd77bca4d9762bb0efeae6ea3e"\n'),
+            "4ccbfbdd77bca4d9762bb0efeae6ea3e",
+        )
+        with self.assertRaisesRegex(ValueError, "32 hexadecimal"):
+            parse_ygocdb_md5('"not-a-checksum"')
 
 if __name__ == "__main__":
     unittest.main()

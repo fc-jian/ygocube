@@ -5,20 +5,24 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "update-card-resources.sh"
 REMOTE_APPLY = ROOT / "scripts" / "remote-resource-apply.sh"
+BASH = os.environ.get("YGOCUBE_TEST_BASH") or shutil.which("bash")
 
 
 class UpdateScriptTests(unittest.TestCase):
     def run_script(self, *args: str) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["YGOCUBE_CACHE_DIR"] = "/tmp/ygocube-card-resource-test-cache"
-        return subprocess.run([str(SCRIPT), *args], cwd=ROOT, env=env, text=True, capture_output=True)
+        command = [str(SCRIPT), *args] if os.name != "nt" else [BASH or "bash", str(SCRIPT), *args]
+        return subprocess.run(command, cwd=ROOT, env=env, text=True, capture_output=True)
 
     def git_status(self) -> str:
         return subprocess.check_output(["git", "status", "--short"], cwd=ROOT, text=True)
@@ -28,27 +32,34 @@ class UpdateScriptTests(unittest.TestCase):
         import tempfile
         # Exercise the actual payload copier against a tiny managed expansion.
         script = SCRIPT.read_text()
-        start = script.index('import json, os, shutil, sys\nsd, ad, ed =')
+        start = script.index('import json, os, shutil, sys\nsd, ad, ed, bd =')
         body = script[start:script.index('\nPY\n', start)]
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             base, payload = root / 'source', root / 'payload'
             files = ['test-release.cdb', 'script/c123.lua', 'pics/123.jpg']
+            banlist_files = ['lflist.conf', 'expansions/lflist.conf']
             for name in files:
                 source = base / 'srvpro/ygopro/expansions' / name
                 source.parent.mkdir(parents=True, exist_ok=True)
                 source.write_bytes(b'fixture')
+            (base / 'srvpro/ygopro/lflist.conf').parent.mkdir(parents=True, exist_ok=True)
+            (base / 'srvpro/ygopro/lflist.conf').write_bytes(b'# upstream\n')
+            (base / 'srvpro/ygopro/expansions/lflist.conf').write_bytes(b'# upstream\n')
             (payload / 'deletes').mkdir(parents=True)
             deltas = []
-            for index in range(3):
+            for index in range(4):
                 delta = root / f'delta{index}.json'
-                delta.write_text(json.dumps({'changed': files if index == 2 else [], 'removed': []}))
+                changed = files if index == 2 else banlist_files if index == 3 else []
+                delta.write_text(json.dumps({'changed': changed, 'removed': []}))
                 deltas.append(str(delta))
-            result = subprocess.run(['python3', '-c', body, *deltas, str(payload), str(base)], capture_output=True, text=True)
+            result = subprocess.run([sys.executable, '-c', body, *deltas, str(payload), str(base)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue((payload / 'srvpro/ygopro/expansions/test-release.cdb').is_file())
             self.assertTrue((payload / 'srvpro/ygopro/expansions/script/c123.lua').is_file())
             self.assertFalse((payload / 'srvpro/ygopro/expansions/pics/123.jpg').exists())
+            self.assertTrue((payload / 'srvpro/ygopro/lflist.conf').is_file())
+            self.assertTrue((payload / 'srvpro/ygopro/expansions/lflist.conf').is_file())
 
     def test_dry_run_prepare_is_non_mutating(self) -> None:
         before = self.git_status()
@@ -78,7 +89,8 @@ class UpdateScriptTests(unittest.TestCase):
     def test_remote_apply_rejects_broad_or_unsafe_targets(self) -> None:
         for root, release in (("/", "safe"), ("/opt/ygocube", "../unsafe")):
             result = subprocess.run(
-                [str(REMOTE_APPLY), "--root", root, "--id", release],
+                ([str(REMOTE_APPLY), "--root", root, "--id", release]
+                 if os.name != "nt" else [BASH or "bash", str(REMOTE_APPLY), "--root", root, "--id", release]),
                 cwd=ROOT,
                 text=True,
                 capture_output=True,

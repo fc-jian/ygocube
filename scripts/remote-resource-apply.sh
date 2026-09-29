@@ -148,6 +148,7 @@ safe_delete() {
 }
 safe_delete "$STAGE/root/srvpro/ygopro/script" "$STAGE/root/deletes/scripts.txt"
 safe_delete "$STAGE/root/srvpro/ygopro/expansions" "$STAGE/root/deletes/expansions.txt"
+safe_delete "$STAGE/root/srvpro/ygopro" "$STAGE/root/deletes/banlist.txt"
 safe_delete "$STAGE/root/assets/pics_avif" "$STAGE/root/deletes/avif.txt"
 
 (cd "$STAGE/root" && sha256sum -c metadata/SHA256SUMS)
@@ -156,6 +157,16 @@ safe_delete "$STAGE/root/assets/pics_avif" "$STAGE/root/deletes/avif.txt"
 if grep -q '"expansions"' "$STAGE/root/metadata/resource-manifest.json"; then
   [[ -d "$STAGE/root/srvpro/ygopro/expansions" ]]
 fi
+python3 - "$STAGE/root/metadata/resource-manifest.json" "$STAGE/root/srvpro/ygopro" <<'PY'
+import hashlib, json, pathlib, sys
+manifest = json.load(open(sys.argv[1], encoding='utf-8'))
+host = pathlib.Path(sys.argv[2])
+files = manifest.get('banlist', {}).get('files', {})
+for relative, metadata in files.items():
+    path = host / relative
+    if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != metadata['sha256']:
+        raise SystemExit(f'upstream ban-list verification failed: {relative}')
+PY
 
 # The old directories remain available as .pre-$RELEASE_ID until a later
 # cleanup.  Moving complete directories on one filesystem makes the switch

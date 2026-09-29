@@ -1,4 +1,5 @@
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { cardAliasKind, decodeCardFields, parseSetCodes, CardsService, readCardNameEntries, readCardNameMap, selectYgocdbCardName } from '../src/cards/cards.service';
 import { config } from '../src/config';
@@ -18,7 +19,7 @@ describe('ygopro card metadata decoding', () => {
   });
 
   it('reads a code-to-name mapping from object or array exports', () => {
-    const file = path.join('/tmp', `ygocube-card-names-${process.pid}-${Date.now()}.json`);
+    const file = path.join(os.tmpdir(), `ygocube-card-names-${process.pid}-${Date.now()}.json`);
     fs.writeFileSync(file, JSON.stringify({
       first: { id: 900000001, sc_name: '第一名称', md_name: '备用名称' },
       second: { id: '900000002', sc_name: '', md_name: '第二名称' },
@@ -33,7 +34,7 @@ describe('ygopro card metadata decoding', () => {
     } finally {
       fs.rmSync(file, { force: true });
     }
-    const arrayFile = path.join('/tmp', `ygocube-card-names-array-${process.pid}-${Date.now()}.json`);
+    const arrayFile = path.join(os.tmpdir(), `ygocube-card-names-array-${process.pid}-${Date.now()}.json`);
     fs.writeFileSync(arrayFile, JSON.stringify([{ id: 900000003, jp_name: '数组名称' }]));
     try {
       expect(readCardNameMap(arrayFile).get(900000003)).toBe('数组名称');
@@ -43,8 +44,8 @@ describe('ygopro card metadata decoding', () => {
   });
 
   it('prefers mapped names and falls back to the literal CDB name', () => {
-    const cdbPath = path.join('/tmp', `ygocube-card-cdb-${process.pid}-${Date.now()}.cdb`);
-    const namesPath = path.join('/tmp', `ygocube-card-names-${process.pid}-${Date.now()}.json`);
+    const cdbPath = path.join(os.tmpdir(), `ygocube-card-cdb-${process.pid}-${Date.now()}.cdb`);
+    const namesPath = path.join(os.tmpdir(), `ygocube-card-names-${process.pid}-${Date.now()}.json`);
     const Database = require('better-sqlite3');
     const cdb = new Database(cdbPath);
     cdb.exec('CREATE TABLE datas (id INTEGER PRIMARY KEY, type INTEGER, level INTEGER, race INTEGER, attribute INTEGER, atk INTEGER, def INTEGER, alias INTEGER, setcode INTEGER)');
@@ -96,7 +97,7 @@ describe('ygopro card metadata decoding', () => {
   });
 
   it('distinguishes artwork names from rules-name aliases without changing exact identities', () => {
-    const dir = fs.mkdtempSync(path.join('/tmp', 'ygocube-artwork-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ygocube-artwork-'));
     const cdbPath = path.join(dir, 'cards.cdb');
     const namesPath = path.join(dir, 'names.json');
     const Database = require('better-sqlite3');
@@ -136,8 +137,8 @@ describe('ygopro card metadata decoding', () => {
   });
 
   it('rebuilds the metadata cache when a deployed CDB is replaced', () => {
-    const cdbPath = path.join('/tmp', `ygocube-card-refresh-${process.pid}-${Date.now()}.cdb`);
-    const namesPath = path.join('/tmp', `ygocube-card-refresh-names-${process.pid}-${Date.now()}.json`);
+    const cdbPath = path.join(os.tmpdir(), `ygocube-card-refresh-${process.pid}-${Date.now()}.cdb`);
+    const namesPath = path.join(os.tmpdir(), `ygocube-card-refresh-names-${process.pid}-${Date.now()}.json`);
     const Database = require('better-sqlite3');
     const writeCdb = (rows: Array<[number, string]>) => {
       fs.rmSync(cdbPath, { force: true });
@@ -300,7 +301,7 @@ describe('ygopro card metadata decoding', () => {
 describe('expansion catalogue', () => {
   beforeEach(() => useTestDb());
   it('loads host overlays, searches new cards, rejects tokens and removes withdrawn cards on rebuild', () => {
-    const dir = fs.mkdtempSync('/tmp/ygocube-expansion-');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ygocube-expansion-'));
     const old = config.server.cardsCdb;
     const Database = require('better-sqlite3');
     const write = (name: string, rows: [number, string, number][]) => {

@@ -23,7 +23,8 @@ function controllerRoom(label) {
   return `CUBE-${key}`;
 }
 
-const { main, extra } = JSON.parse(fs.readFileSync('/tmp/cube-cardcodes.json', 'utf8'));
+const cardCodesPath = process.env.CARDCODES_PATH || '/tmp/cube-cardcodes.json';
+const { main, extra } = JSON.parse(fs.readFileSync(cardCodesPath, 'utf8'));
 
 // ---- protocol helpers (framing: [len u16][type u8][payload]) ----
 function pkt(type, payload) {

@@ -7,6 +7,8 @@
 # pictures, and requires an explicit confirmation before stopping services.
 # See `--help` for the complete workflow.
 set -euo pipefail
+export PYTHONUTF8=1
+export PYTHONIOENCODING=utf-8
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 HELPER="$ROOT_DIR/scripts/card_resources.py"
@@ -21,7 +23,10 @@ EXPANSION_URL="${YGOCUBE_EXPANSION_URL:-https://cdn02.moecube.com:444/ygopro-sup
 EXPANSION_LIST_URL="${YGOCUBE_EXPANSION_LIST_URL:-https://cdn02.moecube.com:444/ygopro-super-pre/data/test-release.json}"
 ALY_HOST="${YGOCUBE_ALY_HOST:-aly}"
 ALY_ROOT="${YGOCUBE_ALY_ROOT:-/opt/ygocube}"
+ALY_DUEL_ROOT="${YGODUEL_ALY_ROOT:-/opt/ygoduel}"
 ALY_PUBLIC_URL="${YGOCUBE_ALY_URL:-https://39.96.220.91}"
+SSH_EXEC_HELPER="${YGOCUBE_SSH_EXEC_HELPER:-/home/jianfc/myskills/ssh-skill/scripts/ssh_execute.py}"
+SSH_UPLOAD_HELPER="${YGOCUBE_SSH_UPLOAD_HELPER:-/home/jianfc/myskills/ssh-skill/scripts/ssh_upload.py}"
 # Keep the default cache in /tmp: the project may run in a read-only home
 # (notably WSL/CI), while callers can still select a durable cache explicitly.
 CACHE_ROOT="${YGOCUBE_CACHE_DIR:-/tmp/ygocube-card-resources}"
@@ -83,8 +88,8 @@ Options:
   -h, --help                Show this help.
 
 Environment variables may override defaults (YGOCUBE_CACHE_DIR, YGOCUBE_ALY_URL,
-YGOCUBE_ALY_HOST, YGOCUBE_ALY_ROOT, YGOCUBE_IMAGES_URL, YGOCUBE_EXPANSION_URL,
-YGOCUBE_EXPANSION_LIST_URL and commit variables).
+YGOCUBE_ALY_HOST, YGOCUBE_ALY_ROOT, YGODUEL_ALY_ROOT, YGOCUBE_IMAGES_URL, YGOCUBE_EXPANSION_URL,
+YGOCUBE_EXPANSION_LIST_URL, YGOCUBE_SSH_EXEC_HELPER, YGOCUBE_SSH_UPLOAD_HELPER and commit variables).
 No token, password or private key is read or stored by this script.
 USAGE
 }
@@ -185,6 +190,7 @@ parse_args "$@"
 [[ "$EXPANSION_URL" == https://* ]] || die "expansion URL must use HTTPS"
 [[ "$EXPANSION_LIST_URL" == https://* ]] || die "expansion list URL must use HTTPS"
 [[ "$ALY_ROOT" =~ ^/[A-Za-z0-9._/+:-]+$ ]] || die "invalid Aly root path"
+[[ "$ALY_DUEL_ROOT" =~ ^/[A-Za-z0-9._/+:-]+$ && "$ALY_DUEL_ROOT" != "/" ]] || die "invalid Aly independent Duel root path"
 
 if ((DRY_RUN)) || [[ "$COMMAND" == "check" || "$COMMAND" == "test" ]]; then
   :
@@ -524,12 +530,24 @@ cmd_prepare() {
   fi
   if ((REFRESH_NAMES)); then
     local names_zip="$CACHE_ROOT/ygocdb-cards.zip"
-    if [[ ! -s "$names_zip" ]]; then
-      info "downloading YGOCDB names archive"
+    local names_md5_part="$CACHE_ROOT/ygocdb-cards.zip.md5.part" expected_names_md5
+    mkdir -p "$CACHE_ROOT"
+    info "checking YGOCDB names archive version"
+    curl --fail --show-error --location --proto '=https' --tlsv1.2 --max-time 60 -o "$names_md5_part" https://ygocdb.com/api/v0/cards.zip.md5
+    expected_names_md5="$(python3 "$HELPER" parse-name-md5 "$names_md5_part")" || die "YGOCDB returned an invalid cards.json MD5"
+    if [[ ! -s "$names_zip" ]] || ! python3 "$HELPER" validate-name-zip "$names_zip" --md5 "$expected_names_md5" >/dev/null 2>&1; then
+      info "downloading the current YGOCDB names archive"
       curl --fail --show-error --location --proto '=https' --tlsv1.2 --max-time 600 -o "$names_zip.part" https://ygocdb.com/api/v0/cards.zip
+      python3 "$HELPER" validate-name-zip "$names_zip.part" --md5 "$expected_names_md5" >/dev/null || die "downloaded YGOCDB archive failed checksum validation"
       mv -f "$names_zip.part" "$names_zip"
     fi
-    python3 "$HELPER" merge-names "$names_zip" "$ROOT_DIR/assets/ygocdb_cards.json"
+    local ygocdb_archive_meta
+    ygocdb_archive_meta="$(python3 "$HELPER" validate-name-zip "$names_zip" --md5 "$expected_names_md5")"
+    python3 "$HELPER" merge-names "$names_zip" "$ROOT_DIR/assets/ygocdb_cards.json" --md5 "$expected_names_md5"
+    printf '%s\n' "$ygocdb_archive_meta" > "$STATE_DIR/ygocdb-archive-meta.json"
+    mv -f "$names_md5_part" "$CACHE_ROOT/ygocdb-cards.zip.md5"
+  else
+    printf '%s\n' '{"enabled":false,"source":"https://ygocdb.com/api/v0/cards.zip"}' > "$STATE_DIR/ygocdb-archive-meta.json"
   fi
   local only_codes="$STATE_DIR/new-codes.json"
   if [[ -f "$STATE_DIR/base-cdb.json" ]]; then
@@ -659,6 +677,18 @@ PY
     for expansion_cdb in "${expansion_cdbs[@]}"; do
       python3 "$HELPER" validate-cdb "$expansion_cdb" > /dev/null
     done
+    local expansion_missing='[]' one_expansion_missing
+    for expansion_cdb in "${expansion_cdbs[@]}"; do
+      one_expansion_missing="$(python3 "$HELPER" missing-names "$expansion_cdb" "$ROOT_DIR/assets/ygocdb_cards.json")"
+      expansion_missing="$(python3 -c 'import json,sys; print(json.dumps(sorted(set(json.loads(sys.argv[1])+json.loads(sys.argv[2])))))' "$expansion_missing" "$one_expansion_missing")"
+    done
+    printf '%s\n' "$expansion_missing" > "$STATE_DIR/expansion-missing-names.json"
+    missing="$(python3 -c 'import json,sys; print(json.dumps(sorted(set(json.loads(sys.argv[1])+json.loads(sys.argv[2])))))' "$missing" "$expansion_missing")"
+    printf '%s\n' "$missing" > "$STATE_DIR/missing-names.json"
+    if [[ "$expansion_missing" != '[]' ]]; then
+      warn "Super Pre contains cards without a YGOCDB or CDB display name: $expansion_missing"
+      ((ALLOW_MISSING_NAMES)) || die "Super Pre name coverage is incomplete; refresh YGOCDB or audit the missing codes"
+    fi
     if [[ -f "$expansion_source/test-release.cdb" ]]; then
       python3 "$HELPER" validate-expansion-release "$expansion_list" "$expansion_source/test-release.cdb" > "$STATE_DIR/expansion-release-match.json"
     fi
@@ -704,6 +734,9 @@ print(json.dumps({
 }, ensure_ascii=False, separators=(',', ':')))
 PY
   fi
+  [[ -f "$ROOT_DIR/ygopro/lflist.conf" ]] || die "upstream lflist.conf is missing"
+  cp -f "$ROOT_DIR/ygopro/lflist.conf" "$runtime/lflist.conf"
+  cp -f "$ROOT_DIR/ygopro/lflist.conf" "$expansions/lflist.conf"
   local image_archive_meta_file="$STATE_DIR/image-archive-meta.json"
   printf '%s\n' '{"locale":null,"url":null,"etag":null,"size":null,"sha256":null,"entryCount":0,"entries":[]}' > "$image_archive_meta_file"
   if ((SKIP_IMAGES)); then
@@ -745,15 +778,17 @@ PY
     fi
     python3 "$HELPER" avif "$image_source" "$ROOT_DIR/assets/pics_avif" --expansion-pics "$expansions/pics" --previous "$avif_previous" --manifest-out "$STATE_DIR/avif-manifest.json"
   fi
-  python3 - "$STATE_DIR/manifest-extra.json" "$image_archive_meta_file" "$expansion_archive_meta_file" "$STATE_DIR/missing-names.json" "$STATE_DIR/cdb-diff.json" "$UPSTREAM_REPO" "$UPSTREAM_REF" "$UPSTREAM_COMMIT" "$SCRIPT_COMMIT" "$OCGCORE_COMMIT" <<'PY'
+  python3 - "$STATE_DIR/manifest-extra.json" "$image_archive_meta_file" "$expansion_archive_meta_file" "$STATE_DIR/missing-names.json" "$STATE_DIR/cdb-diff.json" "$UPSTREAM_REPO" "$UPSTREAM_REF" "$UPSTREAM_COMMIT" "$SCRIPT_COMMIT" "$OCGCORE_COMMIT" "$STATE_DIR/ygocdb-archive-meta.json" <<'PY'
 import json, sys
-out, image_path, expansion_path, missing, cdb_diff, repo, ref, commit, script, ocgcore = sys.argv[1:]
+out, image_path, expansion_path, missing, cdb_diff, repo, ref, commit, script, ocgcore, names_path = sys.argv[1:]
 payload = {
     'upstream': {'repo': repo, 'ref': ref, 'commit': commit},
+    'banlistSource': {'repo': repo, 'ref': ref, 'commit': commit, 'path': 'lflist.conf'},
     'scriptCommit': script,
     'ocgcoreCommit': ocgcore,
     'imageArchive': json.load(open(image_path, encoding='utf-8')),
     'expansionArchive': json.load(open(expansion_path, encoding='utf-8')),
+    'ygocdbNamesArchive': json.load(open(names_path, encoding='utf-8')),
     'missingNameCodes': json.load(open(missing, encoding='utf-8')),
     'cdbDiff': json.load(open(cdb_diff, encoding='utf-8')),
 }
@@ -791,6 +826,7 @@ except (OSError, json.JSONDecodeError):
     previous = {}
 if isinstance(previous, dict) and 'expansions' in previous:
     manifest['expansions'] = previous['expansions']
+    manifest['expansions'].get('files', {}).pop('lflist.conf', None)
 else:
     manifest.pop('expansions', None)
 if isinstance(previous, dict) and 'expansionArchive' in previous:
@@ -836,10 +872,15 @@ cmd_build() {
 
 cmd_test() {
   require_command python3
+  local test_tmp="$STATE_DIR/test-tmp"
+  mkdir -p "$test_tmp"
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) test_tmp="$(cygpath -m "$test_tmp")" ;;
+  esac
   info "resource helper tests"
   PYTHONPATH="$ROOT_DIR/scripts" python3 -m unittest discover -s "$ROOT_DIR/scripts" -p 'test_*card_resources.py'
   info "API tests/build"
-  (cd "$ROOT_DIR" && TMPDIR=/tmp TMP=/tmp TEMP=/tmp npm --prefix cube/apps/api test -- --runInBand)
+  (cd "$ROOT_DIR" && TMPDIR="$test_tmp" TMP="$test_tmp" TEMP="$test_tmp" npm --prefix cube/apps/api test -- --runInBand)
   (cd "$ROOT_DIR" && npm --prefix cube/apps/api run build)
   info "Web build"
   (cd "$ROOT_DIR" && npm --prefix cube/apps/web run build)
@@ -874,7 +915,7 @@ make_payload() {
   cp -f "$ROOT_DIR/srvpro/ygopro/cards.cdb" "$payload/srvpro/ygopro/cards.cdb"
   [[ -f "$ROOT_DIR/srvpro/ygopro/strings.conf" ]] && cp -f "$ROOT_DIR/srvpro/ygopro/strings.conf" "$payload/srvpro/ygopro/strings.conf"
   [[ -x "$ROOT_DIR/srvpro/ygopro/ygopro" ]] && cp -f "$ROOT_DIR/srvpro/ygopro/ygopro" "$payload/srvpro/ygopro/ygopro"
-  local script_delta_file="$payload/metadata/scripts-delta.json" avif_delta_file="$payload/metadata/avif-delta.json" expansion_delta_file="$payload/metadata/expansions-delta.json" delta_args=()
+  local script_delta_file="$payload/metadata/scripts-delta.json" avif_delta_file="$payload/metadata/avif-delta.json" expansion_delta_file="$payload/metadata/expansions-delta.json" banlist_delta_file="$payload/metadata/banlist-delta.json" delta_args=()
   # Only compare against a manifest recorded after a successful Aly publish.
   # Local prepare attempts can be interrupted and must never make a first
   # deployment omit resources that are still absent on the server.
@@ -883,9 +924,9 @@ make_payload() {
   python3 "$HELPER" delta "$current" "${delta_args[@]}" --section avif > "$avif_delta_file"
   if ((EXPANSION_ENABLED)); then
     python3 "$HELPER" delta "$current" "${delta_args[@]}" --section expansions > "$expansion_delta_file"
-    # lflist.conf is a server-local ban-list and is intentionally never
-    # removed by an official expansion update, including during migration
-    # from an older full-directory manifest.
+    # Older manifests may have incorrectly tracked the upstream ban-list as
+    # part of the Super Pre archive; retain it there only as a compatibility
+    # guard while publishing it through the dedicated banlist section.
     python3 - "$expansion_delta_file" <<'PY'
 import json, os, sys
 path = sys.argv[1]
@@ -900,19 +941,22 @@ PY
   else
     printf '%s\n' '{"changed":[],"removed":[]}' > "$expansion_delta_file"
   fi
+  python3 "$HELPER" delta "$current" "${delta_args[@]}" --section banlist > "$banlist_delta_file"
   # Read the potentially large delta JSON from files; passing all changed
   # paths as argv can exceed Linux ARG_MAX on a first resource publish.
-  python3 - "$script_delta_file" "$avif_delta_file" "$expansion_delta_file" "$payload" "$ROOT_DIR" <<'PY'
+  python3 - "$script_delta_file" "$avif_delta_file" "$expansion_delta_file" "$banlist_delta_file" "$payload" "$ROOT_DIR" <<'PY'
 import json, os, shutil, sys
-sd, ad, ed = (json.load(open(sys.argv[1], encoding='utf-8')),
+sd, ad, ed, bd = (json.load(open(sys.argv[1], encoding='utf-8')),
               json.load(open(sys.argv[2], encoding='utf-8')),
-              json.load(open(sys.argv[3], encoding='utf-8')))
-root, base = sys.argv[4], sys.argv[5]
+              json.load(open(sys.argv[3], encoding='utf-8')),
+              json.load(open(sys.argv[4], encoding='utf-8')))
+root, base = sys.argv[5], sys.argv[6]
 base=os.path.abspath(base)
 for section, delta, source, target in (
     ("scripts", sd, os.path.join(base, "srvpro", "ygopro", "script"), os.path.join(root, "srvpro", "ygopro", "script")),
     ("avif", ad, os.path.join(base, "assets", "pics_avif"), os.path.join(root, "assets", "pics_avif")),
     ("expansions", ed, os.path.join(base, "srvpro", "ygopro", "expansions"), os.path.join(root, "srvpro", "ygopro", "expansions")),
+    ("banlist", bd, os.path.join(base, "srvpro", "ygopro"), os.path.join(root, "srvpro", "ygopro")),
 ):
     for rel in delta["changed"]:
         # Source pictures are local AVIF inputs, never server payloads.
@@ -940,23 +984,40 @@ PYMANIFEST
 }
 
 ssh_exec() {
-  python3 /home/jianfc/myskills/ssh-skill/scripts/ssh_execute.py "$ALY_HOST" "$1" --timeout "${2:-120}" --no-shell-init
+  if [[ -f "$SSH_EXEC_HELPER" ]]; then
+    python3 "$SSH_EXEC_HELPER" "$ALY_HOST" "$1" --timeout "${2:-120}" --no-shell-init
+  else
+    require_command ssh
+    ssh -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=60 "$ALY_HOST" "$1"
+  fi
 }
 
 ssh_upload() {
-  python3 /home/jianfc/myskills/ssh-skill/scripts/ssh_upload.py "$ALY_HOST" "$1" "$2" --no-progress
+  if [[ -f "$SSH_UPLOAD_HELPER" ]]; then
+    python3 "$SSH_UPLOAD_HELPER" "$ALY_HOST" "$1" "$2" --no-progress
+  else
+    require_command scp
+    scp -q -o BatchMode=yes -o ConnectTimeout=20 -- "$1" "$ALY_HOST:$2"
+  fi
 }
 
 remote_rollback() {
   local id="$1"
   info "rolling back Aly resource backup $id"
+  ssh_exec "if [ -f '$ALY_ROOT/.staging/card-sync-$id/apply-duel.py' ]; then python3 '$ALY_ROOT/.staging/card-sync-$id/apply-duel.py' --cube-root '$ALY_ROOT' --duel-root '$ALY_DUEL_ROOT' --id '$id' --rollback; fi" 300
   ssh_exec "set -eu; root='$ALY_ROOT'; backup=\"\$root/backups/card-sync-$id\"; test -d \"\$backup\"; systemctl stop ygocube-srvpro ygocube-web ygocube-api nginx; rm -rf \"\$root/shared/srvpro/ygopro\" \"\$root/shared/assets/pics_avif\"; cp -a \"\$backup/srvpro-ygopro\" \"\$root/shared/srvpro/ygopro\"; cp -a \"\$backup/pics_avif\" \"\$root/shared/assets/pics_avif\"; if [ -f \"\$backup/ygocdb_cards.json\" ]; then cp -f \"\$backup/ygocdb_cards.json\" \"\$root/shared/assets/.ygocdb_cards.json.rollback-new\"; mv -f \"\$root/shared/assets/.ygocdb_cards.json.rollback-new\" \"\$root/shared/assets/ygocdb_cards.json\"; else rm -f \"\$root/shared/assets/ygocdb_cards.json\"; fi; if [ -f \"\$backup/resource-manifest.json\" ]; then cp -f \"\$backup/resource-manifest.json\" \"\$root/shared/assets/.resource-manifest.json.rollback-new\"; mv -f \"\$root/shared/assets/.resource-manifest.json.rollback-new\" \"\$root/shared/assets/resource-manifest.json\"; else rm -f \"\$root/shared/assets/resource-manifest.json\"; fi; if [ -f \"\$root/shared/data/cube.sqlite\" ]; then sqlite3 \"\$root/shared/data/cube.sqlite\" 'UPDATE cards SET metadata_version=0;'; fi; chown -R ygocube:ygocube \"\$root/shared/srvpro/ygopro\" \"\$root/shared/assets/pics_avif\"; chown ygocube:ygocube \"\$root/shared/assets/ygocdb_cards.json\" \"\$root/shared/assets/resource-manifest.json\" 2>/dev/null || true; systemctl start ygocube-api; systemctl start ygocube-srvpro; systemctl start ygocube-web; systemctl start nginx; systemctl is-active ygocube-api ygocube-srvpro ygocube-web nginx" 300
 }
 
 remote_health() {
-  local expected_cdb_sha="${1:-}" expected_manifest_sha="${2:-}" remote_check
-  remote_check="set -eu; systemctl is-active ygocube-api ygocube-srvpro ygocube-web nginx; test -x '$ALY_ROOT/shared/srvpro/ygopro/ygopro'; ! ldd '$ALY_ROOT/shared/srvpro/ygopro/ygopro' 2>&1 | grep -q 'not found'; actual=\$(sha256sum '$ALY_ROOT/shared/srvpro/ygopro/cards.cdb' | awk '{print \$1}'); printf 'remote_cards_sha256=%s\\n' \"\$actual\""
+  local expected_cdb_sha="${1:-}" expected_manifest_sha="${2:-}" expected_names_sha="${3:-}" expected_banlist_sha="${4:-}" remote_check
+  remote_check="set -eu; systemctl is-active ygocube-api ygocube-srvpro ygocube-web ygoduel-api ygoduel-srvpro ygoduel-web nginx; test -x '$ALY_ROOT/shared/srvpro/ygopro/ygopro'; ! ldd '$ALY_ROOT/shared/srvpro/ygopro/ygopro' 2>&1 | grep -q 'not found'; actual=\$(sha256sum '$ALY_ROOT/shared/srvpro/ygopro/cards.cdb' | awk '{print \$1}'); printf 'remote_cards_sha256=%s\\n' \"\$actual\""
   [[ -z "$expected_cdb_sha" ]] || remote_check+="; test \"\$actual\" = '$expected_cdb_sha'"
+  remote_check+="; test -x '$ALY_DUEL_ROOT/current/srvpro/ygopro/ygopro'; ! ldd '$ALY_DUEL_ROOT/current/srvpro/ygopro/ygopro' 2>&1 | grep -q 'not found'"
+  if [[ -n "$expected_cdb_sha" ]]; then
+    remote_check+="; duel_cards=\$(sha256sum '$ALY_DUEL_ROOT/current/srvpro/ygopro/cards.cdb' | awk '{print \$1}'); test \"\$duel_cards\" = '$expected_cdb_sha'"
+  fi
+  [[ -z "$expected_names_sha" ]] || remote_check+="; test \$(sha256sum '$ALY_ROOT/shared/assets/ygocdb_cards.json' | awk '{print \$1}') = '$expected_names_sha'; test \$(sha256sum '$ALY_DUEL_ROOT/current/assets/ygocdb_cards.json' | awk '{print \$1}') = '$expected_names_sha'"
+  [[ -z "$expected_banlist_sha" ]] || remote_check+="; test \$(sha256sum '$ALY_ROOT/shared/srvpro/ygopro/lflist.conf' | awk '{print \$1}') = '$expected_banlist_sha'; test \$(sha256sum '$ALY_ROOT/shared/srvpro/ygopro/expansions/lflist.conf' | awk '{print \$1}') = '$expected_banlist_sha'; test \$(sha256sum '$ALY_DUEL_ROOT/current/srvpro/ygopro/lflist.conf' | awk '{print \$1}') = '$expected_banlist_sha'; test \$(sha256sum '$ALY_DUEL_ROOT/current/srvpro/ygopro/expansions/lflist.conf' | awk '{print \$1}') = '$expected_banlist_sha'"
   if [[ -n "$expected_manifest_sha" ]]; then
     remote_check+="; test -f '$ALY_ROOT/shared/assets/resource-manifest.json'; manifest=\$(sha256sum '$ALY_ROOT/shared/assets/resource-manifest.json' | awk '{print \$1}'); printf 'remote_manifest_sha256=%s\\n' \"\$manifest\"; test \"\$manifest\" = '$expected_manifest_sha'"
     local expansion_count
@@ -967,10 +1028,47 @@ remote_health() {
   fi
   ssh_exec "$remote_check" 120
   curl --fail --silent --show-error --retry 5 --retry-delay 2 --max-time 30 "$ALY_PUBLIC_URL/api/health" >/dev/null
-  local html assets asset
+  if [[ -n "$expected_names_sha" && -n "$expected_banlist_sha" ]]; then
+    local duel_options_file="$STATE_DIR/duel-options-postdeploy.json" duel_search_file="$STATE_DIR/duel-search-postdeploy.json" duel_probe_code
+    curl --fail --silent --show-error --retry 5 --retry-delay 2 --max-time 30 "$ALY_PUBLIC_URL/duel-api/public/duel/options" -o "$duel_options_file"
+    python3 - "$duel_options_file" "$ROOT_DIR/ygopro/lflist.conf" <<'PY'
+import json, sys
+lists = {str(item.get('name', '')) for item in json.load(open(sys.argv[1], encoding='utf-8')).get('lists', [])}
+headers = [line[1:].strip() for line in open(sys.argv[2], encoding='utf-8') if line.startswith('!')]
+for header in [value for value in headers if 'TCG' in value][:1] + [value for value in headers if 'TCG' not in value][:1]:
+    expected = header if 'TCG' in header else header + ' OCG'
+    if expected not in lists:
+        raise SystemExit(f'independent Duel is missing upstream ban-list {expected}')
+PY
+    duel_probe_code="$(python3 -c 'import json,sys; codes=json.load(open(sys.argv[1], encoding="utf-8")).get("codes", []); print(codes[0] if codes else "")' "$STATE_DIR/expansion-release-match.json")"
+    [[ "$duel_probe_code" =~ ^[0-9]+$ ]] || die "missing expansion search probe code"
+    curl --fail --silent --show-error --retry 5 --retry-delay 2 --max-time 30 "$ALY_PUBLIC_URL/duel-api/public/duel/search?q=$duel_probe_code" -o "$duel_search_file"
+    python3 - "$duel_search_file" "$duel_probe_code" <<'PY'
+import json, sys
+code = int(sys.argv[2])
+if not any(int(row.get('code', 0)) == code for row in json.load(open(sys.argv[1], encoding='utf-8'))):
+    raise SystemExit(f'independent Duel public search missed extension card {code}')
+PY
+    curl --fail --silent --show-error --retry 3 --max-time 30 "$ALY_PUBLIC_URL/duel/decks" -o "$STATE_DIR/duel-decks-postdeploy.html"
+    grep -Eq '卡组构筑|deck-editor|_next/static|duel-assets' "$STATE_DIR/duel-decks-postdeploy.html" || die "Aly /duel/decks returned unexpected HTML"
+    local duel_pic_headers duel_pic_type duel_pic_file="$STATE_DIR/duel-pic-postdeploy.avif"
+    duel_pic_headers="$(curl --fail --silent --show-error --head --max-time 30 "$ALY_PUBLIC_URL/pics/$duel_probe_code.avif")"
+    duel_pic_type="$(printf '%s\n' "$duel_pic_headers" | awk 'BEGIN{IGNORECASE=1} /^content-type:/ {sub("^[^:]*:[[:space:]]*",""); gsub("\r",""); print; exit}')"
+    [[ "$duel_pic_type" == *image/avif* ]] || die "Aly expansion card image has wrong MIME: $duel_pic_type"
+    curl --fail --silent --show-error --max-time 30 "$ALY_PUBLIC_URL/pics/$duel_probe_code.avif" -o "$duel_pic_file"
+    python3 - "$duel_pic_file" <<'PY'
+import pathlib, sys
+data = pathlib.Path(sys.argv[1]).read_bytes()[:32]
+if len(data) < 16 or data[4:8] != b'ftyp' or b'avif' not in data[:32]:
+    raise SystemExit('Aly expansion card image is not a valid AVIF payload')
+PY
+  fi
+  local html duel_page assets asset
   html="$(curl --fail --silent --show-error --retry 3 --max-time 30 "$ALY_PUBLIC_URL/")"
-  assets="$(printf '%s' "$html" | grep -Eo "/_next/static/[^\"' ]+\.(js|css)" | sort -u || true)"
-  [[ -n "$assets" ]] || die "homepage did not reference Next static assets"
+  duel_page="$(curl --fail --silent --show-error --retry 3 --max-time 30 "$ALY_PUBLIC_URL/duel/decks")"
+  grep -Eq '卡组构筑|deck-editor|_next/static|duel-assets' <<<"$duel_page" || die "Aly /duel/decks returned unexpected HTML"
+  assets="$(printf '%s\n%s' "$html" "$duel_page" | grep -Eo "/_next/static/[^\"' ]+\.(js|css)" | sort -u || true)"
+  [[ -n "$assets" ]] || die "homepage and /duel/decks did not reference Next static assets"
   while IFS= read -r asset; do
     [[ -z "$asset" ]] && continue
     local asset_headers content_type
@@ -995,6 +1093,8 @@ cmd_deploy() {
   ssh_exec "set -eu; root='$ALY_ROOT'; mkdir -p \"\$root/.staging/card-sync-$RELEASE_ID\"" 60
   ssh_upload "$archive" "$ALY_ROOT/.staging/card-sync-$RELEASE_ID/payload.tar.gz"
   ssh_upload "$ROOT_DIR/scripts/remote-resource-apply.sh" "$ALY_ROOT/.staging/card-sync-$RELEASE_ID/apply.sh"
+  ssh_upload "$ROOT_DIR/scripts/remote-duel-resource-apply.py" "$ALY_ROOT/.staging/card-sync-$RELEASE_ID/apply-duel.py"
+  ssh_exec "set -eu; chmod 700 '$ALY_ROOT/.staging/card-sync-$RELEASE_ID/apply.sh' '$ALY_ROOT/.staging/card-sync-$RELEASE_ID/apply-duel.py'; python3 -m py_compile '$ALY_ROOT/.staging/card-sync-$RELEASE_ID/apply-duel.py'" 60
   if ! ssh_exec "set -eu; chmod 700 '$ALY_ROOT/.staging/card-sync-$RELEASE_ID/apply.sh'; '$ALY_ROOT/.staging/card-sync-$RELEASE_ID/apply.sh' --root '$ALY_ROOT' --id '$RELEASE_ID'" 900; then
     if ssh_exec "test -d '$ALY_ROOT/backups/card-sync-$RELEASE_ID/srvpro-ygopro' && test -d '$ALY_ROOT/backups/card-sync-$RELEASE_ID/pics_avif'" 30 >/dev/null 2>&1; then
       warn "Aly publish failed; attempting automatic resource rollback"
@@ -1003,10 +1103,21 @@ cmd_deploy() {
     fi
     die "Aly publish failed before a complete backup was created; services were recovered by the remote safety trap"
   fi
-  local expected_cdb_sha expected_manifest_sha
+  if ! ssh_exec "set -eu; python3 '$ALY_ROOT/.staging/card-sync-$RELEASE_ID/apply-duel.py' --cube-root '$ALY_ROOT' --duel-root '$ALY_DUEL_ROOT' --id '$RELEASE_ID'" 900; then
+    warn "independent Duel update failed; attempting to restore both resource releases"
+    remote_rollback "$RELEASE_ID" || die "automatic rollback also failed; keep backups and inspect both releases before resuming service"
+    die "independent Duel update failed and the resource releases were rolled back"
+  fi
+  local expected_cdb_sha expected_manifest_sha expected_names_sha expected_banlist_sha
   expected_cdb_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["cards"]["sha256"])' "$STATE_DIR/resource-manifest.json")"
   expected_manifest_sha="$(sha256sum "$staging/payload/metadata/resource-manifest.json" | awk '{print $1}')"
-  remote_health "$expected_cdb_sha" "$expected_manifest_sha"
+  expected_names_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["cardNames"]["sha256"])' "$STATE_DIR/resource-manifest.json")"
+  expected_banlist_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["banlist"]["files"]["lflist.conf"]["sha256"])' "$STATE_DIR/resource-manifest.json")"
+  if ! remote_health "$expected_cdb_sha" "$expected_manifest_sha" "$expected_names_sha" "$expected_banlist_sha"; then
+    warn "post-deploy verification failed; attempting to restore both resource releases"
+    remote_rollback "$RELEASE_ID" || die "verification failed and automatic rollback also failed; retain backups and inspect Aly immediately"
+    die "post-deploy verification failed and the resource releases were rolled back"
+  fi
   cp -f "$staging/payload/metadata/resource-manifest.json" "$STATE_DIR/deployed-resource-manifest.json"
   if ((EXPANSION_ENABLED)) && [[ -f "$STATE_DIR/expansion-manifest.json" ]]; then
     cp -f "$STATE_DIR/expansion-manifest.json" "$STATE_DIR/deployed-expansion-manifest.json"

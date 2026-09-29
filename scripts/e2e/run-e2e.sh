@@ -14,8 +14,14 @@ SRVPRO_PORT="${SRVPRO_PORT:-7911}"
 HTTP_PORT="${HTTP_PORT:-7922}"
 API_KEY="${API_KEY:-cube-test-key}"
 CDB="${CDB:-srvpro/ygopro/cards.cdb}"
+CARD_CODES_FILE="${TMPDIR:-/tmp}/cube-cardcodes-$$.json"
+CARD_CODES_ARG="$CARD_CODES_FILE"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) CARD_CODES_ARG="$(cygpath -m "$CARD_CODES_FILE")" ;;
+esac
+trap 'rm -f "$CARD_CODES_FILE"' EXIT
 
-python3 - "$CDB" > /tmp/cube-cardcodes.json <<'EOF'
+python3 - "$CDB" "$CARD_CODES_FILE" <<'EOF'
 import sqlite3, json, sys
 conn = sqlite3.connect(sys.argv[1])
 cur = conn.cursor()
@@ -43,7 +49,7 @@ main = unique_codes("SELECT id FROM datas WHERE (type & %d)=0 AND (type & 0x4000
 # deck.  Keep them out of the generated fixture so a refreshed CDB cannot make
 # the unrelated deck-override probes fail with DECKERROR_UNKNOWNCARD.
 extra = unique_codes("SELECT id FROM datas WHERE (type & %d)!=0 AND (type & 0x4000)=0" % mask, 40)
-json.dump({"main": main, "extra": extra}, open('/tmp/cube-cardcodes.json', 'w'))
+json.dump({"main": main, "extra": extra}, open(sys.argv[2], 'w'))
 EOF
 
-CARDCODES=/tmp/cube-cardcodes.json node "$SCRIPT_DIR/cube-e2e.js" "$SRVPRO_HOST" "$SRVPRO_PORT" "$HTTP_PORT" "$API_KEY"
+CARDCODES_PATH="$CARD_CODES_ARG" node "$SCRIPT_DIR/cube-e2e.js" "$SRVPRO_HOST" "$SRVPRO_PORT" "$HTTP_PORT" "$API_KEY"

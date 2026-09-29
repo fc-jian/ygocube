@@ -26,6 +26,8 @@ description: Safely synchronize YGOPro upstream card resources and the current o
   `corres_srv.ini` 上传到运行目录。
 - 资源清单、日志、事件和 URL 不得含 token、密码、私钥、绝对本地路径或完整请求
   头。SSH 凭据只从已有 `aly` 别名/SSH 配置取得。
+- 更新脚本优先使用已配置的 SSH helper；本机没有 helper 时使用系统 `ssh`/`scp`
+  和同一别名，不复制或读取私钥内容。
 - 发布会中断服务并影响进行中的比赛。只有用户明确确认维护窗口后，才运行带有
   `--confirm-maintenance` 的 deploy；失败时保留 staging 和备份，不能先清理。
 
@@ -137,6 +139,12 @@ bash scripts/update-card-resources.sh prepare --refresh-names
 - 名称映射按 exact code 读取：`sc_name` → `md_name` → `jp_name` → `cn_name` →
   `en_name`；都为空或映射缺失时回退同一编号的 `cards.cdb texts.name`。YGOPro
   `TYPE_TOKEN` 衍生物不进入搜索、卡池或名称覆盖审计，因此其外部译名缺失可忽略。
+- `prepare --refresh-names` 每次读取 YGOCDB 的 `cards.zip.md5`，按其公布的
+  `cards.json` MD5 校验缓存/下载归档后再合并 exact-code 映射；MD5、归档 SHA-256、
+  记录数及映射文件哈希写入清单。主卡库与 Super Pre CDB 都要通过名称覆盖审计。
+- 禁限卡表来源为同一固定 SHA 的上游 `ygopro/lflist.conf`。准备流程将它分别安装到
+  `srvpro/ygopro/lflist.conf` 和 `srvpro/ygopro/expansions/lflist.conf`，并在 manifest
+  的独立 `banlist` 段校验哈希；即使传入 `--skip-expansion`，禁限表仍同步更新。
 - 新增/变更的非衍生物仍缺名称时，读取 `.card-resource-sync/missing-names.json`，
   优先重新运行 `--refresh-names` 并检查确实是 exact code。只有记录了编号、原因和
   影响范围的人工审计例外才可以显式使用 `--allow-missing-names`；不能用它隐藏
@@ -219,10 +227,19 @@ PY
 6. 逐张核验扩展卡按编号和**显示全名**搜索、入临时测试卡池及脚本/低清卡图覆盖；
    对局描述与 CDB 全量比对。使用隔离数据库，不能在生产用户卡池制造测试数据。
 
+`/duel/decks` 由独立 Duel Web 提供，搜索请求走 `/duel-api/public/duel/search`，其
+API 和卡库 release 位于 `/opt/ygoduel`；不能用 Cube 的 `/api` 搜索结果代表该页面。
+标准 `deploy` 在 `/opt/ygocube` 资源发布成功后，还会把同一代主 CDB、Super Pre、
+脚本、两处 `lflist.conf`、AVIF 与 YGOCDB 映射安装到新的独立 Duel release，并使其
+卡片元数据缓存失效。部署前若发现独立 Duel 的 `ygopro` 宿主仍运行则中止，避免中断
+进行中的独立对局；失败时将两套资源一并回滚。验收必须经 `/duel-api` 按编号和完整
+卡名逐张搜索 Super Pre 卡，并确认 `/duel-api/public/duel/options` 包含上游最新 OCG
+与 TCG 禁限表。
+
 ### 4.2 Cube 与独立 Duel 是两个发布目标
 
-- 默认资源 deploy 只处理 `/opt/ygocube`；不能据此宣称 `/opt/ygoduel` 也已更新。
-  分别记录两套 API、srvpro、宿主与资源路径、哈希及健康结果。
+- 标准资源 deploy 分别更新 `/opt/ygocube` 和 `/opt/ygoduel`，两边各自备份、校验和
+  回滚；分别记录两套 API、srvpro、宿主与资源路径、哈希及健康结果。
 - Cube 保持既有建房和原生客户端模式，独立 Duel 的端口、数据库、Web 网关和
   特有宿主参数必须保留。不得以复制 Cube 的整个应用或宿主二进制替代独立发布。
 - 独立资源在新 release 中准备并校验，API 配置应指向稳定的 current 或受管理
@@ -337,7 +354,7 @@ bash scripts/update-card-resources.sh deploy --confirm-maintenance
 expansion 清单。即使已有 `deployed-resource-manifest.json`，也不能因此跳过上游检查。
 兼容参数 `--expansion` 仍可显式启用默认行为。
 
-发布脚本的远端顺序是：取得发布锁 → 停止 API/srvpro/Web/Nginx → 对 SQLite 做
+Cube 资源发布的远端顺序是：取得发布锁 → 停止 Cube API/srvpro/Web/Nginx → 对 SQLite 做
 WAL checkpoint 和 `PRAGMA integrity_check` → 备份数据库（含 WAL/SHM）、配置、
 宿主资源、AVIF、名称映射和旧 manifest → 校验上传归档的路径/链接/类型/大小 →
 在 staging 中展开并验证 SHA（包括启用时的 expansion 文件和删除清单）→ 原子切换资源目录 → 使卡片元数据缓存失效 → 按
@@ -347,7 +364,13 @@ API → srvpro → Web → Nginx 启动。输出中的 release/backup ID 必须�
 /opt/ygocube/backups/card-sync-<release-id>/
 ```
 
-本 Skill 的 deploy 只发布卡片资源和无头宿主；如果同一变更还包含 API/Web 代码，
+随后独立 Duel 发布器以同一 ID 在 `/opt/ygoduel/releases/card-sync-<release-id>/`
+准备资源 release，备份独立 Duel 数据库、私有配置和旧 `current` 目标，确认没有活动
+宿主后仅重启 `ygoduel-api` 与 `ygoduel-srvpro`。Web、Nginx 和 Cube srvpro 不因这一步
+重启。其备份保存在 `/opt/ygoduel/backups/card-sync-<release-id>/`。两步任一失败或
+发布后校验失败都通过同一 ID 回滚两套资源。
+
+本 Skill 的 deploy 更新 Cube 与独立 Duel 两套卡片资源和无头宿主；如果同一变更还包含 API/Web 代码，
 使用项目的完整应用发布流程，并确保 standalone Web 同时安装 `.next/static`
 和必要的 `public`，不能用首页 200 掩盖静态资源 404。
 
@@ -361,12 +384,14 @@ backup 路径、构建 hash 和测试日志。确认失败发布的 staging/备�
 # 本地或通过 SSH 执行
 curl --fail --silent --show-error "$YGOCUBE_ALY_URL/api/health"
 ssh aly 'systemctl is-active ygocube-api ygocube-srvpro ygocube-web nginx'
+ssh aly 'systemctl is-active ygoduel-api ygoduel-srvpro ygoduel-web'
 ssh aly "ldd /opt/ygocube/shared/srvpro/ygopro/ygopro | grep -F 'not found' && exit 1 || true"
 ```
 
-公网首页 HTML 中引用的每个 `/_next/static/*.js`、`*.css` 都必须返回 200，且 JS
+公网首页和 `/duel/decks` HTML 中引用的每个 `/_next/static/*.js`、`*.css` 都必须返回 200，且 JS
 为 JavaScript MIME、CSS 为 `text/css`；检查新卡片 API、`/pics/<code>.avif`、
-srvpro HTTP/TCP/Cube 协议探针和实际宿主启动。数据库完整性、四个 systemd 服务、
+Cube `/api` 与独立 Duel `/duel-api` 搜索、最新禁限表、`/pics/<code>.avif`、
+srvpro HTTP/TCP/Cube 协议探针和实际宿主启动。两套数据库完整性、七个 systemd 服务、
 资源 hash、音频客户端（若构建）均通过后才宣布成功。
 
 ## 失败处理和常见问题
@@ -380,7 +405,7 @@ srvpro HTTP/TCP/Cube 协议探针和实际宿主启动。数据库完整性、�
 | script/ocgcore gitlink 不匹配 | 检查 `.gitmodules`、fork 上的提交和 `YGOPRO_*_COMMIT`；未确认 nested submodule 内容前不发布。 |
 | CDB 无法打开、表缺失、增删改异常 | 停止并保留旧运行时；重新取得同一上游提交的 CDB，使用 `validate-cdb` 和 `compare-cdb`，不得直接覆盖。 |
 | 先行卡 `.ypk` 被拒绝、列表 JSON 不合法或没有服务器 CDB | 保留旧 expansion 不变；检查 HTTPS 镜像、完整下载和官方包结构。不要绕过 ZIP/JSON 校验，也不要手动把客户端 `.ypk` 放入运行目录。 |
-| expansion 与普通资源更新互相覆盖 | 标准更新默认启用 Super Pre 并以 Aly 已部署 manifest 计算差量；检查只删除此前受清单管理且官方包已移除的文件，未知文件与 `lflist.conf` 保留。仅用户明确要求跳过 Super Pre 时传 `--skip-expansion`，并确认 expansion 删除清单为空。 |
+| expansion 与普通资源更新互相覆盖 | 标准更新默认启用 Super Pre 并以 Aly 已部署 manifest 计算差量；检查只删除此前受清单管理且官方包已移除的文件，未知文件保留。禁限表在独立 `banlist` 清单中更新，不受 `--skip-expansion` 影响。仅用户明确要求跳过 Super Pre 时传 `--skip-expansion`，并确认 expansion 删除清单为空。 |
 | 先行卡 CDB 中的脚本或卡图缺失 | 核对 `.ypk` 的 `script/`、`pics/` 和两个 CDB 是否完整；确认目标宿主启用了 `LoadExpansions()`。不要把扩展卡并入主 `cards.cdb` 作为临时修复。 |
 | manifest 已包含 expansion 但远端没有对应文件 | 检查是否在默认 `prepare` 后又用 `--skip-expansion` 部署；首次发布需在默认模式重新准备和发布。脚本会在上传前拒绝 manifest 与 payload 不一致的组合，保留远端旧状态。 |
 | `missing-names.json` 有非衍生物 | `prepare --refresh-names`，按 exact code 修复；只对有编号和理由的少量例外使用 `--allow-missing-names`。 |
@@ -394,7 +419,7 @@ srvpro HTTP/TCP/Cube 协议探针和实际宿主启动。数据库完整性、�
 | 发布后服务未 active、API/协议/AVIF 不通 | 先读取 systemd/journal 日志和 release metadata；若资源切换已发生，使用同一 `<release-id>` 执行 rollback。 |
 | Next 静态 JS/CSS 404 或 MIME 为 HTML | 这是完整 Web 发布遗漏 `.next/static` 的典型问题；按 AGENTS.md 的 standalone 发布规则补齐静态目录并重启 Web，不能改 Nginx 把所有请求回退首页。 |
 | 远端证书校验失败 | 使用正确的受信任 `YGOCUBE_ALY_URL`/证书链后重试；诊断可单独使用 `curl -k`，不要把跳过 TLS 验证写进正式脚本。 |
-| 需要回滚 | 让维护窗口保持有效，运行 `bash scripts/update-card-resources.sh rollback --backup-id <release-id>`，再次完成全部健康检查。回滚只恢复资源，不自动恢复比赛数据库；数据库异常须另行核验备份后处理。 |
+| 需要回滚 | 让维护窗口保持有效，运行 `bash scripts/update-card-resources.sh rollback --backup-id <release-id>`，再次完成两套健康检查。回滚恢复资源与配置；数据库缓存失效值可由 API 重建，比赛数据异常须另行核验备份后处理。 |
 
 ## 先行卡发布后补充验收
 
@@ -429,10 +454,10 @@ srvpro HTTP/TCP/Cube 协议探针和实际宿主启动。数据库完整性、�
    才可跳过扩展更新，且 expansion 删除清单必须为空。
 4. **本地构建测试通过**：helper、API、Web、srvpro、宿主 `ldd`/启动 smoke、E2E
    全部通过；Windows 客户端（若要求）为正确架构、可启动且音频依赖可用。
-5. **Aly 运行正常**：备份的 SQLite/WAL/SHM integrity 为 `ok`；API、srvpro、Web、
-   Nginx 均 active 且无异常重启；`/api/health`、首页、全部 Next 静态 JS/CSS、
-   新卡片 API、AVIF endpoint、srvpro HTTP/TCP/Cube 探针均通过；远端宿主 `ldd`
-   无 `not found`。
+5. **Aly 运行正常**：备份的 Cube/独立 Duel SQLite integrity 为 `ok`；两套 API、
+   srvpro、Web 与 Nginx 均 active；`/api/health`、首页、`/duel/decks`、静态资源、
+   Cube `/api` 与独立 Duel `/duel-api` 新卡搜索、最新 OCG/TCG 禁限表、AVIF endpoint、
+   srvpro HTTP/TCP/Cube 探针均通过；两套远端宿主 `ldd` 无 `not found`。
 6. **可恢复且有记录**：release ID、备份目录、旧/新资源 hash、commit、测试结果和
    任何警告已保存；失败 staging 与备份在人工确认前不删除，必要时可用明确 backup ID
    回滚。

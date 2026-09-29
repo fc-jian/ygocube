@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import sqlite3
 from contextlib import closing
@@ -32,6 +33,7 @@ MAX_EXPANSION_ENTRIES = 50_000
 MAX_EXPANSION_UNCOMPRESSED = 1_000_000_000
 MAX_EXPANSION_ENTRY = 200_000_000
 MAX_EXPANSION_LIST_ITEMS = 10_000
+MAX_YGOCDB_JSON_SIZE = 100_000_000
 EXPANSION_METADATA_FILES = {"corres_srv.ini", "test-release.json", "version.txt"}
 EXPANSION_IMAGE_SUFFIXES = {"jpg", "jpeg", "png", "webp"}
 # TYPE_TOKEN is 0x4000 in the YGOPro CDB format.  0x4000000 is TYPE_LINK;
@@ -435,6 +437,59 @@ def file_manifest(directory: Path, suffix: str | None = None) -> dict[str, dict[
     return out
 
 
+def file_metadata(path: Path) -> dict[str, Any]:
+    return {"size": path.stat().st_size, "sha256": sha256_file(path)}
+
+
+def parse_ygocdb_md5(value: str) -> str:
+    """Accept YGOCDB's JSON string or plain-text MD5 response."""
+    candidate = value.strip()
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        parsed = candidate
+    if isinstance(parsed, str):
+        candidate = parsed.strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{32}", candidate):
+        raise ValueError("YGOCDB cards.json MD5 response must contain 32 hexadecimal characters")
+    return candidate.lower()
+
+
+def read_ygocdb_name_archive(zip_path: Path, expected_md5: str | None = None) -> tuple[Any, dict[str, Any]]:
+    """Read and validate YGOCDB's inner cards.json, including its published MD5."""
+    if not zip_path.is_file():
+        raise ValueError(f"YGOCDB archive not found: {zip_path}")
+    if expected_md5 is not None and not re.fullmatch(r"[0-9a-fA-F]{32}", expected_md5.strip()):
+        raise ValueError("YGOCDB cards.json MD5 must be 32 hexadecimal characters")
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            candidates = [info for info in archive.infolist() if info.filename == "cards.json"]
+            if len(candidates) != 1:
+                raise ValueError("YGOCDB archive must contain exactly one cards.json")
+            info = candidates[0]
+            if info.file_size > MAX_YGOCDB_JSON_SIZE:
+                raise ValueError("YGOCDB cards.json exceeds size limit")
+            raw = archive.read(info)
+    except zipfile.BadZipFile as exc:
+        raise ValueError(f"invalid YGOCDB archive: {exc}") from exc
+    actual_md5 = hashlib.md5(raw).hexdigest()
+    if expected_md5 and actual_md5.lower() != expected_md5.strip().lower():
+        raise ValueError(f"YGOCDB cards.json MD5 mismatch: {actual_md5}")
+    try:
+        parsed = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid YGOCDB cards.json: {exc}") from exc
+    if not isinstance(parsed, (list, dict)):
+        raise ValueError("YGOCDB cards.json must be an array or object")
+    record_count = len(parsed)
+    return parsed, {
+        "innerMd5": actual_md5,
+        "archiveSha256": sha256_file(zip_path),
+        "archiveSize": zip_path.stat().st_size,
+        "recordCount": record_count,
+    }
+
+
 def sync_managed_scripts(source: Path, destination: Path, previous: Path | None = None) -> dict[str, dict[str, Any]]:
     """Copy Lua files and remove only files managed by our previous manifest."""
     current = file_manifest(source, ".lua")
@@ -475,8 +530,8 @@ def sync_managed_expansions(source: Path, destination: Path, previous: Path | No
             old = {}
     old_files = set(old.get("files", old).keys()) if isinstance(old, dict) else set()
     for rel in sorted(old_files - set(current)):
-        # The ban-list is a server-local setting loaded from the same
-        # directory, not part of the downloadable Super Pre archive.
+        # The upstream ban-list is managed separately from the Super Pre
+        # archive, so an expansion cleanup must never remove it.
         if rel == "lflist.conf":
             continue
         target = _safe_target(destination, rel)
@@ -495,8 +550,6 @@ def sync_managed_expansions(source: Path, destination: Path, previous: Path | No
 
 def generate_avif(source: Path, destination: Path, previous: Path | None = None, expansion_pics: Path | None = None) -> dict[str, dict[str, Any]]:
     """Generate max-200px Q30 AVIFs; unchanged source CRC/size is skipped."""
-    if shutil.which("vips") is None:
-        raise ValueError("vips is required to generate AVIF resources")
     old: dict[str, Any] = {}
     if previous and previous.exists():
         try:
@@ -546,6 +599,8 @@ def generate_avif(source: Path, destination: Path, previous: Path | None = None,
                 continue
         # Keep the .avif suffix on the temporary output: libvips chooses the
         # writer from the final extension, and a .tmp suffix would be rejected.
+        if shutil.which("vips") is None:
+            raise ValueError("vips is required to generate or refresh AVIF resources")
         temp = output.with_name(f".{output.stem}.tmp.avif")
         subprocess.run(
             ["vips", "thumbnail", str(image), f"{temp}[Q=30,effort=9,subsample-mode=on,strip]", "200", "--size", "down"],
@@ -599,14 +654,9 @@ def missing_names(cdb_path: Path, mapping_path: Path, only_codes: Iterable[int] 
     return missing
 
 
-def merge_name_zip(zip_path: Path, mapping_path: Path) -> int:
-    """Merge records from YGOCDB cards.zip into the exact-code map."""
-    with zipfile.ZipFile(zip_path) as archive:
-        candidates = [name for name in archive.namelist() if name.endswith("cards.json")]
-        if not candidates:
-            raise ValueError("YGOCDB archive does not contain cards.json")
-        with archive.open(candidates[0]) as handle:
-            parsed = json.load(handle)
+def merge_name_zip(zip_path: Path, mapping_path: Path, expected_md5: str | None = None) -> dict[str, int]:
+    """Refresh exact-code records from YGOCDB while retaining local-only fields."""
+    parsed, _ = read_ygocdb_name_archive(zip_path, expected_md5)
     incoming = parsed if isinstance(parsed, list) else (list(parsed.values()) if isinstance(parsed, dict) else [])
     existing: dict[str, Any] = {}
     if mapping_path.exists():
@@ -629,6 +679,7 @@ def merge_name_zip(zip_path: Path, mapping_path: Path) -> int:
                 if previous is None or not any(str(previous.get(field) or "").strip() for field in DISPLAY_NAME_FIELDS):
                     existing[key] = value
     added = 0
+    updated = 0
     for record in incoming:
         if not isinstance(record, dict):
             continue
@@ -637,12 +688,12 @@ def merge_name_zip(zip_path: Path, mapping_path: Path) -> int:
             code = int(raw_id)
         except (TypeError, ValueError):
             continue
+        if code <= 0:
+            continue
         # The API consumes records by exact printed card id.  `cid` is an
         # upstream catalog identifier and can be shared by reprints, so it
         # must never be the JSON key for a code-to-name refresh.
         key = str(code)
-        if key not in existing:
-            added += 1
         previous = existing.get(key)
         incoming_has_display = any(
             str(record.get(field) or "").strip()
@@ -658,9 +709,15 @@ def merge_name_zip(zip_path: Path, mapping_path: Path) -> int:
         # replace it when it has a real display value.
         if previous_has_display and not incoming_has_display:
             continue
-        existing[key] = record
+        refreshed = dict(previous) if isinstance(previous, dict) else {}
+        refreshed.update(record)
+        if previous is None:
+            added += 1
+        elif refreshed != previous:
+            updated += 1
+        existing[key] = refreshed
     _json_dump(existing, mapping_path)
-    return added
+    return {"added": added, "updated": updated}
 
 
 def build_resource_manifest(cdb: Path, scripts: Path, avif: Path, output: Path, names: Path | None = None, expansions: Path | None = None, **extra: Any) -> dict[str, Any]:
@@ -675,7 +732,18 @@ def build_resource_manifest(cdb: Path, scripts: Path, avif: Path, output: Path, 
         "avif": {"files": file_manifest(avif, ".avif")},
     }
     if expansions is not None:
-        manifest["expansions"] = {"files": file_manifest(expansions)}
+        expansion_files = file_manifest(expansions)
+        expansion_files.pop("lflist.conf", None)
+        manifest["expansions"] = {"files": expansion_files}
+    banlist_files: dict[str, dict[str, Any]] = {}
+    for relative, path in (
+        ("lflist.conf", cdb.parent / "lflist.conf"),
+        ("expansions/lflist.conf", cdb.parent / "expansions" / "lflist.conf"),
+    ):
+        if path.is_file() and not path.is_symlink():
+            banlist_files[relative] = file_metadata(path)
+    if banlist_files:
+        manifest["banlist"] = {"files": banlist_files}
     if names and names.is_file():
         manifest["cardNames"] = {"size": names.stat().st_size, "sha256": sha256_file(names)}
     manifest.update(extra)
@@ -745,6 +813,7 @@ def _main() -> int:
     m = sub.add_parser("merge-names")
     m.add_argument("zip", type=Path)
     m.add_argument("mapping", type=Path)
+    m.add_argument("--md5")
     man = sub.add_parser("manifest")
     man.add_argument("--cdb", type=Path, required=True)
     man.add_argument("--scripts", type=Path, required=True)
@@ -757,7 +826,12 @@ def _main() -> int:
     d = sub.add_parser("delta")
     d.add_argument("current", type=Path)
     d.add_argument("--previous", type=Path)
-    d.add_argument("--section", choices=("scripts", "avif", "expansions"), required=True)
+    d.add_argument("--section", choices=("scripts", "avif", "expansions", "banlist"), required=True)
+    nz = sub.add_parser("validate-name-zip")
+    nz.add_argument("path", type=Path)
+    nz.add_argument("--md5")
+    nm = sub.add_parser("parse-name-md5")
+    nm.add_argument("path", type=Path)
     args = parser.parse_args()
     try:
         if args.command == "validate-cdb":
@@ -794,7 +868,12 @@ def _main() -> int:
                 only = json.loads(args.only.read_text(encoding="utf-8"))
             print(json.dumps(missing_names(args.cdb, args.mapping, only), ensure_ascii=False))
         elif args.command == "merge-names":
-            print(json.dumps({"added": merge_name_zip(args.zip, args.mapping)}, ensure_ascii=False))
+            print(json.dumps(merge_name_zip(args.zip, args.mapping, args.md5), ensure_ascii=False, sort_keys=True))
+        elif args.command == "validate-name-zip":
+            _, metadata = read_ygocdb_name_archive(args.path, args.md5)
+            print(json.dumps(metadata, ensure_ascii=False, sort_keys=True))
+        elif args.command == "parse-name-md5":
+            print(parse_ygocdb_md5(args.path.read_text(encoding="utf-8")))
         elif args.command == "manifest":
             extra = json.loads(args.extra)
             if args.extra_file:
