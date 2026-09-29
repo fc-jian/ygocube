@@ -10,6 +10,7 @@ from pathlib import Path
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).with_name("remote-duel-resource-apply.py")
@@ -60,6 +61,27 @@ class RemoteDuelResourceApplyTests(unittest.TestCase):
             self.assertEqual(previous.read_text(encoding="utf-8"), '{"version":1}\n')
             self.assertEqual(release.read_text(encoding="utf-8"), '{"version":2}\n')
             self.assertNotEqual(previous.stat().st_ino, release.stat().st_ino)
+
+    def test_release_ownership_skips_shared_hardlinks_and_uses_supported_chown(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release = root / "release"
+            release.mkdir()
+            shared_source = root / "shared.js"
+            shared_source.write_text("shared\n", encoding="utf-8")
+            shared_release = release / "shared.js"
+            os.link(shared_source, shared_release)
+            unique_file = release / "release.json"
+            unique_file.write_text("{}\n", encoding="utf-8")
+
+            with patch.object(REMOTE.shutil, "chown") as chown:
+                REMOTE.set_release_ownership(release)
+
+            paths = [Path(call.args[0]) for call in chown.call_args_list]
+            self.assertIn(release, paths)
+            self.assertIn(unique_file, paths)
+            self.assertNotIn(shared_release, paths)
+            self.assertTrue(all("follow_symlinks" not in call.kwargs for call in chown.call_args_list))
 
     def test_identical_copy_keeps_hardlink_and_changed_copy_isolated(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -105,7 +105,7 @@ def atomic_write_text(path: Path, value: str) -> None:
 def set_release_ownership(release: Path) -> None:
     for directory, _subdirectories, filenames in os.walk(release, followlinks=False):
         directory_path = Path(directory)
-        shutil.chown(directory_path, user="ygoduel", group="ygoduel", follow_symlinks=False)
+        shutil.chown(directory_path, user="ygoduel", group="ygoduel")
         for name in filenames:
             path = directory_path / name
             if path.is_symlink():
@@ -113,7 +113,7 @@ def set_release_ownership(release: Path) -> None:
             # Unchanged files are hard links to the previous immutable release;
             # they already have the correct owner and must not be chowned here.
             if path.stat().st_nlink == 1:
-                shutil.chown(path, user="ygoduel", group="ygoduel", follow_symlinks=False)
+                shutil.chown(path, user="ygoduel", group="ygoduel")
 
 
 def safe_remove_list(root: Path, list_path: Path) -> None:
