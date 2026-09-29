@@ -254,6 +254,11 @@ WebP 不进入运行 release、回滚快照或备份。部署须清除旧运行�
   资源路径，不能永远固定首个 release。未变化的应用文件以硬链接复用，因此旧 release
   文件保持不可变；更新资源须先替换目标文件，元数据须原子替换，不能原地写入。
   避免在运行目录直接覆盖 Lua/CDB。
+- Aly 上 Cube shared 与 Duel releases 必须位于同一文件系统。主/扩展 CDB、脚本、
+  两处 `lflist.conf`、卡名映射和 AVIF 逐文件硬链接到 Cube shared 同一 inode；遇到
+  `EXDEV` 必须失败并回滚，禁止退化为复制。只有资源清单及内容完全相同的上一版
+  Duel rollback release 才能在停服后重链接到当前 Cube 资源；版本不同则保留其旧资源
+  供回滚。Cube 资源备份及 rollback 用 `cp -al` 保留这些共享 inode。
 - 用户明确要求清理历史备份时，先核对 current、systemd 与备份指针，再保留 current
   和一个可回滚 release/资源快照，清理更旧的备份与 `.pre-*`。不得删除失败发布的
   staging；新备份与原图检查通过后再清理旧备份。删除 release 前还要检查相关

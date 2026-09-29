@@ -80,29 +80,151 @@ def wait_healthy(banlist_path: Path | None = None) -> None:
     raise RuntimeError(f"standalone Duel API health check failed: {last_error}")
 
 
-def checked_copy_file(source: Path, destination: Path) -> None:
+def hardlink_file(source: str, destination: str) -> str:
+    try:
+        os.link(source, destination)
+    except OSError as exc:
+        if exc.errno == errno.EXDEV:
+            raise RuntimeError("resource trees must share a filesystem; refusing a duplicate copy") from exc
+        raise
+    return destination
+
+
+def link_resource_file(source: Path, destination: Path) -> None:
     if not source.is_file() or source.is_symlink():
-        raise RuntimeError(f"missing regular resource file: {source.name}")
+        raise RuntimeError(f"missing regular resource file: {source}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.is_symlink():
         destination.unlink()
     elif destination.exists():
         if not destination.is_file():
             raise RuntimeError(f"resource destination is not a regular file: {destination}")
-        if source.stat().st_size == destination.stat().st_size and sha256(source) == sha256(destination):
+        source_stat = source.stat()
+        destination_stat = destination.stat()
+        if source_stat.st_dev == destination_stat.st_dev and source_stat.st_ino == destination_stat.st_ino:
             return
-        destination.unlink()
-    shutil.copy2(source, destination)
-
-
-def link_or_copy(source: str, destination: str) -> str:
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.link")
+    if temporary.is_symlink() or temporary.is_file():
+        temporary.unlink()
+    elif temporary.exists():
+        raise RuntimeError(f"resource link staging path is not a regular file: {temporary}")
     try:
-        os.link(source, destination)
+        os.link(source, temporary)
     except OSError as exc:
-        if exc.errno != errno.EXDEV:
-            raise
-        shutil.copy2(source, destination)
-    return destination
+        if exc.errno == errno.EXDEV:
+            raise RuntimeError(
+                f"Cube and Duel resources must share a filesystem; refusing to copy {source}"
+            ) from exc
+        raise
+    os.replace(temporary, destination)
+
+
+def hardlink_manifest_files(source_root: Path, destination_root: Path, files: dict, label: str) -> None:
+    for relative in files:
+        rel = PurePosixPath(relative)
+        if rel.is_absolute() or ".." in rel.parts or "\\" in relative:
+            raise RuntimeError(f"unsafe {label} manifest path: {relative!r}")
+        link_resource_file(source_root.joinpath(*rel.parts), destination_root.joinpath(*rel.parts))
+
+
+def verify_hardlink(source: Path, destination: Path, label: str) -> None:
+    source_stat = source.stat()
+    destination_stat = destination.stat()
+    if source_stat.st_dev != destination_stat.st_dev or source_stat.st_ino != destination_stat.st_ino:
+        raise RuntimeError(f"Cube and Duel {label} are separate files: {destination}")
+
+
+def verify_resource_hardlinks(
+    source_host: Path,
+    target_host: Path,
+    source_assets: Path,
+    target_assets: Path,
+    manifest: dict,
+) -> int:
+    linked = 0
+    for source_relative, target_relative in (
+        ("cards.cdb", "cards.cdb"),
+        ("strings.conf", "strings.conf"),
+        ("lflist.conf", "lflist.conf"),
+        ("expansions/lflist.conf", "expansions/lflist.conf"),
+    ):
+        verify_hardlink(source_host / source_relative, target_host / target_relative, target_relative)
+        linked += 1
+    for subdirectory, key, label in (("expansions", "expansions", "Super Pre"),):
+        files = manifest.get(key, {}).get("files", {})
+        for relative in files:
+            rel = PurePosixPath(relative)
+            verify_hardlink(
+                (source_host / subdirectory).joinpath(*rel.parts),
+                (target_host / subdirectory).joinpath(*rel.parts),
+                f"{label} resource {relative}",
+            )
+            linked += 1
+    for path in (source_host / "script").rglob("*.lua"):
+        if path.is_file() and not path.is_symlink():
+            relative = path.relative_to(source_host / "script")
+            verify_hardlink(path, target_host / "script" / relative, f"YGOPro script {relative}")
+            linked += 1
+    verify_hardlink(
+        source_assets / "ygocdb_cards.json",
+        target_assets / "ygocdb_cards.json",
+        "YGOCDB mapping",
+    )
+    linked += 1
+    for relative in manifest.get("avif", {}).get("files", {}):
+        rel = PurePosixPath(relative)
+        verify_hardlink(
+            (source_assets / "pics_avif").joinpath(*rel.parts),
+            (target_assets / "pics_avif").joinpath(*rel.parts),
+            f"AVIF image {relative}",
+        )
+        linked += 1
+    return linked
+
+
+def managed_resource_sets_match(
+    source_host: Path,
+    target_host: Path,
+    source_assets: Path,
+    target_assets: Path,
+    manifest: dict,
+) -> bool:
+    try:
+        for relative in ("cards.cdb", "strings.conf", "lflist.conf", "expansions/lflist.conf"):
+            source = source_host / relative
+            target = target_host / relative
+            if not source.is_file() or not target.is_file() or sha256(source) != sha256(target):
+                return False
+        for subdirectory, key, label in (
+            ("script", "scripts", "YGOPro script"),
+            ("expansions", "expansions", "Super Pre"),
+        ):
+            files = manifest.get(key, {}).get("files", {})
+            verify_file_manifest(target_host / subdirectory, files, label)
+            verify_file_manifest(source_host / subdirectory, files, f"Cube {label}")
+        if cdb_hashes(source_host) != cdb_hashes(target_host):
+            return False
+        source_scripts = {
+            path.relative_to(source_host / "script").as_posix(): sha256(path)
+            for path in (source_host / "script").rglob("*.lua")
+            if path.is_file() and not path.is_symlink()
+        }
+        target_scripts = {
+            path.relative_to(target_host / "script").as_posix(): sha256(path)
+            for path in (target_host / "script").rglob("*.lua")
+            if path.is_file() and not path.is_symlink()
+        }
+        if source_scripts != target_scripts:
+            return False
+        source_names = source_assets / "ygocdb_cards.json"
+        target_names = target_assets / "ygocdb_cards.json"
+        if not source_names.is_file() or not target_names.is_file() or sha256(source_names) != sha256(target_names):
+            return False
+        if directory_fingerprint(source_assets / "pics_avif") != directory_fingerprint(target_assets / "pics_avif"):
+            return False
+    except (OSError, RuntimeError):
+        return False
+    return True
 
 
 def replace_directory(source: Path, destination: Path, *, ignore=None) -> None:
@@ -110,7 +232,7 @@ def replace_directory(source: Path, destination: Path, *, ignore=None) -> None:
         destination.unlink()
     elif destination.exists():
         shutil.rmtree(destination)
-    shutil.copytree(source, destination, ignore=ignore, symlinks=False, copy_function=link_or_copy)
+    shutil.copytree(source, destination, ignore=ignore, symlinks=False, copy_function=hardlink_file)
 
 
 def atomic_write_text(path: Path, value: str) -> None:
@@ -395,6 +517,15 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
     new = releases / release_name
     if new.exists():
         raise RuntimeError(f"release already exists: {release_name}")
+    source_host = cube_root / "shared" / "srvpro" / "ygopro"
+    source_assets = cube_root / "shared" / "assets"
+    image_source = source_assets / "pics_avif"
+    names_source = source_assets / "ygocdb_cards.json"
+    old_host = old / "srvpro" / "ygopro"
+    old_assets = old / "assets"
+    previous_resources_match = managed_resource_sets_match(
+        source_host, old_host, source_assets, old_assets, manifest
+    )
     backup = duel_root / "backups" / release_name
     backup.mkdir(parents=True, exist_ok=False)
     (backup / "previous-release.txt").write_text(str(old) + "\n", encoding="utf-8")
@@ -404,17 +535,16 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
         # Releases share unchanged immutable files to avoid duplicating the
         # independent application's large node_modules tree and exhausting
         # Aly's inode quota. Updated files are unlinked before they are copied.
-        shutil.copytree(old, new, dirs_exist_ok=True, symlinks=True, copy_function=link_or_copy)
+        shutil.copytree(old, new, dirs_exist_ok=True, symlinks=True, copy_function=hardlink_file)
         release_metadata = new / "release.json"
         if release_metadata.is_file():
             metadata = json.loads(release_metadata.read_text(encoding="utf-8"))
             metadata.update(id=release_name, previousRelease=old.name, resourceManifestSha256=sha256(manifest_path))
             atomic_write_text(release_metadata, json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
-        source_host = cube_root / "shared" / "srvpro" / "ygopro"
         target_host = new / "srvpro" / "ygopro"
         remove_raw_card_images(target_host)
         for name in ("cards.cdb", "strings.conf", "lflist.conf"):
-            checked_copy_file(source_host / name, target_host / name)
+            link_resource_file(source_host / name, target_host / name)
         for directory in (target_host / "script", target_host / "expansions"):
             if directory.is_symlink():
                 directory.unlink()
@@ -430,7 +560,7 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
 
         for lua in (source_host / "script").rglob("*.lua"):
             relative = lua.relative_to(source_host / "script")
-            checked_copy_file(lua, target_host / "script" / relative)
+            link_resource_file(lua, target_host / "script" / relative)
         source_expansions = source_host / "expansions"
         for source in source_expansions.rglob("*"):
             if source.is_symlink():
@@ -442,10 +572,13 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
                 continue
             if source.name == "corres_srv.ini" or source.suffix.lower() == ".ypk":
                 continue
-            checked_copy_file(source, target_host / "expansions" / relative)
+            link_resource_file(source, target_host / "expansions" / relative)
         # Keep the upstream lflist at both srvpro lookup paths. It is tracked as
         # a separate resource so --skip-expansion cannot freeze ban-list dates.
-        checked_copy_file(source_host / "lflist.conf", target_host / "expansions" / "lflist.conf")
+        link_resource_file(
+            source_host / "expansions" / "lflist.conf",
+            target_host / "expansions" / "lflist.conf",
+        )
         remove_unmanaged_suffix(source_host / "script", target_host / "script", ".lua")
         remove_unmanaged_suffix(source_expansions, target_host / "expansions", ".cdb")
         verify_file_manifest(target_host / "script", manifest.get("scripts", {}).get("files", {}), "Duel YGOPro script")
@@ -453,7 +586,6 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
         if cdb_hashes(source_host) != cdb_hashes(target_host):
             raise RuntimeError("Cube and Duel card database sets differ")
 
-        image_source = cube_root / "shared" / "assets" / "pics_avif"
         if not image_source.is_dir():
             raise RuntimeError("staged AVIF directory is missing")
         replace_directory(image_source, new / "assets" / "pics_avif")
@@ -461,7 +593,14 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
         if duel_avif_fingerprint != cube_resource_state["picsAvif"]:
             raise RuntimeError("Cube and Duel AVIF image trees differ")
         verify_compressed_card_art(target_host, new / "assets" / "pics_avif")
-        checked_copy_file(cube_root / "shared" / "assets" / "ygocdb_cards.json", new / "assets" / "ygocdb_cards.json")
+        link_resource_file(names_source, new / "assets" / "ygocdb_cards.json")
+        hardlink_count = verify_resource_hardlinks(
+            source_host,
+            target_host,
+            source_assets,
+            new / "assets",
+            manifest,
+        )
 
         resources_path = new / "resources.json"
         resources = json.loads(resources_path.read_text(encoding="utf-8")) if resources_path.is_file() else {}
@@ -513,6 +652,29 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
             source.backup(target)
         (backup / "db-integrity.txt").write_text("ok\n", encoding="utf-8")
         shutil.copy2(config_temp, config_file)
+        if previous_resources_match:
+            # The old release is the rollback target. When its complete managed
+            # resource set is byte-for-byte identical, point it at the same
+            # immutable inodes too; otherwise preserve its older generation.
+            link_resource_file(source_host / "cards.cdb", old_host / "cards.cdb")
+            link_resource_file(source_host / "strings.conf", old_host / "strings.conf")
+            link_resource_file(source_host / "lflist.conf", old_host / "lflist.conf")
+            link_resource_file(
+                source_host / "expansions" / "lflist.conf",
+                old_host / "expansions" / "lflist.conf",
+            )
+            for lua in (source_host / "script").rglob("*.lua"):
+                relative = lua.relative_to(source_host / "script")
+                link_resource_file(lua, old_host / "script" / relative)
+            hardlink_manifest_files(
+                source_host / "expansions",
+                old_host / "expansions",
+                manifest.get("expansions", {}).get("files", {}),
+                "Super Pre",
+            )
+            replace_directory(image_source, old_assets / "pics_avif")
+            link_resource_file(names_source, old_assets / "ygocdb_cards.json")
+            verify_resource_hardlinks(source_host, old_host, source_assets, old_assets, manifest)
         atomic_current(duel_root, new, release_id)
         with sqlite3.connect(database) as db:
             db.execute("UPDATE cards SET metadata_version=0")
@@ -534,6 +696,7 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
                     "ok": True,
                     "release": release_name,
                     "previousRelease": old.name,
+                    "previousReleaseResourcesLinkedToCube": previous_resources_match,
                     "search": search_result,
                     "resourceManifestSha256": resources["resourceManifest"],
                     "cardDatabaseFilesMatched": len(cdb_hashes(source_host)),
@@ -549,6 +712,8 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
             "ok": True,
             "release": release_name,
             "backup": str(backup),
+            "previousReleaseResourcesLinkedToCube": previous_resources_match,
+            "managedResourceHardlinks": hardlink_count,
             "cardDatabaseFilesMatched": len(cdb_hashes(source_host)),
             "picsAvif": live_duel_avif,
             **search_result,

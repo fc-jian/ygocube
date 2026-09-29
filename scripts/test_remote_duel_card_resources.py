@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import importlib.util
 import os
@@ -88,24 +89,53 @@ class RemoteDuelResourceApplyTests(unittest.TestCase):
             self.assertNotIn(shared_release, paths)
             self.assertTrue(all("follow_symlinks" not in call.kwargs for call in chown.call_args_list))
 
-    def test_identical_copy_keeps_hardlink_and_changed_copy_isolated(self) -> None:
+    def test_identical_and_changed_resources_are_hardlinked_to_cube(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            source = root / "source.lua"
-            destination = root / "release" / "source.lua"
+            source = root / "source.cdb"
+            destination = root / "release" / "source.cdb"
             source.write_text("return 1\n", encoding="utf-8")
             destination.parent.mkdir()
-            os.link(source, destination)
+            destination.write_text("duplicate old copy\n", encoding="utf-8")
 
-            REMOTE.checked_copy_file(source, destination)
+            REMOTE.link_resource_file(source, destination)
             self.assertEqual(source.stat().st_ino, destination.stat().st_ino)
+            self.assertEqual(source.stat().st_dev, destination.stat().st_dev)
 
             updated = root / "updated.lua"
             updated.write_text("return 2\n", encoding="utf-8")
             os.replace(updated, source)
-            REMOTE.checked_copy_file(source, destination)
+            REMOTE.link_resource_file(source, destination)
             self.assertEqual(destination.read_text(encoding="utf-8"), "return 2\n")
-            self.assertNotEqual(source.stat().st_ino, destination.stat().st_ino)
+            self.assertEqual(source.stat().st_ino, destination.stat().st_ino)
+
+    def test_cross_device_resource_link_fails_without_copying(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.cdb"
+            destination = root / "release" / "source.cdb"
+            source.write_bytes(b"verified source")
+            destination.parent.mkdir()
+            destination.write_bytes(b"old destination")
+
+            with patch.object(REMOTE.os, "link", side_effect=OSError(errno.EXDEV, "cross-device link")):
+                with self.assertRaisesRegex(RuntimeError, "refusing to copy"):
+                    REMOTE.link_resource_file(source, destination)
+
+            self.assertEqual(destination.read_bytes(), b"old destination")
+            self.assertEqual(list(destination.parent.iterdir()), [destination])
+
+    def test_hardlink_helper_fails_on_cross_device(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source.lua"
+            destination = Path(temporary) / "release.lua"
+            source.write_text("return 1\n", encoding="utf-8")
+
+            with patch.object(REMOTE.os, "link", side_effect=OSError(errno.EXDEV, "cross-device link")):
+                with self.assertRaisesRegex(RuntimeError, "refusing a duplicate copy"):
+                    REMOTE.hardlink_file(str(source), str(destination))
+
+            self.assertFalse(destination.exists())
 
     def test_avif_directory_fingerprint_matches_manifest_and_detects_extras(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
