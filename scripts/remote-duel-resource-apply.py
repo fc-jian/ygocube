@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -65,7 +66,23 @@ def checked_copy_file(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.is_symlink():
         destination.unlink()
+    elif destination.exists():
+        if not destination.is_file():
+            raise RuntimeError(f"resource destination is not a regular file: {destination}")
+        if source.stat().st_size == destination.stat().st_size and sha256(source) == sha256(destination):
+            return
+        destination.unlink()
     shutil.copy2(source, destination)
+
+
+def link_or_copy(source: str, destination: str) -> str:
+    try:
+        os.link(source, destination)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        shutil.copy2(source, destination)
+    return destination
 
 
 def replace_directory(source: Path, destination: Path, *, ignore=None) -> None:
@@ -73,7 +90,29 @@ def replace_directory(source: Path, destination: Path, *, ignore=None) -> None:
         destination.unlink()
     elif destination.exists():
         shutil.rmtree(destination)
-    shutil.copytree(source, destination, ignore=ignore, symlinks=False)
+    shutil.copytree(source, destination, ignore=ignore, symlinks=False, copy_function=link_or_copy)
+
+
+def atomic_write_text(path: Path, value: str) -> None:
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(value, encoding="utf-8")
+    temporary.chmod(mode)
+    os.replace(temporary, path)
+
+
+def set_release_ownership(release: Path) -> None:
+    for directory, _subdirectories, filenames in os.walk(release, followlinks=False):
+        directory_path = Path(directory)
+        shutil.chown(directory_path, user="ygoduel", group="ygoduel", follow_symlinks=False)
+        for name in filenames:
+            path = directory_path / name
+            if path.is_symlink():
+                continue
+            # Unchanged files are hard links to the previous immutable release;
+            # they already have the correct owner and must not be chowned here.
+            if path.stat().st_nlink == 1:
+                shutil.chown(path, user="ygoduel", group="ygoduel", follow_symlinks=False)
 
 
 def safe_remove_list(root: Path, list_path: Path) -> None:
@@ -241,12 +280,15 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
 
     new.mkdir(parents=True)
     try:
-        shutil.copytree(old, new, dirs_exist_ok=True, symlinks=True)
+        # Releases share unchanged immutable files to avoid duplicating the
+        # independent application's large node_modules tree and exhausting
+        # Aly's inode quota. Updated files are unlinked before they are copied.
+        shutil.copytree(old, new, dirs_exist_ok=True, symlinks=True, copy_function=link_or_copy)
         release_metadata = new / "release.json"
         if release_metadata.is_file():
             metadata = json.loads(release_metadata.read_text(encoding="utf-8"))
             metadata.update(id=release_name, previousRelease=old.name, resourceManifestSha256=sha256(manifest_path))
-            release_metadata.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            atomic_write_text(release_metadata, json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
         source_host = cube_root / "shared" / "srvpro" / "ygopro"
         target_host = new / "srvpro" / "ygopro"
         for name in ("cards.cdb", "strings.conf", "lflist.conf"):
@@ -297,8 +339,9 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
                 resources[name] = sha256(resource)
         resources["cardNames"] = sha256(new / "assets" / "ygocdb_cards.json")
         resources["resourceManifest"] = sha256(manifest_path)
-        resources_path.write_text(json.dumps(resources, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        (new / "resource-sync.json").write_text(
+        atomic_write_text(resources_path, json.dumps(resources, ensure_ascii=False, indent=2) + "\n")
+        atomic_write_text(
+            new / "resource-sync.json",
             json.dumps(
                 {
                     "id": release_id,
@@ -312,9 +355,8 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
                 indent=2,
             )
             + "\n",
-            encoding="utf-8",
         )
-        run("chown", "-R", "ygoduel:ygoduel", str(new))
+        set_release_ownership(new)
 
         config_file = duel_root / "shared" / "config.yaml"
         config = parse_config(old / "api" / "node_modules", config_file)
