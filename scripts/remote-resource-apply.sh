@@ -98,16 +98,25 @@ for sidecar in "$DB-wal" "$DB-shm"; do
   [[ -e "$sidecar" ]] && cp -f "$sidecar" "$BACKUP/$(basename "$sidecar")" || true
 done
 rm -rf "$BACKUP/srvpro-ygopro" "$BACKUP/pics_avif"
-cp -a "$OLD_HOST" "$BACKUP/srvpro-ygopro"
-cp -a "$OLD_AVIF" "$BACKUP/pics_avif"
+cp -al "$OLD_HOST" "$BACKUP/srvpro-ygopro"
+cp -al "$OLD_AVIF" "$BACKUP/pics_avif"
+# Keep rollback resources compact and never retain original card images.
+rm -rf "$BACKUP/srvpro-ygopro/pics" "$BACKUP/srvpro-ygopro/expansions/pics" "$BACKUP/srvpro-ygopro/expansions/pack"
 cp -a "$ROOT/current/config.yaml" "$BACKUP/config.yaml"
 [[ -f "$OLD_NAMES" ]] && cp -f "$OLD_NAMES" "$BACKUP/ygocdb_cards.json" || true
 [[ -f "$ROOT/shared/assets/resource-manifest.json" ]] && cp -f "$ROOT/shared/assets/resource-manifest.json" "$BACKUP/resource-manifest.json" || true
 
 rm -rf "$STAGE/root"
 mkdir -p "$STAGE/root/srvpro/ygopro" "$STAGE/root/assets/pics_avif"
-cp -a "$OLD_HOST"/. "$STAGE/root/srvpro/ygopro"/
-cp -a "$OLD_AVIF"/. "$STAGE/root/assets/pics_avif"/
+cp -al "$OLD_HOST"/. "$STAGE/root/srvpro/ygopro"/
+cp -al "$OLD_AVIF"/. "$STAGE/root/assets/pics_avif"/
+rm -rf "$OLD_HOST/pics" "$OLD_HOST/expansions/pics" "$OLD_HOST/expansions/pack"
+rm -rf "$STAGE/root/srvpro/ygopro/pics" "$STAGE/root/srvpro/ygopro/expansions/pics" "$STAGE/root/srvpro/ygopro/expansions/pack"
+for tree in "$BACKUP/srvpro-ygopro" "$OLD_HOST" "$STAGE/root/srvpro/ygopro"; do
+  find "$tree" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.bmp' -o -iname '*.gif' -o -iname '*.tif' -o -iname '*.tiff' -o -iname '*.ypk' \) -delete
+  [[ ! -e "$tree/pics" && ! -e "$tree/expansions/pics" && ! -e "$tree/expansions/pack" ]]
+  [[ -z "$(find "$tree" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.bmp' -o -iname '*.gif' -o -iname '*.tif' -o -iname '*.tiff' -o -iname '*.ypk' \) -print -quit)" ]]
+done
 [[ -f "$OLD_NAMES" ]] && cp -f "$OLD_NAMES" "$STAGE/root/assets/ygocdb_cards.json" || true
 # Validate the uploaded tar before extraction.  The staging directory is
 # root-owned, but treating the archive as untrusted protects against a
@@ -133,7 +142,7 @@ with tarfile.open(archive_path, "r:gz") as archive:
         if total > 4_000_000_000:
             raise SystemExit("payload is too large")
 PY
-tar -xzf "$STAGE/payload.tar.gz" -C "$STAGE/root" --no-same-owner
+tar -xzf "$STAGE/payload.tar.gz" -C "$STAGE/root" --no-same-owner --unlink-first
 
 safe_delete() {
   local base="$1" list="$2" rel
@@ -173,6 +182,7 @@ PY
 # atomic from running processes' point of view.
 mv "$OLD_HOST" "$ROOT/shared/srvpro/ygopro.pre-$RELEASE_ID"
 HOST_PRE_MOVED=1
+rm -rf "$ROOT/shared/srvpro/ygopro.pre-$RELEASE_ID/pics" "$ROOT/shared/srvpro/ygopro.pre-$RELEASE_ID/expansions/pics" "$ROOT/shared/srvpro/ygopro.pre-$RELEASE_ID/expansions/pack"
 mv "$OLD_AVIF" "$ROOT/shared/assets/pics_avif.pre-$RELEASE_ID"
 AVIF_PRE_MOVED=1
 mv "$STAGE/root/srvpro/ygopro" "$OLD_HOST"

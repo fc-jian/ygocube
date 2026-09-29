@@ -236,6 +236,11 @@ API 和卡库 release 位于 `/opt/ygoduel`；不能用 Cube 的 `/api` 搜索�
 卡名逐张搜索 Super Pre 卡，并确认 `/duel-api/public/duel/options` 包含上游最新 OCG
 与 TCG 禁限表。
 
+卡图在 Aly 只保留 `assets/pics_avif` 中的压缩 AVIF；原始 `pics/`、`pack/`、JPEG、PNG、
+WebP 不进入运行 release、回滚快照或备份。部署须清除旧运行树中的原图，并逐项检查
+两套受管资源目录。Cube 与 Duel 的主/扩展 CDB 集合、脚本、禁限表、YGOCDB 映射及 AVIF
+目录指纹都必须对应同一个 `resource-manifest.json`。
+
 ### 4.2 Cube 与独立 Duel 是两个发布目标
 
 - 标准资源 deploy 分别更新 `/opt/ygocube` 和 `/opt/ygoduel`，两边各自备份、校验和
@@ -246,6 +251,9 @@ API 和卡库 release 位于 `/opt/ygoduel`；不能用 Cube 的 `/api` 搜索�
   资源路径，不能永远固定首个 release。未变化的应用文件以硬链接复用，因此旧 release
   文件保持不可变；更新资源须先替换目标文件，元数据须原子替换，不能原地写入。
   避免在运行目录直接覆盖 Lua/CDB。
+- 用户明确要求清理历史备份时，先核对 current、systemd 与备份指针，再保留 current
+  和一个可回滚 release/资源快照，清理更旧的备份与 `.pre-*`。不得删除失败发布的
+  staging；新备份与原图检查通过后再清理旧备份。
 - 资源和 API 同时修复时走完整应用发布：备份数据库/配置/current，验证完整包，
   原子切换，按影响范围重启，并具备回滚。不得为 API 修改重启无关 Web、Nginx
   或 Cube 宿主；确需中断的范围应在维护授权上下文中说明。

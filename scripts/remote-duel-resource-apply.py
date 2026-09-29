@@ -19,6 +19,7 @@ from urllib.request import urlopen
 
 
 TOKEN_TYPE = 0x4000
+RAW_CARD_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
 
 
 def run(*args: str) -> str:
@@ -131,23 +132,124 @@ def safe_remove_list(root: Path, list_path: Path) -> None:
             target.unlink()
 
 
-def verify_cube_resources(cube_root: Path, manifest: dict) -> None:
+def verify_file_manifest(root: Path, files: dict, label: str) -> None:
+    for relative, metadata in files.items():
+        rel = PurePosixPath(relative)
+        if rel.is_absolute() or ".." in rel.parts or "\\" in relative:
+            raise RuntimeError(f"unsafe {label} manifest path: {relative!r}")
+        path = root.joinpath(*rel.parts)
+        if not path.is_file() or path.is_symlink():
+            raise RuntimeError(f"missing regular {label} resource: {relative}")
+        if path.stat().st_size != metadata.get("size") or sha256(path) != metadata.get("sha256"):
+            raise RuntimeError(f"{label} resource does not match manifest: {relative}")
+
+
+def manifest_tree_fingerprint(files: dict) -> dict:
+    digest = hashlib.sha256()
+    for relative, metadata in sorted(files.items()):
+        digest.update(relative.encode("utf-8") + b"\0")
+        digest.update(bytes.fromhex(metadata["sha256"]))
+        digest.update(b"\0" + str(int(metadata["size"])).encode("ascii") + b"\n")
+    return {"fileCount": len(files), "sha256": digest.hexdigest()}
+
+
+def directory_fingerprint(root: Path) -> dict:
+    digest = hashlib.sha256()
+    files = sorted(root.rglob("*"))
+    count = 0
+    for path in files:
+        if path.is_symlink():
+            raise RuntimeError(f"refusing symlink in card-image tree: {path.relative_to(root)}")
+        if not path.is_file():
+            continue
+        relative = path.relative_to(root).as_posix()
+        digest.update(relative.encode("utf-8") + b"\0")
+        digest.update(bytes.fromhex(sha256(path)))
+        digest.update(b"\0" + str(path.stat().st_size).encode("ascii") + b"\n")
+        count += 1
+    return {"fileCount": count, "sha256": digest.hexdigest()}
+
+
+def cdb_hashes(host: Path) -> dict[str, str]:
+    paths = [host / "cards.cdb", *sorted((host / "expansions").rglob("*.cdb"))]
+    return {
+        path.relative_to(host).as_posix(): sha256(path)
+        for path in paths
+        if path.is_file() and not path.is_symlink()
+    }
+
+
+def remove_unmanaged_suffix(source: Path, target: Path, suffix: str) -> None:
+    expected = {
+        path.relative_to(source).as_posix()
+        for path in source.rglob(f"*{suffix}")
+        if path.is_file() and not path.is_symlink()
+    }
+    for path in target.rglob(f"*{suffix}"):
+        if path.is_symlink():
+            raise RuntimeError(f"refusing symlinked Duel resource: {path.name}")
+        if path.is_file() and path.relative_to(target).as_posix() not in expected:
+            path.unlink()
+
+
+def remove_raw_card_images(host: Path) -> None:
+    for path in (host / "pics", host / "expansions" / "pics", host / "expansions" / "pack"):
+        if path.is_symlink():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+        elif path.exists():
+            path.unlink()
+    for path in host.rglob("*.ypk"):
+        if path.is_symlink():
+            path.unlink()
+        elif path.is_file():
+            path.unlink()
+
+
+def verify_compressed_card_art(host: Path, avif_root: Path) -> None:
+    for path in host.rglob("*"):
+        if path.is_dir() and path.name.lower() in {"pics", "pack"}:
+            raise RuntimeError(f"uncompressed card-image directory remains: {path.relative_to(host)}")
+        if path.is_file() and path.suffix.lower() in RAW_CARD_IMAGE_SUFFIXES:
+            raise RuntimeError(f"uncompressed card image remains: {path.relative_to(host)}")
+    for path in avif_root.rglob("*"):
+        if path.is_file() and path.suffix.lower() != ".avif":
+            raise RuntimeError(f"non-AVIF file in compressed card-image tree: {path.relative_to(avif_root)}")
+        if path.is_file() and path.stat().st_size > 64 * 1024:
+            raise RuntimeError(f"AVIF card image exceeds the compressed-size limit: {path.relative_to(avif_root)}")
+
+
+def verify_cube_resources(cube_root: Path, manifest: dict) -> dict:
     host = cube_root / "shared" / "srvpro" / "ygopro"
+    assets = cube_root / "shared" / "assets"
     card = host / "cards.cdb"
-    if not card.is_file() or sha256(card) != manifest.get("cards", {}).get("sha256"):
+    cards_meta = manifest.get("cards", {})
+    if not card.is_file() or card.stat().st_size != cards_meta.get("size") or sha256(card) != cards_meta.get("sha256"):
         raise RuntimeError("staged main cards.cdb does not match its manifest")
     names_meta = manifest.get("cardNames", {})
-    names = cube_root / "shared" / "assets" / "ygocdb_cards.json"
-    if not names.is_file() or sha256(names) != names_meta.get("sha256"):
+    names = assets / "ygocdb_cards.json"
+    if not names.is_file() or names.stat().st_size != names_meta.get("size") or sha256(names) != names_meta.get("sha256"):
         raise RuntimeError("staged YGOCDB mapping does not match its manifest")
+    installed_manifest = assets / "resource-manifest.json"
+    if not installed_manifest.is_file() or json.loads(installed_manifest.read_text(encoding="utf-8")) != manifest:
+        raise RuntimeError("Cube resource manifest differs from the verified deployment manifest")
     for relative, metadata in manifest.get("banlist", {}).get("files", {}).items():
         path = host / relative
-        if not path.is_file() or sha256(path) != metadata.get("sha256"):
+        if not path.is_file() or path.stat().st_size != metadata.get("size") or sha256(path) != metadata.get("sha256"):
             raise RuntimeError(f"staged upstream ban-list does not match its manifest: {relative}")
-    for relative, metadata in manifest.get("expansions", {}).get("files", {}).items():
-        path = host / "expansions" / relative
-        if not path.is_file() or sha256(path) != metadata.get("sha256"):
-            raise RuntimeError(f"staged Super Pre file does not match its manifest: {relative}")
+    verify_file_manifest(host / "script", manifest.get("scripts", {}).get("files", {}), "YGOPro script")
+    verify_file_manifest(host / "expansions", manifest.get("expansions", {}).get("files", {}), "Super Pre")
+    avif_files = manifest.get("avif", {}).get("files", {})
+    verify_file_manifest(assets / "pics_avif", avif_files, "AVIF")
+    avif_fingerprint = directory_fingerprint(assets / "pics_avif")
+    if avif_fingerprint != manifest_tree_fingerprint(avif_files):
+        raise RuntimeError("Cube AVIF directory has extra or missing files")
+    verify_compressed_card_art(host, assets / "pics_avif")
+    return {
+        "resourceManifestSha256": sha256(installed_manifest),
+        "picsAvif": avif_fingerprint,
+    }
 
 
 def probe_catalogue(release: Path, manifest: dict) -> dict:
@@ -261,7 +363,7 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
     # The Cube apply step atomically moves the payload's complete host and AVIF
     # tree into shared/. Read the now-live, hash-verified resources from there;
     # only the manifest and delete lists remain in the staging directory.
-    verify_cube_resources(cube_root, manifest)
+    cube_resource_state = verify_cube_resources(cube_root, manifest)
     if active_standalone_host():
         raise RuntimeError("an independent Duel host is active; resource deployment was not started")
 
@@ -291,6 +393,7 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
             atomic_write_text(release_metadata, json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
         source_host = cube_root / "shared" / "srvpro" / "ygopro"
         target_host = new / "srvpro" / "ygopro"
+        remove_raw_card_images(target_host)
         for name in ("cards.cdb", "strings.conf", "lflist.conf"):
             checked_copy_file(source_host / name, target_host / name)
         for directory in (target_host / "script", target_host / "expansions"):
@@ -324,11 +427,21 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
         # Keep the upstream lflist at both srvpro lookup paths. It is tracked as
         # a separate resource so --skip-expansion cannot freeze ban-list dates.
         checked_copy_file(source_host / "lflist.conf", target_host / "expansions" / "lflist.conf")
+        remove_unmanaged_suffix(source_host / "script", target_host / "script", ".lua")
+        remove_unmanaged_suffix(source_expansions, target_host / "expansions", ".cdb")
+        verify_file_manifest(target_host / "script", manifest.get("scripts", {}).get("files", {}), "Duel YGOPro script")
+        verify_file_manifest(target_host / "expansions", manifest.get("expansions", {}).get("files", {}), "Duel Super Pre")
+        if cdb_hashes(source_host) != cdb_hashes(target_host):
+            raise RuntimeError("Cube and Duel card database sets differ")
 
         image_source = cube_root / "shared" / "assets" / "pics_avif"
         if not image_source.is_dir():
             raise RuntimeError("staged AVIF directory is missing")
         replace_directory(image_source, new / "assets" / "pics_avif")
+        duel_avif_fingerprint = directory_fingerprint(new / "assets" / "pics_avif")
+        if duel_avif_fingerprint != cube_resource_state["picsAvif"]:
+            raise RuntimeError("Cube and Duel AVIF image trees differ")
+        verify_compressed_card_art(target_host, new / "assets" / "pics_avif")
         checked_copy_file(cube_root / "shared" / "assets" / "ygocdb_cards.json", new / "assets" / "ygocdb_cards.json")
 
         resources_path = new / "resources.json"
@@ -338,7 +451,8 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
             if resource.is_file():
                 resources[name] = sha256(resource)
         resources["cardNames"] = sha256(new / "assets" / "ygocdb_cards.json")
-        resources["resourceManifest"] = sha256(manifest_path)
+        resources["resourceManifest"] = cube_resource_state["resourceManifestSha256"]
+        resources["picsAvif"] = duel_avif_fingerprint
         atomic_write_text(resources_path, json.dumps(resources, ensure_ascii=False, indent=2) + "\n")
         atomic_write_text(
             new / "resource-sync.json",
@@ -371,6 +485,7 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
         config_temp.chmod(0o600)
 
         run("systemctl", "stop", "ygoduel-api", "ygoduel-srvpro")
+        remove_raw_card_images(old / "srvpro" / "ygopro")
         shutil.copy2(config_file, backup / "config.yaml")
         database = duel_root / "shared" / "data" / "duel.sqlite"
         with sqlite3.connect(database) as source, sqlite3.connect(backup / "duel.sqlite") as target:
@@ -386,6 +501,12 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
         run("systemctl", "start", "ygoduel-api", "ygoduel-srvpro")
         wait_healthy(target_host / "lflist.conf")
         search_result = probe_catalogue(new, manifest)
+        live_duel_avif = directory_fingerprint(duel_root / "current" / "assets" / "pics_avif")
+        live_cube_avif = directory_fingerprint(cube_root / "shared" / "assets" / "pics_avif")
+        if live_cube_avif != cube_resource_state["picsAvif"] or live_duel_avif != live_cube_avif:
+            raise RuntimeError("live Cube and Duel AVIF image trees differ")
+        if (duel_root / "current" / "resource-sync.json").is_file() is False:
+            raise RuntimeError("Duel current release is missing its resource-sync manifest")
         if new.joinpath("srvpro/ygopro/ygopro").is_file() and "not found" in run("ldd", str(new / "srvpro/ygopro/ygopro")):
             raise RuntimeError("standalone Duel host has unresolved shared libraries")
         (backup / "deployment.json").write_text(
@@ -396,6 +517,8 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
                     "previousRelease": old.name,
                     "search": search_result,
                     "resourceManifestSha256": resources["resourceManifest"],
+                    "cardDatabaseFilesMatched": len(cdb_hashes(source_host)),
+                    "picsAvif": live_duel_avif,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -403,7 +526,14 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
             + "\n",
             encoding="utf-8",
         )
-        return {"ok": True, "release": release_name, "backup": str(backup), **search_result}
+        return {
+            "ok": True,
+            "release": release_name,
+            "backup": str(backup),
+            "cardDatabaseFilesMatched": len(cdb_hashes(source_host)),
+            "picsAvif": live_duel_avif,
+            **search_result,
+        }
     except Exception:
         # The release remains on disk for inspection. Restore the old pointer
         # and configuration before starting the former services again.
