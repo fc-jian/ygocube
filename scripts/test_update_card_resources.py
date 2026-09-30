@@ -142,11 +142,13 @@ refresh_server_baseline() { return 0; }
             record.write_text(json.dumps({'cards': {'sha256': 'stale'}}))
             actual = {'cards': {'sha256': 'restored'}, 'expansions': {'files': {'restored.lua': {'sha256': 'a'}}}}
             response = state / 'server.txt'
-            response.write_text('tool output\nYGOCUBE_MANIFEST_SHA=' + 'a' * 64 + '\nYGOCUBE_MANIFEST_JSON=' + json.dumps(actual) + '\n')
-            result = subprocess.run([sys.executable, '-c', body, str(response), str(state)], text=True, capture_output=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(json.loads(record.read_text()), actual)
-            self.assertEqual((state / 'expected-server-manifest.sha256').read_text().strip(), 'a' * 64)
+            stdout = 'YGOCUBE_MANIFEST_SHA=' + 'a' * 64 + '\nYGOCUBE_MANIFEST_JSON=' + json.dumps(actual) + '\n'
+            for output in [stdout, json.dumps({'success': True, 'exit_code': 0, 'stdout': stdout})]:
+                response.write_text(output)
+                result = subprocess.run([sys.executable, '-c', body, str(response), str(state)], text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(record.read_text()), actual)
+                self.assertEqual((state / 'expected-server-manifest.sha256').read_text().strip(), 'a' * 64)
 
     @unittest.skipIf(os.name == "nt", "Linux deployment lock and tool fixture")
     def test_pair_rollback_stops_on_duel_failure_before_cube_restore(self) -> None:

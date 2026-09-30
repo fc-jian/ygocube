@@ -1023,6 +1023,14 @@ refresh_server_baseline() {
   python3 - "$output" "$STATE_DIR" <<'PYBASE' || return $?
 import json, os, pathlib, re, sys
 output = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
+try:
+    response = json.loads(output)
+except json.JSONDecodeError:
+    response = None
+if isinstance(response, dict) and isinstance(response.get('stdout'), str):
+    if response.get('success') is False or response.get('exit_code', 0) != 0:
+        raise SystemExit('SSH helper reported a failed server baseline request')
+    output = response['stdout']
 state = pathlib.Path(sys.argv[2])
 digest = re.search(r'YGOCUBE_MANIFEST_SHA=([0-9a-f]{64})', output)
 marker = 'YGOCUBE_MANIFEST_JSON='
