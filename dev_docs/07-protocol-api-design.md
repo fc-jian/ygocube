@@ -430,6 +430,8 @@ CardInfo 增加可选 aliasName：alias 对应 exact code 的显示卡名，查�
 
 GET /public/duel/options 与私有 /cube/standalone-options 的 lists 每项增加 limits（卡号到 0/1/2/3 的映射），索引与宿主加载顺序保持一致，无限制为空映射。Duel 构筑默认选日期最新的 OCG 表，允许切换，卡图左上角显示禁/限/准限；按 YGOPro 使用 alias（非零时）查表，未列出为 3。此选项只影响构筑显示，不改房间规则。
 
+禁限表名称中的日期使用上游 `lflist.conf` 的日历日期，与服务器时区无关；只有年月的表头按该月 1 日显示。例如 `!2026.10` 显示为 `2026.10.01 OCG`，`!2026.9 TCG` 显示为 `2026.09.01 TCG`。时区转换不能将名称移到前一天。
+
 ### 8.11 战斗数值与攻击日志
 
 - 共享协议模型 `Card` 显式声明可选数字字段 `status`、`baseAtk`、`baseDef`，对应已支持的 QUERY_STATUS、QUERY_BASE_ATTACK、QUERY_BASE_DEF；缺失表示当前视角尚未收到该字段，不补零或推测。隐蔽查询清理时仍移除这些字段。

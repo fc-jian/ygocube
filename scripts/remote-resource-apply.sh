@@ -21,6 +21,9 @@ OLD_HOST="$ROOT/shared/srvpro/ygopro"
 OLD_AVIF="$ROOT/shared/assets/pics_avif"
 OLD_NAMES="$ROOT/shared/assets/ygocdb_cards.json"
 DB="$ROOT/shared/data/cube.sqlite"
+OLD_CUBE_RELEASE="$(readlink -f "$ROOT/current")"
+[[ "$OLD_CUBE_RELEASE" == "$ROOT/releases/"* ]]
+NEW_APP_RELEASE="$ROOT/releases/card-sync-$RELEASE_ID"
 mkdir -p "$BACKUP"
 exec 9>"$ROOT/.card-resource.lock"
 flock -n 9
@@ -36,11 +39,16 @@ HOST_PRE_MOVED=0
 AVIF_PRE_MOVED=0
 NAMES_REPLACED=0
 MANIFEST_REPLACED=0
+APP_REPLACED=0
 rollback_resource_moves() {
   # The backup is complete before any live directory is moved.  If an
   # unexpected filesystem error occurs during the two-directory switch,
   # restore the old paths before bringing services back up.  Keep the failed
   # stage and backup for forensic inspection; never touch the database here.
+  if [[ "${APP_REPLACED:-0}" == 1 ]]; then
+    ln -s "$OLD_CUBE_RELEASE" "$ROOT/current-recover-$RELEASE_ID"
+    mv -Tf "$ROOT/current-recover-$RELEASE_ID" "$ROOT/current"
+  fi
   if [[ "${HOST_REPLACED:-0}" == 1 ]]; then
     rm -rf "$OLD_HOST"
     if [[ -d "$OLD_HOST.pre-$RELEASE_ID" ]]; then
@@ -103,6 +111,9 @@ cp -al "$OLD_AVIF" "$BACKUP/pics_avif"
 # Keep rollback resources compact and never retain original card images.
 rm -rf "$BACKUP/srvpro-ygopro/pics" "$BACKUP/srvpro-ygopro/expansions/pics" "$BACKUP/srvpro-ygopro/expansions/pack"
 cp -a "$ROOT/current/config.yaml" "$BACKUP/config.yaml"
+printf '%s\n' "$OLD_CUBE_RELEASE" > "$BACKUP/previous-release.txt"
+cp -f "$STAGE/apply-duel.py" "$BACKUP/apply-duel.py"
+cp -f "$STAGE/apply.sh" "$BACKUP/apply.sh"
 [[ -f "$OLD_NAMES" ]] && cp -f "$OLD_NAMES" "$BACKUP/ygocdb_cards.json" || true
 [[ -f "$ROOT/shared/assets/resource-manifest.json" ]] && cp -f "$ROOT/shared/assets/resource-manifest.json" "$BACKUP/resource-manifest.json" || true
 
@@ -142,6 +153,7 @@ with tarfile.open(archive_path, "r:gz") as archive:
         if total > 4_000_000_000:
             raise SystemExit("payload is too large")
 PY
+
 tar -xzf "$STAGE/payload.tar.gz" -C "$STAGE/root" --no-same-owner --unlink-first
 
 safe_delete() {
@@ -177,6 +189,21 @@ for relative, metadata in files.items():
         raise SystemExit(f'upstream ban-list verification failed: {relative}')
 PY
 
+if [[ -f "$STAGE/root/metadata/srvpro-application.json" ]]; then
+  [[ ! -e "$NEW_APP_RELEASE" ]]
+  cp -al "$OLD_CUBE_RELEASE" "$NEW_APP_RELEASE"
+  python3 "$STAGE/apply-duel.py" --cube-root "$ROOT" --id "$RELEASE_ID" --install-application-to "$NEW_APP_RELEASE"
+  python3 - "$NEW_APP_RELEASE/release.json" "$RELEASE_ID" "$OLD_CUBE_RELEASE" <<'PYAPP'
+import json, os, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding='utf-8')) if path.is_file() else {}
+value.update(id='card-sync-' + sys.argv[2], previousRelease=pathlib.Path(sys.argv[3]).name)
+temporary = path.with_name('.release.json.app-new')
+temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+os.replace(temporary, path)
+PYAPP
+fi
+
 # The old directories remain available as .pre-$RELEASE_ID until a later
 # cleanup.  Moving complete directories on one filesystem makes the switch
 # atomic from running processes' point of view.
@@ -204,6 +231,17 @@ MANIFEST_REPLACED=1
 # cache-only mutation is recoverable without restoring tournament state.
 sqlite3 "$DB" 'UPDATE cards SET metadata_version=0;' > "$BACKUP/card-cache-invalidated.txt"
 chown -R ygocube:ygocube "$OLD_HOST" "$OLD_AVIF" "$OLD_NAMES" "$ROOT/shared/assets/resource-manifest.json"
+
+if [[ -f "$STAGE/root/metadata/srvpro-application.json" ]]; then
+  ln -s "$NEW_APP_RELEASE" "$ROOT/current-app-$RELEASE_ID"
+  mv -Tf "$ROOT/current-app-$RELEASE_ID" "$ROOT/current"
+  APP_REPLACED=1
+fi
+# Keep the audited helper available after successful staging cleanup and for
+# application/Web publications. Rollback also has its own backup copy above.
+mkdir -p "$ROOT/shared/card-resource-tools"
+cp -f "$STAGE/apply-duel.py" "$ROOT/shared/card-resource-tools/.apply-duel.py.new"
+mv -f "$ROOT/shared/card-resource-tools/.apply-duel.py.new" "$ROOT/shared/card-resource-tools/apply-duel.py"
 
 systemctl start ygocube-api
 systemctl start ygocube-srvpro

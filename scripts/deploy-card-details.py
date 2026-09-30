@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 """Stage or activate a checksummed Cube/Duel application release."""
 import argparse, hashlib, json, os, pathlib, re, shutil, sqlite3, subprocess, tarfile, time, urllib.request
+import importlib.util
+import fcntl
+resource_lock=open('/opt/ygocube/.card-resource-deploy.lock','a')
+fcntl.flock(resource_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
 P = pathlib.Path
+helper_path=P('/opt/ygocube/shared/card-resource-tools/apply-duel.py')
+if not helper_path.is_file():raise SystemExit('Install current resource workflow before application deployment')
+spec=importlib.util.spec_from_file_location('resource_apply',helper_path)
+resource_apply=importlib.util.module_from_spec(spec);spec.loader.exec_module(resource_apply)
 ap = argparse.ArgumentParser()
 ap.add_argument('archive', type=P)
 ap.add_argument('sha256')
@@ -52,14 +60,19 @@ for n,new in news.items():
     if new.exists():
         assert (new/'COMMIT').read_text().strip() == manifest['sourceCommit']
         continue
-    shutil.copytree(olds[n], new, symlinks=True)
+    shutil.copytree(olds[n], new, symlinks=True, copy_function=resource_apply.hardlink_file)
     shutil.rmtree(new/'web')
     shutil.copytree(stage/n/'web', new/'web', symlinks=True)
     if not a.web_only:
         shutil.rmtree(new/'api/dist')
         shutil.copytree(stage/'api/dist', new/'api/dist')
-        shutil.copytree(stage/'api/node_modules', new/'api/node_modules', dirs_exist_ok=True)
-        shutil.copytree(stage/'srvpro', new/'srvpro', dirs_exist_ok=True)
+        def replace_file(src, dst):
+            target=P(dst)
+            assert target.resolve().is_relative_to(new.resolve()), 'Application overlay touches shared runtime'
+            if target.is_file() or target.is_symlink():target.unlink()
+            return shutil.copy2(src,dst)
+        shutil.copytree(stage/'api/node_modules', new/'api/node_modules', dirs_exist_ok=True, copy_function=replace_file)
+        shutil.copytree(stage/'srvpro', new/'srvpro', dirs_exist_ok=True, copy_function=replace_file)
     app = new/'web'/('standalone/apps/web' if n == 'ygocube' else 'apps/web')
     assert (app/'.next/static').is_dir() and (app/'.next/BUILD_ID').is_file()
     old_static = olds[n]/'web'/('standalone/apps/web/.next/static' if n == 'ygocube' else 'apps/web/.next/static')
@@ -70,10 +83,11 @@ for n,new in news.items():
     metadata = dict(id=a.release, sourceCommit=manifest['sourceCommit'], sourceBranch=manifest.get('sourceBranch','unknown'), workingTreeChanges=False,
                     previousRelease=olds[n].name, webBuildId=(app/'.next/BUILD_ID').read_text().strip(),
                     artifactSha256=a.sha256, srvproCommit=manifest['srvproCommit'])
-    (new/'release.json').write_text(json.dumps(metadata, indent=2))
-    (new/'COMMIT').write_text(manifest['sourceCommit']+'\n')
-    (new/'RELEASE_ID').write_text(a.release+'\n')
-    run('chown','-R',n+':'+n,str(new))
+    resource_apply.atomic_write_text(new/'release.json',json.dumps(metadata, indent=2))
+    resource_apply.atomic_write_text(new/'COMMIT',manifest['sourceCommit']+'\n')
+    resource_apply.atomic_write_text(new/'RELEASE_ID',a.release+'\n')
+    if n=='ygoduel':resource_apply.link_existing_release_resources(roots['ygocube'],new)
+    resource_apply.set_release_ownership(new,user=n)
     run('/usr/bin/node','-e',"require(process.argv[1]+'/node_modules/ws'); require(process.argv[1]+'/node_modules/@ygocube/duel-protocol')",str(new/'api'))
 if not a.activate:
     print(json.dumps({'prepared':True,'release':a.release,'sourceCommit':manifest['sourceCommit']}))
@@ -101,7 +115,8 @@ for n,root in roots.items():
     shutil.copy2(config_file,backup/'config.yaml')
 try:
     if not a.web_only:
-        run('systemctl','stop','ygocube-api','ygoduel-api')
+        resource_apply.enter_maintenance()
+        run('systemctl','stop','ygocube-api')
         assert not occupied(), 'Host appeared during maintenance preflight'
     run('systemctl','stop',*services)
     if a.windbot_root:

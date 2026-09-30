@@ -103,6 +103,77 @@ class UpdateScriptTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("safe identifier", result.stderr)
 
+    def test_rollback_propagates_first_ssh_failure_in_conditional_context(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        body = source[source.index('remote_rollback() {'):source.index('\nremote_health() {')]
+        fixture = '''
+ROOT_DIR=/fixture; ALY_ROOT=/opt/ygocube; ALY_DUEL_ROOT=/opt/ygoduel; RELEASE_ID=fixture
+info() { :; }
+calls=0
+ssh_exec() { calls=$((calls + 1)); if [ "$calls" = 1 ]; then return 7; fi; return 0; }
+ssh_upload() { return 0; }
+refresh_server_baseline() { return 0; }
+'''
+        result = subprocess.run([BASH or "bash", "-c", 'set -e\n' + fixture + body + '\nremote_rollback fixture || exit $?'], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 7, result.stderr)
+
+    def test_rollback_propagates_upload_failure(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        body = source[source.index('remote_rollback() {'):source.index('\nremote_health() {')]
+        fixture = '''
+ROOT_DIR=/fixture; ALY_ROOT=/opt/ygocube; ALY_DUEL_ROOT=/opt/ygoduel; RELEASE_ID=fixture
+info() { :; }
+ssh_exec() { return 0; }
+ssh_upload() { return 13; }
+refresh_server_baseline() { return 0; }
+'''
+        result = subprocess.run([BASH or "bash", "-c", 'set -e\n' + fixture + body + '\nremote_rollback fixture || exit $?'], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 13, result.stderr)
+
+    def test_server_baseline_replaces_stale_local_deploy_record(self) -> None:
+        import json
+        import tempfile
+        source = SCRIPT.read_text(encoding="utf-8")
+        start = source.index('import json, os, pathlib, re, sys\noutput = ')
+        body = source[start:source.index('\nPYBASE\n', start)]
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            record = state / 'deployed-resource-manifest.json'
+            record.write_text(json.dumps({'cards': {'sha256': 'stale'}}))
+            actual = {'cards': {'sha256': 'restored'}, 'expansions': {'files': {'restored.lua': {'sha256': 'a'}}}}
+            response = state / 'server.txt'
+            response.write_text('tool output\nYGOCUBE_MANIFEST_SHA=' + 'a' * 64 + '\nYGOCUBE_MANIFEST_JSON=' + json.dumps(actual) + '\n')
+            result = subprocess.run([sys.executable, '-c', body, str(response), str(state)], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(record.read_text()), actual)
+            self.assertEqual((state / 'expected-server-manifest.sha256').read_text().strip(), 'a' * 64)
+
+    @unittest.skipIf(os.name == "nt", "Linux deployment lock and tool fixture")
+    def test_pair_rollback_stops_on_duel_failure_before_cube_restore(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cube, duel, commands = root / 'cube', root / 'duel', root / 'commands'
+            backup = cube / 'backups/card-sync-fixture'
+            for directory in [backup / 'srvpro-ygopro', backup / 'pics_avif', duel, commands, cube / 'shared/srvpro/ygopro']:
+                directory.mkdir(parents=True, exist_ok=True)
+            (backup / 'resource-manifest.json').write_text('{}')
+            live = cube / 'shared/srvpro/ygopro/live.cdb'
+            live.write_text('current resource')
+            transaction = root / 'transaction.sh'
+            shutil.copyfile(SCRIPT.with_name('remote-resource-transaction.sh'), transaction)
+            (root / 'apply-duel.py').write_text('# fixture')
+            python = commands / 'python3'
+            python.write_text('#!/usr/bin/env bash\nfor arg in "$@"; do if [ "$arg" = --rollback ]; then exit 17; fi; done\nexit 0\n')
+            systemctl = commands / 'systemctl'
+            systemctl.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$SERVICE_LOG"\n')
+            python.chmod(0o755); systemctl.chmod(0o755)
+            env = {**os.environ, 'PATH': str(commands) + os.pathsep + os.environ['PATH'], 'SERVICE_LOG': str(root / 'services.log')}
+            result = subprocess.run([BASH or 'bash', str(transaction), 'rollback', '--cube-root', str(cube), '--duel-root', str(duel), '--id', 'fixture'], env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 17, result.stderr)
+            self.assertEqual(live.read_text(), 'current resource')
+            self.assertNotIn('stop ygocube', (root / 'services.log').read_text())
+
 
 if __name__ == "__main__":
     unittest.main()

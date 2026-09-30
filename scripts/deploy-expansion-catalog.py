@@ -3,6 +3,8 @@
 import argparse, hashlib, json, os, pathlib, shutil, sqlite3, subprocess, time, urllib.request
 
 P = pathlib.Path
+if P('/opt/ygocube/shared/card-resource-tools/apply-duel.py').is_file():
+    raise SystemExit('Legacy catalogue migration is retired; use update-card-resources.sh and the application publisher')
 parser = argparse.ArgumentParser()
 parser.add_argument('stage', type=P)
 parser.add_argument('--confirm-maintenance', action='store_true', required=True)

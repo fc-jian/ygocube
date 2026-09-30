@@ -48,6 +48,7 @@ CONFIRM_MAINTENANCE=0
 BACKUP_ID=""
 IMAGE_URL_OVERRIDE=0
 EXPANSION_ENABLED=1
+SRVPRO_APP=0
 
 usage() {
   sed -n '1,55p' "$0"
@@ -84,6 +85,7 @@ Options:
   --continue                Continue a previously interrupted/manual merge.
   --push                    Push feature branches (never force-push).
   --confirm-maintenance     Required by deploy before stopping Aly services.
+  --srvpro-app              Include the tested srvpro server and ban-list module in both releases.
   --backup-id <id>          Backup identifier for rollback.
   -h, --help                Show this help.
 
@@ -171,6 +173,7 @@ parse_args() {
       --continue) CONTINUE_MERGE=1; shift ;;
       --push) PUSH=1; shift ;;
       --confirm-maintenance) CONFIRM_MAINTENANCE=1; shift ;;
+      --srvpro-app) SRVPRO_APP=1; shift ;;
       --backup-id) [[ $# -ge 2 ]] || die "--backup-id needs a value"; BACKUP_ID="$2"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
       *) die "unknown argument: $1 (use --help)" ;;
@@ -189,7 +192,7 @@ parse_args "$@"
 [[ "$IMAGE_URL" == https://* ]] || die "image URL must use HTTPS"
 [[ "$EXPANSION_URL" == https://* ]] || die "expansion URL must use HTTPS"
 [[ "$EXPANSION_LIST_URL" == https://* ]] || die "expansion list URL must use HTTPS"
-[[ "$ALY_ROOT" =~ ^/[A-Za-z0-9._/+:-]+$ ]] || die "invalid Aly root path"
+[[ "$ALY_ROOT" =~ ^/[A-Za-z0-9._/+:-]+$ && "$ALY_ROOT" != / ]] || die "invalid Aly root path"
 [[ "$ALY_DUEL_ROOT" =~ ^/[A-Za-z0-9._/+:-]+$ && "$ALY_DUEL_ROOT" != "/" ]] || die "invalid Aly independent Duel root path"
 
 if ((DRY_RUN)) || [[ "$COMMAND" == "check" || "$COMMAND" == "test" ]]; then
@@ -693,10 +696,10 @@ PY
       python3 "$HELPER" validate-expansion-release "$expansion_list" "$expansion_source/test-release.cdb" > "$STATE_DIR/expansion-release-match.json"
     fi
     expansion_previous="$STATE_DIR/previous-expansion-manifest.json"
-    if [[ -f "$STATE_DIR/deployed-expansion-manifest.json" ]]; then
-      cp -f "$STATE_DIR/deployed-expansion-manifest.json" "$expansion_previous"
-    elif [[ -f "$STATE_DIR/expansion-manifest.json" ]]; then
+    if [[ -f "$STATE_DIR/expansion-manifest.json" ]]; then
       cp -f "$STATE_DIR/expansion-manifest.json" "$expansion_previous"
+    elif [[ -f "$STATE_DIR/deployed-expansion-manifest.json" ]]; then
+      cp -f "$STATE_DIR/deployed-expansion-manifest.json" "$expansion_previous"
     else
       # Do not infer ownership from an old full resource manifest: it may
       # contain server-local lflist.conf or administrator-added files.
@@ -728,6 +731,7 @@ print(json.dumps({
     'entryCount': len(entries),
     'serverEntryCount': sum(item.get('kind') != 'metadata' for item in entries),
     'listSha256': list_digest,
+    'listEtag': open(listing + '.etag', encoding='utf-8').read().strip(),
     'listSize': len(list_bytes),
     'listCount': len(json.loads(list_bytes.decode('utf-8'))),
     'releaseMatch': release_match,
@@ -910,7 +914,19 @@ make_payload() {
     die "resource manifest contains expansion files but no successful deployed manifest exists; pass --expansion to deploy"
   fi
   rm -rf "$payload"
-  mkdir -p "$payload/srvpro/ygopro" "$payload/srvpro/ygopro/script" "$payload/srvpro/ygopro/expansions" "$payload/assets/pics_avif" "$payload/metadata" "$payload/deletes"
+  mkdir -p "$payload/srvpro/ygopro" "$payload/srvpro/ygopro/script" "$payload/srvpro/ygopro/expansions" "$payload/assets/pics_avif" "$payload/metadata" "$payload/deletes" "$payload/application"
+  if ((SRVPRO_APP)); then
+    mkdir -p "$payload/application/srvpro"
+    cp -f "$ROOT_DIR/srvpro/ygopro-server.js" "$ROOT_DIR/srvpro/cube-banlists.js" "$payload/application/srvpro/"
+    python3 - "$payload" "$(git -C "$ROOT_DIR/srvpro" rev-parse HEAD)" <<'PYAPP'
+import hashlib, json, pathlib, sys
+payload = pathlib.Path(sys.argv[1])
+files = {p.name: {'size': p.stat().st_size, 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()}
+         for p in (payload / 'application/srvpro').iterdir()}
+(payload / 'metadata/srvpro-application.json').write_text(
+    json.dumps({'sourceCommit': sys.argv[2], 'files': files}, indent=2) + '\n', encoding='utf-8')
+PYAPP
+  fi
   [[ -f "$ROOT_DIR/assets/ygocdb_cards.json" ]] && cp -f "$ROOT_DIR/assets/ygocdb_cards.json" "$payload/assets/ygocdb_cards.json"
   cp -f "$ROOT_DIR/srvpro/ygopro/cards.cdb" "$payload/srvpro/ygopro/cards.cdb"
   [[ -f "$ROOT_DIR/srvpro/ygopro/strings.conf" ]] && cp -f "$ROOT_DIR/srvpro/ygopro/strings.conf" "$payload/srvpro/ygopro/strings.conf"
@@ -978,7 +994,7 @@ if isinstance(manifest.get('expansions'), dict):
 with open(sys.argv[2], 'w', encoding='utf-8') as handle:
     json.dump(manifest, handle, ensure_ascii=False, sort_keys=True)
 PYMANIFEST
-  (cd "$payload" && find srvpro assets -type f -print0 | sort -z | xargs -0 sha256sum > metadata/SHA256SUMS)
+  (cd "$payload" && find srvpro assets application -type f -print0 | sort -z | xargs -0 sha256sum > metadata/SHA256SUMS)
   python3 "$ROOT_DIR/scripts/package-card-resource-payload.py" "$payload" "$STATE_DIR/card-resources-${RELEASE_ID}.tar.gz"
   printf '%s\n' "$STATE_DIR/card-resources-${RELEASE_ID}.tar.gz"
 }
@@ -1001,12 +1017,39 @@ ssh_upload() {
   fi
 }
 
+refresh_server_baseline() {
+  local output="$STATE_DIR/server-resource-baseline.txt"
+  ssh_exec "python3 -c 'import hashlib,json,pathlib; p=pathlib.Path(\"$ALY_ROOT/shared/assets/resource-manifest.json\"); b=p.read_bytes(); print(\"YGOCUBE_MANIFEST_SHA=\"+hashlib.sha256(b).hexdigest()); print(\"YGOCUBE_MANIFEST_JSON=\"+json.dumps(json.loads(b),separators=(\",\",\":\")))'" 120 > "$output" || return $?
+  python3 - "$output" "$STATE_DIR" <<'PYBASE' || return $?
+import json, os, pathlib, re, sys
+output = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
+state = pathlib.Path(sys.argv[2])
+digest = re.search(r'YGOCUBE_MANIFEST_SHA=([0-9a-f]{64})', output)
+marker = 'YGOCUBE_MANIFEST_JSON='
+if not digest or marker not in output:
+    raise SystemExit('server baseline response is incomplete')
+manifest, _ = json.JSONDecoder().raw_decode(output.split(marker, 1)[1])
+if not manifest.get('cards', {}).get('sha256'):
+    raise SystemExit('server baseline has no card database metadata')
+for name, value in [('deployed-resource-manifest.json', manifest),
+                    ('deployed-expansion-manifest.json', manifest.get('expansions', {'schemaVersion': 1, 'files': {}}))]:
+    temporary = state / ('.' + name + '.new')
+    temporary.write_text(json.dumps(value, ensure_ascii=False, sort_keys=True) + '\n', encoding='utf-8')
+    os.replace(temporary, state / name)
+(state / 'expected-server-manifest.sha256').write_text(digest.group(1) + '\n', encoding='utf-8')
+PYBASE
+}
+
 remote_rollback() {
-  local id="$1"
+  local id="$1" rollback_stage="$ALY_ROOT/.staging/rollback-$RELEASE_ID"
   info "rolling back Aly resource backup $id"
-  ssh_exec "if [ -f '$ALY_ROOT/.staging/card-sync-$id/apply-duel.py' ]; then python3 '$ALY_ROOT/.staging/card-sync-$id/apply-duel.py' --cube-root '$ALY_ROOT' --duel-root '$ALY_DUEL_ROOT' --id '$id' --rollback; fi" 300
-  ssh_exec "set -eu; root='$ALY_ROOT'; backup=\"\$root/backups/card-sync-$id\"; test -d \"\$backup\"; systemctl stop ygocube-srvpro ygocube-web ygocube-api nginx; rm -rf \"\$root/shared/srvpro/ygopro\" \"\$root/shared/assets/pics_avif\"; cp -al \"\$backup/srvpro-ygopro\" \"\$root/shared/srvpro/ygopro\"; cp -al \"\$backup/pics_avif\" \"\$root/shared/assets/pics_avif\"; if [ -f \"\$backup/ygocdb_cards.json\" ]; then cp -f \"\$backup/ygocdb_cards.json\" \"\$root/shared/assets/.ygocdb_cards.json.rollback-new\"; mv -f \"\$root/shared/assets/.ygocdb_cards.json.rollback-new\" \"\$root/shared/assets/ygocdb_cards.json\"; else rm -f \"\$root/shared/assets/ygocdb_cards.json\"; fi; if [ -f \"\$backup/resource-manifest.json\" ]; then cp -f \"\$backup/resource-manifest.json\" \"\$root/shared/assets/.resource-manifest.json.rollback-new\"; mv -f \"\$root/shared/assets/.resource-manifest.json.rollback-new\" \"\$root/shared/assets/resource-manifest.json\"; else rm -f \"\$root/shared/assets/resource-manifest.json\"; fi; if [ -f \"\$root/shared/data/cube.sqlite\" ]; then sqlite3 \"\$root/shared/data/cube.sqlite\" 'UPDATE cards SET metadata_version=0;'; fi; chown -R ygocube:ygocube \"\$root/shared/srvpro/ygopro\" \"\$root/shared/assets/pics_avif\"; chown ygocube:ygocube \"\$root/shared/assets/ygocdb_cards.json\" \"\$root/shared/assets/resource-manifest.json\" 2>/dev/null || true; systemctl start ygocube-api; systemctl start ygocube-srvpro; systemctl start ygocube-web; systemctl start nginx; systemctl is-active ygocube-api ygocube-srvpro ygocube-web nginx" 300
-  ssh_exec "if [ -f '$ALY_ROOT/.staging/card-sync-$id/apply-duel.py' ]; then python3 '$ALY_ROOT/.staging/card-sync-$id/apply-duel.py' --cube-root '$ALY_ROOT' --duel-root '$ALY_DUEL_ROOT' --id '$id' --relink-current-to-cube; fi" 300
+  ssh_exec "mkdir -p '$rollback_stage'" 60 || return $?
+  ssh_upload "$ROOT_DIR/scripts/remote-duel-resource-apply.py" "$rollback_stage/apply-duel.py" || return $?
+  ssh_upload "$ROOT_DIR/scripts/remote-resource-transaction.sh" "$rollback_stage/transaction.sh" || return $?
+  # Explicitly propagate every failure: callers use ||, which disables Bash
+  # errexit inside functions. Never let a later successful check mask it.
+  ssh_exec "bash '$rollback_stage/transaction.sh' rollback --cube-root '$ALY_ROOT' --duel-root '$ALY_DUEL_ROOT' --id '$id'" 900 || return $?
+  refresh_server_baseline || return $?
 }
 
 remote_health() {
@@ -1030,6 +1073,7 @@ remote_health() {
       remote_check+="; test -d '$ALY_ROOT/shared/srvpro/ygopro/expansions'; find '$ALY_ROOT/shared/srvpro/ygopro/expansions' -maxdepth 1 -type f -name '*.cdb' -print | grep -q ."
     fi
   fi
+  remote_check+="; python3 '$ALY_ROOT/shared/card-resource-tools/apply-duel.py' --cube-root '$ALY_ROOT' --duel-root '$ALY_DUEL_ROOT' --id '$RELEASE_ID' --verify-current"
   ssh_exec "$remote_check" 120 || die "Aly remote release, services, or resource checks failed"
   curl --fail --silent --show-error --retry 5 --retry-delay 2 --max-time 30 "$ALY_PUBLIC_URL/api/health" >/dev/null || die "Aly Cube API health endpoint failed"
   if [[ -n "$expected_names_sha" && -n "$expected_banlist_sha" ]]; then
@@ -1093,8 +1137,23 @@ cmd_deploy() {
   require_command python3; require_command curl
   state_init
   ((DRY_RUN)) && { info "dry-run: would package, back up, stop services, atomically publish, restart and verify Aly"; return 0; }
+  if ((EXPANSION_ENABLED)); then
+    local source_url source_etag actual_etag
+    python3 - "$STATE_DIR/resource-manifest.json" > "$STATE_DIR/deploy-source-versions.txt" <<'PY' || die "run prepare with complete official source metadata"
+import json, sys
+source = json.load(open(sys.argv[1], encoding='utf-8'))['expansionArchive']
+print(source['url'] + '\t' + (source.get('etag') or ''))
+print(source['listUrl'] + '\t' + (source.get('listEtag') or ''))
+PY
+    while IFS=$'\t' read -r source_url source_etag; do
+      [[ "$source_url" == https://* && -n "$source_etag" ]] || die "prepared official expansion metadata is incomplete"
+      actual_etag="$(curl --fail --silent --show-error --location --head --max-time 30 "$source_url" | header_last etag)" || die "cannot verify prepared expansion source"
+      [[ "$actual_etag" == "$source_etag" ]] || die "official Super Pre changed after prepare; prepare and test the new version before deploy"
+    done < "$STATE_DIR/deploy-source-versions.txt"
+  fi
   ssh_exec "set -eu; cube_device=\$(stat -c '%d' '$ALY_ROOT/shared'); duel_device=\$(stat -c '%d' '$ALY_DUEL_ROOT/releases'); test \"\$cube_device\" = \"\$duel_device\"" 60 || die "Cube shared resources and Duel releases must share a filesystem for hard-link deployment"
   local archive staging="$STATE_DIR/deploy-$RELEASE_ID"
+  refresh_server_baseline || die "cannot read actual Aly resource baseline"
   archive="$(make_payload "$staging/payload")"
   info "uploading delta archive to Aly"
   ssh_exec "set -eu; root='$ALY_ROOT'; mkdir -p \"\$root/.staging/card-sync-$RELEASE_ID\"" 60
@@ -1102,18 +1161,15 @@ cmd_deploy() {
   ssh_upload "$ROOT_DIR/scripts/remote-resource-apply.sh" "$ALY_ROOT/.staging/card-sync-$RELEASE_ID/apply.sh"
   ssh_upload "$ROOT_DIR/scripts/remote-duel-resource-apply.py" "$ALY_ROOT/.staging/card-sync-$RELEASE_ID/apply-duel.py"
   ssh_exec "set -eu; chmod 700 '$ALY_ROOT/.staging/card-sync-$RELEASE_ID/apply.sh' '$ALY_ROOT/.staging/card-sync-$RELEASE_ID/apply-duel.py'; python3 -m py_compile '$ALY_ROOT/.staging/card-sync-$RELEASE_ID/apply-duel.py'" 60
-  if ! ssh_exec "set -eu; chmod 700 '$ALY_ROOT/.staging/card-sync-$RELEASE_ID/apply.sh'; '$ALY_ROOT/.staging/card-sync-$RELEASE_ID/apply.sh' --root '$ALY_ROOT' --id '$RELEASE_ID'" 900; then
+  ssh_upload "$ROOT_DIR/scripts/remote-resource-transaction.sh" "$ALY_ROOT/.staging/card-sync-$RELEASE_ID/transaction.sh"
+  ssh_upload "$STATE_DIR/expected-server-manifest.sha256" "$ALY_ROOT/.staging/card-sync-$RELEASE_ID/expected-server-manifest.sha256"
+  if ! ssh_exec "bash '$ALY_ROOT/.staging/card-sync-$RELEASE_ID/transaction.sh' apply --cube-root '$ALY_ROOT' --duel-root '$ALY_DUEL_ROOT' --id '$RELEASE_ID'" 900; then
     if ssh_exec "test -d '$ALY_ROOT/backups/card-sync-$RELEASE_ID/srvpro-ygopro' && test -d '$ALY_ROOT/backups/card-sync-$RELEASE_ID/pics_avif'" 30 >/dev/null 2>&1; then
-      warn "Aly publish failed; attempting automatic resource rollback"
-      remote_rollback "$RELEASE_ID" || die "automatic rollback also failed; keep services stopped and restore $ALY_ROOT/backups/card-sync-$RELEASE_ID manually"
+      warn "Aly publish failed; attempting automatic rollback of both resource releases"
+      remote_rollback "$RELEASE_ID" || die "automatic rollback failed; retain both backups and inspect Aly before resuming deployment"
       die "Aly publish failed and was rolled back"
     fi
-    die "Aly publish failed before a complete backup was created; services were recovered by the remote safety trap"
-  fi
-  if ! ssh_exec "set -eu; python3 '$ALY_ROOT/.staging/card-sync-$RELEASE_ID/apply-duel.py' --cube-root '$ALY_ROOT' --duel-root '$ALY_DUEL_ROOT' --id '$RELEASE_ID'" 900; then
-    warn "independent Duel update failed; attempting to restore both resource releases"
-    remote_rollback "$RELEASE_ID" || die "automatic rollback also failed; keep backups and inspect both releases before resuming service"
-    die "independent Duel update failed and the resource releases were rolled back"
+    die "Aly publish failed before a complete backup was created; inspect the retained stage"
   fi
   local expected_cdb_sha expected_manifest_sha expected_names_sha expected_banlist_sha
   expected_cdb_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["cards"]["sha256"])' "$STATE_DIR/resource-manifest.json")"
@@ -1125,17 +1181,15 @@ cmd_deploy() {
     remote_rollback "$RELEASE_ID" || die "verification failed and automatic rollback also failed; retain backups and inspect Aly immediately"
     die "post-deploy verification failed and the resource releases were rolled back"
   fi
-  cp -f "$staging/payload/metadata/resource-manifest.json" "$STATE_DIR/deployed-resource-manifest.json"
-  if ((EXPANSION_ENABLED)) && [[ -f "$STATE_DIR/expansion-manifest.json" ]]; then
-    cp -f "$STATE_DIR/expansion-manifest.json" "$STATE_DIR/deployed-expansion-manifest.json"
-  fi
+  refresh_server_baseline || die "published resources passed checks but baseline refresh failed"
   info "Aly deployment completed: $RELEASE_ID"
 }
 
 cmd_rollback() {
   [[ "$BACKUP_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "rollback requires --backup-id with a safe identifier"
   ((DRY_RUN)) && { info "dry-run: would restore Aly backup $BACKUP_ID"; return 0; }
-  remote_rollback "$BACKUP_ID"
+  state_init
+  remote_rollback "$BACKUP_ID" || die "rollback failed; retain backups and inspect Aly"
   remote_health
 }
 

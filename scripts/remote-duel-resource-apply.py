@@ -12,6 +12,8 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import signal
+import tarfile
 import sqlite3
 import subprocess
 import time
@@ -47,9 +49,7 @@ def banlist_api_name(header: str) -> str:
     if not match:
         raise RuntimeError(f"invalid ban-list date header: {header!r}")
     year, month, day = (int(value) if value is not None else None for value in match.groups())
-    # srvpro parses dates in the host's local timezone, then applies -08:00.
-    # Aly runs in UTC+08:00, so its public date is one day before the source header.
-    public_date = date(year, month, day or 1) - timedelta(days=1)
+    public_date = date(year, month, day or 1)
     suffix = "TCG" if "TCG" in header else "OCG"
     return f"{public_date:%Y.%m.%d} {suffix}"
 
@@ -58,7 +58,7 @@ def banlist_api_names(headers: list[str]) -> list[str]:
     return [banlist_api_name(header) for header in headers]
 
 
-def wait_healthy(banlist_path: Path | None = None) -> None:
+def wait_healthy(banlist_path: Path | None = None, *, allow_legacy_dates: bool = False) -> None:
     last_error: Exception | None = None
     for _ in range(40):
         try:
@@ -70,6 +70,13 @@ def wait_healthy(banlist_path: Path | None = None) -> None:
             if banlist_path is not None:
                 headers = [line[1:].strip() for line in banlist_path.read_text(encoding="utf-8").splitlines() if line.startswith("!")]
                 expected = banlist_api_names(headers)
+                if allow_legacy_dates and any(name not in names for name in expected):
+                    # Only a rollback to a pre-calendar-fix application may use
+                    # its former display names. Normal publication is strict.
+                    expected = [
+                        f"{date.fromisoformat(name[:10].replace('.', '-')) - timedelta(days=1):%Y.%m.%d} {name[11:]}"
+                        for name in expected
+                    ]
                 missing = [name for name in expected if name not in names]
                 if missing:
                     raise RuntimeError(f"the standalone Duel API did not load upstream ban-lists: {missing[:5]}")
@@ -271,10 +278,10 @@ def atomic_write_text(path: Path, value: str) -> None:
     os.replace(temporary, path)
 
 
-def set_release_ownership(release: Path) -> None:
+def set_release_ownership(release: Path, user: str = "ygoduel") -> None:
     for directory, _subdirectories, filenames in os.walk(release, followlinks=False):
         directory_path = Path(directory)
-        shutil.chown(directory_path, user="ygoduel", group="ygoduel")
+        shutil.chown(directory_path, user=user, group=user)
         for name in filenames:
             path = directory_path / name
             if path.is_symlink():
@@ -282,7 +289,31 @@ def set_release_ownership(release: Path) -> None:
             # Unchanged files are hard links to the previous immutable release;
             # they already have the correct owner and must not be chowned here.
             if path.stat().st_nlink == 1:
-                shutil.chown(path, user="ygoduel", group="ygoduel")
+                shutil.chown(path, user=user, group=user)
+
+
+def extract_application_archive(archive_path: Path, release: Path) -> None:
+    """Replace archive files without writing through a previous release link."""
+    root = release.resolve(strict=True)
+    with tarfile.open(archive_path) as archive:
+        members = archive.getmembers()
+        for member in members:
+            relative = PurePosixPath(member.name)
+            if relative.is_absolute() or ".." in relative.parts or "\\" in member.name:
+                raise RuntimeError(f"unsafe application archive path: {member.name}")
+            # Next standalone bundles may contain relative dependency links.
+            # Python's data filter rejects links escaping this release.
+            tarfile.data_filter(member, str(release))
+            if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
+                raise RuntimeError(f"application archive contains a special file: {member.name}")
+            destination = release.joinpath(*relative.parts)
+            if not destination.resolve().is_relative_to(root):
+                raise RuntimeError(f"application archive resolves outside release: {member.name}")
+        for member in members:
+            destination = release.joinpath(*PurePosixPath(member.name).parts)
+            if not member.isdir() and (destination.is_file() or destination.is_symlink()):
+                destination.unlink()
+        archive.extractall(release, members=members, filter="data")
 
 
 def safe_remove_list(root: Path, list_path: Path) -> None:
@@ -479,6 +510,55 @@ def parse_config(api_modules: Path, config_file: Path) -> dict:
     return value
 
 
+def install_srvpro_application(stage_root: Path, release: Path) -> None:
+    metadata_path = stage_root / "metadata" / "srvpro-application.json"
+    if not metadata_path.is_file():
+        return
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    files = metadata.get("files", {})
+    allowed = {"ygopro-server.js", "cube-banlists.js"}
+    if set(files) != allowed:
+        raise RuntimeError("srvpro application payload must contain its server and ban-list module")
+    source = stage_root / "application" / "srvpro"
+    verify_file_manifest(source, files, "srvpro application")
+    for name in sorted(files):
+        run("/usr/bin/node", "--check", str(source / name))
+        link_resource_file(source / name, release / "srvpro" / name)
+    release_metadata = release / "release.json"
+    if release_metadata.is_file():
+        value = json.loads(release_metadata.read_text(encoding="utf-8"))
+        value["srvproApplication"] = metadata
+        atomic_write_text(release_metadata, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+
+
+def link_existing_release_resources(cube_root: Path, release: Path) -> int:
+    """Application/Web publications retain the installed resource generation."""
+    manifest = json.loads((cube_root / "shared/assets/resource-manifest.json").read_text(encoding="utf-8"))
+    verify_cube_resources(cube_root, manifest)
+    source_host = cube_root / "shared/srvpro/ygopro"
+    source_assets = cube_root / "shared/assets"
+    target_host = release / "srvpro/ygopro"
+    target_assets = release / "assets"
+    if not managed_resource_sets_match(source_host, target_host, source_assets, target_assets, manifest):
+        raise RuntimeError("application payload changes card resources; publish them through the resource workflow first")
+    return hardlink_resource_set(source_host, target_host, source_assets, target_assets, manifest)
+
+
+def verify_current_resources(cube_root: Path, duel_root: Path) -> dict:
+    manifest = json.loads((cube_root / "shared/assets/resource-manifest.json").read_text(encoding="utf-8"))
+    state = verify_cube_resources(cube_root, manifest)
+    linked = verify_resource_hardlinks(
+        cube_root / "shared/srvpro/ygopro", duel_root / "current/srvpro/ygopro",
+        cube_root / "shared/assets", duel_root / "current/assets", manifest,
+    )
+    if not managed_resource_sets_match(
+        cube_root / "shared/srvpro/ygopro", duel_root / "current/srvpro/ygopro",
+        cube_root / "shared/assets", duel_root / "current/assets", manifest,
+    ):
+        raise RuntimeError("live Cube and Duel resource generations differ")
+    return {"ok": True, "managedResourceHardlinks": linked, **state}
+
+
 def atomic_current(duel_root: Path, target: Path, suffix: str) -> None:
     current = duel_root / "current"
     next_link = duel_root / f"current-{suffix}"
@@ -497,23 +577,59 @@ def active_standalone_host() -> bool:
     return result.returncode == 0
 
 
-def rollback(duel_root: Path, release_id: str) -> dict:
+def enter_maintenance() -> dict:
+    """Close both Web and native room creation before preparing resources."""
+    if active_standalone_host():
+        raise RuntimeError("an independent Duel host is active; maintenance was not started")
+    pid = 0
+    paused = False
+    try:
+        run("systemctl", "stop", "ygoduel-api")
+        pid = int(run("systemctl", "show", "ygoduel-srvpro", "-p", "MainPID", "--value") or "0")
+        if pid:
+            # Pause the acceptor before the final host check. Existing child
+            # hosts remain running, so a raced room is detected and preserved.
+            os.kill(pid, signal.SIGSTOP)
+            paused = True
+        if active_standalone_host():
+            raise RuntimeError("a Duel host appeared; maintenance was cancelled")
+        # systemd sends SIGCONT after SIGTERM, including to paused services.
+        run("systemctl", "stop", "ygoduel-srvpro")
+        paused = False
+    except Exception:
+        if paused:
+            try:
+                os.kill(pid, signal.SIGCONT)
+            except ProcessLookupError:
+                pass
+        run("systemctl", "start", "ygoduel-api")
+        raise
+    return {"ok": True, "maintenanceEntered": True}
+
+
+def rollback(duel_root: Path, release_id: str, *, defer_start: bool = False) -> dict:
     backup = duel_root / "backups" / f"card-sync-{release_id}"
     previous_text = backup / "previous-release.txt"
     config_backup = backup / "config.yaml"
     if not previous_text.is_file() or not config_backup.is_file():
         return {"skipped": True, "reason": "no independent Duel release backup for this ID"}
-    if active_standalone_host():
-        raise RuntimeError("an independent Duel host is active; rollback was not started")
     previous = Path(previous_text.read_text(encoding="utf-8").strip()).resolve(strict=True)
     current = (duel_root / "current").resolve(strict=True)
-    run("systemctl", "stop", "ygoduel-api", "ygoduel-srvpro")
+    if not previous.is_relative_to((duel_root / "releases").resolve(strict=True)):
+        raise RuntimeError("rollback target resolves outside Duel releases")
+    enter_maintenance()
     try:
         atomic_current(duel_root, previous, f"rollback-{release_id}")
         config_file = duel_root / "shared" / "config.yaml"
         shutil.copy2(config_backup, config_file)
-        run("systemctl", "start", "ygoduel-api", "ygoduel-srvpro")
-        wait_healthy(previous / "srvpro" / "ygopro" / "lflist.conf")
+        # Restoring files does not replace the derived card catalogue in the
+        # live database. Rebuild it without reverting any player/match state.
+        with sqlite3.connect(duel_root / "shared/data/duel.sqlite") as database:
+            database.execute("UPDATE cards SET metadata_version=0")
+            database.commit()
+        if not defer_start:
+            run("systemctl", "start", "ygoduel-api", "ygoduel-srvpro")
+            wait_healthy(previous / "srvpro" / "ygopro" / "lflist.conf", allow_legacy_dates=True)
     except Exception:
         if (duel_root / "current").resolve() != current:
             atomic_current(duel_root, current, f"recover-{release_id}")
@@ -522,7 +638,7 @@ def rollback(duel_root: Path, release_id: str) -> dict:
     return {"rolledBack": True, "previousRelease": previous.name}
 
 
-def relink_current_to_cube(cube_root: Path, duel_root: Path) -> dict:
+def relink_current_to_cube(cube_root: Path, duel_root: Path, *, defer_start: bool = False) -> dict:
     manifest_path = cube_root / "shared" / "assets" / "resource-manifest.json"
     if not manifest_path.is_file():
         return {"ok": True, "relinked": False, "reason": "Cube resource manifest is missing"}
@@ -542,13 +658,12 @@ def relink_current_to_cube(cube_root: Path, duel_root: Path) -> dict:
             "release": current.name,
             "reason": "rollback release contains a different resource generation",
         }
-    if active_standalone_host():
-        raise RuntimeError("an independent Duel host is active; resource relinking was not started")
-    run("systemctl", "stop", "ygoduel-api", "ygoduel-srvpro")
+    enter_maintenance()
     try:
         linked = hardlink_resource_set(source_host, target_host, source_assets, target_assets, manifest)
-        run("systemctl", "start", "ygoduel-api", "ygoduel-srvpro")
-        wait_healthy(target_host / "lflist.conf")
+        if not defer_start:
+            run("systemctl", "start", "ygoduel-api", "ygoduel-srvpro")
+            wait_healthy(target_host / "lflist.conf", allow_legacy_dates=True)
     except Exception:
         for service in ("ygoduel-api", "ygoduel-srvpro"):
             subprocess.run(["systemctl", "start", service], check=False)
@@ -567,9 +682,6 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
     # tree into shared/. Read the now-live, hash-verified resources from there;
     # only the manifest and delete lists remain in the staging directory.
     cube_resource_state = verify_cube_resources(cube_root, manifest)
-    if active_standalone_host():
-        raise RuntimeError("an independent Duel host is active; resource deployment was not started")
-
     current_link = duel_root / "current"
     old = current_link.resolve(strict=True)
     releases = duel_root / "releases"
@@ -594,10 +706,14 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
 
     new.mkdir(parents=True)
     try:
+        # The pair transaction enters maintenance before the Cube apply. A
+        # direct invocation repeats the guard inside its recovery scope.
+        enter_maintenance()
         # Releases share unchanged immutable files to avoid duplicating the
         # independent application's large node_modules tree and exhausting
         # Aly's inode quota. Updated files are unlinked before they are copied.
         shutil.copytree(old, new, dirs_exist_ok=True, symlinks=True, copy_function=hardlink_file)
+        install_srvpro_application(stage_root, new)
         release_metadata = new / "release.json"
         if release_metadata.is_file():
             metadata = json.loads(release_metadata.read_text(encoding="utf-8"))
@@ -695,11 +811,11 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
         config_file = duel_root / "shared" / "config.yaml"
         config = parse_config(old / "api" / "node_modules", config_file)
         config.setdefault("server", {}).update(
-            cards_cdb="/opt/ygoduel/current/srvpro/ygopro/cards.cdb",
-            strings_conf="/opt/ygoduel/current/srvpro/ygopro/strings.conf",
-            card_names_json="/opt/ygoduel/current/assets/ygocdb_cards.json",
+            cards_cdb=str(duel_root / "current/srvpro/ygopro/cards.cdb"),
+            strings_conf=str(duel_root / "current/srvpro/ygopro/strings.conf"),
+            card_names_json=str(duel_root / "current/assets/ygocdb_cards.json"),
         )
-        config.setdefault("pics", {})["avif_dir"] = "/opt/ygoduel/current/assets/pics_avif"
+        config.setdefault("pics", {})["avif_dir"] = str(duel_root / "current/assets/pics_avif")
         config_temp = backup / ".config.yaml.new"
         config_temp.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         config_temp.chmod(0o600)
@@ -782,6 +898,10 @@ def main() -> None:
     parser.add_argument("--id", required=True)
     parser.add_argument("--rollback", action="store_true")
     parser.add_argument("--relink-current-to-cube", action="store_true")
+    parser.add_argument("--enter-maintenance", action="store_true")
+    parser.add_argument("--defer-start", action="store_true")
+    parser.add_argument("--verify-current", action="store_true")
+    parser.add_argument("--install-application-to", type=Path)
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9._-]+", args.id):
         raise SystemExit("invalid resource release ID")
@@ -789,10 +909,20 @@ def main() -> None:
         if not path.is_absolute() or path == Path("/"):
             raise SystemExit("invalid installation root")
     try:
-        if args.rollback:
-            result = rollback(args.duel_root.resolve(), args.id)
+        if args.install_application_to:
+            release = args.install_application_to.resolve(strict=True)
+            if not release.is_relative_to(args.cube_root.resolve() / "releases"):
+                raise RuntimeError("application release resolves outside Cube releases")
+            install_srvpro_application(args.cube_root / ".staging" / f"card-sync-{args.id}" / "root", release)
+            result = {"ok": True, "applicationInstalled": release.name}
+        elif args.enter_maintenance:
+            result = enter_maintenance()
+        elif args.verify_current:
+            result = verify_current_resources(args.cube_root.resolve(), args.duel_root.resolve())
+        elif args.rollback:
+            result = rollback(args.duel_root.resolve(), args.id, defer_start=args.defer_start)
         elif args.relink_current_to_cube:
-            result = relink_current_to_cube(args.cube_root.resolve(), args.duel_root.resolve())
+            result = relink_current_to_cube(args.cube_root.resolve(), args.duel_root.resolve(), defer_start=args.defer_start)
         else:
             result = deploy(args.cube_root.resolve(), args.duel_root.resolve(), args.id)
     except Exception as exc:

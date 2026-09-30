@@ -6,10 +6,14 @@ from __future__ import annotations
 import errno
 import hashlib
 import importlib.util
+import io
+import json
 import os
 from pathlib import Path
 import tarfile
 import tempfile
+import signal
+import sqlite3
 import unittest
 from unittest.mock import patch
 
@@ -29,10 +33,103 @@ PACKAGE_SPEC.loader.exec_module(PACKAGE)
 
 
 class RemoteDuelResourceApplyTests(unittest.TestCase):
-    def test_banlist_api_names_match_srvpro_timezone_normalization(self) -> None:
-        self.assertEqual(REMOTE.banlist_api_name("2026.10"), "2026.09.30 OCG")
-        self.assertEqual(REMOTE.banlist_api_name("2026.9 TCG"), "2026.08.31 TCG")
-        self.assertEqual(REMOTE.banlist_api_name("2025.04.01 OCG"), "2025.03.31 OCG")
+    def test_banlist_api_names_keep_upstream_calendar_dates(self) -> None:
+        self.assertEqual(REMOTE.banlist_api_name("2026.10"), "2026.10.01 OCG")
+        self.assertEqual(REMOTE.banlist_api_name("2026.9 TCG"), "2026.09.01 TCG")
+        self.assertEqual(REMOTE.banlist_api_name("2025.04.01 OCG"), "2025.04.01 OCG")
+
+    @unittest.skipIf(os.name == "nt", "Linux systemd signals")
+    def test_maintenance_preserves_a_host_that_appears_during_preparation(self) -> None:
+        with patch.object(REMOTE, "active_standalone_host", side_effect=[False, True]), \
+             patch.object(REMOTE, "run", side_effect=lambda *args: "123" if "MainPID" in args else "") as run, \
+             patch.object(REMOTE.os, "kill") as kill:
+            with self.assertRaisesRegex(RuntimeError, "maintenance was cancelled"):
+                REMOTE.enter_maintenance()
+        self.assertEqual([call.args for call in kill.call_args_list], [(123, signal.SIGSTOP), (123, signal.SIGCONT)])
+        self.assertNotIn(("systemctl", "stop", "ygoduel-srvpro"), [call.args for call in run.call_args_list])
+        self.assertIn(("systemctl", "start", "ygoduel-api"), [call.args for call in run.call_args_list])
+
+    @unittest.skipIf(os.name == "nt", "Linux systemd signals")
+    def test_maintenance_pauses_acceptor_before_final_host_check(self) -> None:
+        events = []
+        def occupied():
+            events.append("host-check")
+            return False
+        with patch.object(REMOTE, "active_standalone_host", side_effect=occupied), \
+             patch.object(REMOTE, "run", side_effect=lambda *args: "123" if "MainPID" in args else events.append(args) or ""), \
+             patch.object(REMOTE.os, "kill", side_effect=lambda *args: events.append(args)):
+            REMOTE.enter_maintenance()
+        self.assertLess(events.index((123, signal.SIGSTOP)), len(events) - 1)
+        self.assertEqual(events[-2:], ["host-check", ("systemctl", "stop", "ygoduel-srvpro")])
+
+    def test_application_archive_preserves_previous_hardlinked_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old, new = root / "old", root / "new"
+            old.mkdir()
+            (old / "application.js").write_bytes(b"old application")
+            (old / "cards.cdb").write_bytes(b"shared resource")
+            REMOTE.shutil.copytree(old, new, copy_function=REMOTE.hardlink_file)
+            archive_path = root / "application.tar.gz"
+            with tarfile.open(archive_path, "w:gz") as archive:
+                member = tarfile.TarInfo("application.js")
+                member.size = len(b"new application")
+                archive.addfile(member, io.BytesIO(b"new application"))
+            REMOTE.extract_application_archive(archive_path, new)
+            self.assertEqual((old / "application.js").read_bytes(), b"old application")
+            self.assertEqual((new / "application.js").read_bytes(), b"new application")
+            self.assertEqual((old / "cards.cdb").stat().st_ino, (new / "cards.cdb").stat().st_ino)
+
+    def test_srvpro_application_install_preserves_old_release(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stage, old, new = root / "stage", root / "old", root / "new"
+            (stage / "metadata").mkdir(parents=True)
+            (stage / "application/srvpro").mkdir(parents=True)
+            (old / "srvpro").mkdir(parents=True)
+            (old / "release.json").write_text('{"id":"old"}', encoding="utf-8")
+            files = {}
+            for name in ["ygopro-server.js", "cube-banlists.js"]:
+                content = b"new server"
+                (stage / "application/srvpro" / name).write_bytes(content)
+                (old / "srvpro" / name).write_bytes(b"old server")
+                files[name] = {"size": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+            REMOTE.shutil.copytree(old, new, copy_function=REMOTE.hardlink_file)
+            (stage / "metadata/srvpro-application.json").write_text(json.dumps({"files": files}), encoding="utf-8")
+            with patch.object(REMOTE, "run"):
+                REMOTE.install_srvpro_application(stage, new)
+            self.assertEqual((old / "srvpro/ygopro-server.js").read_bytes(), b"old server")
+            self.assertEqual((new / "srvpro/ygopro-server.js").read_bytes(), b"new server")
+            self.assertNotIn("srvproApplication", json.loads((old / "release.json").read_text()))
+            self.assertIn("srvproApplication", json.loads((new / "release.json").read_text()))
+
+    def test_rollback_invalidates_derived_catalogue_without_restoring_player_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            previous, current = root / 'releases/old', root / 'releases/new'
+            previous.mkdir(parents=True); current.mkdir()
+            backup = root / 'backups/card-sync-fixture'
+            backup.mkdir(parents=True)
+            (backup / 'previous-release.txt').write_text(str(previous))
+            (backup / 'config.yaml').write_text('restored config')
+            (root / 'shared/data').mkdir(parents=True)
+            (root / 'shared/config.yaml').write_text('current config')
+            database = root / 'shared/data/duel.sqlite'
+            with sqlite3.connect(database) as connection:
+                connection.execute('create table cards(metadata_version integer)')
+                connection.execute('insert into cards values(6)')
+                connection.execute('create table players(name text)')
+                connection.execute("insert into players values('preserve me')")
+            try:
+                (root / 'current').symlink_to(current, target_is_directory=True)
+            except OSError:
+                self.skipTest('directory symlinks unavailable in this Windows sandbox')
+            with patch.object(REMOTE, 'enter_maintenance'):
+                REMOTE.rollback(root, 'fixture', defer_start=True)
+            self.assertEqual((root / 'current').resolve(), previous)
+            with sqlite3.connect(database) as connection:
+                self.assertEqual(connection.execute('select metadata_version from cards').fetchone()[0], 0)
+                self.assertEqual(connection.execute('select name from players').fetchone()[0], 'preserve me')
 
     def test_resource_payload_archive_contains_files_without_directory_entries(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

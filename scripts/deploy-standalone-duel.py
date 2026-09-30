@@ -3,6 +3,8 @@
 import hashlib, json, os, pathlib, secrets, shutil, subprocess, sys, tarfile, time, urllib.request
 P=pathlib.Path
 ROOT=P('/opt/ygoduel')
+if (ROOT/'current').exists():
+ raise SystemExit('Duel is already installed; use the current application/resource update workflow')
 RELEASE='20260906-independent-duel-r1'
 ARCHIVE=P('/tmp/ygoduel-release.tar.gz')
 def run(*args): return subprocess.check_output(args,text=True).strip()

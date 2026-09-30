@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 """Install and verify the two Web bundles without restarting duel backends."""
 import hashlib,json,os,pathlib,shutil,subprocess,sys,tarfile,time,urllib.request,re
+import importlib.util
+import fcntl
+resource_lock=open('/opt/ygocube/.card-resource-deploy.lock','a')
+fcntl.flock(resource_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
 P=pathlib.Path
+helper_path=P('/opt/ygocube/shared/card-resource-tools/apply-duel.py')
+if not helper_path.is_file():raise SystemExit('Install current resource workflow before Web deployment')
+spec=importlib.util.spec_from_file_location('resource_apply',helper_path)
+resource_apply=importlib.util.module_from_spec(spec);spec.loader.exec_module(resource_apply)
 archive=P(sys.argv[1]);assert hashlib.sha256(archive.read_bytes()).hexdigest()==sys.argv[2]
 release=sys.argv[3]
 assert re.fullmatch(r'[a-z0-9-]+',release), 'invalid release id'
@@ -19,7 +27,7 @@ olds={};news={};results={}
 for service in ['ygocube','ygoduel']:
  root=P('/opt')/service;old=(root/'current').resolve();new=root/'releases'/release
  backup=root/'backups'/release;backup.mkdir(parents=True,exist_ok=False)
- shutil.copytree(old,new,symlinks=True)
+ shutil.copytree(old,new,symlinks=True,copy_function=resource_apply.hardlink_file)
  # Overlay hashed assets; retain previous immutable chunks for existing tabs.
  shutil.rmtree(new/'web')
  shutil.copytree(stage/service/'web',new/'web',symlinks=True)
@@ -32,8 +40,9 @@ for service in ['ygocube','ygoduel']:
    target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(previous,target)
  metadata=new/'release.json'
  if metadata.exists():
-  v=json.loads(metadata.read_text());v.update(id=release,previousRelease=old.name,webBuildId=(app/'.next/BUILD_ID').read_text().strip());metadata.write_text(json.dumps(v,indent=2))
- run('chown','-R',service+':'+service,str(new))
+  v=json.loads(metadata.read_text());v.update(id=release,previousRelease=old.name,webBuildId=(app/'.next/BUILD_ID').read_text().strip());resource_apply.atomic_write_text(metadata,json.dumps(v,indent=2))
+ if service=='ygoduel':resource_apply.link_existing_release_resources(P('/opt/ygocube'),new)
+ resource_apply.set_release_ownership(new,user=service)
  (backup/'previous-release.txt').write_text(str(old))
  olds[service]=old;news[service]=new
 try:
