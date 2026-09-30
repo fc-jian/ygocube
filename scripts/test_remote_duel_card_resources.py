@@ -120,6 +120,7 @@ class RemoteDuelResourceApplyTests(unittest.TestCase):
                 connection.execute('insert into cards values(6)')
                 connection.execute('create table players(name text)')
                 connection.execute("insert into players values('preserve me')")
+            connection.close()
             try:
                 (root / 'current').symlink_to(current, target_is_directory=True)
             except OSError:
@@ -130,6 +131,7 @@ class RemoteDuelResourceApplyTests(unittest.TestCase):
             with sqlite3.connect(database) as connection:
                 self.assertEqual(connection.execute('select metadata_version from cards').fetchone()[0], 0)
                 self.assertEqual(connection.execute('select name from players').fetchone()[0], 'preserve me')
+            connection.close()
 
     def test_resource_payload_archive_contains_files_without_directory_entries(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

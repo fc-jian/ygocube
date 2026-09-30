@@ -114,6 +114,7 @@ cp -a "$ROOT/current/config.yaml" "$BACKUP/config.yaml"
 printf '%s\n' "$OLD_CUBE_RELEASE" > "$BACKUP/previous-release.txt"
 cp -f "$STAGE/apply-duel.py" "$BACKUP/apply-duel.py"
 cp -f "$STAGE/apply.sh" "$BACKUP/apply.sh"
+cp -f "$STAGE/transaction.sh" "$BACKUP/transaction.sh"
 [[ -f "$OLD_NAMES" ]] && cp -f "$OLD_NAMES" "$BACKUP/ygocdb_cards.json" || true
 [[ -f "$ROOT/shared/assets/resource-manifest.json" ]] && cp -f "$ROOT/shared/assets/resource-manifest.json" "$BACKUP/resource-manifest.json" || true
 
@@ -242,6 +243,8 @@ fi
 mkdir -p "$ROOT/shared/card-resource-tools"
 cp -f "$STAGE/apply-duel.py" "$ROOT/shared/card-resource-tools/.apply-duel.py.new"
 mv -f "$ROOT/shared/card-resource-tools/.apply-duel.py.new" "$ROOT/shared/card-resource-tools/apply-duel.py"
+cp -f "$STAGE/transaction.sh" "$ROOT/shared/card-resource-tools/.transaction.sh.new"
+mv -f "$ROOT/shared/card-resource-tools/.transaction.sh.new" "$ROOT/shared/card-resource-tools/transaction.sh"
 
 systemctl start ygocube-api
 systemctl start ygocube-srvpro

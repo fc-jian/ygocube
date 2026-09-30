@@ -27,14 +27,20 @@ description: Safely synchronize YGOPro upstream card resources and the current o
 - 资源清单、日志、事件和 URL 不得含 token、密码、私钥、绝对本地路径或完整请求
   头。SSH 凭据只从已有 `aly` 别名/SSH 配置取得。
 - 更新脚本优先使用已配置的 SSH helper；本机没有 helper 时使用系统 `ssh`/`scp`
-  和同一别名，不复制或读取私钥内容。
+  和同一别名，不复制或读取私钥内容。helper 返回 JSON 时先检查 `success`/
+  `exit_code` 并解码 `stdout`，不能从带转义的外层响应直接解析资源 JSON。
 - 发布会中断服务并影响进行中的比赛。只有用户明确确认维护窗口后，才运行带有
   `--confirm-maintenance` 的 deploy；失败时保留 staging 和备份，不能先清理。
 
 ## 标准成功路径
 
 以下步骤按顺序执行；每一步失败都停止，不跳过前置验收。命令均从仓库根目录
-执行。
+执行。顺序固定为：记录工作区 → 检查并固定来源 → 同步/准备 → 构建与隔离测试 →
+提交并先推子模块、后推根仓库 → 读取服务器基线并发布 → 现场/公网验收 →
+刷新部署基线 → 按授权清理 → 最后更新维护记录与本 Skill 并提交推送。
+
+维护范围已由本会话授权时沿用授权；把已有用户文件留在原处，最终报告其状态，
+不能为了声明 clean 而删除、暂存或提交无关文件。任一步失败均保留现场并返回非零。
 
 ### 1. 建立可审计的更新分支
 
@@ -234,14 +240,19 @@ Nest API 内部卡图路由是 `/pics/:code.avif`；公网 Cube 前缀为 `/api/
 `/pics/:code.avif` 会落到 Web 前端路由，不能代表任一 API 的卡图服务。
 标准 `deploy` 在 `/opt/ygocube` 资源发布成功后，还会把同一代主 CDB、Super Pre、
 脚本、两处 `lflist.conf`、AVIF 与 YGOCDB 映射安装到新的独立 Duel release，并使其
-卡片元数据缓存失效。部署前若发现独立 Duel 的 `ygopro` 宿主仍运行则中止，避免中断
+卡片元数据缓存失效。禁限表日期是上游日历日期：`!2026.10` 显示为
+`2026.10.01 OCG`，`!2026.9 TCG` 显示为 `2026.09.01 TCG`；不得再通过减一天
+补偿服务器时区。srvpro 日期解析需跨 UTC/上海/洛杉矶回归。
+部署前若发现独立 Duel 的 `ygopro` 宿主仍运行则中止，避免中断
 进行中的独立对局；失败时将两套资源一并回滚。验收必须经 `/duel-api` 按编号和完整
 卡名逐张搜索 Super Pre 卡，并确认 `/duel-api/public/duel/options` 包含上游最新 OCG
 与 TCG 禁限表。
 
 卡图在 Aly 只保留 `assets/pics_avif` 中的压缩 AVIF；原始 `pics/`、`pack/`、JPEG、PNG、
 WebP 不进入运行 release、回滚快照或备份。部署须清除旧运行树中的原图，并逐项检查
-两套受管资源目录。Cube 与 Duel 的主/扩展 CDB 集合、脚本、禁限表、YGOCDB 映射及 AVIF
+两套受管资源目录及保留归档内部。失败归档含原图时，按用户原图清理授权仅移除
+原图，记录原包 SHA、移除条目的 SHA/大小及新包 SHA，保留其他失败内容；改写后的
+归档不能冒充原始校验包。Cube 与 Duel 的主/扩展 CDB 集合、脚本、禁限表、YGOCDB 映射及 AVIF
 目录指纹都必须对应同一个 `resource-manifest.json`。
 
 ### 4.2 Cube 与独立 Duel 是两个发布目标
@@ -261,16 +272,23 @@ WebP 不进入运行 release、回滚快照或备份。部署须清除旧运行�
   供回滚。Cube 资源备份及 rollback 用 `cp -al` 保留这些共享 inode；恢复 Cube 后，
   还要把当前 Duel release 中内容匹配的资源重新硬链接到已恢复的 Cube 文件。
 - 用户明确要求清理历史备份时，先核对 current、systemd 与备份指针，再保留 current
-  和一个可回滚 release/资源快照，清理更旧的备份与 `.pre-*`。不得删除失败发布的
+  和一个可回滚 release/资源快照，清理更旧的备份与 `.pre-*`。不得删除失败或未确认结果的
   staging；新备份与原图检查通过后再清理旧备份。删除 release 前还要检查相关
   systemd unit 的 `ExecStart`、`WorkingDirectory`、`ReadWritePaths`、`ReadOnlyPaths`
-  和 bind 路径；若仍引用旧目录，先迁移到 `current`/`shared` 并重启验证，或保留被引用目录。
+  和 bind 路径、全部相关 `/proc/<pid>/cwd`；若仍引用旧目录，先迁移到
+  `current`/`shared` 并重启验证，或保留被引用目录。先生成具体路径计划并核对
+  最新备份的 `COMPLETED`/`deployment.json`，清理后再验完整资源 inode 和七个服务。
+  记录实际磁盘释放量；硬链接目录的表观体积不等于释放量。
 - 资源和 API 同时修复时走完整应用发布：备份数据库/配置/current，验证完整包，
   原子切换，按影响范围重启，并具备回滚。不得为 API 修改重启无关 Web、Nginx
   或 Cube 宿主；确需中断的范围应在维护授权上下文中说明。
-- 本轮提供 `scripts/stage-expansion-catalog.py`（仅隔离验收）和
-  `scripts/deploy-expansion-catalog.py`（明确维护参数的应用修复发布）。其中路径、
-  release 和样本属于本次迁移，后续使用前必须更新并审查，不能重复运行已存在的 release。
+- 应用/Web 发布也必须取得 `.card-resource-deploy.lock`，以 `hardlink_file` 克隆
+  不变文件，归档文件先 unlink 再展开，JSON 原子替换、chown 跳过共享文件。
+  `deploy-card-details.py`、`deploy-standalone-duel-update.py`、`deploy-web-pics.py`
+  使用持久化 helper 的 `link_existing_release_resources` 检查并保持 Cube/Duel 同一代资源；
+  应用包试图改变卡片资源时拒绝，先走本 Skill 的资源流程。
+- `deploy-expansion-catalog.py` 为已退役的一次性迁移，安装了当前资源工具后拒绝运行；
+  `deploy-standalone-duel.py` 只用于首次安装，现有 Duel 用应用/资源更新入口。
 
 ### 5. 构建无头宿主和（可选）客户端
 
@@ -284,29 +302,12 @@ bash scripts/update-card-resources.sh build
 保留 `-cube` 版本后缀，并把宿主复制到 `srvpro/ygopro/ygopro`。只有确认是纯
 资源变化且已有兼容宿主时才可显式 `--skip-build`，并在发布记录中说明理由。
 
-需要 GUI 客户端时另外执行并验收：
-
-```bash
-bash scripts/update-card-resources.sh build --client
-# 或按构建机依赖显式补齐 --build-freetype/--build-png/--build-jpeg/--build-opus-vorbis
-```
-
-这条命令默认是当前 WSL/Linux 工具链；Windows 客户端必须在
-`C:\projects\ygopro` 的 Cube feature 分支使用现有 `premake5.exe` 与 VS2022
-工作流构建。生成 VS2022 解决方案时不要传 `--no-audio`，确认 miniaudio/Ogg/
-Opus/Vorbis 等实际链接到 Release 配置；用 PE 架构检查、依赖检查和启动 smoke
-test 验证，而不是只看编译命令成功。若二进制明显小于已知成功产物、音频依赖未
-解析或版本后缀丢失，立即停止，不把该客户端放入发布包。
-
-#### Windows Cube 客户端容量参数验收
-
-- Windows 完整客户端使用仓库的 `scripts/build-ygopro-client.ps1`，默认源码目录为相邻 `../ygopro`、分支为 `cube-server`，默认 extra/side 各 30；需要更大容量时显式传入 `-MaxExtra` / `-MaxSide`，与目标比赛约定一致。
-- 每次构建必须重新生成 VS 工程，显式传 `--max-extra=30 --max-side=30`（或本次约定的容量）及完整音频参数。仅运行 MSBuild 会复用旧工程；`1.036.2-cube` 后缀只能证明代码版本，不能证明容量宏正确。
-- 构建前核对 Release|x64 的 `YGOPRO_MAX_EXTRA`、`YGOPRO_MAX_SIDE` 和音频宏，缺项直接失败。未传容量参数时源码默认 15，会导致组卡/普通加载截断；Cube 推送后保存并重新加载也经过这条路径。
-- 用超出 15 张的真实 YDK 在本次生成的 exe 内打开，核验界面 main/extra/side 实际数量。2026-09-10 回归夹具为 40/30/30；记录新 exe 路径、SHA-256 和实际运行验证，不把头文件常量或项目配置单独当作二进制验收。
+需要 GUI 客户端或修改客户端容量时，执行 [客户端验收补充](references/client-and-web-verification.md) 中的构建、音频和真实 YDK 验收。
 
 ### 6. 完成本地测试和提交审计
 
+Windows/Linux 分别用各自的依赖和宿主，在隔离目录、数据库与房间回归；不得跨平台
+复制 node_modules/二进制，也不覆盖已有 Linux 仓库的未提交改动。
 标准测试入口会运行资源 helper、Cube API/Web、srvpro 构建和两个真实流程探针：
 
 ```bash
@@ -362,10 +363,12 @@ ssh aly 'hostname; test -d /opt/ygocube; systemctl is-active ygocube-api ygocube
 
 默认目标为 `aly`、`/opt/ygocube`；如环境不同，显式设置
 `YGOCUBE_ALY_HOST`、`YGOCUBE_ALY_ROOT`、`YGOCUBE_ALY_URL`。维护窗口尚未获授权时先准备可验收的修复包，再请求确认；同一会话用户已确认
-“完成更新/继续发布”且上下文明确包含服务重启时，不重复询问。确认后运行：
+“完成更新/继续发布”且上下文明确包含服务重启时，不重复询问。下面两条发布命令按修改范围二选一：
 
 ```bash
 bash scripts/update-card-resources.sh deploy --confirm-maintenance
+# 同时发布已提交、已测试的 srvpro 服务/禁限表模块修改时：
+bash scripts/update-card-resources.sh deploy --srvpro-app --confirm-maintenance
 # 仅用户明确要求保留 Aly 当前 Super Pre 版本时才加 --skip-expansion
 ```
 
@@ -375,27 +378,36 @@ bash scripts/update-card-resources.sh deploy --confirm-maintenance
 expansion 清单。即使已有 `deployed-resource-manifest.json`，也不能因此跳过上游检查。
 兼容参数 `--expansion` 仍可显式启用默认行为。
 
-Cube 资源发布的远端顺序是：取得发布锁 → 停止 Cube API/srvpro/Web/Nginx → 对 SQLite 做
-WAL checkpoint 和 `PRAGMA integrity_check` → 备份数据库（含 WAL/SHM）、配置、
-宿主资源、AVIF、名称映射和旧 manifest → 校验上传归档的路径/链接/类型/大小 →
-在 staging 中展开并验证 SHA（包括启用时的 expansion 文件和删除清单）→ 原子切换资源目录 → 使卡片元数据缓存失效 → 按
-API → srvpro → Web → Nginx 启动。输出中的 release/backup ID 必须保存，例如：
+发布前重新核对已准备的官方 `.ypk` 与列表 ETag；版本漂移时重新 prepare/test，
+不发布旧包。delta 每次读取 Aly 实际 `resource-manifest.json`，不能把本地上次成功
+状态当作服务器现状。记录该文件 SHA，并在远端持有成对发布锁后再次比较；
+打包期间服务器变化则在停服前拒绝，不用 stale delta 继续。
 
-```text
-/opt/ygocube/backups/card-sync-<release-id>/
-```
+远端顺序由 `remote-resource-transaction.sh` 固定：
 
-随后独立 Duel 发布器以同一 ID 在 `/opt/ygoduel/releases/card-sync-<release-id>/`
-准备资源 release，备份独立 Duel 数据库、私有配置和旧 `current` 目标，确认没有活动
-宿主后仅重启 `ygoduel-api` 与 `ygoduel-srvpro`。Web、Nginx 和 Cube srvpro 不因这一步
-重启。其备份保存在 `/opt/ygoduel/backups/card-sync-<release-id>/`。两步任一失败或
-发布后校验失败都通过同一 ID 回滚两套资源。
-部署后健康检查失败必须把非零状态返回给 `cmd_deploy`，以触发上述回滚；若检查函数
-使用 `die()`/`exit`，须在可捕获的子 shell 中调用，避免直接退出主脚本而跳过回滚。
+1. 取得 `.card-resource-deploy.lock`，关闭 Duel API 建房，SIGSTOP 暂停原生 srvpro
+   接入进程，再次检查子宿主。若出现对局，SIGCONT 恢复接入并恢复 API，返回失败；
+   两次检查之间不能留有可以创建新宿主的入口。
+2. 无活动宿主才停止 Duel srvpro，保持入口关闭。随后停止 Cube API/srvpro/Web/Nginx，
+   checkpoint/integrity-check，备份数据库/配置/资源/manifest/旧 current 和全部事务工具。
+3. staging 校验路径、归档、SHA 和删除清单，以完整目录原子切换 Cube 资源并重建卡片缓存。
+   `--srvpro-app` 从旧 Cube 应用硬链接生成新 release，只原子替换已验证的两个 JS 文件；
+   Duel 的新资源 release 安装同一 srvpro 修改。该参数不能代替任意 API/Web 的完整发布。
+4. 安装并校验 Duel 与 Cube 的同代资源硬链接，保存 Duel 数据库/配置/旧 current，
+   使 Duel 卡片缓存失效。两侧 API/srvpro 启动，Duel Web 重启并绑定当前 release。
+5. 公网和现场检查通过才刷新本地部署基线。工具保存在 `shared/card-resource-tools/`
+   以及本次备份中，清理成功 staging 后仍能回滚。
 
-本 Skill 的 deploy 更新 Cube 与独立 Duel 两套卡片资源和无头宿主；如果同一变更还包含 API/Web 代码，
-使用项目的完整应用发布流程，并确保 standalone Web 同时安装 `.next/static`
-和必要的 `public`，不能用首页 200 掩盖静态资源 404。
+备份分别为 `/opt/ygocube/backups/card-sync-<id>/` 与
+`/opt/ygoduel/backups/card-sync-<id>/`。任一步或发布后健康检查失败，通过同一 ID
+回滚两套。回滚在同一锁下恢复 Duel 指针并保持停服 → 恢复 Cube 资源/current →
+重链 Duel → **同时使两侧派生 cards 缓存失效** → 启动并验证；不回退比赛状态。
+回滚成功后重新从服务器记录本地基线，后续 delta 以恢复后的实际版本为准。
+
+SSH、上传、子步骤的失败都必须显式 `return`/非零退出；函数处于 `||`/条件上下文时
+Bash `errexit` 可能失效，不能让后续成功覆盖早先失败。使用 `die()`/`exit` 的健康函数
+在可捕获的子 shell 中调用，确保触发成对回滚。回归须覆盖早期 SSH/上传失败、
+准备期间出现 Duel 宿主、回滚后 stale baseline、旧 release 不被硬链接写入影响。
 
 ### 8. 发布后验收与记录
 
@@ -444,38 +456,23 @@ srvpro HTTP/TCP/Cube 协议探针和实际宿主启动。两套数据库完整�
 | 发布后服务未 active、API/协议/AVIF 不通 | 先读取 systemd/journal 日志和 release metadata；若资源切换已发生，使用同一 `<release-id>` 执行 rollback。 |
 | Next 静态 JS/CSS 404 或 MIME 为 HTML | 这是完整 Web 发布遗漏 `.next/static` 的典型问题；按 AGENTS.md 的 standalone 发布规则补齐静态目录并重启 Web，不能改 Nginx 把所有请求回退首页。 |
 | 远端证书校验失败 | 使用正确的受信任 `YGOCUBE_ALY_URL`/证书链后重试；诊断可单独使用 `curl -k`，不要把跳过 TLS 验证写进正式脚本。 |
+| 历史 matches 唯一约束告警 | 只读核实重复记录与外键；不同对局/结果不能当作冗余卡片缓存删除。记录独立修复事项，资源回滚只清派生 cards 缓存，不覆盖玩家、比赛或事件。 |
 | 需要回滚 | 让维护窗口保持有效，运行 `bash scripts/update-card-resources.sh rollback --backup-id <release-id>`，再次完成两套健康检查。回滚恢复资源与配置；数据库缓存失效值可由 API 重建，比赛数据异常须另行核验备份后处理。 |
 
-## 先行卡发布后补充验收
-
-- 两套服务分别访问公网实际搜索路由及 Cube `/api/pics/<code>.avif`、独立 Duel
-  `/duel-api/pics/<code>.avif`，检查 MIME 和实体内容；
-  页面 200、文件存在、staging 测试通过均不代表生产已生效。
-- 用先行卡进入实际房间、准备并完成比赛；验证 BO3 换备和重连。独立 Duel 还需
-  测试网页建房→原生客户端加入、原生建房→网页加入两个方向。
-- 至少执行一个先行卡效果，覆盖召唤/发动、卡组选择、连锁处理/送墓等实际
-  ocgcore 链路。全量元数据检查不等于逐一卡片效果实现均通过，应明确样例范围。
-- 可用隔离探针：`EXPANSION_CODE=<code> STANDALONE_ONLY=1 STANDALONE_MATCH=1
-  /usr/bin/node scripts/e2e/web-duel-smoke.cjs`；本轮 `EXPANSION_EFFECT=1` 使用
-  固定的「优秀精灵」与装备卡夹具。测试必须在独立目录/数据库/房间执行。
-- 若 WebSocket 反复连接，检查实际关闭码和 srvpro 日志。曾遇到代理统一使用
-  loopback 后被全局 `BAD IP` 封禁；不要用关闭超时/取消所有协议检查来掩盖问题。
-- Git 提交前检查根仓库和 submodule 的全部差异、运行时资源及敏感信息。
-  已授权跨轮开发一起归档时可拆分提交；先推 fork 的特性分支再更新根 gitlink，
-  不得把 srvpro/ygopro 推向 mycard 的 upstream origin。推送后核对远端 SHA。
+正式扩展卡与原生/Web 互通验收见 [先行卡补充验收](references/client-and-web-verification.md)。元数据检查不能代替实际效果与协议测试。
 
 ## 最终验收标准
 
-只有同时满足下列条件才报告“更新成功”：
+只有同时满足下列条件才报告“更新成功”；无关的既有用户改动只记录，不纳入本次提交：
 
 1. **来源可追溯**：上游完整 SHA、script/ocgcore gitlink、CDB/图片/manifest 哈希
    和名称缺失报告齐全；版本号主版本与上游一致且保留 Cube 后缀。
-2. **代码干净**：根 feature 分支和所有被修改的 submodule 工作区 clean；无运行时
+2. **代码干净**：本次修改均已提交推送，所有被修改的 submodule 工作区 clean；无运行时
    资源、原始图片、数据库、token 或临时状态被 Git 追踪；无冲突标记、无 force push。
 3. **资源正确**：CDB SQLite integrity/代码集合通过；exact code 名称按完整 fallback
    选择；衍生物不出现在搜索/卡池；Lua 仅按 manifest 差量同步；AVIF 尺寸、MIME、
    数量和重复执行幂等性通过。标准更新必须验证当前官方 `.ypk`/列表、两个扩展 CDB、
-   expansion 脚本/卡图清单和客户端元数据排除，并对照上次成功部署清单审计 expansion
+   expansion 脚本/卡图清单和客户端元数据排除，并对照服务器实际部署清单审计 expansion
    差量；只允许删除上次清单管理且已从当前官方包移除的文件。用户明确要求保留旧版时，
    才可跳过扩展更新，且 expansion 删除清单必须为空。
 4. **本地构建测试通过**：helper、API、Web、srvpro、宿主 `ldd`/启动 smoke、E2E
@@ -487,16 +484,3 @@ srvpro HTTP/TCP/Cube 协议探针和实际宿主启动。两套数据库完整�
 6. **可恢复且有记录**：release ID、备份目录、旧/新资源 hash、commit、测试结果和
    任何警告已保存；失败 staging 与备份在人工确认前不删除，必要时可用明确 backup ID
    回滚。
-
-
-## Web 样式与本地卡图验收补充
-
-- Next build 的启动目录会影响 Tailwind 的默认配置查找与 content 扫描。PostCSS
-  必须显式定位应用的 Tailwind 配置，content 使用相对配置文件的路径；从仓库根目录
-  构建也要跑测试。不得把“编译成功、CSS 200”当作完整样式生成的证明。
-- 部署校验除 MIME 外，还要验证生成 CSS 含关键布局与主题工具类；真实浏览器检查
-  grid 的 display、间距和主题颜色，并截图检查首页、后台、Duel、构筑页的桌面/手机布局。
-- 本地图片测试需覆盖实际用户提供的编号/图片，损坏但非空的 JPG、可用 PNG 回退、
-  根目录绑定以及刷新恢复。图片存在但不能解码时，继续尝试其他本地候选或服务器低清图。
-- 真实外部目录和 OPFS 测试的权限行为不同；OPFS 通过不能证明用户原有授权仍有效。
-  提供显式重新读取/更换目录入口，强制重新检查授权与刷新缓存，不要静默停留在坏图上。
