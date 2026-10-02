@@ -1,5 +1,5 @@
 import { Body, Controller, Delete, Get, GoneException, Param, Post, Put, Query, Req } from '@nestjs/common';
-import { AuthGuard, AuthedRequest, Identity, normalizeCreateUsername, sha256 } from './auth/auth.guard';
+import { Access, AuthedRequest, Identity, normalizeCreateUsername, sha256 } from './auth/auth.guard';
 import { TournamentsService } from './tournaments/tournaments.service';
 import { DraftService } from './draft/draft.service';
 import { DecksService } from './decks/decks.service';
@@ -25,6 +25,7 @@ import { getDb } from './db';
 // creator credentials are scoped to tournaments whose created_by matches the
 // authenticated create username.
 @Controller('admin')
+@Access('admin')
 export class AdminController {
   constructor(
     private tournaments: TournamentsService,
@@ -103,6 +104,7 @@ export class AdminController {
   }
 
   @Get('mine/tournaments')
+  @Access('creator-list')
   listCreatedTournaments(@Req() req: AuthedRequest) {
     const identity = req.identity as Identity;
     if (identity.isSuper) return this.listTournaments(req);

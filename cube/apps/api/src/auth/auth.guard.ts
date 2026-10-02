@@ -26,6 +26,13 @@ export interface AuthedRequest extends Request {
 }
 
 export const Public = () => SetMetadata('public', true);
+export type AccessPolicy = 'player' | 'admin' | 'creator-list' | 'create' | 'candidate';
+export const Access = (policy: AccessPolicy) => SetMetadata('accessPolicy', policy);
+
+function routeTournamentId(req: AuthedRequest): string | undefined {
+  if (req.params?.tid !== undefined) return typeof req.params.tid === 'string' ? req.params.tid : '';
+  return req.path.match(/^\/(?:admin\/)?t\/(\d+)(?:\/|$)/i)?.[1];
+}
 
 export function sha256(s: string): string {
   return crypto.createHash('sha256').update(s).digest('hex');
@@ -74,10 +81,6 @@ function safeHashEqual(value: string, expectedHash: string | null | undefined): 
 }
 
 export const CREATE_USERNAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/;
-// Express accepts an optional trailing slash by default. Keep both spellings
-// under the strict candidate-write policy so `/.../cards/` cannot fall into
-// the tournament's no-token testing bypass.
-const CANDIDATE_WRITE_PATH = /^\/pools\/[^/]+\/candidate\/cards\/?$/;
 
 export function normalizeCreateUsername(value: unknown): string {
   if (typeof value !== 'string') throw new Error('BAD_CREATE_USERNAME');
@@ -107,7 +110,7 @@ function queryScalar(req: AuthedRequest, key: string): string | undefined {
 export function extractIdentity(req: AuthedRequest): Identity | null {
   const cookies = cookiesOf(req);
   const headers = req.headers as Record<string, string | string[] | undefined>;
-  const pathTid = req.path.match(/^\/(?:admin\/)?t\/(\d+)(?:\/|$)/)?.[1];
+  const pathTid = routeTournamentId(req);
   // header values must be ISO-8859-1; non-ASCII player ids are percent-encoded by the client
   const hget = (name: string): string | undefined => {
     const v = headers[name];
@@ -165,9 +168,9 @@ export function extractIdentity(req: AuthedRequest): Identity | null {
 }
 
 export function extractTournamentId(req: AuthedRequest): number | null {
-  const m = req.path.match(/^\/(?:admin\/)?t\/(\d+)(?:\/|$)/);
-  if (m) {
-    const parsed = Number(m[1]);
+  const routeTid = routeTournamentId(req);
+  if (routeTid !== undefined) {
+    const parsed = Number(routeTid);
     return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
   }
   const v =
@@ -188,11 +191,12 @@ export class AuthGuard implements CanActivate {
     const isPublic = this.reflector.getAllAndOverride<boolean>('public', [ctx.getHandler(), ctx.getClass()]);
     if (isPublic) return true;
     const req = ctx.switchToHttp().getRequest<AuthedRequest>();
+    const policy = this.reflector.getAllAndOverride<AccessPolicy>('accessPolicy', [ctx.getHandler(), ctx.getClass()]) ?? 'player';
     // Candidate additions are deliberately a player-only capability.  The
     // super token is a universal player token for legacy tournament pages, but
     // it must not bypass the requirement for an active player's real token on
     // this public, append-only endpoint.
-    const candidateWrite = req.method === 'POST' && CANDIDATE_WRITE_PATH.test(req.path);
+    const candidateWrite = policy === 'candidate';
     if (candidateWrite) {
       // The candidate endpoint is intentionally stricter than legacy player
       // routes: its caller must send all three identity factors as headers.
@@ -206,7 +210,7 @@ export class AuthGuard implements CanActivate {
       if (missing.length > 0) throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields: missing });
     }
 
-    if (req.path.startsWith('/admin')) {
+    if (policy === 'admin' || policy === 'creator-list') {
       const adminToken = headerToken(req);
       if (adminToken) {
         if (isSuper(adminToken)) {
@@ -232,11 +236,11 @@ export class AuthGuard implements CanActivate {
       if (!isCreateUser(username, createToken)) {
         throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields: ['create_user', 'create_token'] });
       }
-      const tid = extractTournamentId(req);
+      const tid = routeTournamentId(req) === undefined ? null : extractTournamentId(req);
       // A creator may use the scoped list endpoint, but all other creator
       // operations must carry a tournament id and match created_by exactly.
       if (tid === null) {
-        if (req.path === '/admin/mine/tournaments') {
+        if (policy === 'creator-list') {
           req.identity = { tournamentId: 0, playerId: '', isAdmin: true, isSuper: false, isCreator: true, createUsername: username };
           return true;
         }
@@ -253,7 +257,7 @@ export class AuthGuard implements CanActivate {
       return true;
     }
 
-    if (req.path === '/tournaments' && req.method === 'POST') {
+    if (policy === 'create') {
       // The super token remains a direct create credential. A non-super
       // X-Admin-Token is never accepted as a create credential.
       const createToken = headerValue(req, 'x-create-token');
@@ -314,7 +318,7 @@ export class AuthGuard implements CanActivate {
     const identity = extractIdentity(req);
     if (!identity) {
       const cookies = cookiesOf(req);
-      const pathTid = req.path.match(/^\/(?:admin\/)?t\/(\d+)(?:\/|$)/)?.[1];
+      const pathTid = routeTournamentId(req);
       const fields: string[] = [];
       if (!pathTid && !cookies.yc_tid && !queryScalar(req, 'tid') && !req.headers['x-tournament-id']) fields.push('tid');
       if (!(pathTid && cookies[`yc_pid_${pathTid}`]) && !cookies.yc_pid && !queryScalar(req, 'pid') && !req.headers['x-player-id']) fields.push('pid');

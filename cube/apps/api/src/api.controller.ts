@@ -1,7 +1,7 @@
 import { Body, Controller, Get, GoneException, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
 import type { CardVisibilityStatus } from '@ygocube/shared';
 import { Response } from 'express';
-import { AuthGuard, AuthedRequest, Identity, Public, safeSecretEqual } from './auth/auth.guard';
+import { Access, AuthGuard, AuthedRequest, Identity, Public, safeSecretEqual } from './auth/auth.guard';
 import { TournamentsService } from './tournaments/tournaments.service';
 import { DraftService } from './draft/draft.service';
 import { DecksService } from './decks/decks.service';
@@ -141,6 +141,7 @@ export class ApiController {
   }
 
   @Post('pools/:name/candidate/cards')
+  @Access('candidate')
   addCandidateCards(@Req() req: AuthedRequest, @Param('name') rawName: string, @Body() body?: Record<string, unknown>) {
     // This route is intentionally not @Public: AuthGuard requires a valid
     // player identity (tid/pid/token headers or scoped cookies).  The identity
@@ -223,6 +224,7 @@ export class ApiController {
   // requires X-Create-User + X-Create-Token (or super admin token). The
   // creator credential remains the only non-super tournament administrator.
   @Post('tournaments')
+  @Access('create')
   create(@Req() req: AuthedRequest, @Body() body: CreateTournamentInput) {
     const identity = req.identity as Identity;
     return this.tournaments.create(body, identity.createUsername ?? (identity.isSuper ? 'super-admin' : 'unknown'));

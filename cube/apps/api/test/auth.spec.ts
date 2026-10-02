@@ -1,6 +1,6 @@
 import { useTestDb, makeTournaments, TEST_POOL } from './helpers';
 import { config } from '../src/config';
-import { AuthGuard, extractIdentity, sha256 } from '../src/auth/auth.guard';
+import { Access, AccessPolicy, AuthGuard, extractIdentity, sha256 } from '../src/auth/auth.guard';
 import { Reflector } from '@nestjs/core';
 import { getDb } from '../src/db';
 import { AdminController } from '../src/admin.controller';
@@ -8,6 +8,10 @@ import { CardsService } from '../src/cards/cards.service';
 import { PoolsService } from '../src/pools/pools.service';
 
 function makeCtx(path: string, headers: Record<string, string>, query: Record<string, string> = {}, body: Record<string, unknown> = {}, method = 'GET') {
+  // Unit fixtures describe a matched handler; HTTP tests cover route dispatch.
+  const handler = () => undefined;
+  const policy: AccessPolicy = path === '/admin/mine/tournaments' ? 'creator-list' : path.startsWith('/admin') ? 'admin' : path === '/tournaments' ? 'create' : 'player';
+  Access(policy)(handler);
   const req: any = {
     path,
     headers,
@@ -18,7 +22,7 @@ function makeCtx(path: string, headers: Record<string, string>, query: Record<st
   };
   return {
     switchToHttp: () => ({ getRequest: () => req }),
-    getHandler: () => ({}),
+    getHandler: () => handler,
     getClass: () => ({}),
   } as any;
 }

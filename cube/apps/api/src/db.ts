@@ -326,12 +326,29 @@ function migrate(d: Database.Database): void {
   d.exec('CREATE INDEX IF NOT EXISTS idx_matches_room_name ON matches(room_name)');
   d.exec('CREATE INDEX IF NOT EXISTS idx_picks_tid_pack_round ON picks(tournament_id, pack_index, pick_round)');
   d.exec('CREATE INDEX IF NOT EXISTS idx_snapshots_tid_event ON tournament_snapshots(tournament_id, event_seq)');
+  ensureMatchTableIntegrity(d);
+}
+
+export function ensureMatchTableIntegrity(d: Database.Database): void {
   try {
     d.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_matches_tid_round_table ON matches(tournament_id, round, table_no)');
   } catch (error) {
+    if (!(error as { code?: string }).code?.startsWith('SQLITE_CONSTRAINT')) throw error;
     // Do not make an existing deployment unbootable. Historical duplicates are
     // surfaced for administrator repair; all new databases enforce uniqueness.
     console.error('cannot enforce unique match tables: historical duplicates exist', error);
+    // Protect future writes even before historical conflicts are reconciled.
+    // Score updates on existing duplicates remain possible; introducing or
+    // moving a match onto an occupied table is rejected by SQLite itself.
+    d.exec(`
+      CREATE TRIGGER IF NOT EXISTS guard_match_table_insert BEFORE INSERT ON matches
+      WHEN EXISTS (SELECT 1 FROM matches WHERE tournament_id=NEW.tournament_id AND round=NEW.round AND table_no=NEW.table_no)
+      BEGIN SELECT RAISE(ABORT, 'duplicate match table'); END;
+      CREATE TRIGGER IF NOT EXISTS guard_match_table_update BEFORE UPDATE OF tournament_id,round,table_no ON matches
+      WHEN (OLD.tournament_id<>NEW.tournament_id OR OLD.round<>NEW.round OR OLD.table_no<>NEW.table_no)
+        AND EXISTS (SELECT 1 FROM matches WHERE id<>OLD.id AND tournament_id=NEW.tournament_id AND round=NEW.round AND table_no=NEW.table_no)
+      BEGIN SELECT RAISE(ABORT, 'duplicate match table'); END;
+    `);
   }
 }
 

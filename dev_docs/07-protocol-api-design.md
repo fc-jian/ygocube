@@ -19,6 +19,10 @@
 
 ### 2.1 鉴权
 
+- 权限类型绑定控制器／方法元数据（玩家、管理员、创建者列表、创建比赛、候选追加），
+  不根据请求 URL 字符串分流。路由接受的大小写及尾斜杠变体必须执行相同鉴权。
+  已匹配路由的 `:tid` 参数优先于 header/query；不能借另一比赛身份访问目标比赛。
+
 - 玩家默认需要 `tid + pid + token`。比赛路由以 path 中的 `tid` 为准；浏览器使用
   按比赛隔离的 `yc_pid_<tid>/yc_token_<tid>` cookie，普通 fetch 也可使用
   `X-Tournament-Id/X-Player-Id/X-Token`。旧全局 cookie/query 仅作非敏感 ID 兼容入口；
@@ -365,7 +369,7 @@ pics: {ygopro_root: "", avif_dir: "assets/pics_avif"}
 - `POST /public/duel/join`：`{name,password,options,deck:{main,extra,side}}`，选项字段为 `mode(0单局/1比赛),lflist,rule,duelRule,timeLimit,startLp,startHand,drawCount,mainMin,mainMax,extraMax,sideMax,noCheck,noShuffle`。密码映射同一个内部房间，首位创建者决定规则；后续加入返回已有规则。返回 `{credential,room,options}`；短期 credential 仅保存当前标签页，用于刷新重连，不能用于 Cube 身份。
 - `POST /public/duel/session {credential}`：换取现有单次 WS 票据。后续操作沿用 §8，卡组由网关上传，房主/准备状态由原生宿主决定。
 - 私有 `GET /cube/standalone-options`、`POST /cube/standalone-room {room_name,hostinfo}`：X-Cube-Api-Key 鉴权，通过同一个 srvpro Room 构造器创建普通房间，不绑定 Cube 卡组与结果。
-- 所有上传与保存的卡组放在浏览器会话 cookie（Path=/duel、SameSite=Strict）；按卡组独立编码，最多 8 副，每副最多 3 KiB、合计最多约 7 KiB。写入失败必须显示错误，不伪报保存成功。页面提供随时查看、编辑、导出和删除。关闭浏览器后是否保留取决于浏览器会话恢复设置。
+- 独立 Duel 卡组保存在浏览器 IndexedDB（`ygocube-duel-decks`），不随 HTTP 请求发送，不再受旧版 8 副 / cookie 大小限制；仍按区域最多 200 张、合计最多 500 张校验。首次读取迁移旧 `yc_dueldeck_*` cookie，事务提交后才删除 cookie；迁移标记避免旧标签页残留 cookie 覆盖修改或复活已删除卡组。写入失败必须显示错误，不伪报保存成功；异步保存期间的新编辑保持未保存状态。提供查看、编辑、导出和删除。存储按浏览器与站点隔离，清除站点数据会删除卡组，应保留 YDK 导出备份。
 
 ### 8.2 独立测试部署隔离
 

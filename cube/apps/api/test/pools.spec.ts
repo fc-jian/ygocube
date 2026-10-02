@@ -11,7 +11,7 @@ function makeAuthContext(path: string, headers: Record<string, string>, method =
   const req: any = { path, headers, query: {}, body: {}, method, cookies: {} };
   return {
     switchToHttp: () => ({ getRequest: () => req }),
-    getHandler: () => ({}),
+    getHandler: () => ApiController.prototype.addCandidateCards,
     getClass: () => ({}),
   } as any;
 }

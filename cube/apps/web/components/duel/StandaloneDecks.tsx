@@ -10,7 +10,7 @@ import {
   deleteDeck,
   ydk,
   SavedDeck,
-} from "./deck-cookie";
+} from "./deck-storage";
 import type { BrowserDeck } from "@ygocube/shared";
 import { CardMeta } from "@/components/CardPreview";
 import type { CardInfo } from "@/lib/types";
@@ -62,6 +62,9 @@ export function StandaloneDecks() {
   const [drag, setDrag] = useState<DeckDrag | null>(null);
   const [enlarged, setEnlarged] = useState<Info | null>(null);
   const largeCard = useRef<HTMLDialogElement>(null);
+  const saving = useRef(false);
+  const latestDeck = useRef(deck);
+  latestDeck.current = deck;
   const [dropAt, setDropAt] = useState<string | null>(null);
   useEffect(() => {
     if (enlarged) largeCard.current?.showModal();
@@ -70,7 +73,7 @@ export function StandaloneDecks() {
   const [kind, setKind] = useState(0),
     [sort, setSort] = useState("relevance");
   useEffect(() => {
-    setSaved(readDecks());
+    void readDecks().then(setSaved).catch(error => setNotice(error.message));
   }, []);
   useEffect(() => {
     const f = (e: BeforeUnloadEvent) => {
@@ -145,14 +148,21 @@ export function StandaloneDecks() {
     setNotice("");
   };
   const replace = () => !dirty || window.confirm("放弃未保存修改？");
-  const persist = (asNew = false) => {
+  const persist = async (asNew = false) => {
+    if (saving.current) return;
+    saving.current = true;
+    const snapshot = deck;
+    setNotice('保存中… / Saving…');
     try {
-      setId(saveDeck(deck, asNew ? undefined : id));
-      setSaved(readDecks());
-      setDirty(false);
-      setNotice("已保存");
+      const savedId = await saveDeck(snapshot, asNew ? undefined : id);
+      const unchanged = latestDeck.current === snapshot;
+      if (unchanged) { setId(savedId); setDirty(false); }
+      setSaved(await readDecks());
+      setNotice(unchanged ? '已保存 / Saved' : '已保存先前版本，当前修改尚未保存 / Earlier version saved; current edits are unsaved');
     } catch (e) {
       setNotice((e as Error).message);
+    } finally {
+      saving.current = false;
     }
   };
   function add(c: Info) {
@@ -274,6 +284,9 @@ export function StandaloneDecks() {
             type="file"
             accept=".ydk,.txt"
             onChange={async (e) => {
+              if (saving.current) { e.target.value = ""; return; }
+              const snapshot = deck;
+              saving.current = true;
               try {
                 const f = e.target.files?.[0];
                 if (!f || !replace()) return;
@@ -282,16 +295,16 @@ export function StandaloneDecks() {
                     await f.text(),
                     f.name.replace(/\.ydk$/i, ""),
                   ),
-                  newId = saveDeck(d);
-                setDeck(d);
-                setId(newId);
-                setDirty(false);
-                setSaved(readDecks());
-                setSelectedCard(null);
-                setNotice("已导入并保存");
+                  newId = await saveDeck(d);
+                const unchanged = latestDeck.current === snapshot;
+                if (unchanged) { setDeck(d); setId(newId); setDirty(false); }
+                setSaved(await readDecks());
+                if (unchanged) setSelectedCard(null);
+                setNotice(unchanged ? "已导入并保存 / Imported and saved" : "已导入到卡组列表，当前编辑已保留 / Imported; current edits kept");
               } catch (e) {
                 setNotice((e as Error).message);
               } finally {
+                saving.current = false;
                 e.target.value = "";
               }
             }}
@@ -313,12 +326,17 @@ export function StandaloneDecks() {
         </button>
         <button
           disabled={!id}
-          onClick={() => {
+          onClick={async () => {
+            if (saving.current) return;
             if (id && window.confirm("删除这副已保存卡组？")) {
-              deleteDeck(id);
-              setSaved(readDecks());
-              setId(undefined);
-              setDirty(true);
+              saving.current = true;
+              const snapshot = deck;
+              try {
+                await deleteDeck(id);
+                setSaved(await readDecks());
+                if (latestDeck.current === snapshot) { setId(undefined); setDirty(true); }
+              } catch (error) { setNotice((error as Error).message); }
+              finally { saving.current = false; }
             }
           }}
         >

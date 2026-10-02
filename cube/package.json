@@ -6,10 +6,5 @@
     "dev": "pnpm --filter @ygocube/duel-protocol build && pnpm --parallel --filter @ygocube/api --filter @ygocube/web dev",
     "build": "pnpm -r build",
     "test": "pnpm --filter @ygocube/duel-protocol build && pnpm -r test"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "better-sqlite3"
-    ]
   }
 }

@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import type { BrowserDeck } from "@ygocube/shared";
-import { readDecks, saveDeck, SavedDeck } from "./deck-cookie";
+import { readDecks, saveDeck, SavedDeck } from "./deck-storage";
 import { importYdk } from "./import-ydk";
 export function RoomDeckPicker({
   disabled,
@@ -15,10 +15,11 @@ export function RoomDeckPicker({
   const [decks, setDecks] = useState<SavedDeck[]>([]),
     [loading, setLoading] = useState(false);
   useEffect(() => {
-    const refresh = () => setDecks(readDecks());
+    let active = true;
+    const refresh = () => { void readDecks().then(value => { if (active) setDecks(value); }).catch(error => { if (active) onError(error.message); }); };
     refresh();
     window.addEventListener("focus", refresh);
-    return () => window.removeEventListener("focus", refresh);
+    return () => { active = false; window.removeEventListener("focus", refresh); };
   }, []);
   return (
     <fieldset disabled={disabled || loading} className="duel-room-deck">
@@ -51,8 +52,8 @@ export function RoomDeckPicker({
             try {
               if (f.size > 65536) throw Error("文件过大");
               const deck = await importYdk(await f.text(), f.name);
-              saveDeck(deck);
-              setDecks(readDecks());
+              await saveDeck(deck);
+              setDecks(await readDecks());
               onChoose(deck);
             } catch (e) {
               onError((e as Error).message);

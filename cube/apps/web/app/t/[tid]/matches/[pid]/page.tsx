@@ -37,6 +37,7 @@ export default function MatchesPage() {
   const [server, setServer] = useState<{ host: string; port: number } | null>(null);
   const [webDuelEnabled, setWebDuelEnabled] = useState(false);
   const [error, setError] = useState('');
+  const [serverError, setServerError] = useState('');
   const loadBusy = useRef(false);
 
   useEffect(() => {
@@ -53,8 +54,11 @@ export default function MatchesPage() {
             else setIdentity(r.identity);
           }
         }
-      } catch {
-        if (!cancelled) setIdentity(null);
+      } catch (e) {
+        if (!cancelled) {
+          setIdentity(null);
+          setError(readableApiError(e, '比赛信息加载失败 / Could not load tournament'));
+        }
       }
     })();
     return () => {
@@ -90,16 +94,25 @@ export default function MatchesPage() {
   }, [load]);
 
   // 对局服务器地址和端口由服务端提供。
-  useEffect(() => {
-    api<{ srvpro: { host: string; gamePort: number }; webDuel?: { enabled: boolean } }>('/meta', { identity: null })
-      .then((m) => { setServer({ host: m.srvpro.host, port: m.srvpro.gamePort }); setWebDuelEnabled(m.webDuel?.enabled === true); })
-      .catch(() => setServer({ host: '127.0.0.1', port: 7911 }));
+  const loadServer = useCallback(async () => {
+    setServerError('');
+    try {
+      const m = await api<{ srvpro: { host: string; gamePort: number }; webDuel?: { enabled: boolean } }>('/meta', { identity: null });
+      setServer({ host: m.srvpro.host, port: m.srvpro.gamePort });
+      setWebDuelEnabled(m.webDuel?.enabled === true);
+    } catch {
+      setServer(null);
+      setWebDuelEnabled(false);
+      setServerError('无法读取服务器地址 / Server address unavailable');
+    }
   }, []);
+  useEffect(() => { void loadServer(); }, [loadServer]);
 
   const { connected } = useTournamentStream(tid, identity, useCallback(() => void load(), [load]));
   useTournamentFallbackPolling({ connected, enabled: !!identity, intervalMs: 15_000, onPoll: load });
 
   if (needToken) return <TokenPrompt tid={tid} pid={pid} onToken={(t) => { setNeedToken(false); setIdentity({ tid, pid, token: t }); }} />;
+  if (error && !info) return <main className="p-8 text-red-300" role="alert">{error}<button className="ml-3 underline" onClick={() => location.reload()}>重新加载 / Reload</button></main>;
   if (!info) return <main className="p-8 text-slate-400">加载中…</main>;
 
   const myMatch = matches.find((m) => m.resultA === null && m.resultB === null);
@@ -193,12 +206,13 @@ export default function MatchesPage() {
           <p className="text-sm text-slate-300">
             对手： <b>{myMatch.opponent}</b>
           </p>
-          <p className="mt-2 text-xs text-slate-400">
+          {serverError && <p role="alert" className="mt-2 text-red-300">{serverError}<button className="ml-3 underline" onClick={() => void loadServer()}>重试 / Retry</button></p>}
+          {server && <p className="mt-2 text-xs text-slate-400">
             打开修改版 YGOPro-Cube 客户端，连接服务器{' '}
             <code className="font-mono text-gold">{server ? `${server.host}:${server.port}` : '读取中…'}</code>
             ，加入房间 <code className="font-mono text-gold">{myMatch.roomName ?? '等待创建房间…'}</code>
             ，昵称填写 <code className="font-mono text-gold">{pid}</code>。
-          </p>
+          </p>}
           {webDuelEnabled && myMatch.roomName && <a className="mt-4 inline-block rounded bg-emerald-700 px-5 py-3 text-white" href={`/t/${tidPath}/duel/${pidPath}`}>进入网页对战 / Play in browser</a>}
           {myMatch.roomName && (
             <button
