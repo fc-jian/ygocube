@@ -13,6 +13,7 @@
 - Aly 上使用已发布 API/srvpro/宿主，在临时端口与数据库完成 Cube BO3（96 帧）及独立 Duel 房主规则、开始权限、重连测试。无生产卡池/比赛测试数据。
 - 公网 Edge 验证旧 cookie 迁移、IndexedDB 保存刷新、实际 `/duel-api` 搜索；1440/390 宽度无横向溢出，页面异常 0。
 - 新备份工具分别生成 `cube-verified.sqlite` / `duel-verified.sqlite`，完整性、独立文件恢复及 SHA 校验通过；本次没有镜像到异地存储，也未启用 timer。
+- 首次 GitHub CI 暴露 prepare dry-run 测试依赖本机已初始化的卡库子模块。改为临时目录自建夹具，保持真实命令与“不写入”断言，并补验缺失输入会拒绝；无子模块、无资源的干净 checkout 中 52 项全部通过。此后仅修改测试/记录，不影响已部署应用产物。
 
 两套回滚材料位于各自 `/opt/<instance>/backups/20261002-hardening-086e510/`；旧维护工具在 `/opt/ygocube/backups/hardening-20261002-086e510-tools/`。线上验收记录保留在 `/opt/ygocube/.staging/hardening-20261002-086e510/`。旧 release 和备份均保留。以下为此前本地阶段的详细记录。
 

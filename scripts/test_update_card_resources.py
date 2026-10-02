@@ -62,14 +62,27 @@ class UpdateScriptTests(unittest.TestCase):
             self.assertTrue((payload / 'srvpro/ygopro/expansions/lflist.conf').is_file())
 
     def test_dry_run_prepare_is_non_mutating(self) -> None:
-        before = self.git_status()
-        result = self.run_script("--dry-run", "prepare", "--skip-images")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.git_status(), before)
-        expansion = self.run_script("--dry-run", "prepare", "--skip-images", "--expansion")
-        self.assertEqual(expansion.returncode, 0, expansion.stderr)
-        self.assertIn("expansion", expansion.stdout)
-        self.assertEqual(self.git_status(), before)
+        import tempfile
+        # A clean CI checkout has no runtime cards or initialized submodules.
+        # Exercise the real command against a private fixture, never the user's
+        # resource tree. Dry-run must not open or validate the dummy CDB.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'scripts').mkdir()
+            (root / 'ygopro/script').mkdir(parents=True)
+            script = root / 'scripts/update-card-resources.sh'
+            shutil.copy2(SCRIPT, script)
+            def run(*extra):
+                return subprocess.run([BASH or 'bash', str(script), '--dry-run', 'prepare', '--skip-images', *extra], cwd=root, text=True, capture_output=True)
+            self.assertNotEqual(run().returncode, 0)
+            (root / 'ygopro/cards.cdb').write_bytes(b'dry-run fixture: do not open')
+            snapshot = lambda: {str(p.relative_to(root)): p.read_bytes() if p.is_file() else None for p in root.rglob('*')}
+            before = snapshot()
+            for extra in [(), ('--expansion',)]:
+                result = run(*extra)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('expansion', result.stdout)
+                self.assertEqual(snapshot(), before)
 
     def test_dry_run_deploy_requires_confirmation_but_does_not_connect(self) -> None:
         missing = self.run_script("--dry-run", "deploy")
