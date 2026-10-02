@@ -1,0 +1,39 @@
+name: Local stack checks
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  stack:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: cube/package.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pnpm install --frozen-lockfile
+        working-directory: cube
+      - run: pnpm test
+        working-directory: cube
+      - run: pnpm build
+        working-directory: cube
+      - run: python -m unittest discover -s scripts -p "test_*.py"
+        if: runner.os == 'Linux'
+      - run: python -m unittest discover -s scripts -p test_backup_database.py
+        if: runner.os == 'Windows'

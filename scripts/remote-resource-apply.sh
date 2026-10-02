@@ -33,6 +33,7 @@ systemctl is-active ygocube-api ygocube-srvpro ygocube-web nginx > "$BACKUP/serv
 # Enter maintenance before touching the database. This prevents a write from
 # racing the backup and makes the checkpoint/integrity result reproducible.
 SERVICES_STOPPED=1
+DEFER_START="${YGOCUBE_DEFER_START:-0}"
 HOST_REPLACED=0
 AVIF_REPLACED=0
 HOST_PRE_MOVED=0
@@ -71,14 +72,16 @@ rollback_resource_moves() {
   fi
   if [[ "${NAMES_REPLACED:-0}" == 1 ]]; then
     if [[ -f "$BACKUP/ygocdb_cards.json" ]]; then
-      cp -f "$BACKUP/ygocdb_cards.json" "$OLD_NAMES"
+      cp -f "$BACKUP/ygocdb_cards.json" "$OLD_NAMES.rollback-new"
+      mv -f "$OLD_NAMES.rollback-new" "$OLD_NAMES"
     else
       rm -f "$OLD_NAMES"
     fi
   fi
   if [[ "${MANIFEST_REPLACED:-0}" == 1 ]]; then
     if [[ -f "$BACKUP/resource-manifest.json" ]]; then
-      cp -f "$BACKUP/resource-manifest.json" "$ROOT/shared/assets/resource-manifest.json"
+      cp -f "$BACKUP/resource-manifest.json" "$ROOT/shared/assets/.resource-manifest.rollback-new"
+      mv -f "$ROOT/shared/assets/.resource-manifest.rollback-new" "$ROOT/shared/assets/resource-manifest.json"
     else
       rm -f "$ROOT/shared/assets/resource-manifest.json"
     fi
@@ -89,9 +92,8 @@ recover_services() {
   if [[ "$status" != 0 ]]; then
     rollback_resource_moves || true
   fi
-  if [[ "${SERVICES_STOPPED:-0}" == 1 ]]; then
-    systemctl start ygocube-api ygocube-srvpro ygocube-web nginx >/dev/null 2>&1 || true
-  fi
+  # Failure recovery must never reopen ingress. The pair coordinator owns
+  # rollback, verification and the only successful service restart.
   exit "$status"
 }
 trap recover_services EXIT
@@ -117,6 +119,7 @@ cp -f "$STAGE/apply.sh" "$BACKUP/apply.sh"
 cp -f "$STAGE/transaction.sh" "$BACKUP/transaction.sh"
 [[ -f "$OLD_NAMES" ]] && cp -f "$OLD_NAMES" "$BACKUP/ygocdb_cards.json" || true
 [[ -f "$ROOT/shared/assets/resource-manifest.json" ]] && cp -f "$ROOT/shared/assets/resource-manifest.json" "$BACKUP/resource-manifest.json" || true
+touch "$BACKUP/RESOURCES_BACKED_UP"
 
 rm -rf "$STAGE/root"
 mkdir -p "$STAGE/root/srvpro/ygopro" "$STAGE/root/assets/pics_avif"
@@ -246,11 +249,10 @@ mv -f "$ROOT/shared/card-resource-tools/.apply-duel.py.new" "$ROOT/shared/card-r
 cp -f "$STAGE/transaction.sh" "$ROOT/shared/card-resource-tools/.transaction.sh.new"
 mv -f "$ROOT/shared/card-resource-tools/.transaction.sh.new" "$ROOT/shared/card-resource-tools/transaction.sh"
 
-systemctl start ygocube-api
-systemctl start ygocube-srvpro
-systemctl start ygocube-web
-systemctl start nginx
-systemctl is-active ygocube-api ygocube-srvpro ygocube-web nginx
+if [[ "$DEFER_START" != 1 ]]; then
+  systemctl start ygocube-api ygocube-srvpro ygocube-web nginx
+  systemctl is-active ygocube-api ygocube-srvpro ygocube-web nginx
+fi
 SERVICES_STOPPED=0
 trap - EXIT
-printf '%s\n' "$RELEASE_ID" > "$BACKUP/COMPLETED"
+printf '%s\n' "$RELEASE_ID" > "$BACKUP/CUBE_PREPARED"

@@ -33,6 +33,54 @@ PACKAGE_SPEC.loader.exec_module(PACKAGE)
 
 
 class RemoteDuelResourceApplyTests(unittest.TestCase):
+    def test_ingress_gate_covers_ipv4_ipv6_and_keeps_loopback_probes(self) -> None:
+        import subprocess
+        with tempfile.TemporaryDirectory() as directory:
+            cube, duel = Path(directory) / 'cube', Path(directory) / 'duel'
+            (cube / 'shared').mkdir(parents=True)
+            rules = set()
+            def execute(*args):
+                operation = args[3]
+                key = (args[0], tuple(args[6:] if operation == '-I' else args[5:]))
+                if operation == '-I': rules.add(key)
+                elif operation == '-D': rules.remove(key)
+                return ''
+            def probe(args, **kwargs):
+                return subprocess.CompletedProcess(args, 0 if (args[0], tuple(args[5:])) in rules else 1)
+            with patch.object(REMOTE, 'parse_config', return_value={'srvpro': {'game_port': 8911}, 'server': {'port': 3101}}), patch.object(REMOTE.shutil, 'which', side_effect=lambda name: '/sbin/' + name), patch.object(REMOTE, 'run', side_effect=execute), patch.object(REMOTE.subprocess, 'run', side_effect=probe):
+                REMOTE.maintenance_ingress(cube, duel, close=True)
+                REMOTE.maintenance_ingress(cube, duel, close=True)
+                self.assertEqual(len(rules), 2)
+                self.assertTrue(any('127.0.0.1/32' in rule for _, rule in rules))
+                self.assertTrue(any('::1/128' in rule for _, rule in rules))
+                self.assertTrue(all('3000,3100,3101,8911' in rule for _, rule in rules))
+                REMOTE.maintenance_ingress(cube, duel, close=False)
+                self.assertFalse(rules)
+                self.assertFalse((cube / 'shared/card-maintenance-ingress.json').exists())
+
+    def test_component_inventory_detects_changes_and_preserves_component_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            old, new = Path(directory) / 'old', Path(directory) / 'new'
+            (old / 'api/dist').mkdir(parents=True)
+            (old / 'web/apps/web/.next/static').mkdir(parents=True)
+            (old / 'api/dist/main.js').write_text('old-api')
+            (old / 'web/apps/web/.next/static/test.js').write_text('old-web')
+            (old / 'release.json').write_text(json.dumps({'sourceCommit': 'old-source'}))
+            import shutil
+            shutil.copytree(old, new, copy_function=REMOTE.hardlink_file)
+            REMOTE.atomic_write_text(new / 'api/dist/main.js', 'new-api')
+            REMOTE.record_components(new, {'api': 'new-source'}, previous=old)
+            declared = json.loads((new / 'release.json').read_text())['components']
+            self.assertEqual(declared['api']['sourceCommit'], 'new-source')
+            self.assertEqual(declared['web']['sourceCommit'], 'old-source')
+            self.assertNotIn('components', json.loads((old / 'release.json').read_text()))
+            self.assertEqual(declared, REMOTE.describe_components(new))
+            REMOTE.atomic_write_text(new / 'api/dist/main.js', 'tampered')
+            self.assertNotEqual(declared['api']['sha256'], REMOTE.describe_components(new)['api']['sha256'])
+            REMOTE.record_components(new, {'web': None})
+            self.assertIsNone(REMOTE.describe_components(new)['web']['sourceCommit'])
+            self.assertEqual(REMOTE.describe_components(new)['web']['sourceEvidence'], 'unknown')
+
     def test_banlist_api_names_keep_upstream_calendar_dates(self) -> None:
         self.assertEqual(REMOTE.banlist_api_name("2026.10"), "2026.10.01 OCG")
         self.assertEqual(REMOTE.banlist_api_name("2026.9 TCG"), "2026.09.01 TCG")

@@ -21,33 +21,17 @@ HELPER="$(dirname "$(readlink -f "$0")")/apply-duel.py"
 exec 8>"$CUBE_ROOT/.card-resource-deploy.lock"
 flock -n 8
 MAINTENANCE=0
-recover_services() {
-  local status=$?
-  if [[ "$MAINTENANCE" == 1 ]]; then
-    systemctl start ygocube-api ygocube-srvpro ygocube-web ygoduel-api ygoduel-srvpro ygoduel-web nginx >/dev/null 2>&1 || true
-  fi
-  exit "$status"
-}
-trap recover_services EXIT
-if [[ "$MODE" == apply ]]; then
-  STAGE="$CUBE_ROOT/.staging/card-sync-$RELEASE_ID"
-  expected="$(cat "$STAGE/expected-server-manifest.sha256")"
-  actual="$(sha256sum "$CUBE_ROOT/shared/assets/resource-manifest.json" | cut -d' ' -f1)"
-  [[ "$expected" == "$actual" ]] || { echo 'server resources changed after packaging; refresh baseline and retry' >&2; exit 1; }
-  python3 "$HELPER" --cube-root "$CUBE_ROOT" --duel-root "$DUEL_ROOT" --id "$RELEASE_ID" --enter-maintenance
-  MAINTENANCE=1
-  bash "$STAGE/apply.sh" --root "$CUBE_ROOT" --id "$RELEASE_ID"
-  python3 "$HELPER" --cube-root "$CUBE_ROOT" --duel-root "$DUEL_ROOT" --id "$RELEASE_ID"
-else
-  BACKUP="$CUBE_ROOT/backups/card-sync-$RELEASE_ID"
+INGRESS_CLOSED=0
+INGRESS_WAS_CLOSED=0
+[[ ! -f "$CUBE_ROOT/shared/card-maintenance-ingress.json" ]] || INGRESS_WAS_CLOSED=1
+BACKUP="$CUBE_ROOT/backups/card-sync-$RELEASE_ID"
+restore_pair() {
   [[ -d "$BACKUP/srvpro-ygopro" && -d "$BACKUP/pics_avif" && -f "$BACKUP/resource-manifest.json" ]]
   previous=""
   if [[ -f "$BACKUP/previous-release.txt" ]]; then
     previous="$(readlink -f "$(cat "$BACKUP/previous-release.txt")")"
     [[ "$previous" == "$CUBE_ROOT/releases/"* && -d "$previous" ]]
   fi
-  python3 "$HELPER" --cube-root "$CUBE_ROOT" --duel-root "$DUEL_ROOT" --id "$RELEASE_ID" --enter-maintenance
-  MAINTENANCE=1
   python3 "$HELPER" --cube-root "$CUBE_ROOT" --duel-root "$DUEL_ROOT" --id "$RELEASE_ID" --rollback --defer-start
   systemctl stop ygocube-srvpro ygocube-web ygocube-api nginx
   rm -rf "$CUBE_ROOT/shared/srvpro/ygopro" "$CUBE_ROOT/shared/assets/pics_avif"
@@ -67,10 +51,62 @@ else
   chown ygocube:ygocube "$CUBE_ROOT/shared/assets/ygocdb_cards.json" "$CUBE_ROOT/shared/assets/resource-manifest.json"
   python3 "$HELPER" --cube-root "$CUBE_ROOT" --duel-root "$DUEL_ROOT" --id "$RELEASE_ID" --relink-current-to-cube --defer-start
   python3 "$HELPER" --cube-root "$CUBE_ROOT" --duel-root "$DUEL_ROOT" --id "$RELEASE_ID" --verify-current
-  systemctl start ygocube-api ygocube-srvpro ygocube-web ygoduel-api ygoduel-srvpro nginx
+}
+start_pair() {
+  local legacy=()
+  [[ "${1:-apply}" != rollback ]] || legacy=(--allow-legacy-dates)
+  python3 "$HELPER" --cube-root "$CUBE_ROOT" --duel-root "$DUEL_ROOT" --id "$RELEASE_ID" --record-components "$CUBE_ROOT/current"
+  python3 "$HELPER" --cube-root "$CUBE_ROOT" --duel-root "$DUEL_ROOT" --id "$RELEASE_ID" --record-components "$DUEL_ROOT/current"
+  systemctl start ygocube-api ygocube-srvpro ygocube-web ygoduel-api ygoduel-srvpro
+  systemctl restart ygoduel-web
+  python3 "$HELPER" --cube-root "$CUBE_ROOT" --duel-root "$DUEL_ROOT" --id "$RELEASE_ID" --verify-live "${legacy[@]}"
+  systemctl start nginx
+  systemctl is-active ygocube-api ygocube-srvpro ygocube-web ygoduel-api ygoduel-srvpro ygoduel-web nginx
+  python3 "$HELPER" --cube-root "$CUBE_ROOT" --duel-root "$DUEL_ROOT" --id "$RELEASE_ID" --open-ingress
+}
+recover_pair() {
+  local status=$? recovery_status
+  trap - EXIT
+  if [[ "$MAINTENANCE" == 1 ]]; then
+    # Preserve the lock throughout recovery; never expose a half-installed pair.
+    set +e
+    systemctl stop ygocube-api ygocube-srvpro ygocube-web ygoduel-api ygoduel-srvpro ygoduel-web nginx
+    if [[ "$MODE" == apply && -f "$BACKUP/RESOURCES_BACKED_UP" ]]; then
+      # A standalone subshell keeps errexit active inside every restore step.
+      (set -e; python3 "$HELPER" --cube-root "$CUBE_ROOT" --duel-root "$DUEL_ROOT" --id "$RELEASE_ID" --close-ingress; restore_pair; start_pair rollback)
+      recovery_status=$?
+      if [[ "$recovery_status" == 0 ]]; then
+        printf '%s\n' "$RELEASE_ID" > "$BACKUP/ROLLED_BACK"
+      else
+        systemctl stop ygocube-api ygocube-srvpro ygocube-web ygoduel-api ygoduel-srvpro ygoduel-web nginx
+        echo 'pair recovery failed; services remain stopped; retain backups and staging' >&2
+      fi
+    else
+      echo 'transaction incomplete; services remain stopped for recovery' >&2
+    fi
+  elif [[ "$INGRESS_CLOSED" == 1 && "$INGRESS_WAS_CLOSED" == 0 ]]; then
+    python3 "$HELPER" --cube-root "$CUBE_ROOT" --duel-root "$DUEL_ROOT" --id "$RELEASE_ID" --open-ingress || true
+  fi
+  exit "$status"
+}
+trap recover_pair EXIT
+if [[ "$MODE" == apply ]]; then
+  STAGE="$CUBE_ROOT/.staging/card-sync-$RELEASE_ID"
+  expected="$(cat "$STAGE/expected-server-manifest.sha256")"
+  actual="$(sha256sum "$CUBE_ROOT/shared/assets/resource-manifest.json" | cut -d' ' -f1)"
+  [[ "$expected" == "$actual" ]] || { echo 'server resources changed after packaging; refresh baseline and retry' >&2; exit 1; }
 fi
-# Bind Web to current before older releases can be considered for cleanup.
-systemctl restart ygoduel-web
-systemctl is-active ygocube-api ygocube-srvpro ygocube-web ygoduel-api ygoduel-srvpro ygoduel-web nginx
+python3 "$HELPER" --cube-root "$CUBE_ROOT" --duel-root "$DUEL_ROOT" --id "$RELEASE_ID" --close-ingress
+INGRESS_CLOSED=1
+python3 "$HELPER" --cube-root "$CUBE_ROOT" --duel-root "$DUEL_ROOT" --id "$RELEASE_ID" --enter-maintenance
+MAINTENANCE=1
+if [[ "$MODE" == apply ]]; then
+  YGOCUBE_DEFER_START=1 bash "$STAGE/apply.sh" --root "$CUBE_ROOT" --id "$RELEASE_ID"
+  python3 "$HELPER" --cube-root "$CUBE_ROOT" --duel-root "$DUEL_ROOT" --id "$RELEASE_ID" --defer-start
+  python3 "$HELPER" --cube-root "$CUBE_ROOT" --duel-root "$DUEL_ROOT" --id "$RELEASE_ID" --verify-current
+else
+  restore_pair
+fi
+start_pair "$MODE"
 MAINTENANCE=0
 trap - EXIT

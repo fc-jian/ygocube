@@ -18,6 +18,7 @@ __pycache__/
 
 # node
 node_modules/
+.pnpm-store/
 
 # build output
 cube/apps/api/dist/

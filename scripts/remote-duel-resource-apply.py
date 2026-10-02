@@ -58,10 +58,12 @@ def banlist_api_names(headers: list[str]) -> list[str]:
     return [banlist_api_name(header) for header in headers]
 
 
-def wait_healthy(banlist_path: Path | None = None, *, allow_legacy_dates: bool = False) -> None:
+def wait_healthy(banlist_path: Path | None = None, *, allow_legacy_dates: bool = False, include_cube: bool = False) -> None:
     last_error: Exception | None = None
     for _ in range(40):
         try:
+            if include_cube and read_json("http://127.0.0.1:3001/health") is None:
+                raise RuntimeError('Cube API is not ready')
             if read_json("http://127.0.0.1:3101/health") is None:
                 time.sleep(1)
                 continue
@@ -510,6 +512,58 @@ def parse_config(api_modules: Path, config_file: Path) -> dict:
     return value
 
 
+def describe_components(release: Path) -> dict:
+    metadata_path = release / 'release.json'
+    metadata = json.loads(metadata_path.read_text(encoding='utf-8')) if metadata_path.is_file() else {}
+    previous = metadata.get('components', {})
+    groups = {
+        'api': [release / 'api/dist', release / 'api/node_modules/@ygocube'],
+        'web': [release / 'web'],
+        'srvpro': [release / 'srvpro/ygopro-server.js', release / 'srvpro/cube.js', release / 'srvpro/cube-banlists.js'],
+        'host': [release / 'srvpro/ygopro/ygopro'],
+        'resources': [release / 'assets/resource-manifest.json'],
+    }
+    result = {}
+    for name, roots in groups.items():
+        files = {}
+        for root in roots:
+            candidates = [root] if root.is_file() else sorted(root.rglob('*')) if root.is_dir() else []
+            for file in candidates:
+                if not file.is_file():
+                    continue
+                relative = file.relative_to(release).as_posix()
+                if name == 'web' and ('node_modules' in file.parts or 'cache' in file.parts or '.next' not in file.parts):
+                    continue
+                files[relative] = sha256(file)
+        source = previous.get(name, {}).get('sourceCommit')
+        if name not in previous:
+            if name in ('api', 'web'):
+                source = metadata.get('sourceCommit')
+            elif name == 'srvpro':
+                source = metadata.get('srvproApplication', {}).get('sourceCommit') or metadata.get('srvproCommit')
+        result[name] = {'sourceCommit': source, 'sourceEvidence': previous.get(name, {}).get('sourceEvidence', 'legacy-release-metadata' if source else 'unknown'),
+                        'sha256': hashlib.sha256(json.dumps(files, sort_keys=True, separators=(',', ':')).encode()).hexdigest(), 'fileCount': len(files)}
+    return result
+
+
+def record_components(release: Path, sources: dict | None = None, previous: Path | None = None) -> None:
+    path = release / 'release.json'
+    if not path.is_file():
+        return
+    value = json.loads(path.read_text(encoding='utf-8'))
+    components = describe_components(release)
+    if previous:
+        old = describe_components(previous)
+        for name in components:
+            components[name].update(sourceCommit=old[name]['sourceCommit'], sourceEvidence=old[name]['sourceEvidence'])
+    for name, commit in (sources or {}).items():
+        components[name].update(sourceCommit=commit, sourceEvidence='component-payload' if commit else 'unknown')
+    value['components'] = components
+    if components['srvpro']['sourceCommit']:
+        value['srvproCommit'] = components['srvpro']['sourceCommit']
+    atomic_write_text(path, json.dumps(value, ensure_ascii=False, indent=2) + '\n')
+
+
 def install_srvpro_application(stage_root: Path, release: Path) -> None:
     metadata_path = stage_root / "metadata" / "srvpro-application.json"
     if not metadata_path.is_file():
@@ -529,6 +583,7 @@ def install_srvpro_application(stage_root: Path, release: Path) -> None:
         value = json.loads(release_metadata.read_text(encoding="utf-8"))
         value["srvproApplication"] = metadata
         atomic_write_text(release_metadata, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+        record_components(release, {'srvpro': metadata.get('sourceCommit')})
 
 
 def link_existing_release_resources(cube_root: Path, release: Path) -> int:
@@ -575,6 +630,54 @@ def active_standalone_host() -> bool:
         stderr=subprocess.DEVNULL,
     )
     return result.returncode == 0
+
+
+def maintenance_ingress(cube_root: Path, duel_root: Path, *, close: bool) -> dict:
+    """Gate public native/API/Web ports while keeping loopback probes usable."""
+    ledger = cube_root / 'shared/card-maintenance-ingress.json'
+    if close:
+        ports = {3000, 3100}
+        for root in (cube_root, duel_root):
+            config_file = root / 'current/config.yaml'
+            if not config_file.is_file():
+                config_file = root / 'shared/config.yaml'
+            config = parse_config(root / 'current/api/node_modules', config_file)
+            ports.add(int(config.get('srvpro', {}).get('game_port', 7911)))
+            ports.add(int(config.get('server', {}).get('port', 3001)))
+        if any(port < 1 or port > 65535 for port in ports):
+            raise RuntimeError('invalid maintenance ingress port')
+        value = {'ports': sorted(ports)}
+        if ledger.is_file() and json.loads(ledger.read_text()) != value:
+            raise RuntimeError('existing maintenance ingress ledger differs; retain the closed gate for inspection')
+    else:
+        if not ledger.is_file():
+            return {'ok': True, 'ingressAlreadyOpen': True}
+        value = json.loads(ledger.read_text())
+    rules = []
+    for tool, loopback in [('iptables', '127.0.0.1/32'), ('ip6tables', '::1/128')]:
+        if not shutil.which(tool):
+            raise RuntimeError(f'{tool} is required to keep native ingress closed during verification')
+        rule = ['-p', 'tcp', '!', '-s', loopback, '-m', 'multiport', '--dports', ','.join(map(str, value['ports'])), '-m', 'comment', '--comment', 'ygocube-card-maintenance', '-j', 'REJECT']
+        rules.append((tool, rule))
+    added = []
+    try:
+        for tool, rule in rules:
+            exists = subprocess.run([tool, '-w', '5', '-C', 'INPUT', *rule], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+            if close and not exists:
+                run(tool, '-w', '5', '-I', 'INPUT', '1', *rule)
+                added.append((tool, rule))
+            elif not close and exists:
+                run(tool, '-w', '5', '-D', 'INPUT', *rule)
+        if close:
+            atomic_write_text(ledger, json.dumps(value) + '\n')
+        else:
+            ledger.unlink()
+    except Exception:
+        if close:
+            for tool, rule in reversed(added):
+                subprocess.run([tool, '-w', '5', '-D', 'INPUT', *rule], check=False)
+        raise
+    return {'ok': True, 'ingressClosed': close}
 
 
 def enter_maintenance() -> dict:
@@ -633,7 +736,6 @@ def rollback(duel_root: Path, release_id: str, *, defer_start: bool = False) -> 
     except Exception:
         if (duel_root / "current").resolve() != current:
             atomic_current(duel_root, current, f"recover-{release_id}")
-        run("systemctl", "restart", "ygoduel-api", "ygoduel-srvpro")
         raise
     return {"rolledBack": True, "previousRelease": previous.name}
 
@@ -665,13 +767,12 @@ def relink_current_to_cube(cube_root: Path, duel_root: Path, *, defer_start: boo
             run("systemctl", "start", "ygoduel-api", "ygoduel-srvpro")
             wait_healthy(target_host / "lflist.conf", allow_legacy_dates=True)
     except Exception:
-        for service in ("ygoduel-api", "ygoduel-srvpro"):
-            subprocess.run(["systemctl", "start", service], check=False)
+        # Keep ingress closed until the coordinator verifies both stacks.
         raise
     return {"ok": True, "relinked": True, "release": current.name, "managedResourceHardlinks": linked}
 
 
-def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
+def deploy(cube_root: Path, duel_root: Path, release_id: str, *, defer_start: bool = False) -> dict:
     stage = cube_root / ".staging" / f"card-sync-{release_id}"
     stage_root = stage / "root"
     manifest_path = stage_root / "metadata" / "resource-manifest.json"
@@ -839,9 +940,11 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
         with sqlite3.connect(database) as db:
             db.execute("UPDATE cards SET metadata_version=0")
             db.commit()
-        run("systemctl", "start", "ygoduel-api", "ygoduel-srvpro")
-        wait_healthy(target_host / "lflist.conf")
-        search_result = probe_catalogue(new, manifest)
+        search_result = {}
+        if not defer_start:
+            run("systemctl", "start", "ygoduel-api", "ygoduel-srvpro")
+            wait_healthy(target_host / "lflist.conf")
+            search_result = probe_catalogue(new, manifest)
         live_duel_avif = directory_fingerprint(duel_root / "current" / "assets" / "pics_avif")
         live_cube_avif = directory_fingerprint(cube_root / "shared" / "assets" / "pics_avif")
         if live_cube_avif != cube_resource_state["picsAvif"] or live_duel_avif != live_cube_avif:
@@ -850,7 +953,7 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
             raise RuntimeError("Duel current release is missing its resource-sync manifest")
         if new.joinpath("srvpro/ygopro/ygopro").is_file() and "not found" in run("ldd", str(new / "srvpro/ygopro/ygopro")):
             raise RuntimeError("standalone Duel host has unresolved shared libraries")
-        (backup / "deployment.json").write_text(
+        (backup / ("prepared.json" if defer_start else "deployment.json")).write_text(
             json.dumps(
                 {
                     "ok": True,
@@ -886,8 +989,6 @@ def deploy(cube_root: Path, duel_root: Path, release_id: str) -> dict:
             shutil.copy2(backup / "config.yaml", config_file)
         if (current_link.resolve() != old):
             atomic_current(duel_root, old, f"recover-{release_id}")
-        for service in ("ygoduel-api", "ygoduel-srvpro"):
-            subprocess.run(["systemctl", "start", service], check=False)
         raise
 
 
@@ -901,6 +1002,12 @@ def main() -> None:
     parser.add_argument("--enter-maintenance", action="store_true")
     parser.add_argument("--defer-start", action="store_true")
     parser.add_argument("--verify-current", action="store_true")
+    parser.add_argument("--verify-live", action="store_true")
+    parser.add_argument("--allow-legacy-dates", action="store_true")
+    parser.add_argument("--record-components", type=Path)
+    parser.add_argument("--audit-components", type=Path)
+    parser.add_argument("--close-ingress", action="store_true")
+    parser.add_argument("--open-ingress", action="store_true")
     parser.add_argument("--install-application-to", type=Path)
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9._-]+", args.id):
@@ -909,7 +1016,20 @@ def main() -> None:
         if not path.is_absolute() or path == Path("/"):
             raise SystemExit("invalid installation root")
     try:
-        if args.install_application_to:
+        if args.close_ingress or args.open_ingress:
+            result = maintenance_ingress(args.cube_root, args.duel_root, close=args.close_ingress)
+        elif args.record_components:
+            record_components(args.record_components)
+            result = {'ok': True}
+        elif args.audit_components:
+            actual = describe_components(args.audit_components)
+            declared = json.loads((args.audit_components / 'release.json').read_text(encoding='utf-8')).get('components', {})
+            mismatches = [name for name in actual if declared.get(name, {}).get('sha256') != actual[name]['sha256']]
+            result = {'ok': not mismatches, 'components': actual, 'mismatches': mismatches}
+            if mismatches:
+                print(json.dumps(result, ensure_ascii=False))
+                raise RuntimeError('component inventory is missing or differs from the release')
+        elif args.install_application_to:
             release = args.install_application_to.resolve(strict=True)
             if not release.is_relative_to(args.cube_root.resolve() / "releases"):
                 raise RuntimeError("application release resolves outside Cube releases")
@@ -919,12 +1039,16 @@ def main() -> None:
             result = enter_maintenance()
         elif args.verify_current:
             result = verify_current_resources(args.cube_root.resolve(), args.duel_root.resolve())
+        elif args.verify_live:
+            manifest = json.loads((args.cube_root / "shared/assets/resource-manifest.json").read_text(encoding="utf-8"))
+            wait_healthy(args.duel_root / "current/srvpro/ygopro/lflist.conf", allow_legacy_dates=args.allow_legacy_dates, include_cube=True)
+            result = probe_catalogue(args.duel_root / "current", manifest)
         elif args.rollback:
             result = rollback(args.duel_root.resolve(), args.id, defer_start=args.defer_start)
         elif args.relink_current_to_cube:
             result = relink_current_to_cube(args.cube_root.resolve(), args.duel_root.resolve(), defer_start=args.defer_start)
         else:
-            result = deploy(args.cube_root.resolve(), args.duel_root.resolve(), args.id)
+            result = deploy(args.cube_root.resolve(), args.duel_root.resolve(), args.id, defer_start=args.defer_start)
     except Exception as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
         raise

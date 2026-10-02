@@ -174,7 +174,48 @@ refresh_server_baseline() { return 0; }
             result = subprocess.run([BASH or 'bash', str(transaction), 'rollback', '--cube-root', str(cube), '--duel-root', str(duel), '--id', 'fixture'], env=env, text=True, capture_output=True)
             self.assertEqual(result.returncode, 17, result.stderr)
             self.assertEqual(live.read_text(), 'current resource')
-            self.assertNotIn('stop ygocube', (root / 'services.log').read_text())
+            self.assertNotIn('start ', (root / 'services.log').read_text())
+            self.assertIn('stop ygocube', (root / 'services.log').read_text())
+
+    @unittest.skipIf(os.name == "nt", "Linux deployment lock and tool fixture")
+    def test_failed_pair_apply_never_reopens_ingress_before_recovery(self) -> None:
+        import hashlib
+        import tempfile
+        for fail_rollback in (False, True):
+            with self.subTest(fail_rollback=fail_rollback), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                cube, duel, commands = root / 'cube', root / 'duel', root / 'commands'
+                stage = cube / '.staging/card-sync-fixture'
+                backup = cube / 'backups/card-sync-fixture'
+                for directory in (stage, commands, duel, cube / 'shared/assets/pics_avif', cube / 'shared/srvpro/ygopro', backup / 'srvpro-ygopro', backup / 'pics_avif'):
+                    directory.mkdir(parents=True, exist_ok=True)
+                for filename in ('resource-manifest.json', 'ygocdb_cards.json'):
+                    (cube / 'shared/assets' / filename).write_text('{}')
+                    (backup / filename).write_text('{}')
+                (backup / 'RESOURCES_BACKED_UP').touch()
+                (stage / 'expected-server-manifest.sha256').write_text(hashlib.sha256(b'{}').hexdigest())
+                (stage / 'apply.sh').write_text('#!/bin/bash\nexit 0\n')
+                shutil.copyfile(SCRIPT.with_name('remote-resource-transaction.sh'), root / 'transaction.sh')
+                (root / 'apply-duel.py').write_text('# fixture')
+                fake_python = '#!/bin/bash\nprintf "helper %s\\n" "$*" >> "$SERVICE_LOG"\n'
+                fake_python += 'case "$*" in *--rollback*) exit ' + ('19' if fail_rollback else '0') + ';; *--enter-maintenance*|*--relink-current-to-cube*|*--verify-current*|*--verify-live*|*--record-components*|*--close-ingress*|*--open-ingress*) exit 0;; *) exit 17;; esac\n'
+                for name, text in {'python3': fake_python, 'systemctl': '#!/bin/bash\nprintf "service %s\\n" "$*" >> "$SERVICE_LOG"\n', 'sqlite3': '#!/bin/bash\nexit 0\n', 'chown': '#!/bin/bash\nexit 0\n'}.items():
+                    (commands / name).write_text(text)
+                    (commands / name).chmod(0o755)
+                log = root / 'services.log'
+                env = {**os.environ, 'PATH': str(commands) + os.pathsep + os.environ['PATH'], 'SERVICE_LOG': str(log)}
+                result = subprocess.run([BASH or 'bash', str(root / 'transaction.sh'), 'apply', '--cube-root', str(cube), '--duel-root', str(duel), '--id', 'fixture'], env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 17, result.stderr)
+                calls = log.read_text()
+                if fail_rollback:
+                    self.assertNotIn('service start ', calls)
+                    self.assertNotIn('--open-ingress', calls)
+                    self.assertFalse((backup / 'ROLLED_BACK').exists())
+                else:
+                    self.assertLess(calls.index('--verify-current'), calls.index('service start '))
+                    self.assertLess(calls.index('--verify-live'), calls.index('--open-ingress'))
+                    self.assertTrue((backup / 'ROLLED_BACK').exists())
+                self.assertFalse((backup / 'COMPLETED').exists())
 
 
 if __name__ == "__main__":

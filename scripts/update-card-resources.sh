@@ -1172,12 +1172,7 @@ PY
   ssh_upload "$ROOT_DIR/scripts/remote-resource-transaction.sh" "$ALY_ROOT/.staging/card-sync-$RELEASE_ID/transaction.sh"
   ssh_upload "$STATE_DIR/expected-server-manifest.sha256" "$ALY_ROOT/.staging/card-sync-$RELEASE_ID/expected-server-manifest.sha256"
   if ! ssh_exec "bash '$ALY_ROOT/.staging/card-sync-$RELEASE_ID/transaction.sh' apply --cube-root '$ALY_ROOT' --duel-root '$ALY_DUEL_ROOT' --id '$RELEASE_ID'" 900; then
-    if ssh_exec "test -d '$ALY_ROOT/backups/card-sync-$RELEASE_ID/srvpro-ygopro' && test -d '$ALY_ROOT/backups/card-sync-$RELEASE_ID/pics_avif'" 30 >/dev/null 2>&1; then
-      warn "Aly publish failed; attempting automatic rollback of both resource releases"
-      remote_rollback "$RELEASE_ID" || die "automatic rollback failed; retain both backups and inspect Aly before resuming deployment"
-      die "Aly publish failed and was rolled back"
-    fi
-    die "Aly publish failed before a complete backup was created; inspect the retained stage"
+    die "Aly transaction failed; inspect ROLLED_BACK and retained staging. The remote coordinator owns recovery; do not reopen services manually"
   fi
   local expected_cdb_sha expected_manifest_sha expected_names_sha expected_banlist_sha
   expected_cdb_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["cards"]["sha256"])' "$STATE_DIR/resource-manifest.json")"
@@ -1190,6 +1185,7 @@ PY
     die "post-deploy verification failed and the resource releases were rolled back"
   fi
   refresh_server_baseline || die "published resources passed checks but baseline refresh failed"
+  ssh_exec "set -eu; printf '%s\\n' '$RELEASE_ID' > '$ALY_ROOT/backups/card-sync-$RELEASE_ID/COMPLETED'; cp '$ALY_DUEL_ROOT/backups/card-sync-$RELEASE_ID/prepared.json' '$ALY_DUEL_ROOT/backups/card-sync-$RELEASE_ID/deployment.json'" 30 || die "could not record successful pair verification"
   info "Aly deployment completed: $RELEASE_ID"
 }
 

@@ -39,6 +39,7 @@ description: Safely synchronize YGOPro upstream card resources and the current o
 提交并先推子模块、后推根仓库 → 读取服务器基线并发布 → 现场/公网验收 →
 刷新部署基线 → 按授权清理 → 最后更新维护记录与本 Skill 并提交推送。
 
+用户仅要求本地修复/测试时，流程止于本地提交与测试记录，不推送、不部署；不得以成功标准要求额外授权。
 维护范围已由本会话授权时沿用授权；把已有用户文件留在原处，最终报告其状态，
 不能为了声明 clean 而删除、暂存或提交无关文件。任一步失败均保留现场并返回非零。
 
@@ -143,7 +144,7 @@ bash scripts/update-card-resources.sh prepare --refresh-names
   穿越、绝对路径、符号链接、重复编号和解压总大小；`vips` 生成最大边 200、
   Q30、去元数据 AVIF。只生成卡图编号对应的文件，原始图片留在本地缓存。
 - 名称映射按 exact code 读取：`sc_name` → `md_name` → `jp_name` → `cn_name` →
-  `en_name`；都为空或映射缺失时回退同一编号的 `cards.cdb texts.name`。YGOPro
+  `en_name`；都为空或映射缺失时，异画 alias 继承和 exact-code CDB 回退严格遵守根 `AGENTS.md` 的卡名约定（包括 5405695 例外），不继承规则同名卡译名。YGOPro
   `TYPE_TOKEN` 衍生物不进入搜索、卡池或名称覆盖审计，因此其外部译名缺失可忽略。
 - `prepare --refresh-names` 每次读取 YGOCDB 的 `cards.zip.md5`，按其公布的
   `cards.json` MD5 校验缓存/下载归档后再合并 exact-code 映射；MD5、归档 SHA-256、
@@ -385,7 +386,7 @@ expansion 清单。即使已有 `deployed-resource-manifest.json`，也不能因
 
 远端顺序由 `remote-resource-transaction.sh` 固定：
 
-1. 取得 `.card-resource-deploy.lock`，关闭 Duel API 建房，SIGSTOP 暂停原生 srvpro
+1. 取得 `.card-resource-deploy.lock`。通过 iptables/ip6tables 暂时阻断两套配置中的原生游戏/API 端口及 Web 3000/3100 的非 loopback 访问；保留带标签的规则台账，不改 SSH 端口。两种工具必须已安装且具备权限，否则停服前失败。关闭 Duel API 建房，SIGSTOP 暂停原生 srvpro
    接入进程，再次检查子宿主。若出现对局，SIGCONT 恢复接入并恢复 API，返回失败；
    两次检查之间不能留有可以创建新宿主的入口。
 2. 无活动宿主才停止 Duel srvpro，保持入口关闭。随后停止 Cube API/srvpro/Web/Nginx，
@@ -394,15 +395,14 @@ expansion 清单。即使已有 `deployed-resource-manifest.json`，也不能因
    `--srvpro-app` 从旧 Cube 应用硬链接生成新 release，只原子替换已验证的两个 JS 文件；
    Duel 的新资源 release 安装同一 srvpro 修改。该参数不能代替任意 API/Web 的完整发布。
 4. 安装并校验 Duel 与 Cube 的同代资源硬链接，保存 Duel 数据库/配置/旧 current，
-   使 Duel 卡片缓存失效。两侧 API/srvpro 启动，Duel Web 重启并绑定当前 release。
-5. 公网和现场检查通过才刷新本地部署基线。工具保存在 `shared/card-resource-tools/`
+   使 Duel 卡片缓存失效。两侧子步骤均 deferred start，不能自行提前恢复入口。记录各组件内容哈希与来源，验证同代资源后统一启动，完成本机健康检查与七服务状态检查才移除入口规则。
+5. 公网和现场检查通过才刷新本地部署基线并写 Cube `COMPLETED` / Duel `deployment.json`；准备阶段只写 `CUBE_PREPARED` / `prepared.json`。工具保存在 `shared/card-resource-tools/`
    以及本次备份中，清理成功 staging 后仍能回滚。
 
 备份分别为 `/opt/ygocube/backups/card-sync-<id>/` 与
-`/opt/ygoduel/backups/card-sync-<id>/`。任一步或发布后健康检查失败，通过同一 ID
-回滚两套。回滚在同一锁下恢复 Duel 指针并保持停服 → 恢复 Cube 资源/current →
+`/opt/ygoduel/backups/card-sync-<id>/`。成对事务内任一步失败，由 EXIT trap 在同一把锁内按同一 ID 恢复两套，禁止先重启再交给外层回滚。恢复验证失败则停止全部服务并保留入口规则、备份与 staging；完整资源备份尚未完成也保持停服，人工检查后恢复。事务失败由内层负责恢复，外层不再重复回滚。发布后公网健康检查失败仍以同一 ID 请求回滚；若已有新对局必须停止自动恢复并保留现场，不能强杀对局。回滚在同一锁下恢复 Duel 指针并保持停服 → 恢复 Cube 资源/current →
 重链 Duel → **同时使两侧派生 cards 缓存失效** → 启动并验证；不回退比赛状态。
-回滚成功后重新从服务器记录本地基线，后续 delta 以恢复后的实际版本为准。
+成功恢复写 `ROLLED_BACK`，不能伪造发布成功标记。回滚成功后重新从服务器记录本地基线，后续 delta 以恢复后的实际版本为准。
 
 SSH、上传、子步骤的失败都必须显式 `return`/非零退出；函数处于 `||`/条件上下文时
 Bash `errexit` 可能失效，不能让后续成功覆盖早先失败。使用 `die()`/`exit` 的健康函数
@@ -456,7 +456,7 @@ srvpro HTTP/TCP/Cube 协议探针和实际宿主启动。两套数据库完整�
 | 发布后服务未 active、API/协议/AVIF 不通 | 先读取 systemd/journal 日志和 release metadata；若资源切换已发生，使用同一 `<release-id>` 执行 rollback。 |
 | Next 静态 JS/CSS 404 或 MIME 为 HTML | 这是完整 Web 发布遗漏 `.next/static` 的典型问题；按 AGENTS.md 的 standalone 发布规则补齐静态目录并重启 Web，不能改 Nginx 把所有请求回退首页。 |
 | 远端证书校验失败 | 使用正确的受信任 `YGOCUBE_ALY_URL`/证书链后重试；诊断可单独使用 `curl -k`，不要把跳过 TLS 验证写进正式脚本。 |
-| 历史 matches 唯一约束告警 | 只读核实重复记录与外键；不同对局/结果不能当作冗余卡片缓存删除。记录独立修复事项，资源回滚只清派生 cards 缓存，不覆盖玩家、比赛或事件。 |
+| 历史 matches 唯一约束告警 | 按 `dev_docs/18-local-hardening-20261002.md` 使用离线修复工具先导出计划，在数据库副本演练；冻结比赛、停止全部写入后，显式指定计划和新备份路径才可应用。保留对局 ID/比分并追加修正事件；资源回滚不得覆盖比赛状态。 |
 | 需要回滚 | 让维护窗口保持有效，运行 `bash scripts/update-card-resources.sh rollback --backup-id <release-id>`，再次完成两套健康检查。回滚恢复资源与配置；数据库缓存失效值可由 API 重建，比赛数据异常须另行核验备份后处理。 |
 
 正式扩展卡与原生/Web 互通验收见 [先行卡补充验收](references/client-and-web-verification.md)。元数据检查不能代替实际效果与协议测试。
@@ -467,7 +467,7 @@ srvpro HTTP/TCP/Cube 协议探针和实际宿主启动。两套数据库完整�
 
 1. **来源可追溯**：上游完整 SHA、script/ocgcore gitlink、CDB/图片/manifest 哈希
    和名称缺失报告齐全；版本号主版本与上游一致且保留 Cube 后缀。
-2. **代码干净**：本次修改均已提交推送，所有被修改的 submodule 工作区 clean；无运行时
+2. **代码干净**：本次修改按用户授权提交/推送（本地任务不推送），所有被修改的 submodule 工作区 clean；无运行时
    资源、原始图片、数据库、token 或临时状态被 Git 追踪；无冲突标记、无 force push。
 3. **资源正确**：CDB SQLite integrity/代码集合通过；exact code 名称按完整 fallback
    选择；衍生物不出现在搜索/卡池；Lua 仅按 manifest 差量同步；AVIF 尺寸、MIME、
@@ -484,3 +484,9 @@ srvpro HTTP/TCP/Cube 协议探针和实际宿主启动。两套数据库完整�
 6. **可恢复且有记录**：release ID、备份目录、旧/新资源 hash、commit、测试结果和
    任何警告已保存；失败 staging 与备份在人工确认前不删除，必要时可用明确 backup ID
    回滚。
+
+## 分组件溯源与独立数据库备份
+
+完整应用发布前先确认持久化 `apply-duel.py` helper 支持 `record_components`。各发布入口记录 API、Web、srvpro、host、resources 的哈希和各自 sourceCommit；旧元数据只能标记为 legacy/unknown，不推断整个 release 来自最新 Web commit。可只读运行 `python3 <helper> --cube-root /opt/ygocube --duel-root /opt/ygoduel --id audit --audit-components <release>` 核验内容未漂移。
+
+数据库备份不应仅依赖发布。`scripts/backup-database.py` 使用 SQLite backup API，检查完整性/外键、独立文件恢复、SHA 和可选镜像目录；只有成功校验才写成功清单。`scripts/systemd/` 提供定时模板，但安装、启用以及异地镜像挂载属于单独运维操作，不随本地测试自动执行。详见 `dev_docs/18-local-hardening-20261002.md`。

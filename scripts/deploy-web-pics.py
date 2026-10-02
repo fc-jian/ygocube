@@ -10,6 +10,7 @@ helper_path=P('/opt/ygocube/shared/card-resource-tools/apply-duel.py')
 if not helper_path.is_file():raise SystemExit('Install current resource workflow before Web deployment')
 spec=importlib.util.spec_from_file_location('resource_apply',helper_path)
 resource_apply=importlib.util.module_from_spec(spec);spec.loader.exec_module(resource_apply)
+if not hasattr(resource_apply,'record_components'):raise SystemExit('Update the verified resource helper before staging this Web release')
 archive=P(sys.argv[1]);assert hashlib.sha256(archive.read_bytes()).hexdigest()==sys.argv[2]
 release=sys.argv[3]
 assert re.fullmatch(r'[a-z0-9-]+',release), 'invalid release id'
@@ -41,6 +42,7 @@ for service in ['ygocube','ygoduel']:
  metadata=new/'release.json'
  if metadata.exists():
   v=json.loads(metadata.read_text());v.update(id=release,previousRelease=old.name,webBuildId=(app/'.next/BUILD_ID').read_text().strip());resource_apply.atomic_write_text(metadata,json.dumps(v,indent=2))
+ resource_apply.record_components(new, {'web': None}, previous=old)
  if service=='ygoduel':resource_apply.link_existing_release_resources(P('/opt/ygocube'),new)
  resource_apply.set_release_ownership(new,user=service)
  (backup/'previous-release.txt').write_text(str(old))

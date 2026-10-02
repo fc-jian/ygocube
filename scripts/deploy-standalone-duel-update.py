@@ -9,6 +9,7 @@ helper_path=pathlib.Path('/opt/ygocube/shared/card-resource-tools/apply-duel.py'
 if not helper_path.is_file():raise SystemExit('Install current resource workflow before application deployment')
 spec=importlib.util.spec_from_file_location('resource_apply',helper_path)
 resource_apply=importlib.util.module_from_spec(spec);spec.loader.exec_module(resource_apply)
+if not hasattr(resource_apply,'record_components'):raise SystemExit('Update the verified resource helper before staging this application release')
 P=pathlib.Path;root=P('/opt/ygoduel')
 release=sys.argv[2];assert re.fullmatch(r'[a-z0-9-]+',release)
 new=root/'releases'/release;old=(root/'current').resolve();archive=P(sys.argv[3]);manifest=sys.argv[4]
@@ -49,6 +50,8 @@ if (new/'web/source.json').exists():
  provenance=json.loads((new/'web/source.json').read_text())
  metadata.update({k:provenance[k] for k in ['sourceCommit','workingTreeChanges','webSourceSha256','applicationSourceSha256'] if k in provenance})
 resource_apply.atomic_write_text(new/'release.json',json.dumps(metadata,indent=2))
+component_source = json.loads((new/'web/source.json').read_text()).get('sourceCommit') if 'web/source.json' in json.loads((new/manifest).read_text()) else None
+resource_apply.record_components(new, {name: component_source for name in (['api'] if api_only else ['web'] if web_only else ['api', 'web'])}, previous=old)
 # Preserve old immutable assets so open browser tabs can finish loading.
 resource_apply.link_existing_release_resources(P('/opt/ygocube'),new)
 resource_apply.set_release_ownership(new)
