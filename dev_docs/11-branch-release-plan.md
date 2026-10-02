@@ -1,4 +1,24 @@
-# 分支与发布整理（2026-09-15）
+# 分支与发布整理
+
+## 当前约定与本地整理（2026-10-02）
+
+根仓库只保留 `main` 集成基线与当前短期 `codex/review-hardening-20261002`。
+本地 main 从 `e83ce55` 快进到 `504561c`，已包含原 cube、duel 和资源同步分支。
+删除前已验证祖先关系，并以 `archive/20261002/{main,cube,duel,card-resource-sync}` 保留原指针。
+后续使用短期 `codex/<task>`，资源更新仍使用 `codex/card-resource-sync-*`。
+
+ygopro 的 `cube-server` 快进到根 gitlink 对应的 `db1b431f`，归档并清理已合并任务分支；
+srvpro 保持 `cube` 的 `4d4e45a`，归档并清理已合并 hardening 分支。master 未修改。
+本轮没有推送、删除 GitHub 分支或部署 Aly。远端 main 的同步与旧分支清理待远端授权后执行；
+推送顺序是 ygopro/srvpro 特性分支，再根仓库任务分支，经 CI 后合入 main。禁止 force push。
+
+建议 GitHub main 启用 PR + Windows/Linux 检查，禁止直接推送与删除；新增 CI 仅做测试构建，
+不持有生产 SSH 凭据、不部署。发布以分组件 sourceCommit/hash 为证据，不能把一次 Web 补丁
+的顶层 commit 误认为 API、srvpro、宿主、资源全部来自该提交。
+
+以下为历史记录；2026-09-15 的长期三分支方案由上述约定替代。
+
+## 历史记录（2026-09-15）
 
 ## 发布前核对
 

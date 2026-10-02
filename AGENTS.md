@@ -24,6 +24,7 @@ ygocube/
 ## 硬性约定（Do / Don't）
 
 - **分支纪律**：禁止直接改 ygopro/srvpro 的 master/主分支；开发一律走 `cube-server` / `cube` 特性分支。
+- **根仓库分支**：`main` 为集成基线，开发使用短期 `codex/<task>`，资源同步使用 `codex/card-resource-sync-*`。不再保留长期 `codex/cube`、`codex/duel` 双轨；合并后先确认祖先关系并留归档标签，再清理本地任务分支。推送先子模块、后根仓库；本地整理不隐含远端删除或生产发布授权。
 - **统一配置**：启动前配置全部走仓库根 `config.yaml`（admin.super_token / srvpro / server 路径），可用 `CONFIG_FILE` 覆盖；相对路径以 config.yaml 所在目录为基准。create token 不再写入配置文件。
 - **admin token 三层**：super token 管所有 tournament + 卡池；super admin 通过 `/admin/create-users` 管理数据库创建权限用户，创建者用 `X-Create-User` + `X-Create-Token` 创建并管理自己创建的比赛（比赛记录 `created_by`）；比赛专有 `admin_token` 已取消，旧值立即失效；玩家仍为 `tournamentId + playerId + token` 三要素（管理员可按 tournament 关闭 token 鉴权，`POST /admin/t/:tid/security`）。创建用户删除或轮换后，其既有比赛管理权限立即失效。
 - **鉴权三要素**：cube 后端所有入口（REST/SSE/ydk）默认校验 `tournamentId + playerId + token`（cookie 或 header 或参数），缺一即 401。
