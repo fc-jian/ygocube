@@ -23,6 +23,7 @@ import subprocess
 from typing import Any, Iterable
 from urllib.parse import quote, urlparse
 import zipfile
+import zlib
 
 
 MAX_IMAGE_ENTRIES = 500_000
@@ -162,7 +163,7 @@ def _image_code(name: str) -> tuple[int, str, str] | None:
     return code, suffix, kind
 
 
-def validate_image_zip(path: Path) -> list[dict[str, Any]]:
+def validate_image_zip(path: Path, *, full_crc: bool = False) -> list[dict[str, Any]]:
     """Validate every image ZIP entry before any extraction takes place."""
     if not path.is_file():
         raise ValueError(f"image archive not found: {path}")
@@ -209,7 +210,17 @@ def validate_image_zip(path: Path) -> list[dict[str, Any]]:
                         "crc": int(info.CRC),
                     }
                 )
-    except zipfile.BadZipFile as exc:
+            if full_crc:
+                # Check all path/size limits above before inflating any entry.
+                # Reading to EOF validates each member CRC without retaining
+                # the complete archive or image in memory.
+                for info in infos:
+                    if info.is_dir():
+                        continue
+                    with archive.open(info) as source:
+                        while source.read(1024 * 1024):
+                            pass
+    except (zipfile.BadZipFile, zlib.error) as exc:
         raise ValueError(f"invalid image ZIP: {exc}") from exc
     return sorted(entries, key=lambda item: item["code"])
 
@@ -804,6 +815,7 @@ def _main() -> int:
     compare.add_argument("current", type=Path)
     z = sub.add_parser("validate-zip")
     z.add_argument("path", type=Path)
+    z.add_argument("--full-crc", action="store_true")
     x = sub.add_parser("extract-zip")
     x.add_argument("path", type=Path)
     x.add_argument("destination", type=Path)
@@ -873,7 +885,7 @@ def _main() -> int:
         elif args.command == "compare-cdb":
             print(json.dumps(compare_cdb_files(args.previous, args.current), ensure_ascii=False, sort_keys=True))
         elif args.command == "validate-zip":
-            print(json.dumps(validate_image_zip(args.path), ensure_ascii=False, sort_keys=True))
+            print(json.dumps(validate_image_zip(args.path, full_crc=args.full_crc), ensure_ascii=False, sort_keys=True))
         elif args.command == "extract-zip":
             print(json.dumps(extract_image_zip(args.path, args.destination), ensure_ascii=False, sort_keys=True))
         elif args.command == "validate-expansion-zip":

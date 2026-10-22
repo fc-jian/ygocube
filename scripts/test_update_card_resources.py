@@ -32,6 +32,10 @@ class UpdateScriptTests(unittest.TestCase):
 set -euo pipefail
 CACHE_ROOT="$1"; MODE="$2"; REMOTE_SIZE="$3"; IMAGE_LOCALE=fixture; IMAGE_URL=https://fixture.invalid/archive.zip; HELPER=fixture
 info() { :; }; warn() { printf '%s\n' "$*" >&2; }; die() { printf '%s\n' "$*" >&2; exit 1; }; sleep() { :; }
+python3() {
+  [[ "$2" == validate-zip && "$4" == --full-crc && "$(stat -c %s "$3")" == "$REMOTE_SIZE" ]] || return 98
+  [[ "$MODE" != crc ]] || return 1
+}
 curl() {
   local headers='' output='' range='' head=0
   while (($#)); do
@@ -40,18 +44,27 @@ curl() {
   done
   if ((head)); then printf 'HTTP/1.1 200 OK\r\nETag: "fixture-v1"\r\nContent-Length: %s\r\nContent-Type: application/zip\r\n\r\n' "$REMOTE_SIZE"; return 0; fi
   printf '%s\n' "$range" >> "$CACHE_ROOT/requests"
-  local calls start end length status=206 etag='"fixture-v1"'
+  local calls start end length actual_length code=0 encoding='' status=206 etag='"fixture-v1"'
   calls=$(wc -l < "$CACHE_ROOT/requests"); start=${range%-*}; end=${range#*-}; length=$((end-start+1))
   [[ -n "$end" && "$length" -le 67108864 ]] || return 99
   if [[ "$MODE" == progress && $((calls % 6)) -ne 0 ]]; then printf 'x' > "$output"; return 28; fi
   [[ "$MODE" != ignored ]] || status=200
   [[ "$MODE" != etag ]] || etag='"changed-v2"'
   [[ "$MODE" != range ]] || start=$((start+1))
+  actual_length="$length"
+  if [[ "$MODE" == prefix ]]; then
+    if ((calls == 1)); then actual_length=4; code=18;
+    elif ((calls == 2)); then actual_length=3; code=28; fi
+  elif [[ "$MODE" == prefix-* ]]; then
+    actual_length=4; code=18
+    case "$MODE" in prefix-etag) etag='"changed-v2"';; prefix-range) start=$((start+1));; prefix-encoding) encoding='Content-Encoding: gzip';; prefix-error) code=56;; esac
+  fi
   # An intermediary advertises a misleading valid range; only final headers count.
-  printf 'HTTP/1.1 302 Found\r\nETag: "fixture-v1"\r\nContent-Range: bytes 0-16/17\r\n\r\nHTTP/1.1 %s Test\r\nETag: %s\r\nContent-Range: bytes %s-%s/%s\r\nContent-Length: %s\r\n\r\n' "$status" "$etag" "$start" "$end" "$REMOTE_SIZE" "$length" > "$headers"
-  truncate -s "$length" "$output"
+  printf 'HTTP/1.1 302 Found\r\nETag: "fixture-v1"\r\nContent-Range: bytes 0-16/17\r\n\r\nHTTP/1.1 %s Test\r\nETag: %s\r\nContent-Range: bytes %s-%s/%s\r\nContent-Length: %s\r\n%s\r\n' "$status" "$etag" "$start" "$end" "$REMOTE_SIZE" "$length" "$encoding" > "$headers"
+  truncate -s "$actual_length" "$output"
   # curl also rejects an ignored Range when the full response exceeds its cap.
   [[ "$MODE" != ignored ]] || return 63
+  return "$code"
 }
 '''
             if resume:
@@ -89,6 +102,29 @@ curl() {
                 self.assertEqual(requests.splitlines(), ['7-16'] * 6)
                 self.assertEqual(size, 7)
                 self.assertFalse(completed)
+
+    def test_image_download_advances_only_by_verified_interrupted_prefixes(self) -> None:
+        result, requests, size, completed = self.image_download_fixture('prefix', resume=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(requests.splitlines(), ['7-16', '11-16', '14-16'])
+        self.assertEqual(size, 17)
+        self.assertTrue(completed)
+
+    def test_image_download_never_appends_unsafe_interrupted_prefixes(self) -> None:
+        for mode in ('prefix-etag', 'prefix-range', 'prefix-encoding', 'prefix-error'):
+            with self.subTest(mode=mode):
+                result, requests, size, completed = self.image_download_fixture(mode, resume=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(requests.splitlines(), ['7-16'] * 6)
+                self.assertEqual(size, 7)
+                self.assertFalse(completed)
+
+    def test_image_download_does_not_publish_a_complete_but_invalid_zip(self) -> None:
+        result, _, size, completed = self.image_download_fixture('crc', resume=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('full ZIP validation', result.stderr)
+        self.assertEqual(size, 17)
+        self.assertFalse(completed)
 
     def test_explicit_build_invokes_compiler_even_without_last_commit_native_changes(self) -> None:
         source = SCRIPT.read_text(encoding='utf-8')

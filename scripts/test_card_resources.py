@@ -103,6 +103,19 @@ class CardResourceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_image_zip(self.make_zip("link.zip", [("pics/124.jpg", b"x", stat.S_IFLNK)]))
 
+    def test_image_zip_full_crc_rejects_payload_corruption_with_intact_directory(self) -> None:
+        path = self.make_zip('crc.zip')
+        self.assertEqual(validate_image_zip(path, full_crc=True)[0]['code'], 123)
+        data = bytearray(path.read_bytes())
+        with zipfile.ZipFile(path) as archive:
+            entry = archive.infolist()[0]
+            offset = entry.header_offset + 30 + len(entry.filename.encode()) + len(entry.extra)
+        data[offset] ^= 1
+        path.write_bytes(data)
+        self.assertEqual(validate_image_zip(path)[0]['code'], 123)
+        with self.assertRaisesRegex(ValueError, 'CRC'):
+            validate_image_zip(path, full_crc=True)
+
     def test_expansion_archive_extracts_server_files_and_ignores_client_metadata(self) -> None:
         cdb = self.root / "test-release.cdb"
         self.make_cdb(cdb, [(100200292, 1)])

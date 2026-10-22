@@ -141,7 +141,7 @@ bash scripts/update-card-resources.sh prepare --refresh-names
 - 脚本只同步新增/修改的 Lua；删除清单只删除上次由本管线管理的文件，未知扩展
   文件保留。`strings.conf` 与 CDB 一起更新。
 - 图片下载必须是 HTTPS，校验 ETag/大小/哈希、ZIP 完整性、条目数量、CRC、路径
-  穿越、绝对路径、符号链接、重复编号和解压总大小。大归档按 64 MiB Range 分块，逐块核验最终 206、强 ETag、Content-Range 和实际长度；成功块持久化并清零连续失败计数，6 次无进展停止。不能因固定超时反复丢弃已下载的整段尾部，也不能拼接代理忽略 Range 的 200 响应。`vips` 生成最大边 200、
+  穿越、绝对路径、符号链接、重复编号和解压总大小。大归档按 64 MiB Range 分块，逐块核验最终 206、强 ETag、Content-Range 和实际长度；完整块持久化并清零连续失败计数；curl 18/28 中断时，仅同一强 ETag、精确范围且无内容编码变换的已接收前缀可推进 offset，6 次无进展停止。下载完成和缓存复用均执行 `validate-zip --full-crc`，完整 CRC/路径/大小验证通过后才采用归档。不能因固定超时反复丢弃已下载的整段尾部，也不能拼接代理忽略 Range 的 200 响应。`vips` 生成最大边 200、
   Q30、去元数据 AVIF。只生成卡图编号对应的文件，原始图片留在本地缓存。
 - 名称映射按 exact code 读取：`sc_name` → `md_name` → `jp_name` → `cn_name` →
   `en_name`；都为空或映射缺失时，异画 alias 继承和 exact-code CDB 回退严格遵守根 `AGENTS.md` 的卡名约定（包括 5405695 例外），不继承规则同名卡译名。YGOPro

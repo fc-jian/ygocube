@@ -359,8 +359,8 @@ download_images() {
     local_etag="$(cat "$target.etag" 2>/dev/null || true)"
     if [[ -n "$remote_etag" && "$remote_etag" == "$local_etag" && ( -z "$remote_size" || "$remote_size" == "$local_size" ) ]]; then
       # Metadata alone is not sufficient after an interrupted/proxy download;
-      # validate the central directory before trusting a cached archive.
-      if python3 "$HELPER" validate-zip "$target" >/dev/null 2>&1; then
+      # validate paths, size limits and every member CRC before cache reuse.
+      if python3 "$HELPER" validate-zip "$target" --full-crc >/dev/null 2>&1; then
         info "image archive cache is current (ETag matched)" >&2
         printf '%s\n' "$target"
         return 0
@@ -373,11 +373,11 @@ download_images() {
   fi
   info "downloading image archive to cache (this can be large)" >&2
   # Bound every request, including the first, so a throttled multi-GB archive
-  # makes durable progress within curl's timeout. Never append an unverified
-  # or incomplete response, even when a proxy ignores Range/If-Range.
+  # makes durable progress within curl's timeout. A truncated response may
+  # advance only by its received, version-checked identity-encoded prefix.
   [[ "$remote_size" =~ ^[0-9]+$ && "$remote_size" -gt 0 ]] || die "image archive requires a positive Content-Length for bounded downloads"
   [[ -n "$remote_etag" && "$remote_etag" != W/* ]] || die "image archive requires a strong ETag for safe resumable downloads"
-  local failures=0 chunk_size=67108864 offset requested_end resume_headers resume_chunk transfer_ok response_headers response_status response_etag range_value range_start range_end range_total size content_type
+  local failures=0 chunk_size=67108864 offset requested_end requested_size resume_headers resume_chunk transfer_code response_headers response_status response_etag response_encoding response_length range_value range_start range_end range_total size content_type
   if [[ -s "$partial" ]]; then
     local_etag="$(header_final < "$headers" 2>/dev/null | header_last etag || true)"
     if [[ "$local_etag" != "$remote_etag" ]]; then
@@ -398,27 +398,36 @@ download_images() {
     fi
     requested_end=$((offset + chunk_size - 1))
     ((requested_end < remote_size)) || requested_end=$((remote_size - 1))
+    requested_size=$((requested_end - offset + 1))
     resume_headers="$partial.headers"
     resume_chunk="$partial.resume"
     rm -f "$resume_chunk" "$resume_headers"
-    transfer_ok=0
-    if curl --http1.1 --fail --silent --show-error --location --proto '=https' --tlsv1.2 --connect-timeout 20 --max-time 600 --max-filesize "$chunk_size" --range "$offset-$requested_end" -H "If-Range: $remote_etag" -D "$resume_headers" -o "$resume_chunk" "$IMAGE_URL"; then
-      transfer_ok=1
+    transfer_code=0
+    if curl --http1.1 --fail --silent --show-error --location --proto '=https' --tlsv1.2 --connect-timeout 20 --max-time 600 --max-filesize "$chunk_size" --range "$offset-$requested_end" -H "If-Range: $remote_etag" -H 'Accept-Encoding: identity' -D "$resume_headers" -o "$resume_chunk" "$IMAGE_URL"; then
+      transfer_code=0
+    else
+      transfer_code=$?
     fi
     if [[ -f "$resume_headers" ]]; then
       response_headers="$(header_final < "$resume_headers")"
       response_status="$(printf '%s\n' "$response_headers" | awk 'NR == 1 { print $2 }')"
       [[ "$response_status" != 200 ]] || die "image server ignored Range or changed archive version; partial download retained"
       response_etag="$(printf '%s\n' "$response_headers" | header_last etag)"
+      response_encoding="$(printf '%s\n' "$response_headers" | header_last content-encoding)"
+      response_length="$(printf '%s\n' "$response_headers" | header_last content-length)"
       range_value="$(printf '%s\n' "$response_headers" | header_last content-range)"
-      if [[ "$transfer_ok" == 1 && "$response_status" == 206 && "$response_etag" == "$remote_etag" ]]; then
+      if [[ "$response_status" == 206 && "$response_etag" == "$remote_etag" && ( -z "$response_encoding" || "${response_encoding,,}" == identity ) && ( -z "$response_length" || "$response_length" == "$requested_size" ) ]]; then
         if [[ "$range_value" =~ ^bytes[[:space:]]+([0-9]+)-([0-9]+)/([0-9]+)$ ]]; then
           range_start="${BASH_REMATCH[1]}"; range_end="${BASH_REMATCH[2]}"; range_total="${BASH_REMATCH[3]}"
           size="$(stat -c %s "$resume_chunk" 2>/dev/null || echo 0)"
-          if [[ "$range_start" == "$offset" && "$range_end" == "$requested_end" && "$size" -eq $((requested_end - offset + 1)) && "$range_total" == "$remote_size" ]]; then
+          if [[ "$range_start" == "$offset" && "$range_end" == "$requested_end" && "$range_total" == "$remote_size" ]] && {
+            [[ "$transfer_code" == 0 && "$size" -eq "$requested_size" ]] ||
+            [[ ( "$transfer_code" == 18 || "$transfer_code" == 28 ) && "$size" -gt 0 && "$size" -lt "$requested_size" ]];
+          }; then
             cat "$resume_chunk" >> "$partial"
             printf '%s\n' "$response_headers" > "$headers"
             rm -f "$resume_chunk" "$resume_headers"
+            if ((transfer_code != 0)); then info "retained verified image prefix: $size bytes (curl $transfer_code), total $((offset + size))/$remote_size" >&2; fi
             failures=0
             continue
           fi
@@ -435,6 +444,7 @@ download_images() {
   [[ "$size" == "$remote_size" ]] || die "image archive size mismatch: $size (expected $remote_size)"
   content_type="$(printf '%s\n' "$remote_headers" | header_last content-type)"
   [[ "$content_type" == *zip* || "$content_type" == *octet-stream* || "$content_type" == *binary* ]] || die "image response has unexpected content type: $content_type"
+  python3 "$HELPER" validate-zip "$partial" --full-crc >/dev/null || die "downloaded image archive failed full ZIP validation; partial retained"
   mv -f "$partial" "$target"
   printf '%s\n' "$remote_etag" > "$target.etag"
   sha256sum "$target" | awk '{print $1}' > "$target.sha256"
