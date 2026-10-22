@@ -489,3 +489,11 @@ srvpro HTTP/TCP/Cube 协议探针和实际宿主启动。两套数据库完整�
 完整应用发布前先确认持久化 `apply-duel.py` helper 支持 `record_components` 和 `ApplicationMaintenance`；Web 发布还须支持 `resource_component_files`。各发布入口记录 API、Web、srvpro、host、resources 的哈希和各自 sourceCommit；旧元数据只能标记为 legacy/unknown，不推断整个 release 来自最新 Web commit。资源组件必须按实例实际 config 读取 CDB、脚本、禁限表、名称与 AVIF 并逐文件哈希，staging 中的 current 路径映射到候选 release；必需文件缺失或脚本/AVIF 清单为空必须失败，不能接受空对象哈希。可只读运行 `python3 <helper> --cube-root /opt/ygocube --duel-root /opt/ygoduel --id audit --audit-components <release>` 核验内容未漂移。
 
 数据库备份不应仅依赖发布。`scripts/backup-database.py` 使用 SQLite backup API，检查完整性/外键、独立文件恢复、SHA 和可选镜像目录；只有成功校验才写成功清单。`scripts/systemd/` 提供定时模板，但安装、启用以及异地镜像挂载属于单独运维操作，不随本地测试自动执行。详见 `dev_docs/18-local-hardening-20261002.md`。
+
+## 2026-10-23 Aly 发布经验
+
+已验收发布记录见 [Aly 发布与公网验收](../../../dev_docs/20-aly-release-20261023.md)。应用源码 `685b729`，资源发布 `20261022-200427-685b729`，两实例应用发布 `20261023-reviewed-685b729`；后续维护应重新读取 current 与实际 manifest，不把这里的历史 ID 当作默认目标。
+
+- 公网健康检查按实例路由执行：Cube `/api/health`；独立 Duel `/duel-api/public/duel/options`。独立 Duel 的 health 可以仅在内网开放，公网 404 不等于内部服务故障；Cube 禁用 Duel 功能时其 options 可返回 503，不能拿它代替独立 Duel 检查。
+- 生产 Cube 协议探针优先复用本地已验收的固定卡组夹具，正确排除包含 Link 的所有额外卡组类型并处理 alias 重复。测试夹具错误应修正夹具，不放宽生产卡组校验。公网 BO3 要完成换备与宿主退出，结束后再次确认没有遗留测试宿主或连接。
+- 发布后从 Aly 下载实际部署资源 manifest，验证摘要后刷新本地 deployed 基线并保留旧基线；不能用含本地原始图片的 prepare 清单冒充远端基线。
