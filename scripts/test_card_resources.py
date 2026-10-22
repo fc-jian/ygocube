@@ -32,6 +32,7 @@ from card_resources import (
     merge_name_zip,
     read_ygocdb_name_archive,
     parse_ygocdb_md5,
+    deployment_manifest,
 )
 
 
@@ -306,6 +307,48 @@ class CardResourceTests(unittest.TestCase):
             result = generate_avif(source, destination, previous)
         self.assertEqual(result["123"]["sha256"], hashlib.sha256(image_bytes).hexdigest())
         self.assertEqual((destination / "123.avif").read_bytes(), output_bytes)
+
+    def test_avif_without_source_fingerprint_reencodes_before_recording_source(self) -> None:
+        source, destination = self.root / 'source', self.root / 'output'
+        source.mkdir(); destination.mkdir()
+        (source / '123.jpg').write_bytes(b'updated source image')
+        output = destination / '123.avif'
+        output.write_bytes(b'previous thumbnail')
+        previous = self.root / 'previous.json'
+        previous.write_text(json.dumps({'avif': {'files': {'123.avif': {
+            'size': output.stat().st_size, 'sha256': hashlib.sha256(output.read_bytes()).hexdigest()}}}}))
+        def encode(args, **kwargs):
+            Path(args[3].split('[', 1)[0]).write_bytes(b'new thumbnail')
+        with patch('card_resources.shutil.which', return_value='/fixture/vips'), patch('card_resources.subprocess.run', side_effect=encode) as encoder:
+            result = generate_avif(source, destination, previous)
+        self.assertEqual(encoder.call_count, 1)
+        self.assertEqual(output.read_bytes(), b'new thumbnail')
+        previous.write_text(json.dumps({'sources': result}))
+        with patch('card_resources.subprocess.run') as encoder:
+            generate_avif(source, destination, previous)
+        encoder.assert_not_called()
+
+    def test_preserved_deployment_uses_server_expansion_and_art_not_local_prepare(self) -> None:
+        local = {'expansions': {'files': {'local.cdb': {'sha256': 'local'}}},
+                 'expansionArchive': {'releaseMatch': {'codes': [200]}},
+                 'avif': {'files': {'100.avif': {'sha256': 'local-art'}, '200.avif': {'sha256': 'new-art'}}}}
+        baseline = {'expansions': {'files': {'server.cdb': {'sha256': 'actual'}}},
+                    'expansionArchive': {'releaseMatch': {'codes': [100]}},
+                    'avif': {'files': {'100.avif': {'sha256': 'actual-art'}, '101.avif': {'sha256': 'retained-art'}}}}
+        result = deployment_manifest(local, baseline, {'codes': [100, 101], 'playableCodes': [100]}, True)
+        self.assertEqual(result['expansions'], baseline['expansions'])
+        self.assertEqual(result['expansionArchive'], baseline['expansionArchive'])
+        self.assertEqual(result['avif']['files']['100.avif'], {'sha256': 'actual-art'})
+        self.assertEqual(result['avif']['files']['101.avif'], {'sha256': 'retained-art'})
+        self.assertEqual(result['verification'], {'cardCode': 100})
+        self.assertEqual(local['avif']['files']['100.avif'], {'sha256': 'local-art'})
+
+    def test_deployment_probe_comes_from_effective_manifest_and_is_required_before_deploy(self) -> None:
+        manifest = {'expansionArchive': {'releaseMatch': {'codes': [123]}}, 'avif': {'files': {'123.avif': {}}}}
+        self.assertEqual(deployment_manifest(manifest, {}, {}, False)['verification']['cardCode'], 123)
+        self.assertEqual(deployment_manifest(manifest, {}, {'codes': [], 'playableCodes': []}, True, [123])['verification']['cardCode'], 123)
+        with self.assertRaisesRegex(ValueError, 'no searchable card'):
+            deployment_manifest({'avif': {'files': {}}}, {}, {}, False, [123])
 
     def test_avif_includes_expansions_and_preserves_them_on_normal_updates(self) -> None:
         if shutil.which("vips") is None:

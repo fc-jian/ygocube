@@ -38,6 +38,7 @@ import {
 import { CardImage } from "@/components/CardImage";
 import { TokenPrompt } from "@/components/TokenPrompt";
 import { API_BASE, api, Identity, resolvePlayerIdentity } from "@/lib/api";
+import { usePlayerLogout } from "@/lib/usePlayerLogout";
 import { duelText, DuelLanguage, races, attributes } from "./duel-text";
 import { LocalPicsSetting } from "@/components/IdentityWidget";
 import "./duel.css";
@@ -111,6 +112,14 @@ export function DuelClient({
   const socket = useRef<WebSocket | null>(null),
     promptId = useRef(0),
     [revision, setRevision] = useState(0);
+  usePlayerLogout(identity, () => {
+    socket.current?.close();
+    socket.current = null;
+    setIdentity(null);
+    model.current = initialState();
+    setState(model.current);
+    setNeedToken(true);
+  });
   const [metadata, setMetadata] = useState<Record<number, Info>>({}),
     metadataRef = useRef(metadata),
     fetching = useRef(new Set<number>());

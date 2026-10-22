@@ -101,6 +101,35 @@ describe('pairing engine', () => {
     expect(seen.size).toBe(10);
   });
 
+  it.each(Array.from({ length: 31 }, (_, i) => i + 2))('round robin covers every pair exactly once for %i players', async n => {
+    const { matches, tid } = setupMatches(n, 'round_robin');
+    matches.startRound(tid, 1, 'test');
+    await waitRooms();
+    const schedule = loadState(tid).competition!.roundRobinSchedule!;
+    expect(schedule).toHaveLength(n % 2 === 0 ? n - 1 : n);
+    const seen = new Set<string>();
+    const byes = new Map<string, number>();
+    for (const round of schedule) {
+      const players = round.flat().filter((id): id is string => id !== null);
+      expect(players).toHaveLength(n);
+      expect(new Set(players).size).toBe(n);
+      expect(round.filter(([, b]) => b === null)).toHaveLength(n % 2);
+      for (const [a, b] of round) {
+        if (b === null) {
+          byes.set(a, (byes.get(a) ?? 0) + 1);
+          continue;
+        }
+        const key = [a, b].sort().join('|');
+        expect(seen.has(key)).toBe(false);
+        seen.add(key);
+      }
+    }
+    expect(seen.size).toBe(n * (n - 1) / 2);
+    for (const player of loadState(tid).players) {
+      expect(byes.get(player.playerId) ?? 0).toBe(n % 2);
+    }
+  });
+
   it('double elimination advances winners and losers groups into a single grand final', () => {
     const tournaments = makeTournaments();
     const matches = new MatchesService(new FakeSrvpro() as any);

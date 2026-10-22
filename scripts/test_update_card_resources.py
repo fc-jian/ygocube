@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 
 
@@ -18,6 +19,92 @@ BASH = os.environ.get("YGOCUBE_TEST_BASH") or shutil.which("bash")
 
 
 class UpdateScriptTests(unittest.TestCase):
+    def image_download_fixture(self, mode: str, *, resume: bool = False) -> tuple[subprocess.CompletedProcess[str], str, int, bool]:
+        source = SCRIPT.read_text(encoding='utf-8')
+        helpers = source[source.index('header_last() {'):source.index('\nparse_args() {')]
+        body = source[source.index('download_images() {'):source.index('\ndownload_expansion() {')]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            # Large successful responses are sparse zeros; failures are tiny.
+            # This exercises the real 64-MiB bounds and concatenation logic.
+            size = 2 * 67108864 + 17 if mode == 'progress' else 17
+            fixture = r'''
+set -euo pipefail
+CACHE_ROOT="$1"; MODE="$2"; REMOTE_SIZE="$3"; IMAGE_LOCALE=fixture; IMAGE_URL=https://fixture.invalid/archive.zip; HELPER=fixture
+info() { :; }; warn() { printf '%s\n' "$*" >&2; }; die() { printf '%s\n' "$*" >&2; exit 1; }; sleep() { :; }
+curl() {
+  local headers='' output='' range='' head=0
+  while (($#)); do
+    case "$1" in --head) head=1;; -D) headers="$2"; shift;; -o) output="$2"; shift;; --range) range="$2"; shift;; esac
+    shift
+  done
+  if ((head)); then printf 'HTTP/1.1 200 OK\r\nETag: "fixture-v1"\r\nContent-Length: %s\r\nContent-Type: application/zip\r\n\r\n' "$REMOTE_SIZE"; return 0; fi
+  printf '%s\n' "$range" >> "$CACHE_ROOT/requests"
+  local calls start end length status=206 etag='"fixture-v1"'
+  calls=$(wc -l < "$CACHE_ROOT/requests"); start=${range%-*}; end=${range#*-}; length=$((end-start+1))
+  [[ -n "$end" && "$length" -le 67108864 ]] || return 99
+  if [[ "$MODE" == progress && $((calls % 6)) -ne 0 ]]; then printf 'x' > "$output"; return 28; fi
+  [[ "$MODE" != ignored ]] || status=200
+  [[ "$MODE" != etag ]] || etag='"changed-v2"'
+  [[ "$MODE" != range ]] || start=$((start+1))
+  # An intermediary advertises a misleading valid range; only final headers count.
+  printf 'HTTP/1.1 302 Found\r\nETag: "fixture-v1"\r\nContent-Range: bytes 0-16/17\r\n\r\nHTTP/1.1 %s Test\r\nETag: %s\r\nContent-Range: bytes %s-%s/%s\r\nContent-Length: %s\r\n\r\n' "$status" "$etag" "$start" "$end" "$REMOTE_SIZE" "$length" > "$headers"
+  truncate -s "$length" "$output"
+  # curl also rejects an ignored Range when the full response exceeds its cap.
+  [[ "$MODE" != ignored ]] || return 63
+}
+'''
+            if resume:
+                (root / 'ygopro-images-fixture.zip.part').write_bytes(b'prefix!')
+                (root / 'ygopro-images-fixture.zip.headers').write_text('HTTP/1.1 200 OK\nETag: "fixture-v1"\n\n')
+            fixture_path = root / 'download-fixture.sh'
+            fixture_path.write_text(fixture + helpers + body + '\ndownload_images\n', encoding='utf-8', newline='\n')
+            result = subprocess.run([BASH or 'bash', fixture_path.as_posix(), root.as_posix(), mode, str(size)], capture_output=True, text=True)
+            requests = (root / 'requests').read_text() if (root / 'requests').exists() else ''
+            partial = root / 'ygopro-images-fixture.zip.part'
+            target = root / 'ygopro-images-fixture.zip'
+            retained = partial.stat().st_size if partial.exists() else target.stat().st_size if target.exists() else 0
+            return result, requests, retained, target.exists()
+
+    def test_image_download_bounds_all_chunks_and_resets_consecutive_failure_budget(self) -> None:
+        result, requests, size, completed = self.image_download_fixture('progress')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(requests.splitlines(), ['0-67108863'] * 6 + ['67108864-134217727'] * 6 + ['134217728-134217744'] * 6)
+        self.assertEqual(size, 134217745)
+        self.assertTrue(completed)
+
+    def test_image_download_refuses_a_full_response_to_range(self) -> None:
+        result, requests, size, completed = self.image_download_fixture('ignored', resume=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('ignored Range', result.stderr)
+        self.assertEqual(requests.splitlines(), ['7-16'])
+        self.assertEqual(size, 7)
+        self.assertFalse(completed)
+
+    def test_image_download_rejects_changed_etag_or_range_without_losing_partial(self) -> None:
+        for mode in ('etag', 'range'):
+            with self.subTest(mode=mode):
+                result, requests, size, completed = self.image_download_fixture(mode, resume=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(requests.splitlines(), ['7-16'] * 6)
+                self.assertEqual(size, 7)
+                self.assertFalse(completed)
+
+    def test_explicit_build_invokes_compiler_even_without_last_commit_native_changes(self) -> None:
+        source = SCRIPT.read_text(encoding='utf-8')
+        body = source[source.index('cmd_build() {'):source.index('\ncmd_test() {')]
+        for client in (0, 1):
+            fixture = f'''ROOT_DIR=/fixture; STATE_DIR=/fixture/state; SKIP_BUILD=0; CLIENT={client}; DRY_RUN=1
+state_init() {{ :; }}
+info() {{ :; }}
+git() {{ return 0; }}
+run() {{ printf 'COMPILER %s\\n' "$*"; }}
+'''
+            result = subprocess.run([BASH or 'bash', '-c', 'set -e\n' + fixture + body + '\ncmd_build'], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('COMPILER bash /fixture/scripts/build-ygopro.sh', result.stdout)
+            self.assertEqual('--client' in result.stdout, bool(client))
+
     def run_script(self, *args: str) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["YGOCUBE_CACHE_DIR"] = "/tmp/ygocube-card-resource-test-cache"

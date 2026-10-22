@@ -12,6 +12,9 @@ export interface Identity {
   token: string;
 }
 
+export const PLAYER_LOGOUT_EVENT = 'yc-player-logout';
+export const PLAYER_LOGOUT_STORAGE_KEY = 'yc_player_logout';
+
 /**
  * Encode one dynamic URL path segment.  Player IDs may contain spaces (and
  * other characters that are legal in the protocol but meaningful to a URL),
@@ -54,17 +57,52 @@ function tokenKey(tid: string, pid: string): string {
 
 export function getStoredToken(tid: string, pid: string): string | undefined {
   if (typeof window === 'undefined') return undefined;
-  return window.localStorage.getItem(tokenKey(tid, pid)) ?? undefined;
+  try { return window.localStorage.getItem(tokenKey(tid, pid)) ?? undefined; }
+  catch { return undefined; }
 }
 
 export function storeToken(tid: string, pid: string, token: string): void {
-  window.localStorage.setItem(tokenKey(tid, pid), token);
+  try { window.localStorage.setItem(tokenKey(tid, pid), token); }
+  catch { /* The active page and compatibility cookie can still retain the identity. */ }
   setIdentityCookie(tid, pid, token); // keep the single-user cookie flow working too
 }
 
 export function clearStoredToken(tid: string, pid: string): void {
-  if (typeof window !== 'undefined') window.localStorage.removeItem(tokenKey(tid, pid));
-  if (typeof document !== 'undefined') clearIdentityCookies(tid);
+  try {
+    if (typeof window !== 'undefined') window.localStorage.removeItem(tokenKey(tid, pid));
+  } catch { /* Disabled storage must not prevent clearing the active session. */ }
+  // Another tab may currently own the compatibility cookie for this tournament.
+  if (typeof document !== 'undefined' && getCookie(`yc_pid_${tid}`) === pid) clearIdentityCookies(tid);
+  if (manualIdentity?.tid === tid && manualIdentity.pid === pid) manualIdentity = null;
+}
+
+export function logoutPlayer(tid: string, pid: string): void {
+  clearStoredToken(tid, pid);
+  const detail = { tid, pid };
+  window.dispatchEvent(new CustomEvent(PLAYER_LOGOUT_EVENT, { detail }));
+  // Storage events reach other tabs, including no-token sessions that have no token key.
+  try {
+    window.localStorage.setItem(PLAYER_LOGOUT_STORAGE_KEY, JSON.stringify({ ...detail, at: Date.now(), nonce: Math.random() }));
+  } catch { /* The current page still logs out when cross-tab storage is unavailable. */ }
+}
+
+export function onPlayerLogout(identity: Identity, onLogout: () => void): () => void {
+  const receive = (value: unknown) => {
+    if (!value || typeof value !== 'object') return;
+    const detail = value as Partial<Identity>;
+    if (detail.tid === identity.tid && detail.pid === identity.pid) onLogout();
+  };
+  const local = (event: Event) => receive((event as CustomEvent).detail);
+  const storage = (event: StorageEvent) => {
+    if (event.key !== PLAYER_LOGOUT_STORAGE_KEY || !event.newValue) return;
+    try { receive(JSON.parse(event.newValue)); } catch { /* Ignore unrelated malformed storage. */ }
+  };
+  window.addEventListener(PLAYER_LOGOUT_EVENT, local);
+  window.addEventListener('storage', storage);
+  return () => {
+    window.removeEventListener(PLAYER_LOGOUT_EVENT, local);
+    window.removeEventListener('storage', storage);
+  };
 }
 
 export function readIdentity(tid?: string): Identity | null {
@@ -148,6 +186,7 @@ const API_ERROR_MESSAGES: Record<string, string> = {
   RESULT_ROUND_LOCKED: '该轮结果已经锁定',
   REVERT_CONFIRMATION_MISMATCH: '确认信息不匹配，未执行回溯',
   REVERT_EVENT_NOT_FOUND: '找不到要回溯的事件',
+  REVERT_BASELINE_UNAVAILABLE: '缺少该时间点的历史配置，无法安全回溯',
   PAUSE_VOTING_REMOVED: '暂停投票已取消，请联系管理员操作',
   ADMIN_TOKEN_REMOVED: '比赛管理令牌已取消，请使用创建者凭据',
   CREATE_USER_EXISTS: '该权限用户名已存在',
@@ -179,7 +218,7 @@ export function setManualIdentity(id: Identity | null): void {
 
 // fetch headers carry the three-factor identity; non-ASCII player ids are percent-encoded
 // (header values must be ISO-8859-1) and decoded by the backend.
-function identityHeaders(id: Identity | null): Record<string, string> {
+export function identityHeaders(id: Identity | null): Record<string, string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (id) {
     headers['X-Tournament-Id'] = id.tid;
@@ -243,5 +282,6 @@ export function resolvePlayerIdentity(tid: string, pid: string): { identity: Ide
   const cookieIdentity = readIdentity(tid);
   const token = getStoredToken(tid, pid) ?? (cookieIdentity?.pid === pid ? cookieIdentity.token : undefined);
   if (!token) return { needToken: true };
+  setIdentityCookie(tid, pid, token);
   return { identity: { tid, pid, token } };
 }

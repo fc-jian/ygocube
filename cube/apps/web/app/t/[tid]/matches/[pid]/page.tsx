@@ -7,6 +7,7 @@ import { api, apiDownload, encodePathSegment, Identity, readableApiError, resolv
 import { useTournamentFallbackPolling, useTournamentStream } from '@/lib/sse';
 import { DraftState } from '@/components/TopBar';
 import { TokenPrompt } from '@/components/TokenPrompt';
+import { usePlayerLogout } from '@/lib/usePlayerLogout';
 
 interface MatchInfo {
   id: number;
@@ -39,6 +40,12 @@ export default function MatchesPage() {
   const [error, setError] = useState('');
   const [serverError, setServerError] = useState('');
   const loadBusy = useRef(false);
+  usePlayerLogout(identity, () => {
+    setIdentity(null);
+    setInfo(null);
+    setMatches([]);
+    setNeedToken(true);
+  });
 
   useEffect(() => {
     let cancelled = false;

@@ -141,7 +141,7 @@ bash scripts/update-card-resources.sh prepare --refresh-names
 - 脚本只同步新增/修改的 Lua；删除清单只删除上次由本管线管理的文件，未知扩展
   文件保留。`strings.conf` 与 CDB 一起更新。
 - 图片下载必须是 HTTPS，校验 ETag/大小/哈希、ZIP 完整性、条目数量、CRC、路径
-  穿越、绝对路径、符号链接、重复编号和解压总大小；`vips` 生成最大边 200、
+  穿越、绝对路径、符号链接、重复编号和解压总大小。大归档按 64 MiB Range 分块，逐块核验最终 206、强 ETag、Content-Range 和实际长度；成功块持久化并清零连续失败计数，6 次无进展停止。不能因固定超时反复丢弃已下载的整段尾部，也不能拼接代理忽略 Range 的 200 响应。`vips` 生成最大边 200、
   Q30、去元数据 AVIF。只生成卡图编号对应的文件，原始图片留在本地缓存。
 - 名称映射按 exact code 读取：`sc_name` → `md_name` → `jp_name` → `cn_name` →
   `en_name`；都为空或映射缺失时，异画 alias 继承和 exact-code CDB 回退严格遵守根 `AGENTS.md` 的卡名约定（包括 5405695 例外），不继承规则同名卡译名。YGOPro
@@ -229,8 +229,7 @@ PY
    名称，且继续拒绝 TYPE_TOKEN 入搜索和卡池。
 4. 对局效果提示 `code * 16 + slot` 与录像快照也须读取扩展库；同编号覆盖为空时
    不保留主库旧选项。仅验证卡名/主描述不够。
-5. AVIF 生成输入包含已安装 `expansions/pics`，普通更新也保留其图片；源图变更时
-   不得因旧 AVIF 的文件哈希相同而跳过重编码。重复执行幂等、撤回卡清理只触及受管理文件。
+5. AVIF 生成输入包含已安装 `expansions/pics`，普通更新也保留其图片。当前固定编码参数下，只有已有输出且源图指纹匹配才复用；旧清单没有源图指纹时必须重新编码，不能把当前源图指纹补记到未经验证的旧 AVIF。重复执行幂等、撤回卡清理只触及受管理文件。
 6. 逐张核验扩展卡按编号和**显示全名**搜索、入临时测试卡池及脚本/低清卡图覆盖；
    对局描述与 CDB 全量比对。使用隔离数据库，不能在生产用户卡池制造测试数据。
 
@@ -288,12 +287,13 @@ WebP 不进入运行 release、回滚快照或备份。部署须清除旧运行�
   `deploy-card-details.py`、`deploy-standalone-duel-update.py`、`deploy-web-pics.py`
   使用持久化 helper 的 `link_existing_release_resources` 检查并保持 Cube/Duel 同一代资源；
   应用包试图改变卡片资源时拒绝，先走本 Skill 的资源流程。
+- 应用维护按受影响实例关闭原生/API 入口，暂停 API 与 srvpro 接入进程后再次检查宿主，才可停止服务。恢复服务后的验收失败也必须经过同一检查才能回滚；若已有新对局，恢复接入、保留当前 release 并明确拒绝自动回滚，不能重启进程杀掉比赛。回滚完成后再次通过健康检查才开放入口。API-only 更新保留无关服务的 PID/启动时间。
 - `deploy-expansion-catalog.py` 为已退役的一次性迁移，安装了当前资源工具后拒绝运行；
   `deploy-standalone-duel.py` 只用于首次安装，现有 Duel 用应用/资源更新入口。
 
 ### 5. 构建无头宿主和（可选）客户端
 
-若上游合并触及 C++、premake、ocgcore、网络协议或任何二进制依赖，执行：
+显式 `build` 总会调用增量编译器；不能根据最后一个提交的 diff 推断已有二进制仍然有效。上游合并触及 C++、premake、ocgcore、网络协议或任何二进制依赖时必须执行：
 
 ```bash
 bash scripts/update-card-resources.sh build
@@ -301,7 +301,7 @@ bash scripts/update-card-resources.sh build
 
 脚本会验证产物是 ELF、动态链接器存在（静态构建除外）、`ldd` 没有 `not found`，
 保留 `-cube` 版本后缀，并把宿主复制到 `srvpro/ygopro/ygopro`。只有确认是纯
-资源变化且已有兼容宿主时才可显式 `--skip-build`，并在发布记录中说明理由。
+资源变化且已有兼容宿主时才可显式 `--skip-build`，并在发布记录中说明理由。宿主与客户端分别记录 `native-build-host.json` / `native-build-client.json`，包含源码、ocgcore、工作区 diff 与二进制 SHA；`--client` 必须验收 `YGOPro` 客户端本身，不以旧宿主通过代替，也不覆盖宿主运行时。
 
 需要 GUI 客户端或修改客户端容量时，执行 [客户端验收补充](references/client-and-web-verification.md) 中的构建、音频和真实 YDK 验收。
 
@@ -375,8 +375,7 @@ bash scripts/update-card-resources.sh deploy --srvpro-app --confirm-maintenance
 
 标准资源更新默认在 `check`、`prepare` 和 `deploy` 中同步 Super Pre，确保检查、准备和发布
 使用同一官方 `.ypk` 与列表版本。只有用户明确要求保留现有 Super Pre 时才传
-`--skip-expansion`；此时核对 `deletes/expansions.txt` 为空且发布 manifest 保留远端
-expansion 清单。即使已有 `deployed-resource-manifest.json`，也不能因此跳过上游检查。
+`--skip-expansion`；此时核对 `deletes/expansions.txt` 为空。deploy 在停服前读取 Aly 实际 manifest 与扩展卡编号，生成独立的 `deployment-resource-manifest.json`，保留远端 expansion 文件、图片和来源，并据此选择可搜索/有卡图的验收编号。不能用本地上次 prepare 的 expansion 状态代表远端，也不能依赖本地不存在的 `expansion-release-match.json` 选择探针。即使已有 `deployed-resource-manifest.json`，也不能因此跳过上游检查。
 兼容参数 `--expansion` 仍可显式启用默认行为。
 
 发布前重新核对已准备的官方 `.ypk` 与列表 ETag；版本漂移时重新 prepare/test，
@@ -477,7 +476,7 @@ srvpro HTTP/TCP/Cube 协议探针和实际宿主启动。两套数据库完整�
    才可跳过扩展更新，且 expansion 删除清单必须为空。
 4. **本地构建测试通过**：helper、API、Web、srvpro、宿主 `ldd`/启动 smoke、E2E
    全部通过；Windows 客户端（若要求）为正确架构、可启动且音频依赖可用。
-5. **Aly 运行正常**：备份的 Cube/独立 Duel SQLite integrity 为 `ok`；两套 API、
+5. **Aly 运行正常（仅本次获授权发布时）**：备份的 Cube/独立 Duel SQLite integrity 为 `ok`；两套 API、
    srvpro、Web 与 Nginx 均 active；`/api/health`、首页、`/duel/decks`、静态资源、
    Cube `/api` 与独立 Duel `/duel-api` 新卡搜索、最新 OCG/TCG 禁限表、AVIF endpoint、
    srvpro HTTP/TCP/Cube 探针均通过；两套远端宿主 `ldd` 无 `not found`。
@@ -487,6 +486,6 @@ srvpro HTTP/TCP/Cube 协议探针和实际宿主启动。两套数据库完整�
 
 ## 分组件溯源与独立数据库备份
 
-完整应用发布前先确认持久化 `apply-duel.py` helper 支持 `record_components`。各发布入口记录 API、Web、srvpro、host、resources 的哈希和各自 sourceCommit；旧元数据只能标记为 legacy/unknown，不推断整个 release 来自最新 Web commit。可只读运行 `python3 <helper> --cube-root /opt/ygocube --duel-root /opt/ygoduel --id audit --audit-components <release>` 核验内容未漂移。
+完整应用发布前先确认持久化 `apply-duel.py` helper 支持 `record_components` 和 `ApplicationMaintenance`；Web 发布还须支持 `resource_component_files`。各发布入口记录 API、Web、srvpro、host、resources 的哈希和各自 sourceCommit；旧元数据只能标记为 legacy/unknown，不推断整个 release 来自最新 Web commit。资源组件必须按实例实际 config 读取 CDB、脚本、禁限表、名称与 AVIF 并逐文件哈希，staging 中的 current 路径映射到候选 release；必需文件缺失或脚本/AVIF 清单为空必须失败，不能接受空对象哈希。可只读运行 `python3 <helper> --cube-root /opt/ygocube --duel-root /opt/ygoduel --id audit --audit-components <release>` 核验内容未漂移。
 
 数据库备份不应仅依赖发布。`scripts/backup-database.py` 使用 SQLite backup API，检查完整性/外键、独立文件恢复、SHA 和可选镜像目录；只有成功校验才写成功清单。`scripts/systemd/` 提供定时模板，但安装、启用以及异地镜像挂载属于单独运维操作，不随本地测试自动执行。详见 `dev_docs/18-local-hardening-20261002.md`。

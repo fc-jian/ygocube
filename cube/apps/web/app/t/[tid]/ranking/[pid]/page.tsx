@@ -6,6 +6,7 @@ import { useParams } from 'next/navigation';
 import { api, encodePathSegment, Identity, readableApiError, resolvePlayerIdentity } from '@/lib/api';
 import { useTournamentFallbackPolling, useTournamentStream } from '@/lib/sse';
 import { TokenPrompt } from '@/components/TokenPrompt';
+import { usePlayerLogout } from '@/lib/usePlayerLogout';
 
 interface RankRow {
   rank: number;
@@ -33,6 +34,11 @@ export default function RankingPage() {
   const [rows, setRows] = useState<RankRow[]>([]);
   const [error, setError] = useState('');
   const loadBusy = useRef(false);
+  usePlayerLogout(identity, () => {
+    setIdentity(null);
+    setRows([]);
+    setNeedToken(true);
+  });
 
   useEffect(() => {
     let cancelled = false;

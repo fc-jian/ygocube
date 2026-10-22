@@ -28,7 +28,9 @@ export function CardImage({ code, name, className = '' }: { code: number; name?:
     let objectUrl: string | null = null;
     const fallback = async () => {
       const candidates: string[] = [];
-      const root = localStorage.getItem('yc_local_pics');
+      let root: string | null = null;
+      try { root = localStorage.getItem('yc_local_pics'); }
+      catch { /* Continue with server images when browser storage is blocked. */ }
       if (root) {
         const base = root.replace(/\/+$/, '');
         candidates.push(...localCardImagePaths(code).map(path => `${base}/${path}`));

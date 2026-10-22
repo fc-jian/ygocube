@@ -10,7 +10,7 @@ helper_path=P('/opt/ygocube/shared/card-resource-tools/apply-duel.py')
 if not helper_path.is_file():raise SystemExit('Install current resource workflow before Web deployment')
 spec=importlib.util.spec_from_file_location('resource_apply',helper_path)
 resource_apply=importlib.util.module_from_spec(spec);spec.loader.exec_module(resource_apply)
-if not hasattr(resource_apply,'record_components'):raise SystemExit('Update the verified resource helper before staging this Web release')
+if not all(hasattr(resource_apply,name) for name in ('record_components','resource_component_files')):raise SystemExit('Update the verified resource helper before staging this Web release')
 archive=P(sys.argv[1]);assert hashlib.sha256(archive.read_bytes()).hexdigest()==sys.argv[2]
 release=sys.argv[3]
 assert re.fullmatch(r'[a-z0-9-]+',release), 'invalid release id'

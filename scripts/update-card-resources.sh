@@ -149,6 +149,11 @@ header_length() {
   '
 }
 
+header_final() {
+  # Ignore redirects and proxy CONNECT headers when checking a response.
+  awk '/^HTTP\// { block = "" } { block = block $0 ORS } END { printf "%s", block }'
+}
+
 parse_args() {
   while (($#)); do
     case "$1" in
@@ -344,6 +349,7 @@ download_images() {
   local headers="$target.headers"
   local remote_headers remote_etag remote_size local_etag local_size
   remote_headers="$(curl --fail --silent --show-error --location --head --max-time 30 --proto '=https' --tlsv1.2 "$IMAGE_URL")" || die "image archive HEAD request failed"
+  remote_headers="$(printf '%s\n' "$remote_headers" | header_final)"
   remote_etag="$(printf '%s\n' "$remote_headers" | header_last etag)"
   remote_size="$(printf '%s\n' "$remote_headers" | header_length)"
   [[ -z "$remote_size" || "$remote_size" =~ ^[0-9]+$ ]] || die "image response has invalid Content-Length: $remote_size"
@@ -366,50 +372,67 @@ download_images() {
     rm -f "$target" "$target.etag" "$target.sha256" "$target.headers"
   fi
   info "downloading image archive to cache (this can be large)" >&2
-  # curl's --continue-at can append a full 200 response when a proxy ignores a
-  # Range header.  Resume explicitly, verify Content-Range, and only append a
-  # chunk whose start and length match the existing partial file.
-  local attempt offset expected_size resume_headers resume_chunk range_value range_start range_end range_total size content_type
-  expected_size="$remote_size"
-  for attempt in 1 2 3 4 5 6; do
+  # Bound every request, including the first, so a throttled multi-GB archive
+  # makes durable progress within curl's timeout. Never append an unverified
+  # or incomplete response, even when a proxy ignores Range/If-Range.
+  [[ "$remote_size" =~ ^[0-9]+$ && "$remote_size" -gt 0 ]] || die "image archive requires a positive Content-Length for bounded downloads"
+  [[ -n "$remote_etag" && "$remote_etag" != W/* ]] || die "image archive requires a strong ETag for safe resumable downloads"
+  local failures=0 chunk_size=67108864 offset requested_end resume_headers resume_chunk transfer_ok response_headers response_status response_etag range_value range_start range_end range_total size content_type
+  if [[ -s "$partial" ]]; then
+    local_etag="$(header_final < "$headers" 2>/dev/null | header_last etag || true)"
+    if [[ "$local_etag" != "$remote_etag" ]]; then
+      warn "partial image archive has no matching ETag; restarting clean"
+      rm -f "$partial"
+    fi
+  fi
+  while ((failures < 6)); do
     offset=0
     [[ -f "$partial" ]] && offset="$(stat -c %s "$partial")"
-    if [[ -n "$expected_size" && "$offset" -ge "$expected_size" ]]; then
-      if [[ "$offset" -eq "$expected_size" ]]; then
+    if [[ "$offset" -ge "$remote_size" ]]; then
+      if [[ "$offset" -eq "$remote_size" ]]; then
         break
       fi
       warn "partial image archive is larger than Content-Length; restarting clean"
       rm -f "$partial"
       continue
     fi
-    if [[ "$offset" -gt 0 ]]; then
-      resume_headers="$partial.headers"
-      resume_chunk="$partial.resume"
-      rm -f "$resume_chunk" "$resume_headers"
-      if curl --http1.1 --fail --silent --show-error --location --proto '=https' --tlsv1.2 --connect-timeout 20 --max-time 600 --max-filesize 4000000000 --range "$offset-" -D "$resume_headers" -o "$resume_chunk" "$IMAGE_URL"; then
-        range_value="$(awk 'BEGIN{IGNORECASE=1} /^content-range:/ {sub("^[^:]*:[[:space:]]*",""); gsub("\r",""); print; exit}' "$resume_headers")"
+    requested_end=$((offset + chunk_size - 1))
+    ((requested_end < remote_size)) || requested_end=$((remote_size - 1))
+    resume_headers="$partial.headers"
+    resume_chunk="$partial.resume"
+    rm -f "$resume_chunk" "$resume_headers"
+    transfer_ok=0
+    if curl --http1.1 --fail --silent --show-error --location --proto '=https' --tlsv1.2 --connect-timeout 20 --max-time 600 --max-filesize "$chunk_size" --range "$offset-$requested_end" -H "If-Range: $remote_etag" -D "$resume_headers" -o "$resume_chunk" "$IMAGE_URL"; then
+      transfer_ok=1
+    fi
+    if [[ -f "$resume_headers" ]]; then
+      response_headers="$(header_final < "$resume_headers")"
+      response_status="$(printf '%s\n' "$response_headers" | awk 'NR == 1 { print $2 }')"
+      [[ "$response_status" != 200 ]] || die "image server ignored Range or changed archive version; partial download retained"
+      response_etag="$(printf '%s\n' "$response_headers" | header_last etag)"
+      range_value="$(printf '%s\n' "$response_headers" | header_last content-range)"
+      if [[ "$transfer_ok" == 1 && "$response_status" == 206 && "$response_etag" == "$remote_etag" ]]; then
         if [[ "$range_value" =~ ^bytes[[:space:]]+([0-9]+)-([0-9]+)/([0-9]+)$ ]]; then
           range_start="${BASH_REMATCH[1]}"; range_end="${BASH_REMATCH[2]}"; range_total="${BASH_REMATCH[3]}"
           size="$(stat -c %s "$resume_chunk" 2>/dev/null || echo 0)"
-          if [[ "$range_start" == "$offset" && "$range_end" -ge "$range_start" && "$size" -eq $((range_end - range_start + 1)) && ( -z "$expected_size" || "$range_total" == "$expected_size" ) ]]; then
+          if [[ "$range_start" == "$offset" && "$range_end" == "$requested_end" && "$size" -eq $((requested_end - offset + 1)) && "$range_total" == "$remote_size" ]]; then
             cat "$resume_chunk" >> "$partial"
+            printf '%s\n' "$response_headers" > "$headers"
+            rm -f "$resume_chunk" "$resume_headers"
+            failures=0
+            continue
           fi
         fi
       fi
-      rm -f "$resume_chunk" "$resume_headers"
-    else
-      rm -f "$partial"
-      curl --http1.1 --fail --silent --show-error --location --proto '=https' --tlsv1.2 --connect-timeout 20 --max-time 600 --max-filesize 4000000000 -D "$headers" -o "$partial" "$IMAGE_URL" || true
     fi
-    size="$(stat -c %s "$partial" 2>/dev/null || echo 0)"
-    if [[ -n "$expected_size" && "$size" == "$expected_size" ]]; then
-      break
-    fi
+    rm -f "$resume_chunk" "$resume_headers"
+    failures=$((failures + 1))
+    warn "image chunk failed validation or transfer ($failures/6 consecutive failures); retained $offset bytes"
     sleep 2
   done
   [[ -f "$partial" ]] || die "image archive download failed"
   size="$(stat -c %s "$partial")"
-  [[ -z "$expected_size" || "$size" == "$expected_size" ]] || die "image archive size mismatch: $size (expected $expected_size)"
+  [[ "$size" == "$remote_size" ]] || die "image archive size mismatch: $size (expected $remote_size)"
   content_type="$(printf '%s\n' "$remote_headers" | header_last content-type)"
   [[ "$content_type" == *zip* || "$content_type" == *octet-stream* || "$content_type" == *binary* ]] || die "image response has unexpected content type: $content_type"
   mv -f "$partial" "$target"
@@ -774,9 +797,8 @@ PY
     python3 "$HELPER" extract-zip "$archive" "$image_source" >/dev/null
     [[ -f "$STATE_DIR/avif-manifest.json" ]] && cp -f "$STATE_DIR/avif-manifest.json" "$STATE_DIR/previous-avif-manifest.json" || true
     avif_previous="${STATE_DIR}/previous-avif-manifest.json"
-    # On the first run, reuse the bootstrapped resource manifest's AVIF file
-    # hashes.  This avoids re-encoding thousands of unchanged thumbnails;
-    # only new or modified source images invoke vips.
+    # Bootstrap older output inventories too; entries without a matching
+    # source fingerprint must be encoded before they can become reusable.
     if [[ ! -f "$avif_previous" && -f "$STATE_DIR/previous-resource-manifest.json" ]]; then
       avif_previous="${STATE_DIR}/previous-resource-manifest.json"
     fi
@@ -817,8 +839,8 @@ with open(temporary, 'w', encoding='utf-8') as handle:
 os.replace(temporary, manifest_path)
 PY
   fi
-  # An explicit opt-out preserves Aly's last successful Super Pre section.
-  # Standard prepares fetch and manage the current official package.
+  # An explicit opt-out keeps the previous local Super Pre inventory here.
+  # Deploy derives the effective inventory from a fresh Aly baseline instead.
   if ((EXPANSION_ENABLED == 0)); then
     python3 - "$STATE_DIR/resource-manifest.json" "$STATE_DIR/previous-resource-manifest.json" <<'PY'
 import json, os, sys
@@ -845,22 +867,18 @@ PY
   info "prepared resources: $(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["cards"]["codeCount"], "cards,", len(d["scripts"]["files"]), "Lua,", len(d["avif"]["files"]), "AVIF,", len(d.get("expansions", {}).get("files", {})), "expansion files")' "$STATE_DIR/resource-manifest.json")"
 }
 
-native_changes() {
-  git -C "$ROOT_DIR/ygopro" diff --name-only HEAD^ HEAD -- 2>/dev/null | grep -Eq '(^gframe/|^ocgcore/|^premake/|\.cpp$|\.h$|\.c$|\.lua$)' 
-}
-
 cmd_build() {
   state_init
   if ((SKIP_BUILD)); then info "native build skipped"; return 0; fi
-  local needs=1
-  if git -C "$ROOT_DIR/ygopro" rev-parse HEAD^ >/dev/null 2>&1 && ! native_changes; then needs=0; fi
-  if ((needs == 0)); then info "no native changes detected; build skipped"; return 0; fi
+  # An explicit build always invokes the incremental compiler. Comparing only
+  # HEAD's parent misses earlier changes and bare ocgcore submodule gitlinks.
   local args=("$ROOT_DIR/scripts/build-ygopro.sh")
   ((CLIENT)) && args+=(--client)
   info "building YGOPro native target"
   run bash "${args[@]}"
   if ((DRY_RUN)); then return 0; fi
-  local binary="$ROOT_DIR/ygopro/bin/release/ygopro"
+  local target=host binary="$ROOT_DIR/ygopro/bin/release/ygopro"
+  if ((CLIENT)); then target=client; binary="$ROOT_DIR/ygopro/bin/release/YGOPro"; fi
   [[ -x "$binary" ]] || die "native build did not produce $binary"
   grep -Fq 'PRODUCT_VERSION_SUFFIX = L"-cube"' "$ROOT_DIR/ygopro/gframe/config.h" || die "ygopro version suffix -cube is missing"
   if command -v readelf >/dev/null 2>&1; then
@@ -870,8 +888,26 @@ cmd_build() {
   local ldd_output
   ldd_output="$(LD_LIBRARY_PATH="$ROOT_DIR/envs/ygocube/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ldd "$binary" 2>&1)"
   ! grep -q 'not found' <<<"$ldd_output" || { printf '%s\n' "$ldd_output" >&2; die "native binary has unresolved libraries"; }
-  cp -f "$binary" "$ROOT_DIR/srvpro/ygopro/ygopro"
-  info "native host verified and copied to srvpro/ygopro/ygopro"
+  python3 - "$ROOT_DIR" "$binary" "$target" "$STATE_DIR/native-build-$target.json" <<'PYBUILD'
+import hashlib, json, pathlib, subprocess, sys
+root, binary, target, output = sys.argv[1:]
+source = pathlib.Path(root) / 'ygopro'
+def git(path, *args):
+    return subprocess.check_output(['git', '-C', str(path), *args])
+value = {'schemaVersion': 1, 'target': target,
+         'sourceCommit': git(source, 'rev-parse', 'HEAD').decode().strip(),
+         'ocgcoreCommit': git(source / 'ocgcore', 'rev-parse', 'HEAD').decode().strip(),
+         'sourceDiffSha256': hashlib.sha256(git(source, 'diff', '--binary', 'HEAD')).hexdigest(),
+         'ocgcoreDiffSha256': hashlib.sha256(git(source / 'ocgcore', 'diff', '--binary', 'HEAD')).hexdigest(),
+         'binarySha256': hashlib.sha256(pathlib.Path(binary).read_bytes()).hexdigest()}
+pathlib.Path(output).write_text(json.dumps(value, sort_keys=True, indent=2) + '\n', encoding='utf-8')
+PYBUILD
+  if ((CLIENT == 0)); then
+    cp -f "$binary" "$ROOT_DIR/srvpro/ygopro/ygopro"
+    info "native host verified and copied to srvpro/ygopro/ygopro"
+  else
+    info "native client verified; host runtime preserved"
+  fi
 }
 
 cmd_test() {
@@ -902,7 +938,7 @@ cmd_test() {
 }
 
 make_payload() {
-  local payload="$1" previous="$STATE_DIR/deployed-resource-manifest.json" current="$STATE_DIR/resource-manifest.json"
+  local payload="$1" previous="$STATE_DIR/deployed-resource-manifest.json" current="$STATE_DIR/deployment-resource-manifest.json"
   [[ -f "$current" ]] || die "run prepare before deploy"
   # A first publish must not install a manifest that advertises expansion
   # files while sending an empty expansion delta. Once a successful deploy has
@@ -1019,7 +1055,20 @@ ssh_upload() {
 
 refresh_server_baseline() {
   local output="$STATE_DIR/server-resource-baseline.txt"
-  ssh_exec "python3 -c 'import hashlib,json,pathlib; p=pathlib.Path(\"$ALY_ROOT/shared/assets/resource-manifest.json\"); b=p.read_bytes(); print(\"YGOCUBE_MANIFEST_SHA=\"+hashlib.sha256(b).hexdigest()); print(\"YGOCUBE_MANIFEST_JSON=\"+json.dumps(json.loads(b),separators=(\",\",\":\")))'" 120 > "$output" || return $?
+  ssh_exec "python3 - <<'PYREMOTE'
+import hashlib,json,pathlib,sqlite3
+from contextlib import closing
+root=pathlib.Path('$ALY_ROOT')
+p=root/'shared/assets/resource-manifest.json'
+b=p.read_bytes()
+print('YGOCUBE_MANIFEST_SHA='+hashlib.sha256(b).hexdigest())
+print('YGOCUBE_MANIFEST_JSON='+json.dumps(json.loads(b),separators=(',',':')))
+cards={}
+for path in sorted((root/'shared/srvpro/ygopro/expansions').glob('*.cdb')):
+    with closing(sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True)) as db:
+        cards.update(dict(db.execute('SELECT id,type FROM datas')))
+print('YGOCUBE_EXPANSION_CODES='+json.dumps({'codes':sorted(cards),'playableCodes':sorted(code for code,kind in cards.items() if not kind & 16384)},separators=(',',':')))
+PYREMOTE" 120 > "$output" || return $?
   python3 - "$output" "$STATE_DIR" <<'PYBASE' || return $?
 import json, os, pathlib, re, sys
 output = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
@@ -1044,6 +1093,14 @@ for name, value in [('deployed-resource-manifest.json', manifest),
     temporary = state / ('.' + name + '.new')
     temporary.write_text(json.dumps(value, ensure_ascii=False, sort_keys=True) + '\n', encoding='utf-8')
     os.replace(temporary, state / name)
+codes_marker = 'YGOCUBE_EXPANSION_CODES='
+if codes_marker in output:
+    codes, _ = json.JSONDecoder().raw_decode(output.split(codes_marker, 1)[1])
+    if not isinstance(codes, dict) or any(not isinstance(codes.get(key), list) or any(type(code) is not int or code <= 0 for code in codes[key]) for key in ('codes', 'playableCodes')):
+        raise SystemExit('server expansion code response is invalid')
+    (state / 'server-expansion-codes.json').write_text(json.dumps(codes) + '\n', encoding='utf-8')
+else:
+    (state / 'server-expansion-codes.json').unlink(missing_ok=True)
 (state / 'expected-server-manifest.sha256').write_text(digest.group(1) + '\n', encoding='utf-8')
 PYBASE
 }
@@ -1098,7 +1155,7 @@ for expected in [value for value in module.banlist_api_names(headers) if value.e
     if expected not in lists:
         raise SystemExit(f'independent Duel is missing upstream ban-list {expected}')
 PY
-    duel_probe_code="$(python3 -c 'import json,sys; codes=json.load(open(sys.argv[1], encoding="utf-8")).get("codes", []); print(codes[0] if codes else "")' "$STATE_DIR/expansion-release-match.json")"
+    duel_probe_code="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["verification"]["cardCode"])' "$STATE_DIR/deployment-resource-manifest.json")"
     [[ "$duel_probe_code" =~ ^[0-9]+$ ]] || die "missing expansion search probe code"
     curl --fail --silent --show-error --retry 5 --retry-delay 2 --max-time 30 "$ALY_PUBLIC_URL/duel-api/public/duel/search?q=$duel_probe_code" -o "$duel_search_file" || die "Aly independent Duel search endpoint failed"
     python3 - "$duel_search_file" "$duel_probe_code" <<'PY' || die "Aly independent Duel public search missed extension card $duel_probe_code"
@@ -1162,6 +1219,9 @@ PY
   ssh_exec "set -eu; cube_device=\$(stat -c '%d' '$ALY_ROOT/shared'); duel_device=\$(stat -c '%d' '$ALY_DUEL_ROOT/releases'); test \"\$cube_device\" = \"\$duel_device\"" 60 || die "Cube shared resources and Duel releases must share a filesystem for hard-link deployment"
   local archive staging="$STATE_DIR/deploy-$RELEASE_ID"
   refresh_server_baseline || die "cannot read actual Aly resource baseline"
+  local preservation_args=()
+  ((EXPANSION_ENABLED)) || preservation_args=(--preserve-expansions)
+  python3 "$HELPER" deployment-manifest "$STATE_DIR/resource-manifest.json" "$STATE_DIR/deployed-resource-manifest.json" "$STATE_DIR/server-expansion-codes.json" "$ROOT_DIR/srvpro/ygopro/cards.cdb" "$STATE_DIR/deployment-resource-manifest.json" "${preservation_args[@]}" || die "cannot prepare a verifiable deployment from the actual Aly baseline"
   archive="$(make_payload "$staging/payload")"
   info "uploading delta archive to Aly"
   ssh_exec "set -eu; root='$ALY_ROOT'; mkdir -p \"\$root/.staging/card-sync-$RELEASE_ID\"" 60
@@ -1175,10 +1235,10 @@ PY
     die "Aly transaction failed; inspect ROLLED_BACK and retained staging. The remote coordinator owns recovery; do not reopen services manually"
   fi
   local expected_cdb_sha expected_manifest_sha expected_names_sha expected_banlist_sha
-  expected_cdb_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["cards"]["sha256"])' "$STATE_DIR/resource-manifest.json")"
+  expected_cdb_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["cards"]["sha256"])' "$STATE_DIR/deployment-resource-manifest.json")"
   expected_manifest_sha="$(sha256sum "$staging/payload/metadata/resource-manifest.json" | awk '{print $1}')"
-  expected_names_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["cardNames"]["sha256"])' "$STATE_DIR/resource-manifest.json")"
-  expected_banlist_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["banlist"]["files"]["lflist.conf"]["sha256"])' "$STATE_DIR/resource-manifest.json")"
+  expected_names_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["cardNames"]["sha256"])' "$STATE_DIR/deployment-resource-manifest.json")"
+  expected_banlist_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["banlist"]["files"]["lflist.conf"]["sha256"])' "$STATE_DIR/deployment-resource-manifest.json")"
   if ! (remote_health "$expected_cdb_sha" "$expected_manifest_sha" "$expected_names_sha" "$expected_banlist_sha"); then
     warn "post-deploy verification failed; attempting to restore both resource releases"
     remote_rollback "$RELEASE_ID" || die "verification failed and automatic rollback also failed; retain backups and inspect Aly immediately"

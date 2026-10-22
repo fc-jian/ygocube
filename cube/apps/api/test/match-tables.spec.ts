@@ -54,7 +54,9 @@ describe('offline match table reconciliation', () => {
     expect((getDb().prepare('PRAGMA index_list(matches)').all() as any[]).some(row => row.name === 'idx_matches_tid_round_table' && row.unique === 1)).toBe(true);
   });
   it('refuses stale plans before mutation', async () => {
-    const value = plan(); logEvent(tid, 'notice', 'notice', {}, 'fixture');
+    const value = plan();
+    // Advance the event sequence while preserving the existing frozen state.
+    logEvent(tid, 'frozen', 'frozen', true, 'fixture');
     await expect(repairMatchTables(value, backup)).rejects.toThrow('STALE_REPAIR_PLAN');
     expect(inspectMatchTables().conflicts).toHaveLength(2);
   });

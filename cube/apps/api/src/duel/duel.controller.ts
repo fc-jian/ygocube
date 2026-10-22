@@ -8,7 +8,7 @@ import {
   Query,
   Req,
 } from "@nestjs/common";
-import { AuthedRequest, Public } from "../auth/auth.guard";
+import { Access, AuthedRequest, Public } from "../auth/auth.guard";
 import { DuelService } from "./duel.service";
 @Controller()
 export class DuelController {
@@ -93,6 +93,7 @@ export class DuelController {
     return this.duel.replay(tid, mid);
   }
   @Post("admin/t/:tid/matches/:mid/replay/delete")
+  @Access("admin")
   delete(
     @Param("tid", ParseIntPipe)
     tid: number,

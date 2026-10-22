@@ -592,11 +592,8 @@ def generate_avif(source: Path, destination: Path, previous: Path | None = None,
         current[str(code)] = source_meta
         if output.exists() and old_sources.get(str(code)) == source_meta:
             continue
-        old_output = old_section.get("files", {}).get(f"{code}.avif") if isinstance(old_section, dict) else None
-        if output.exists() and isinstance(old_output, dict) and str(code) not in old_sources and image.parent != expansion_pics:
-            output_meta = {"size": output.stat().st_size, "sha256": sha256_file(output)}
-            if output_meta == old_output:
-                continue
+        # An output hash cannot establish which source produced it. A migrated
+        # cache without source fingerprints must encode once before reuse.
         # Keep the .avif suffix on the temporary output: libvips chooses the
         # writer from the final extension, and a .tmp suffix would be rejected.
         if shutil.which("vips") is None:
@@ -767,6 +764,36 @@ def manifest_delta(previous: Path | None, current: Path, section: str) -> dict[s
     return {"changed": changed, "removed": removed}
 
 
+def deployment_manifest(current: dict, baseline: dict, server_expansions: dict,
+                        preserve_expansions: bool, main_codes: Iterable[int] = ()) -> dict:
+    """Resolve preservation and probes before uploading or stopping services."""
+    result = json.loads(json.dumps(current))
+    if preserve_expansions:
+        result["expansions"] = json.loads(json.dumps(baseline.get("expansions", {"files": {}})))
+        result["expansions"].get("files", {}).pop("lflist.conf", None)
+        result["expansionArchive"] = json.loads(json.dumps(baseline.get("expansionArchive", {"enabled": False})))
+        # Local thumbnails may come from a newer, never-deployed expansion.
+        # Preserve the actual server art for every retained expansion code.
+        files = result.setdefault("avif", {}).setdefault("files", {})
+        old_files = baseline.get("avif", {}).get("files", {})
+        for code in server_expansions.get("codes", []):
+            name = f"{int(code)}.avif"
+            if name in old_files:
+                files[name] = old_files[name]
+            else:
+                files.pop(name, None)
+        codes = server_expansions.get("playableCodes", [])
+    else:
+        codes = (result.get("expansionArchive", {}).get("releaseMatch") or {}).get("codes", [])
+    candidates = list(codes) + list(main_codes)
+    probe = next((int(code) for code in candidates if int(code) > 0
+                  and f"{int(code)}.avif" in result.get("avif", {}).get("files", {})), None)
+    if probe is None:
+        raise ValueError("no searchable card with AVIF is available for deployment verification")
+    result["verification"] = {"cardCode": probe}
+    return result
+
+
 def _main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -832,6 +859,13 @@ def _main() -> int:
     nz.add_argument("--md5")
     nm = sub.add_parser("parse-name-md5")
     nm.add_argument("path", type=Path)
+    deployment = sub.add_parser("deployment-manifest")
+    deployment.add_argument("current", type=Path)
+    deployment.add_argument("baseline", type=Path)
+    deployment.add_argument("server_expansions", type=Path)
+    deployment.add_argument("cdb", type=Path)
+    deployment.add_argument("out", type=Path)
+    deployment.add_argument("--preserve-expansions", action="store_true")
     args = parser.parse_args()
     try:
         if args.command == "validate-cdb":
@@ -881,6 +915,15 @@ def _main() -> int:
             print(json.dumps(build_resource_manifest(args.cdb, args.scripts, args.avif, args.out, names=args.names, expansions=args.expansions, **extra), ensure_ascii=False, sort_keys=True))
         elif args.command == "delta":
             print(json.dumps(manifest_delta(args.previous, args.current, args.section), ensure_ascii=False, sort_keys=True))
+        elif args.command == "deployment-manifest":
+            with closing(sqlite3.connect(args.cdb.resolve().as_uri() + '?mode=ro', uri=True)) as db:
+                main_codes = [row[0] for row in db.execute('SELECT id FROM datas WHERE (type & 16384) = 0 ORDER BY id')]
+            result = deployment_manifest(
+                json.loads(args.current.read_text(encoding='utf-8')),
+                json.loads(args.baseline.read_text(encoding='utf-8')),
+                json.loads(args.server_expansions.read_text(encoding='utf-8')),
+                args.preserve_expansions, main_codes)
+            _json_dump(result, args.out)
     except (OSError, ValueError, sqlite3.Error, zipfile.BadZipFile, json.JSONDecodeError, subprocess.CalledProcessError) as exc:
         parser.error(str(exc))
     return 0

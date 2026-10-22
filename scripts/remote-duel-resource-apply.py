@@ -512,6 +512,57 @@ def parse_config(api_modules: Path, config_file: Path) -> dict:
     return value
 
 
+def resource_component_files(release: Path) -> dict[str, str]:
+    """Hash the actual configured resources, including shared Cube paths."""
+    release = release.resolve(strict=True)
+    installation = release.parent.parent if release.parent.name == 'releases' else None
+    config_file = release / 'config.yaml'
+    if not config_file.is_file() and installation:
+        config_file = installation / 'shared/config.yaml'
+    config = parse_config(release / 'api/node_modules', config_file) if config_file.is_file() else {}
+
+    def configured(section: str, key: str, fallback: Path) -> Path:
+        value = config.get(section, {}).get(key)
+        if not value:
+            return fallback
+        path = Path(value)
+        if not path.is_absolute():
+            path = config_file.resolve().parent / path
+        # A staged release is audited before current switches. Stable current
+        # references must describe the candidate, not the previous release.
+        if installation and path.is_relative_to(installation / 'current'):
+            path = release / path.relative_to(installation / 'current')
+        return path
+
+    card = configured('server', 'cards_cdb', release / 'srvpro/ygopro/cards.cdb')
+    host = card.parent
+    names = configured('server', 'card_names_json', release / 'assets/ygocdb_cards.json')
+    avif = configured('pics', 'avif_dir', release / 'assets/pics_avif')
+    required = {
+        'cards.cdb': card,
+        'strings.conf': configured('server', 'strings_conf', host / 'strings.conf'),
+        'lflist.conf': host / 'lflist.conf',
+        'expansions/lflist.conf': host / 'expansions/lflist.conf',
+        'ygocdb_cards.json': names,
+    }
+    files = {}
+    for label, path in required.items():
+        if not path.is_file() or path.stat().st_size == 0:
+            raise RuntimeError(f'resource inventory is missing required file: {label}')
+        files[label] = sha256(path)
+    for label, directory, suffixes, required_tree in (
+        ('script', host / 'script', {'.lua'}, True),
+        ('expansions', host / 'expansions', {'.lua', '.cdb', '.conf'}, False),
+        ('pics_avif', avif, {'.avif'}, True),
+    ):
+        selected = sorted(path for path in directory.rglob('*') if path.is_file() and path.suffix.lower() in suffixes)
+        if required_tree and not selected:
+            raise RuntimeError(f'resource inventory is missing required files: {label}')
+        for path in selected:
+            files[f'{label}/{path.relative_to(directory).as_posix()}'] = sha256(path)
+    return files
+
+
 def describe_components(release: Path) -> dict:
     metadata_path = release / 'release.json'
     metadata = json.loads(metadata_path.read_text(encoding='utf-8')) if metadata_path.is_file() else {}
@@ -521,11 +572,11 @@ def describe_components(release: Path) -> dict:
         'web': [release / 'web'],
         'srvpro': [release / 'srvpro/ygopro-server.js', release / 'srvpro/cube.js', release / 'srvpro/cube-banlists.js'],
         'host': [release / 'srvpro/ygopro/ygopro'],
-        'resources': [release / 'assets/resource-manifest.json'],
+        'resources': [],
     }
     result = {}
     for name, roots in groups.items():
-        files = {}
+        files = resource_component_files(release) if name == 'resources' else {}
         for root in roots:
             candidates = [root] if root.is_file() else sorted(root.rglob('*')) if root.is_dir() else []
             for file in candidates:
@@ -632,12 +683,16 @@ def active_standalone_host() -> bool:
     return result.returncode == 0
 
 
-def maintenance_ingress(cube_root: Path, duel_root: Path, *, close: bool) -> dict:
+def maintenance_ingress(cube_root: Path, duel_root: Path, *, close: bool,
+                        stacks: tuple[str, ...] = ('ygocube', 'ygoduel')) -> dict:
     """Gate public native/API/Web ports while keeping loopback probes usable."""
     ledger = cube_root / 'shared/card-maintenance-ingress.json'
     if close:
-        ports = {3000, 3100}
-        for root in (cube_root, duel_root):
+        if not stacks or any(name not in ('ygocube', 'ygoduel') for name in stacks):
+            raise RuntimeError('invalid maintenance stack selection')
+        selected = {'ygocube': (cube_root, 3000), 'ygoduel': (duel_root, 3100)}
+        ports = {selected[name][1] for name in stacks}
+        for root, _ in (selected[name] for name in stacks):
             config_file = root / 'current/config.yaml'
             if not config_file.is_file():
                 config_file = root / 'shared/config.yaml'
@@ -678,6 +733,73 @@ def maintenance_ingress(cube_root: Path, duel_root: Path, *, close: bool) -> dic
                 subprocess.run([tool, '-w', '5', '-D', 'INPUT', *rule], check=False)
         raise
     return {'ok': True, 'ingressClosed': close}
+
+
+class ApplicationMaintenance:
+    """Guard application activation and rollback without killing raced games.
+
+    Nginx may proxy a new game during public verification after API startup.
+    Every destructive stop therefore pauses both creators and checks hosts
+    again; a new game cancels rollback and keeps the current release running.
+    The caller owns the existing deployment lock and must call finish only
+    after successful activation or a verified restoration.
+    """
+
+    def __init__(self, cube_root: Path, duel_root: Path, services: list[str]):
+        self.cube_root, self.duel_root = cube_root, duel_root
+        self.services = services
+        self.stacks = tuple(sorted({service.split('-', 1)[0] for service in services}))
+        if not self.stacks or any(name not in ('ygocube', 'ygoduel') for name in self.stacks):
+            raise ValueError('invalid application services')
+        self.gated = False
+
+    def occupied(self) -> bool:
+        for user in self.stacks:
+            result = subprocess.run(['pgrep', '-u', user, '-x', 'ygopro'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if result.returncode == 0:
+                return True
+            if result.returncode != 1:
+                raise RuntimeError(f'cannot inspect active hosts for {user}')
+        return False
+
+    def begin(self) -> None:
+        if self.occupied():
+            raise RuntimeError('an active duel host prevents application maintenance')
+        if (self.cube_root / 'shared/card-maintenance-ingress.json').exists():
+            raise RuntimeError('an earlier maintenance gate is still closed; inspect it before application deployment')
+        maintenance_ingress(self.cube_root, self.duel_root, close=True, stacks=self.stacks)
+        self.gated = True
+
+    def finish(self) -> None:
+        if self.gated:
+            maintenance_ingress(self.cube_root, self.duel_root, close=False)
+            self.gated = False
+
+    def stop_services(self) -> None:
+        paused: list[tuple[str, int]] = []
+        try:
+            for stack in self.stacks:
+                for component in ('api', 'srvpro'):
+                    service = f'{stack}-{component}'
+                    pid = int(run('systemctl', 'show', service, '-p', 'MainPID', '--value') or '0')
+                    if pid:
+                        try:
+                            os.kill(pid, signal.SIGSTOP)
+                            paused.append((service, pid))
+                        except ProcessLookupError:
+                            pass
+            if self.occupied():
+                # No service has been stopped and no current pointer changed.
+                # Reopen the native gate so the detected game can continue.
+                self.finish()
+                raise RuntimeError('a duel host appeared; current release retained and automatic rollback refused')
+            run('systemctl', 'stop', *self.services)
+        finally:
+            for _, pid in reversed(paused):
+                try:
+                    os.kill(pid, signal.SIGCONT)
+                except ProcessLookupError:
+                    pass
 
 
 def enter_maintenance() -> dict:

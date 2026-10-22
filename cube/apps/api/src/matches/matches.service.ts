@@ -120,10 +120,14 @@ export class MatchesService implements OnModuleInit, OnModuleDestroy {
   private roundRobinSchedule(ids: string[]): [string, string | null][][] {
     if (ids.length % 2 === 0) {
       const rounds: [string, string | null][][] = [];
-      const arr = [...ids];
+      // Seed opposite sides with adjacent entrants so the first round and the
+      // established four-player order stay unchanged. Pair across the ring,
+      // then rotate every seat except the first: adjacent pairing on a rotated
+      // array repeats opponents once the field has more than four players.
+      const arr = [...ids.filter((_, i) => i % 2 === 0), ...ids.filter((_, i) => i % 2 === 1).reverse()];
       for (let r = 0; r < ids.length - 1; r++) {
         const pairs: [string, string | null][] = [];
-        for (let i = 0; i < ids.length / 2; i++) pairs.push([arr[2 * i], arr[2 * i + 1]]);
+        for (let i = 0; i < ids.length / 2; i++) pairs.push([arr[i], arr[arr.length - 1 - i]]);
         rounds.push(pairs);
         const first = arr.splice(1, 1)[0];
         arr.push(first);

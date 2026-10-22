@@ -1,9 +1,11 @@
-import { useTestDb, makeTournaments, TEST_POOL } from './helpers';
+import { useTestDb, makeTournaments, makePools, TEST_POOL } from './helpers';
 import {
   afterEventCommit,
   loadState,
   revertTo,
   hardRevertTo,
+  previewRevert,
+  snapshotNow,
   resetStateCache,
   logEvent,
   withEventTransaction,
@@ -78,6 +80,96 @@ describe('event log & revert', () => {
     expect(restored.frozen).toBe(true);
     expect(restored.status).toBe('registration');
     expect(restored.players.map((p) => p.playerId)).toEqual(['a']);
+  });
+
+  it('restores default token auth when an earlier revert already replaced the config projection', () => {
+    const tournaments = makeTournaments();
+    const tid = tournaments.create({ name: 'repeated-revert-auth', maxPlayers: 2, cardPool: TEST_POOL }, 'test').tid;
+    tournaments.join(tid, 'a', 'A');
+    const db = require('../src/db').getDb();
+    const originalSeq = (db.prepare('SELECT MAX(seq) AS seq FROM events WHERE tournament_id=?').get(tid) as { seq: number }).seq;
+    tournaments.setAuthRequired(tid, false, 'test');
+    const disabledSeq = (db.prepare('SELECT MAX(seq) AS seq FROM events WHERE tournament_id=?').get(tid) as { seq: number }).seq;
+    tournaments.setAuthRequired(tid, true, 'test');
+    hardRevertTo(tid, disabledSeq, 'test');
+    expect(tournaments.get(tid).authRequired).toBe(false);
+    hardRevertTo(tid, originalSeq, 'test');
+    resetStateCache();
+    expect(tournaments.get(tid).authRequired).toBe(true);
+    expect(JSON.parse(loadState(tid).configJson).authRequired).not.toBe(false);
+  });
+
+  it.each([false, true])('preserves initial custom config and pool across repeated reverts (legacy=%s)', legacy => {
+    const tournaments = makeTournaments();
+    const pools = makePools();
+    pools.create('second-pool', pools.codesByName(TEST_POOL)!);
+    const tid = tournaments.create({ name: 'repeated-config', maxPlayers: 2, cardPool: TEST_POOL, mainMin: 20 }, 'test').tid;
+    const db = require('../src/db').getDb();
+    const originalPoolId = db.prepare('SELECT card_pool_id FROM tournaments WHERE id=?').get(tid).card_pool_id;
+    if (legacy) db.prepare('DELETE FROM tournament_snapshots WHERE tournament_id=?').run(tid);
+    tournaments.join(tid, 'a', 'A');
+    const originalSeq = db.prepare('SELECT MAX(seq) AS seq FROM events WHERE tournament_id=?').get(tid).seq;
+    tournaments.updateConfig(tid, { mainMin: 30, cardPool: 'second-pool' }, 'test');
+    const changedSeq = db.prepare('SELECT MAX(seq) AS seq FROM events WHERE tournament_id=?').get(tid).seq;
+    snapshotNow(tid);
+    hardRevertTo(tid, changedSeq, 'test');
+    hardRevertTo(tid, originalSeq, 'test');
+    resetStateCache();
+    expect(JSON.parse(loadState(tid).configJson)).toMatchObject({ mainMin: 20, cardPool: TEST_POOL, cardPoolId: originalPoolId });
+    expect(db.prepare('SELECT card_pool_id FROM tournaments WHERE id=?').get(tid)).toEqual({ card_pool_id: originalPoolId });
+    expect(db.prepare('SELECT count(*) AS c FROM tournament_snapshots WHERE tournament_id=? AND event_seq>?').get(tid, originalSeq)).toEqual({ c: 0 });
+  });
+
+  it('rejects irrecoverable legacy history before modifying the current branch', () => {
+    const tournaments = makeTournaments();
+    const tid = tournaments.create({ name: 'lost-config', maxPlayers: 2, cardPool: TEST_POOL, mainMin: 20 }, 'test').tid;
+    const db = require('../src/db').getDb();
+    const originalSeq = db.prepare('SELECT MAX(seq) AS seq FROM events WHERE tournament_id=?').get(tid).seq;
+    tournaments.updateConfig(tid, { mainMin: 30 }, 'test');
+    const changedSeq = db.prepare('SELECT MAX(seq) AS seq FROM events WHERE tournament_id=?').get(tid).seq;
+    hardRevertTo(tid, changedSeq, 'test');
+    // Simulate an old release: it removed all prior snapshots and persisted
+    // the later config as the only seed for replay.
+    db.prepare('DELETE FROM tournament_snapshots WHERE tournament_id=? AND event_seq<?').run(tid, changedSeq);
+    const before = db.prepare('SELECT * FROM tournaments WHERE id=?').get(tid);
+    for (const revert of [() => previewRevert(tid, originalSeq), () => hardRevertTo(tid, originalSeq, 'test')]) {
+      try {
+        revert();
+        throw new Error('expected missing baseline rejection');
+      } catch (error: any) {
+        expect(error.getStatus()).toBe(400);
+        expect(error.getResponse()).toEqual({ code: 'REVERT_BASELINE_UNAVAILABLE' });
+      }
+    }
+    expect(db.prepare('SELECT * FROM tournaments WHERE id=?').get(tid)).toEqual(before);
+    expect(db.prepare('SELECT MAX(seq) AS seq FROM events WHERE tournament_id=?').get(tid)).toEqual({ seq: changedSeq });
+  });
+
+  it('can recover legacy config from a complete config event without a snapshot', () => {
+    const tournaments = makeTournaments();
+    const tid = tournaments.create({ name: 'recorded-config', maxPlayers: 2, cardPool: TEST_POOL, mainMin: 20 }, 'test').tid;
+    const db = require('../src/db').getDb();
+    tournaments.updateConfig(tid, { mainMin: 25 }, 'test');
+    const target = db.prepare('SELECT MAX(seq) AS seq FROM events WHERE tournament_id=?').get(tid).seq;
+    tournaments.updateConfig(tid, { mainMin: 30 }, 'test');
+    const later = db.prepare('SELECT MAX(seq) AS seq FROM events WHERE tournament_id=?').get(tid).seq;
+    hardRevertTo(tid, later, 'test');
+    db.prepare('DELETE FROM tournament_snapshots WHERE tournament_id=?').run(tid);
+    expect(JSON.parse(hardRevertTo(tid, target, 'test').state.configJson).mainMin).toBe(25);
+  });
+
+  it('restores the historical name consistently in details, listings and later revert previews', () => {
+    const tournaments = makeTournaments();
+    const tid = tournaments.create({ name: 'original-name', maxPlayers: 2, cardPool: TEST_POOL }, 'test').tid;
+    const db = require('../src/db').getDb();
+    const target = db.prepare('SELECT MAX(seq) AS seq FROM events WHERE tournament_id=?').get(tid).seq;
+    tournaments.updateName(tid, 'later-name', 'test');
+    hardRevertTo(tid, target, 'test');
+    resetStateCache();
+    expect(tournaments.get(tid).name).toBe('original-name');
+    expect(tournaments.list().find(tournament => tournament.id === tid)?.name).toBe('original-name');
+    expect(previewRevert(tid, target).tournamentName).toBe('original-name');
+    expect(db.prepare('SELECT name FROM tournaments WHERE id=?').get(tid)).toEqual({ name: 'original-name' });
   });
 
   it('every mutation appends to the append-only log', () => {

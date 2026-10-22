@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { encodePathSegment, Identity } from './api';
+import { API_BASE, encodePathSegment, identityHeaders, Identity, onPlayerLogout, setIdentityCookie } from './api';
+import { readEventStream } from './eventStream';
 
 // SSE stream per tournament (dev_docs/07 §2.3): reconnect + refetch full state.
 export function useTournamentStream(tid: string | null, identity: Identity | null, onEvent?: (event: string, data: any) => void) {
@@ -17,48 +18,61 @@ export function useTournamentStream(tid: string | null, identity: Identity | nul
       setConnected(false);
       return;
     }
-    let es: EventSource | null = null;
+    const controller = new AbortController();
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let closed = false;
     let retry = 0;
 
-    const connect = () => {
-      // EventSource cannot set authentication headers. The identity helper has
-      // already written per-tournament SameSite cookies, so credentials never
-      // need to appear in browser history, proxy logs, or Referer headers.
-      es = new EventSource(`/api/t/${encodePathSegment(tid)}/stream`);
-      es.onopen = () => {
+    const connect = async () => {
+      try {
+        // Explicit headers keep concurrent players in the same tournament isolated.
+        // Scoped cookies remain available for legacy links and no-token sessions.
+        setIdentityCookie(identity.tid, identity.pid, identity.token);
+        const response = await fetch(`${API_BASE}/t/${encodePathSegment(tid)}/stream`, {
+          headers: { ...identityHeaders(identity), Accept: 'text/event-stream' },
+          credentials: 'same-origin',
+          cache: 'no-store',
+          signal: controller.signal,
+        });
+        if (closed) return;
+        if (!response.ok) {
+          if (response.status === 401) onEventRef.current?.('auth-required', null);
+          throw new Error(`STREAM_HTTP_${response.status}`);
+        }
+        if (!response.body || !response.headers.get('content-type')?.toLowerCase().startsWith('text/event-stream')) {
+          throw new Error('INVALID_EVENT_STREAM');
+        }
         retry = 0;
         setConnected(true);
         // Events missed while offline are recovered by fetching current state.
         onEventRef.current?.('reconnect', null);
-      };
-      es.onerror = () => {
-        setConnected(false);
-        es?.close();
-        if (!closed) {
-          retry++;
-          retryTimer = setTimeout(connect, Math.min(5000, 500 * Math.pow(2, retry)));
-        }
-      };
-      const known = ['phase', 'pack', 'pick', 'pause', 'deck', 'match', 'notice'];
-      for (const ev of known) {
-        es.addEventListener(ev, (e) => {
+        const known = new Set(['phase', 'pack', 'pick', 'pause', 'deck', 'match', 'notice']);
+        await readEventStream(response, ({ event, data }) => {
+          if (closed || !known.has(event)) return;
           try {
-            onEventRef.current?.(ev, JSON.parse((e as MessageEvent).data));
+            onEventRef.current?.(event, JSON.parse(data));
           } catch (error) {
-            console.error('invalid tournament stream event', ev, error);
+            console.error('invalid tournament stream event', event, error);
           }
         });
+      } catch {
+        // Transport failures and stream EOF share the bounded reconnect policy.
+      } finally {
+        if (closed) return;
+        setConnected(false);
+        retry++;
+        retryTimer = setTimeout(() => void connect(), Math.min(5000, 500 * Math.pow(2, retry)));
       }
     };
-    connect();
-    return () => {
+    const stop = () => {
       closed = true;
       if (retryTimer) clearTimeout(retryTimer);
-      es?.close();
+      controller.abort();
       setConnected(false);
     };
+    const unsubscribe = onPlayerLogout(identity, stop);
+    void connect();
+    return () => { unsubscribe(); stop(); };
   }, [tid, identity?.tid, identity?.pid, identity?.token]);
 
   const refetch = useCallback(async () => {

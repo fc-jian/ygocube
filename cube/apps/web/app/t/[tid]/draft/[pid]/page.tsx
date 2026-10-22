@@ -15,6 +15,8 @@ import { CardInfo } from '@/lib/types';
 import { matchesCardQuery, PickSortMode, safeCardCodes, sortCardSearchResults } from '@/lib/cardInfo';
 import { fetchCardMetadata } from '@/lib/cardCache';
 import { useTournamentFallbackPolling } from '@/lib/sse';
+import { useCoalescedRefresh } from '@/lib/useCoalescedRefresh';
+import { usePlayerLogout } from '@/lib/usePlayerLogout';
 
 export default function DraftPage() {
   const params = useParams<{ tid: string; pid: string }>();
@@ -35,7 +37,6 @@ export default function DraftPage() {
   const [poolResults, setPoolResults] = useState<CardInfo[]>([]);
   const [cardSortMode, setCardSortMode] = useState<PickSortMode>('default');
   const [draftConfirmBusy, setDraftConfirmBusy] = useState(false);
-  const loadBusy = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -64,11 +65,11 @@ export default function DraftPage() {
     };
   }, [tidPath, pid]);
 
-  const load = useCallback(async () => {
-    if (!identity || loadBusy.current) return;
-    loadBusy.current = true;
+  const refresh = useCoalescedRefresh(useCallback(async ({ signal, isCurrent }) => {
+    if (!identity) return;
     try {
-      const raw = await api<unknown>(`/t/${tidPath}/state`, { identity });
+      const raw = await api<unknown>(`/t/${tidPath}/state`, { identity, signal });
+      if (!isCurrent()) return;
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('INVALID_STATE_RESPONSE');
       const s = raw as DraftState;
       const normalized = {
@@ -100,9 +101,10 @@ export default function DraftPage() {
         const cards = await fetchCardMetadata(`/t/${tidPath}/cards`, [...codes], identity);
         const map: Record<number, CardInfo> = {};
         for (const c of cards) map[c.code] = c;
-        setCardMap((m) => ({ ...m, ...map }));
+        if (isCurrent()) setCardMap((m) => ({ ...m, ...map }));
       }
     } catch (e: any) {
+      if (!isCurrent()) return;
       if (e.code === 'AUTH_REQUIRED') {
         setIdentity(null);
         setNeedToken(true);
@@ -111,10 +113,16 @@ export default function DraftPage() {
       } else {
         setError(readableApiError(e, '比赛状态加载失败'));
       }
-    } finally {
-      loadBusy.current = false;
     }
-  }, [tidPath, identity]);
+  }, [tidPath, identity]));
+  const load = refresh.request;
+  usePlayerLogout(identity, () => {
+    refresh.cancel();
+    setIdentity(null);
+    setState(null);
+    setCardMap({});
+    setNeedToken(true);
+  });
 
   const updateDisplayName = useCallback(async (displayName: string) => {
     if (!identity) return;
@@ -264,7 +272,7 @@ export default function DraftPage() {
   };
 
   const { connected } = useTournamentStream(tid, identity, useCallback((event: string) => {
-    if (event === 'reconnect' || event === 'pack' || event === 'pick' || event === 'pause' || event === 'phase' || event === 'deck' || event === 'notice') void load();
+    if (event === 'reconnect' || event === 'auth-required' || event === 'pack' || event === 'pick' || event === 'pause' || event === 'phase' || event === 'deck' || event === 'notice') void load();
   }, [load]));
 
   // 倒计时归零时立即刷新（超时自动选牌可能已发生）。

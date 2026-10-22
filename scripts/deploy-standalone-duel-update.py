@@ -9,7 +9,7 @@ helper_path=pathlib.Path('/opt/ygocube/shared/card-resource-tools/apply-duel.py'
 if not helper_path.is_file():raise SystemExit('Install current resource workflow before application deployment')
 spec=importlib.util.spec_from_file_location('resource_apply',helper_path)
 resource_apply=importlib.util.module_from_spec(spec);spec.loader.exec_module(resource_apply)
-if not hasattr(resource_apply,'record_components'):raise SystemExit('Update the verified resource helper before staging this application release')
+if not all(hasattr(resource_apply,name) for name in ('record_components','ApplicationMaintenance')):raise SystemExit('Update the verified resource helper before staging this application release')
 P=pathlib.Path;root=P('/opt/ygoduel')
 release=sys.argv[2];assert re.fullmatch(r'[a-z0-9-]+',release)
 new=root/'releases'/release;old=(root/'current').resolve();archive=P(sys.argv[3]);manifest=sys.argv[4]
@@ -60,15 +60,19 @@ if api_only:
  for path,digest in json.loads((new/manifest).read_text()).items():
   if path.startswith('web/') and path!='web/source.json':assert (old/path).is_file() and hashlib.sha256((old/path).read_bytes()).hexdigest()==digest,path
  protected=run('systemctl','show','ygoduel-web','ygoduel-srvpro','-p','MainPID','-p','ExecMainStartTimestamp')
- run('systemctl','stop','ygoduel-api')
+ maintenance=resource_apply.ApplicationMaintenance(P('/opt/ygocube'),root,['ygoduel-api'])
+ maintenance.begin()
  try:
+  maintenance.stop_services()
   db=sqlite3.connect(root/'shared/data/duel.sqlite');out=sqlite3.connect(backup/'duel.sqlite');db.backup(out);assert out.execute('PRAGMA integrity_check').fetchone()[0]=='ok';out.close();db.close()
   (root/'next').symlink_to(new);os.replace(root/'next',root/'current')
   run('systemctl','start','ygoduel-api');healthy()
+  assert protected==run('systemctl','show','ygoduel-web','ygoduel-srvpro','-p','MainPID','-p','ExecMainStartTimestamp')
+  assert baseline==run('systemctl','show','ygocube-api','ygocube-srvpro','ygocube-web','nginx','-p','MainPID','-p','ExecMainStartTimestamp')
  except Exception:
-  (root/'rollback').symlink_to(old);os.replace(root/'rollback',root/'current');run('systemctl','restart','ygoduel-api');raise
- assert protected==run('systemctl','show','ygoduel-web','ygoduel-srvpro','-p','MainPID','-p','ExecMainStartTimestamp')
- assert baseline==run('systemctl','show','ygocube-api','ygocube-srvpro','ygocube-web','nginx','-p','MainPID','-p','ExecMainStartTimestamp')
+  maintenance.stop_services()
+  (root/'rollback').symlink_to(old);os.replace(root/'rollback',root/'current');run('systemctl','restart','ygoduel-api');healthy();maintenance.finish();raise
+ maintenance.finish()
  (backup/'cube-baseline.txt').write_text(baseline)
  (backup/'duel-protected-baseline.txt').write_text(protected)
  print(json.dumps({'ok':True,'release':str(new),'apiOnly':True,'otherServicesUnchanged':True,'build':metadata['webBuildId']}))
@@ -87,15 +91,18 @@ if web_only:
  (backup/'duel-backend-baseline.txt').write_text(protected)
  print(json.dumps({'ok':True,'release':str(new),'webOnly':True,'backendsUnchanged':True,'build':metadata['webBuildId']}))
  raise SystemExit(0)
-resource_apply.enter_maintenance()
-run('systemctl','stop','ygoduel-web')
+maintenance=resource_apply.ApplicationMaintenance(P('/opt/ygocube'),root,['ygoduel-api','ygoduel-srvpro','ygoduel-web'])
+maintenance.begin()
 try:
+ maintenance.stop_services()
  db=sqlite3.connect(root/'shared/data/duel.sqlite');out=sqlite3.connect(backup/'duel.sqlite');db.backup(out);assert out.execute('PRAGMA integrity_check').fetchone()[0]=='ok';out.close();db.close()
  shutil.copytree(root/'shared/srvpro-config',backup/'srvpro-config')
  (root/'next').symlink_to(new);os.replace(root/'next',root/'current')
  run('systemctl','start','ygoduel-api','ygoduel-srvpro','ygoduel-web');healthy()
+ assert baseline==run('systemctl','show','ygocube-api','ygocube-srvpro','ygocube-web','nginx','-p','MainPID','-p','ExecMainStartTimestamp')
 except Exception:
- (root/'rollback').symlink_to(old);os.replace(root/'rollback',root/'current');run('systemctl','restart','ygoduel-api','ygoduel-srvpro','ygoduel-web');raise
-assert baseline==run('systemctl','show','ygocube-api','ygocube-srvpro','ygocube-web','nginx','-p','MainPID','-p','ExecMainStartTimestamp')
+ maintenance.stop_services()
+ (root/'rollback').symlink_to(old);os.replace(root/'rollback',root/'current');run('systemctl','restart','ygoduel-api','ygoduel-srvpro','ygoduel-web');healthy();maintenance.finish();raise
+maintenance.finish()
 (backup/'cube-baseline.txt').write_text(baseline)
 print(json.dumps({'ok':True,'release':str(new),'cubeUnchanged':True,'build':(new/'web/apps/web/.next/BUILD_ID').read_text().strip()}))

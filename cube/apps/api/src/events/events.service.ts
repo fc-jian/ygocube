@@ -1,6 +1,7 @@
 import { getDb } from '../db';
 import { config, defaults } from '../config';
 import crypto from 'crypto';
+import { BadRequestException } from '@nestjs/common';
 
 // Append-only event log + in-memory state with snapshot/replay (dev_docs/05 §7).
 // Every mutation is: logEvent(...) then apply(state, action, payload) — the same
@@ -627,10 +628,22 @@ function stateAt(tid: number, seq: number): TournamentState {
   const row = tournamentRow(tid);
   const target = getDb().prepare('SELECT seq FROM events WHERE tournament_id=? AND seq=?').get(tid, seq);
   if (!target) throw new Error('REVERT_EVENT_NOT_FOUND');
-  const state = emptyState(row.id, row.name, row.config_json, row.created_by ?? 'unknown');
+  // Token auth starts enabled. A previous revert may have put a later auth
+  // toggle into config_json; only snapshots/events at the requested point can
+  // establish a historical override, never that current projection.
+  const initialConfig = JSON.parse(row.config_json) as Record<string, unknown>;
+  delete initialConfig.authRequired;
+  const state = emptyState(row.id, row.name, JSON.stringify(initialConfig), row.created_by ?? 'unknown');
   const snap = getDb()
     .prepare('SELECT seq, event_seq, state_json FROM tournament_snapshots WHERE tournament_id=? AND event_seq IS NOT NULL AND event_seq<=? ORDER BY event_seq DESC LIMIT 1')
     .get(tid, seq) as SnapRow | undefined;
+  if (!snap
+    && getDb().prepare("SELECT 1 FROM admin_actions WHERE tournament_id=? AND action='hard_revert' LIMIT 1").get(tid)
+    && !getDb().prepare("SELECT 1 FROM events WHERE tournament_id=? AND action='config' AND seq<=? LIMIT 1").get(tid, seq)) {
+    // Older versions overwrote the only initial config and deleted all earlier
+    // snapshots. The current projection cannot establish that lost history.
+    throw new BadRequestException({ code: 'REVERT_BASELINE_UNAVAILABLE' });
+  }
   let startSeq = 0;
   if (snap) {
     Object.assign(state, JSON.parse(snap.state_json) as TournamentState);
@@ -705,11 +718,22 @@ export function hardRevertTo(tid: number, seq: number, actor: string): HardRever
   }
 
   const db = getDb();
+  // Legacy tournaments without an initial snapshot still have their original
+  // config_json until the first hard revert. Preserve it before overwriting it.
+  // A previous hard revert makes that seed untrustworthy; stateAt then requires
+  // a historical snapshot or a complete config event instead.
+  const row = tournamentRow(tid);
+  const firstEvent = db.prepare('SELECT MIN(seq) AS seq FROM events WHERE tournament_id=?').get(tid) as { seq: number };
+  const preserveInitial = !db.prepare("SELECT 1 FROM admin_actions WHERE tournament_id=? AND action='hard_revert' LIMIT 1").get(tid)
+    && !db.prepare('SELECT 1 FROM tournament_snapshots WHERE tournament_id=? AND event_seq<=? LIMIT 1').get(tid, firstEvent.seq);
+  const initialState = preserveInitial ? emptyState(row.id, row.name, row.config_json, row.created_by ?? 'unknown') : null;
   const replacementTokens: Record<string, string> = {};
   const now = new Date().toISOString();
   let restoredCardPoolId: number | null = null;
+  let restoredAuthRequired = true;
   try {
     const restoredConfig = JSON.parse(state.configJson) as Record<string, unknown>;
+    restoredAuthRequired = restoredConfig.authRequired !== false;
     restoredCardPoolId = typeof restoredConfig.cardPoolId === 'number' && Number.isInteger(restoredConfig.cardPoolId)
       ? restoredConfig.cardPoolId
       : null;
@@ -720,9 +744,13 @@ export function hardRevertTo(tid: number, seq: number, actor: string): HardRever
   }
   db.transaction(() => {
     db.prepare('DELETE FROM events WHERE tournament_id=? AND seq>?').run(tid, seq);
-    db.prepare('DELETE FROM tournament_snapshots WHERE tournament_id=?').run(tid);
-    db.prepare('UPDATE tournaments SET config_json=?, card_pool_id=?, status=?, round=?, frozen=1, updated_at=? WHERE id=?')
-      .run(state.configJson, restoredCardPoolId, state.status, state.round, now, tid);
+    db.prepare('DELETE FROM tournament_snapshots WHERE tournament_id=? AND (event_seq IS NULL OR event_seq>=?)').run(tid, seq);
+    if (initialState) {
+      db.prepare('INSERT INTO tournament_snapshots (tournament_id, seq, event_seq, state_json, created_at) VALUES (?,?,?,?,?)')
+        .run(tid, 0, 0, JSON.stringify(initialState), now);
+    }
+    db.prepare('UPDATE tournaments SET name=?, config_json=?, card_pool_id=?, auth_required=?, status=?, round=?, frozen=1, updated_at=? WHERE id=?')
+      .run(state.name, state.configJson, restoredCardPoolId, restoredAuthRequired ? 1 : 0, state.status, state.round, now, tid);
 
     db.prepare('UPDATE tournament_players SET active=0 WHERE tournament_id=?').run(tid);
     const findPlayer = db.prepare('SELECT id FROM tournament_players WHERE tournament_id=? AND player_id=?');

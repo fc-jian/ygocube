@@ -4,6 +4,8 @@ import { APP_GUARD } from '@nestjs/core';
 import fs from 'fs';
 import { ApiController } from '../src/api.controller';
 import { AdminController } from '../src/admin.controller';
+import { DuelController } from '../src/duel/duel.controller';
+import { DuelService } from '../src/duel/duel.service';
 import { AuthGuard, sha256 } from '../src/auth/auth.guard';
 import { CardsService } from '../src/cards/cards.service';
 import { CardPickStatsService } from '../src/cards/card-pick-stats.service';
@@ -16,11 +18,13 @@ import { RealtimeService } from '../src/realtime/realtime.service';
 import { getDb, closeDb } from '../src/db';
 import { config } from '../src/config';
 import { makeTournaments, TEST_POOL, useTestDb } from './helpers';
+import { getConfig, hardRevertTo, loadState, resetStateCache } from '../src/events/events.service';
 
 describe('HTTP authorization follows matched route metadata', () => {
   let app: INestApplication, base: string, tid: number, target: number;
   let player: Record<string, string>, tournaments: TournamentsService, cards: CardsService;
   const creator = { 'x-create-user': 'owner', 'x-create-token': 'creator-fixture' };
+  const deleteReplay = jest.fn(() => ({ ok: true }));
   beforeAll(async () => {
     useTestDb();
     tournaments = makeTournaments(); cards = new CardsService();
@@ -31,12 +35,13 @@ describe('HTTP authorization follows matched route metadata', () => {
     getDb().prepare('INSERT INTO create_users(username,token_hash,created_at,active) VALUES(?,?,?,1)')
       .run('owner', sha256(creator['x-create-token']), new Date().toISOString());
     const module = await Test.createTestingModule({
-      controllers: [AdminController, ApiController],
+      controllers: [AdminController, ApiController, DuelController],
       providers: [
         { provide: APP_GUARD, useClass: AuthGuard },
         { provide: TournamentsService, useValue: tournaments },
         { provide: CardsService, useValue: cards },
         { provide: PoolsService, useValue: new PoolsService(cards) },
+        { provide: DuelService, useValue: { deleteReplay } },
         ...[DraftService, DecksService, MatchesService, RealtimeService, CardPickStatsService]
           .map(provide => ({ provide, useValue: {} })),
       ],
@@ -83,6 +88,52 @@ describe('HTTP authorization follows matched route metadata', () => {
       expect(await post(path, { ...player, 'x-token': '' }, body)).toBe(401);
       expect(await post(path, { ...player, 'x-token': config.admin.superToken }, body)).toBe(401);
       expect(await post(path, player, body)).toBe(201);
+    }
+  });
+
+  it.each([true, false])('enforces the replay deletion role matrix with player token auth %s', async required => {
+    tournaments.setAuthRequired(tid, required, 'test');
+    const cases: { label: string; headers: Record<string, string>; tournamentId: number; status: number }[] = [
+      { label: 'anonymous', headers: {}, tournamentId: tid, status: 401 },
+      { label: 'player', headers: player, tournamentId: tid, status: 401 },
+      { label: 'player without token', headers: { 'x-player-id': 'alice' }, tournamentId: tid, status: 401 },
+      { label: 'super token in player identity', headers: { ...player, 'x-token': config.admin.superToken }, tournamentId: tid, status: 401 },
+      { label: 'invalid admin', headers: { 'x-admin-token': 'invalid' }, tournamentId: tid, status: 401 },
+      { label: 'invalid creator', headers: { ...creator, 'x-create-token': 'invalid' }, tournamentId: tid, status: 401 },
+      { label: 'owner', headers: creator, tournamentId: tid, status: 201 },
+      { label: 'other tournament creator', headers: { ...creator, 'x-tournament-id': String(tid) }, tournamentId: target, status: 403 },
+      { label: 'super admin', headers: { 'x-admin-token': config.admin.superToken }, tournamentId: target, status: 201 },
+    ];
+    for (const prefix of ['admin', 'Admin', 'ADMIN']) {
+      for (const suffix of ['', '/']) {
+        for (const scenario of cases) {
+          deleteReplay.mockClear();
+          const status = await post(`/${prefix}/t/${scenario.tournamentId}/matches/42/replay/delete${suffix}`, scenario.headers, {});
+          expect({ role: scenario.label, status }).toEqual({ role: scenario.label, status: scenario.status });
+          if (scenario.status === 201) expect(deleteReplay).toHaveBeenCalledWith(scenario.tournamentId, 42);
+          else expect(deleteReplay).not.toHaveBeenCalled();
+        }
+      }
+    }
+  });
+
+  it.each([undefined, true, false])('restores effective player authorization after reverting to authRequired=%s', async required => {
+    const revertTid = tournaments.create({ name: 'revert-auth', maxPlayers: 2, cardPool: TEST_POOL }, 'owner').tid;
+    const { token } = tournaments.join(revertTid, 'alice', 'Alice');
+    if (required !== undefined) tournaments.setAuthRequired(revertTid, required, 'test');
+    const seq = (getDb().prepare('SELECT MAX(seq) AS seq FROM events WHERE tournament_id=?').get(revertTid) as { seq: number }).seq;
+    const expectedRequired = required !== false;
+    tournaments.setAuthRequired(revertTid, !expectedRequired, 'test');
+    hardRevertTo(revertTid, seq, 'test');
+    resetStateCache();
+    expect(getConfig(loadState(revertTid)).authRequired !== false).toBe(expectedRequired);
+    expect(tournaments.get(revertTid).authRequired).toBe(expectedRequired);
+    for (const credential of [undefined, 'invalid', token]) {
+      const response = await fetch(`${base}/t/${revertTid}/state`, {
+        headers: { 'x-player-id': 'alice', ...(credential === undefined ? {} : { 'x-token': credential }) },
+      });
+      expect(response.status).toBe(expectedRequired && credential !== token ? 401 : 200);
+      await response.arrayBuffer();
     }
   });
 });

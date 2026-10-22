@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { getDb } from '../db';
 import { config, defaults } from '../config';
-import { logEvent, loadState, persistMeta, getConfig, TournamentState, withEventTransaction } from '../events/events.service';
+import { logEvent, loadState, persistMeta, getConfig, snapshotNow, TournamentState, withEventTransaction } from '../events/events.service';
 import crypto from 'crypto';
 import { sha256 } from '../auth/auth.guard';
 import { normalizePoolName, PoolsService } from '../pools/pools.service';
@@ -162,6 +162,8 @@ export class TournamentsService {
         .run(input.name, JSON.stringify(cfg), actor, pool.id, 'registration', 0, now, now);
       const createdTid = Number(row.lastInsertRowid);
       logEvent(createdTid, 'tournament', 'phase', { status: 'registration', round: 0 }, actor);
+      // Preserve custom initial settings before any config event or hard revert.
+      snapshotNow(createdTid);
       return createdTid;
     })();
     return { tid, url: `/t/${tid}`, created_by: actor };

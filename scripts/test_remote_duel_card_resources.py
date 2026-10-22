@@ -15,7 +15,7 @@ import tempfile
 import signal
 import sqlite3
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 SCRIPT = Path(__file__).with_name("remote-duel-resource-apply.py")
@@ -33,6 +33,14 @@ PACKAGE_SPEC.loader.exec_module(PACKAGE)
 
 
 class RemoteDuelResourceApplyTests(unittest.TestCase):
+    def make_resources(self, release: Path) -> None:
+        for name in ('srvpro/ygopro/cards.cdb', 'srvpro/ygopro/strings.conf', 'srvpro/ygopro/lflist.conf',
+                     'srvpro/ygopro/expansions/lflist.conf', 'srvpro/ygopro/script/c123.lua',
+                     'assets/ygocdb_cards.json', 'assets/pics_avif/123.avif'):
+            path = release / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'original resource')
+
     def test_ingress_gate_covers_ipv4_ipv6_and_keeps_loopback_probes(self) -> None:
         import subprocess
         with tempfile.TemporaryDirectory() as directory:
@@ -66,6 +74,7 @@ class RemoteDuelResourceApplyTests(unittest.TestCase):
             (old / 'api/dist/main.js').write_text('old-api')
             (old / 'web/apps/web/.next/static/test.js').write_text('old-web')
             (old / 'release.json').write_text(json.dumps({'sourceCommit': 'old-source'}))
+            self.make_resources(old)
             import shutil
             shutil.copytree(old, new, copy_function=REMOTE.hardlink_file)
             REMOTE.atomic_write_text(new / 'api/dist/main.js', 'new-api')
@@ -80,6 +89,107 @@ class RemoteDuelResourceApplyTests(unittest.TestCase):
             REMOTE.record_components(new, {'web': None})
             self.assertIsNone(REMOTE.describe_components(new)['web']['sourceCommit'])
             self.assertEqual(REMOTE.describe_components(new)['web']['sourceEvidence'], 'unknown')
+
+    def test_resource_inventory_hashes_content_and_rejects_missing_required_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            release = Path(directory)
+            (release / 'release.json').write_text('{}')
+            with self.assertRaisesRegex(RuntimeError, 'missing required file'):
+                REMOTE.record_components(release)
+            self.make_resources(release)
+            (release / 'assets/resource-manifest.json').write_text('{"unchanged":"manifest"}')
+            REMOTE.record_components(release)
+            declared = json.loads((release / 'release.json').read_text())['components']['resources']
+            self.assertGreater(declared['fileCount'], 0)
+            for name in ('srvpro/ygopro/cards.cdb', 'srvpro/ygopro/script/c123.lua', 'assets/pics_avif/123.avif', 'assets/ygocdb_cards.json'):
+                path = release / name
+                path.write_bytes(b'changed without editing manifest')
+                self.assertNotEqual(REMOTE.describe_components(release)['resources']['sha256'], declared['sha256'])
+                path.write_bytes(b'original resource')
+            (release / 'assets/pics_avif/123.avif').unlink()
+            with self.assertRaisesRegex(RuntimeError, 'missing required files: pics_avif'):
+                REMOTE.describe_components(release)
+
+    def test_resource_inventory_reads_shared_config_and_maps_current_to_staged_release(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shared, release = root / 'shared', root / 'releases/new'
+            self.make_resources(shared)
+            self.make_resources(release)
+            (shared / 'config.yaml').write_text('fixture configuration')
+            config = {'server': {'cards_cdb': str(shared / 'srvpro/ygopro/cards.cdb'),
+                                 'card_names_json': str(root / 'current/assets/ygocdb_cards.json')},
+                      'pics': {'avif_dir': str(shared / 'assets/pics_avif')}}
+            (release / 'assets/ygocdb_cards.json').write_bytes(b'candidate names')
+            with patch.object(REMOTE, 'parse_config', return_value=config):
+                actual = REMOTE.resource_component_files(release)
+            self.assertEqual(actual['ygocdb_cards.json'], hashlib.sha256(b'candidate names').hexdigest())
+            self.assertEqual(actual['cards.cdb'], REMOTE.sha256(shared / 'srvpro/ygopro/cards.cdb'))
+
+    def test_application_stop_pauses_both_creators_but_only_stops_selected_services(self) -> None:
+        events = []
+        guard = REMOTE.ApplicationMaintenance(Path('/fixture/cube'), Path('/fixture/duel'), ['ygoduel-api'])
+        def run(*args):
+            events.append(args)
+            return '123' if 'ygoduel-api' in args and 'show' in args else '456' if 'show' in args else ''
+        def occupied():
+            events.append(('host-check',))
+            return False
+        with patch.object(REMOTE, 'run', side_effect=run), patch.object(guard, 'occupied', side_effect=occupied), \
+             patch.object(REMOTE.os, 'kill', side_effect=lambda *args: events.append(args)), \
+             patch.object(REMOTE.signal, 'SIGSTOP', 19, create=True), patch.object(REMOTE.signal, 'SIGCONT', 18, create=True):
+            guard.stop_services()
+        self.assertLess(events.index((123, 19)), events.index(('host-check',)))
+        self.assertLess(events.index((456, 19)), events.index(('host-check',)))
+        self.assertIn(('systemctl', 'stop', 'ygoduel-api'), events)
+        self.assertNotIn(('systemctl', 'stop', 'ygoduel-srvpro'), events)
+        self.assertIn((456, 18), events)
+
+    def test_application_activation_failure_preserves_raced_game_or_verifies_rollback(self) -> None:
+        from types import SimpleNamespace
+        # Execute the real activation/recovery block, with only services,
+        # databases and pointer switching replaced by isolated test doubles.
+        source = SCRIPT.with_name('deploy-card-details.py').read_text(encoding='utf-8')
+        body = source[source.index('maintenance = None if a.web_only'):source.index("result={'ok':True")]
+        for raced in (False, True):
+            with self.subTest(raced=raced), tempfile.TemporaryDirectory() as directory:
+                roots = {name: Path(directory) / name for name in ('ygocube', 'ygoduel')}
+                olds = {name: root / 'old' for name, root in roots.items()}
+                news = {name: root / 'new' for name, root in roots.items()}
+                services = [name + '-' + component for name in roots for component in ('api', 'srvpro', 'web')]
+                calls = []
+                def run(*args):
+                    calls.append(('run', args))
+                    return '123' if 'show' in args else ''
+                health_calls = []
+                def health():
+                    health_calls.append(True)
+                    if len(health_calls) == 1:
+                        raise ValueError('public verification failed')
+                database = MagicMock()
+                database.connect.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = ('ok',)
+                switches = []
+                env = {'a': SimpleNamespace(web_only=False, windbot_root=None, release='fixture'),
+                       'resource_apply': REMOTE, 'roots': roots, 'olds': olds, 'news': news,
+                       'services': services, 'run': run, 'sqlite3': database, 'health': health,
+                       'switch': lambda root, target: switches.append((root, target))}
+                with patch.object(REMOTE.ApplicationMaintenance, 'occupied', side_effect=[False, False, raced]), \
+                     patch.object(REMOTE, 'maintenance_ingress') as gate, patch.object(REMOTE, 'run', side_effect=run), \
+                     patch.object(REMOTE.os, 'kill'), patch.object(REMOTE.signal, 'SIGSTOP', 19, create=True), \
+                     patch.object(REMOTE.signal, 'SIGCONT', 18, create=True):
+                    expected = RuntimeError if raced else ValueError
+                    with self.assertRaises(expected):
+                        exec(compile(body, 'application-activation-fixture', 'exec'), env)
+                restarts = [args for _, args in calls if args[:2] == ('systemctl', 'restart')]
+                if raced:
+                    self.assertEqual(switches, [(roots[name], news[name]) for name in roots])
+                    self.assertFalse(restarts)
+                    self.assertEqual(len(health_calls), 1)
+                else:
+                    self.assertEqual(switches[-2:], [(roots[name], olds[name]) for name in roots])
+                    self.assertEqual(len(restarts), 1)
+                    self.assertEqual(len(health_calls), 2)
+                self.assertFalse(gate.call_args.kwargs['close'])
 
     def test_banlist_api_names_keep_upstream_calendar_dates(self) -> None:
         self.assertEqual(REMOTE.banlist_api_name("2026.10"), "2026.10.01 OCG")
@@ -136,6 +246,7 @@ class RemoteDuelResourceApplyTests(unittest.TestCase):
             (stage / "application/srvpro").mkdir(parents=True)
             (old / "srvpro").mkdir(parents=True)
             (old / "release.json").write_text('{"id":"old"}', encoding="utf-8")
+            self.make_resources(old)
             files = {}
             for name in ["ygopro-server.js", "cube-banlists.js"]:
                 content = b"new server"

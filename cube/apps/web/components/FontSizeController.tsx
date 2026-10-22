@@ -6,14 +6,22 @@ import { useEffect } from 'react';
 const SIZES = { small: '14px', medium: '16px', large: '18px' } as const;
 export type FontSizeKey = keyof typeof SIZES;
 
+function readFontSize(): FontSizeKey {
+  try {
+    const key = typeof window !== 'undefined' ? window.localStorage.getItem('yc_font_size') : null;
+    if (key === 'small' || key === 'medium' || key === 'large') return key;
+  } catch { /* Browser storage is optional for presentation preferences. */ }
+  return 'medium';
+}
+
 export function FontSizeController() {
   useEffect(() => {
     const apply = (key: string | null) => {
       const k = key === 'small' || key === 'medium' || key === 'large' ? key : 'medium';
       document.documentElement.style.fontSize = SIZES[k];
     };
-    apply(localStorage.getItem('yc_font_size'));
-    const onStorage = () => apply(localStorage.getItem('yc_font_size'));
+    apply(readFontSize());
+    const onStorage = () => apply(readFontSize());
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
   }, []);
@@ -21,9 +29,10 @@ export function FontSizeController() {
 }
 
 export function FontSizeSetting() {
-  const current = (typeof window !== 'undefined' && localStorage.getItem('yc_font_size')) || 'medium';
+  const current = readFontSize();
   const setSize = (k: FontSizeKey) => {
-    localStorage.setItem('yc_font_size', k);
+    try { window.localStorage.setItem('yc_font_size', k); }
+    catch { /* Apply the size for this page even when it cannot be persisted. */ }
     document.documentElement.style.fontSize = SIZES[k];
   };
   return (

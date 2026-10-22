@@ -15,6 +15,7 @@ import { canonicalCardCode, isExtraDeckType, safeCardCodes } from '@/lib/cardInf
 import { flipIds, useFlip } from '@/lib/useFlip';
 import { fetchCardMetadata } from '@/lib/cardCache';
 import { useTournamentFallbackPolling } from '@/lib/sse';
+import { usePlayerLogout } from '@/lib/usePlayerLogout';
 
 export default function DeckPage() {
   const params = useParams<{ tid: string; pid: string }>();
@@ -30,6 +31,13 @@ export default function DeckPage() {
   const [error, setError] = useState('');
   const loadSequence = useRef(0);
   const flip = useFlip<HTMLDivElement>();
+  usePlayerLogout(identity, () => {
+    loadSequence.current++;
+    setIdentity(null);
+    setState(null);
+    setCardMap({});
+    setNeedToken(true);
+  });
 
   useEffect(() => {
     let cancelled = false;

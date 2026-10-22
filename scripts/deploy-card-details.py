@@ -10,7 +10,7 @@ helper_path=P('/opt/ygocube/shared/card-resource-tools/apply-duel.py')
 if not helper_path.is_file():raise SystemExit('Install current resource workflow before application deployment')
 spec=importlib.util.spec_from_file_location('resource_apply',helper_path)
 resource_apply=importlib.util.module_from_spec(spec);spec.loader.exec_module(resource_apply)
-if not hasattr(resource_apply,'record_components'):raise SystemExit('Update the verified resource helper before staging this application release')
+if not all(hasattr(resource_apply,name) for name in ('record_components','ApplicationMaintenance')):raise SystemExit('Update the verified resource helper before staging this application release')
 ap = argparse.ArgumentParser()
 ap.add_argument('archive', type=P)
 ap.add_argument('sha256')
@@ -115,12 +115,14 @@ for n,root in roots.items():
     config_file = root/'current/config.yaml'
     if not config_file.exists(): config_file = root/'shared/config.yaml'
     shutil.copy2(config_file,backup/'config.yaml')
+maintenance = None if a.web_only else resource_apply.ApplicationMaintenance(roots['ygocube'], roots['ygoduel'], services)
+if maintenance:
+    maintenance.begin()
 try:
-    if not a.web_only:
-        resource_apply.enter_maintenance()
-        run('systemctl','stop','ygocube-api')
-        assert not occupied(), 'Host appeared during maintenance preflight'
-    run('systemctl','stop',*services)
+    if maintenance:
+        maintenance.stop_services()
+    else:
+        run('systemctl','stop',*services)
     if a.windbot_root:
         (roots['ygoduel']/'shared/config.yaml').write_text(json.dumps(windbot_config, indent=2)+'\n')
     for n,root in roots.items():
@@ -150,12 +152,19 @@ try:
     assert all(unchanged_state[s] == run('systemctl','show',s,'-p','MainPID','-p','ExecMainStartTimestamp') for s in unchanged)
     assert nginx==run('systemctl','show','nginx','-p','MainPID','-p','ExecMainStartTimestamp')
 except Exception:
+    if maintenance:
+        maintenance.stop_services()
     if a.windbot_root:
         shutil.copy2(roots['ygoduel']/'backups'/a.release/'config.yaml', roots['ygoduel']/'shared/config.yaml')
     for n,root in roots.items():
         if (root/'current').resolve()!=olds[n]: switch(root,olds[n])
     run('systemctl','restart',*services)
+    health()
+    if maintenance:
+        maintenance.finish()
     raise
+if maintenance:
+    maintenance.finish()
 result={'ok':True,'release':a.release,'commit':manifest['sourceCommit'],'pages':results,'services':services+unchanged+['nginx'],'webOnly':a.web_only}
 for n,root in roots.items(): (root/'backups'/a.release/'verification.json').write_text(json.dumps(result,indent=2))
 print(json.dumps(result))

@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { api, encodePathSegment, readableApiError, setIdentityCookie, readIdentity } from '@/lib/api';
+import { api, encodePathSegment, readableApiError, storeToken, readIdentity } from '@/lib/api';
 
 export default function 报名参加Page() {
   const params = useParams<{ tid: string }>();
@@ -51,7 +51,7 @@ export default function 报名参加Page() {
     try {
       const r = await api<{ token: string }>(`/t/${tidPath}/join`, { method: 'POST', body: { player_id: normalizedPlayerId, display_name: displayName || normalizedPlayerId } });
       setToken(r.token);
-      setIdentityCookie(tid, normalizedPlayerId, r.token);
+      storeToken(tid, normalizedPlayerId, r.token);
     } catch (e: any) {
       // Handle a race where another view registered the same ID after the
       // public summary was loaded. Refresh once and use the same recovery path.

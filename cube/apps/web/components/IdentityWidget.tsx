@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { clearIdentityCookies, encodePathSegment, readableApiError } from '@/lib/api';
+import { clearIdentityCookies, encodePathSegment, logoutPlayer, readableApiError } from '@/lib/api';
 import { getDirHandle, removeDirHandle, saveDirHandle, requestDirPermission } from '@/lib/pics';
 
 
@@ -34,7 +34,8 @@ export function IdentityWidget({
   }, [displayName, editingName]);
 
   const logout = () => {
-    if (tid) clearIdentityCookies(tid);
+    if (tid && pid) logoutPlayer(tid, pid);
+    else if (tid) clearIdentityCookies(tid);
     else clearIdentityCookies();
     setLoggedOut(true);
   };

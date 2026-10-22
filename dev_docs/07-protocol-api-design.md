@@ -23,9 +23,12 @@
   不根据请求 URL 字符串分流。路由接受的大小写及尾斜杠变体必须执行相同鉴权。
   已匹配路由的 `:tid` 参数优先于 header/query；不能借另一比赛身份访问目标比赛。
 
-- 玩家默认需要 `tid + pid + token`。比赛路由以 path 中的 `tid` 为准；浏览器使用
-  按比赛隔离的 `yc_pid_<tid>/yc_token_<tid>` cookie，普通 fetch 也可使用
-  `X-Tournament-Id/X-Player-Id/X-Token`。旧全局 cookie/query 仅作非敏感 ID 兼容入口；
+- 玩家默认需要 `tid + pid + token`。比赛路由以 path 中的 `tid` 为准；浏览器 REST 与
+  SSE fetch 流显式携带当前页面的 `X-Tournament-Id/X-Player-Id/X-Token`，避免同一比赛
+  多玩家标签页互相覆盖身份；兼容按比赛隔离的 `yc_pid_<tid>/yc_token_<tid>` cookie。
+  从持久化身份恢复时同步 cookie；免 token 模式仍携带当前玩家 ID。
+  退出登录清除该玩家的持久化凭证和页面身份、终止流连接；同浏览器同身份页面同步退出，
+  不注销其他玩家。旧全局 cookie/query 仅作非敏感 ID 兼容入口；
   token 只接受比赛隔离 cookie 或 header。显式玩家 header 身份优先于 cookie；一旦提供
   `X-Player-Id` 或 `X-Token`，两者必须完整且配对，不从其他标签页的 cookie 补齐。
 - `/admin/*` 使用两种身份：超级管理员使用 `X-Admin-Token`；比赛创建者使用
@@ -108,7 +111,7 @@ swissRoundCount, playoffSize
 | `GET /t/:tid/deck.ydk` | 下载 `cube-deck-<tid>-<pid>-<timestamp>.ydk` |
 | `GET /t/:tid/matches` | 当前玩家全部对局和本桌 room info |
 | `GET /t/:tid/ranking` | 公开积分/净胜局/OMW 排名 |
-| `GET /t/:tid/stream` | SSE，使用按比赛隔离的身份 cookie；token 不写入 URL |
+| `GET /t/:tid/stream` | SSE，浏览器 fetch 流使用当前页面身份 header，兼容比赛隔离 cookie；token 不写入 URL |
 | `POST /cube/result` | srvpro webhook；需 `X-Cube-Api-Key`，幂等处理 |
 
 小世界独立工具不属于比赛玩家接口，不需要 tournament/player/token 鉴权：
@@ -173,6 +176,8 @@ swissRoundCount, playoffSize
 | `POST /admin/create-users/:username/token` | super admin 轮换 token；旧 token 立即失效，新明文只返回一次 |
 | `DELETE /admin/create-users/:username` | super admin 立即撤销创建权限 |
 
+硬回溯同时恢复目标事件的名称、配置、卡池身份与 token 鉴权设置，比赛列表与详情使用一致的恢复结果。新比赛在创建事务内保存初始快照；回溯保留目标之前的历史快照，仅删除目标及未来快照后写入冻结状态，避免连续回溯继承较晚分支的配置。尚未硬回溯的旧比赛可在首次回溯时保存原始配置基线。旧比赛若目标前没有名称快照或命名事件，已丢失的原名不能推断，仍保留当前持久化名称。已被旧版本硬回溯、且目标前没有可信快照或完整 `config` 事件的历史无法安全重建；预览与执行均返回 HTTP 400 `REVERT_BASELINE_UNAVAILABLE`，不修改比赛或关闭房间。
+
 卡池 `POST` 既接受 `codes:number[]`，也接受 `importText`。文本每行支持
 `code` 或 `code<TAB>name`；后端以该 code 的字面原名比较，返回每一行的
 `invalid`、`missing_code`、`name_mismatch`，以及 `filtered`/`missingCodes` 汇总。
@@ -186,7 +191,9 @@ swissRoundCount, playoffSize
 - `deck` 只含 player id；
 - `match` 不广播其他桌房间名。
 
-客户端收到事件后 refetch `/state`；倒计时使用服务器绝对 deadline 和冻结剩余值。
+客户端收到事件后 refetch `/state`；请求进行中收到的新事件必须在请求结束后补拉，不能丢弃。
+重连成功立即同步状态；退出或切换身份取消旧流及旧身份请求的结果。倒计时使用服务器绝对
+deadline 和冻结剩余值。
 
 ## 3. cube API ↔ srvpro
 
@@ -309,6 +316,7 @@ tournamentCount,sampleCount}[]` 按 exact code 返回；抓位从 1 开始，百
 | `NO_VALID_PAIRING` | 瑞士无法生成无重复对手的完整配对 |
 | `PAIRING_SEARCH_LIMIT` | 瑞士回溯达到时间/节点保护上限，HTTP 503，可重试或调整赛制 |
 | `RESULT_ROUND_LOCKED` | 后续轮已存在，历史赛果只能通过回溯修改 |
+| `REVERT_BASELINE_UNAVAILABLE` | 旧比赛缺少目标时点的可信配置基线，HTTP 400，不能安全回溯 |
 | `FORMAT_LOCKED` / `BAD_MATCH_FORMAT` | 赛制已锁定或参数非法 |
 | `POOL_EXISTS` / `POOL_NOT_FOUND` / `BAD_POOL_IMPORT` / `BAD_POOL_NAME` / `POOL_IN_USE` | 卡池操作错误；`POOL_IN_USE.details.tournaments` 列出仍在使用该池的比赛 |
 | `BAD_CREATE_USERNAME` / `CREATE_USER_EXISTS` / `CREATE_USER_NOT_FOUND` | 创建权限用户错误 |

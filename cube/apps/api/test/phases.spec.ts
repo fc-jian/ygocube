@@ -192,9 +192,9 @@ describe('snapshot replay with shared global event seq', () => {
     const { logEvent: log } = require('../src/events/events.service');
     // 触发快照：事件计数到 100（4 join + 96 条杂项）
     for (let i = 0; i < 96; i++) log(tid, 'tournament', 'config', { noise: i }, 'test');
-    const snaps = getDb().prepare('SELECT seq, event_seq FROM tournament_snapshots WHERE tournament_id=?').all(tid);
-    expect(snaps.length).toBe(1);
-    expect(snaps[0].event_seq).toBeGreaterThan(snaps[0].seq); // 全局 seq 与相对计数不同
+    const snaps = getDb().prepare('SELECT seq, event_seq FROM tournament_snapshots WHERE tournament_id=? ORDER BY event_seq').all(tid);
+    expect(snaps.map((snap: { seq: number }) => snap.seq)).toEqual([1, 100]);
+    for (const snap of snaps) expect(snap.event_seq).toBeGreaterThan(snap.seq); // 全局 seq 与相对计数不同
     // 清除缓存强制从事件重放（模拟重启）
     const { resetStateCache } = require('../src/events/events.service');
     resetStateCache();
