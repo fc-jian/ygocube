@@ -113,6 +113,12 @@ export class GuessController {
   }
 
   @Public()
+  @Get('rooms/:roomId/spectate')
+  spectate(@Param('roomId') roomId: string) {
+    return this.guess.spectate(roomId);
+  }
+
+  @Public()
   @Get('rooms/:roomId/cards')
   roomCards(
     @Param('roomId') roomId: string,

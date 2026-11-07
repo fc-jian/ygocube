@@ -1,10 +1,11 @@
 import {
-  BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, OnModuleInit, UnauthorizedException,
+  BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException,
+  OnModuleDestroy, OnModuleInit, UnauthorizedException,
 } from '@nestjs/common';
 import { randomBytes, randomInt } from 'node:crypto';
 import type {
   GuessActionRequest, GuessCardKind, GuessCardPage, GuessCardRef, GuessCreateRequest, GuessMove, GuessRoomSummary,
-  GuessRoomView, GuessSession,
+  GuessPublicRoomView, GuessRoomView, GuessSession, GuessSpectatorView,
 } from '@ygocube/shared';
 import { safeHashEqual, sha256 } from '../auth/auth.guard';
 import { CardsService, TYPE_TOKEN } from '../cards/cards.service';
@@ -12,11 +13,16 @@ import { getDb } from '../db';
 import { GuessPoolsService } from './guess-pools.service';
 
 const MAX_PLAYERS = 8;
+const ROOM_IDLE_MS = 24 * 60 * 60 * 1000;
+const EXPIRY_INTERVAL_MS = 60 * 1000;
+const OPEN_ROOM_PHASES = "phase IN ('lobby', 'playing', 'between_rounds')";
+type SystemFinishReason = NonNullable<GuessRoomView['finishReason']>;
 
 interface Player {
   playerId: string;
   tokenHash: string;
   score: number;
+  departed?: true;
 }
 
 interface Seat {
@@ -41,6 +47,7 @@ interface Room {
   poolName: string;
   poolCount: number;
   phase: GuessRoomView['phase'];
+  finishReason?: SystemFinishReason;
   players: Player[];
   version: number;
   round: Round | null;
@@ -62,6 +69,12 @@ interface RoomRow {
   state_json: string;
 }
 
+interface SubmittedGuessRow {
+  playerId: string;
+  code: number;
+  outcome: 'correct' | 'incorrect';
+}
+
 function sample<T>(values: readonly T[], count: number): T[] {
   const items = [...values];
   for (let index = 0; index < count; index++) {
@@ -76,11 +89,15 @@ function newPlayer(playerId: string) {
   return { player: { playerId, tokenHash: sha256(token), score: 0 }, token };
 }
 
+function activePlayers(room: Room): Player[] {
+  return room.players.filter((player) => !player.departed);
+}
+
 function summary(room: Room): GuessRoomSummary {
   return {
     roomId: room.roomId,
     name: room.name,
-    playerCount: room.players.length,
+    playerCount: activePlayers(room).length,
     maxPlayers: Math.min(room.poolCount, MAX_PLAYERS),
     poolId: room.poolId,
     poolName: room.poolName,
@@ -98,8 +115,63 @@ function cardRef({ code, name }: GuessCardRef): GuessCardRef {
   return { code, name };
 }
 
+function inactivityCutoff(now = Date.now()): string {
+  return new Date(now - ROOM_IDLE_MS).toISOString();
+}
+
+function writeRoom(room: Room, event: object, now = new Date().toISOString()): void {
+  const db = getDb();
+  room.version++;
+  db.prepare('INSERT INTO guess_room_events (room_id, version, event_json, created_at) VALUES (?, ?, ?, ?)')
+    .run(room.roomId, room.version, JSON.stringify(event), now);
+  db.prepare(`
+    INSERT INTO guess_rooms (room_id, phase, state_json, updated_at) VALUES (?, ?, ?, ?)
+    ON CONFLICT (room_id) DO UPDATE SET phase = excluded.phase,
+      state_json = excluded.state_json, updated_at = excluded.updated_at
+  `).run(room.roomId, room.players.length ? room.phase : 'closed', JSON.stringify(room), now);
+}
+
+function settleRooms(reason: SystemFinishReason, roomId?: string): number {
+  const db = getDb();
+  const now = Date.now();
+  const where = [OPEN_ROOM_PHASES];
+  const bindings: string[] = [];
+  if (reason === 'inactivity') {
+    where.push('updated_at <= ?');
+    bindings.push(inactivityCutoff(now));
+  }
+  if (roomId !== undefined) {
+    where.push('room_id = ?');
+    bindings.push(roomId.toUpperCase());
+  }
+  const pending = db.prepare(`SELECT state_json FROM guess_rooms WHERE ${where.join(' AND ')}`);
+  if (!pending.get(...bindings)) return 0;
+  return db.transaction(() => {
+    const rows = pending.all(...bindings) as RoomRow[];
+    const finishedAt = new Date(now).toISOString();
+    for (const row of rows) {
+      const room = JSON.parse(row.state_json) as Room;
+      room.phase = 'finished';
+      room.finishReason = reason;
+      if (room.round) {
+        room.round.currentPlayerId = null;
+        delete room.round.selectedCode;
+      }
+      writeRoom(room, { action: 'finish', reason }, finishedAt);
+    }
+    return rows.length;
+  }).immediate();
+}
+
+export function settleOpenGuessRoomsForMaintenance(): number {
+  return settleRooms('maintenance');
+}
+
 @Injectable()
-export class GuessService implements OnModuleInit {
+export class GuessService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(GuessService.name);
+  private expiryTimer?: ReturnType<typeof setInterval>;
+
   constructor(private readonly cards: CardsService, private readonly pools: GuessPoolsService) {}
 
   onModuleInit(): void {
@@ -142,14 +214,30 @@ export class GuessService implements OnModuleInit {
         save.run(JSON.stringify(upgraded), room.roomId);
       }
     }).immediate();
+    settleRooms('inactivity');
+    if (!this.expiryTimer) {
+      this.expiryTimer = setInterval(() => {
+        try {
+          settleRooms('inactivity');
+        } catch (error) {
+          this.logger.error('Failed to settle inactive Guess rooms', error);
+        }
+      }, EXPIRY_INTERVAL_MS);
+      this.expiryTimer.unref();
+    }
+  }
+
+  onModuleDestroy(): void {
+    clearInterval(this.expiryTimer);
+    this.expiryTimer = undefined;
   }
 
   list(): GuessRoomSummary[] {
     const rows = getDb().prepare(`
-      SELECT state_json FROM guess_rooms WHERE phase = 'lobby'
+      SELECT state_json FROM guess_rooms WHERE phase = 'lobby' AND updated_at > ?
         AND json_array_length(state_json, '$.players') < MIN(?, json_extract(state_json, '$.poolCount'))
       ORDER BY updated_at DESC, room_id LIMIT 50
-    `).all(MAX_PLAYERS) as RoomRow[];
+    `).all(inactivityCutoff(), MAX_PLAYERS) as RoomRow[];
     return rows.map((row) => summary(JSON.parse(row.state_json) as Room));
   }
 
@@ -174,31 +262,39 @@ export class GuessService implements OnModuleInit {
         version: 0,
         round: null,
       };
-      this.write(room, { action: 'create', ...input });
+      writeRoom(room, { action: 'create', ...input });
       return { token, room: this.view(room, player.playerId) };
     }).immediate();
   }
 
   join(roomId: string, playerId: string): GuessSession {
+    settleRooms('inactivity', roomId);
     return getDb().transaction(() => {
       const room = this.load(roomId);
-      this.requirePhase(room, 'lobby');
+      this.requireJoinable(room);
       if (room.players.some((player) => player.playerId.toLowerCase() === playerId.toLowerCase())) {
         throw new ConflictException({ code: 'GUESS_PLAYER_EXISTS' });
       }
-      if (room.players.length >= summary(room).maxPlayers) {
+      const { playerCount, maxPlayers } = summary(room);
+      if (playerCount >= maxPlayers) {
         throw new ConflictException({ code: 'GUESS_ROOM_FULL' });
       }
       const { player, token } = newPlayer(playerId);
       room.players.push(player);
-      this.write(room, { action: 'join', playerId });
+      writeRoom(room, { action: 'join', playerId });
       return { token, room: this.view(room, playerId) };
     }).immediate();
   }
 
   state(roomId: string, authorization: string | undefined): GuessRoomView {
+    settleRooms('inactivity', roomId);
     const room = this.load(roomId);
     return this.view(room, this.authenticate(room, authorization).playerId);
+  }
+
+  spectate(roomId: string): GuessSpectatorView {
+    settleRooms('inactivity', roomId);
+    return this.view(this.load(roomId));
   }
 
   search(roomId: string, authorization: string | undefined, query: string, page: number): GuessCardPage {
@@ -208,30 +304,37 @@ export class GuessService implements OnModuleInit {
   }
 
   act(roomId: string, authorization: string | undefined, command: GuessActionRequest): GuessRoomView | null {
+    settleRooms('inactivity', roomId);
     return getDb().transaction(() => {
       const room = this.load(roomId);
       const player = this.authenticate(room, authorization);
       const { playerId } = player;
       if (command.version !== room.version) throw new ConflictException({ code: 'GUESS_STALE_VERSION' });
       if (command.action === 'leave') {
-        this.requirePhase(room, 'lobby');
-        room.players = room.players.filter((member) => member !== player);
-        this.write(room, { action: 'leave', playerId });
+        this.requireJoinable(room);
+        if (room.phase === 'lobby') {
+          room.players = room.players.filter((member) => member !== player);
+        } else {
+          player.departed = true;
+          player.tokenHash = '';
+          if (activePlayers(room).length === 0) room.phase = 'finished';
+        }
+        writeRoom(room, { action: 'leave', playerId });
         return null;
       }
       if (command.action === 'start' || command.action === 'next' || command.action === 'finish') {
-        if (room.players[0] !== player) throw new ForbiddenException({ code: 'GUESS_HOST_REQUIRED' });
+        if (activePlayers(room)[0] !== player) throw new ForbiddenException({ code: 'GUESS_HOST_REQUIRED' });
         this.requirePhase(room, command.action === 'start' ? 'lobby' : 'between_rounds');
         if (command.action === 'finish') {
           room.phase = 'finished';
-          this.write(room, { action: 'finish', playerId });
+          writeRoom(room, { action: 'finish', playerId });
         } else {
           this.deal(room);
-          this.write(room, { action: command.action, playerId, round: room.round });
+          writeRoom(room, { action: command.action, playerId, round: room.round });
         }
       } else {
         const move = this.play(room, player, command);
-        this.write(room, { ...command, playerId, ...(move && { move }) });
+        writeRoom(room, { ...command, playerId, ...(move && { move }) });
         const round = room.round!;
         if (round.currentPlayerId === null) this.pools.recordRound(room.poolId, room.roomId, round.number, round.seats);
       }
@@ -248,7 +351,7 @@ export class GuessService implements OnModuleInit {
 
   private authenticate(room: Room, authorization: string | undefined): Player {
     const token = authorization?.match(/^Bearer ([0-9a-f]{64})$/i)?.[1];
-    const player = token && room.players.find((member) => safeHashEqual(token, member.tokenHash));
+    const player = token && room.players.find((member) => !member.departed && safeHashEqual(token, member.tokenHash));
     if (!player) throw new UnauthorizedException({ code: 'GUESS_AUTH_REQUIRED' });
     return player;
   }
@@ -257,13 +360,18 @@ export class GuessService implements OnModuleInit {
     if (room.phase !== phase) throw new ConflictException({ code: 'GUESS_WRONG_PHASE' });
   }
 
+  private requireJoinable(room: Room): void {
+    if (room.phase !== 'between_rounds') this.requirePhase(room, 'lobby');
+  }
+
   private deal(room: Room): void {
-    const count = room.players.length;
+    const participants = activePlayers(room);
+    const count = participants.length;
     if (count < 2) throw new ConflictException({ code: 'GUESS_NEED_PLAYERS' });
     const codes = this.pools.availableCodes(this.pools.get(room.poolId).codes);
     if (codes.length < count) throw new ConflictException({ code: 'GUESS_POOL_TOO_SMALL' });
     const answers = sample(codes, count);
-    const seats = sample(room.players, count).map((player, index) => ({
+    const seats = sample(participants, count).map((player, index) => ({
       playerId: player.playerId, code: answers[index], points: null, attempts: 0,
     }));
     room.round = {
@@ -289,7 +397,7 @@ export class GuessService implements OnModuleInit {
     if (room.phase !== 'playing' || !round) throw new ConflictException({ code: 'GUESS_WRONG_PHASE' });
     const hostSkip = command.action === 'host-skip';
     if (hostSkip) {
-      if (room.players[0] !== player) throw new ForbiddenException({ code: 'GUESS_HOST_REQUIRED' });
+      if (activePlayers(room)[0] !== player) throw new ForbiddenException({ code: 'GUESS_HOST_REQUIRED' });
     } else if (round.currentPlayerId !== player.playerId) {
       throw new ConflictException({ code: 'GUESS_NOT_YOUR_TURN' });
     }
@@ -331,22 +439,11 @@ export class GuessService implements OnModuleInit {
     return move;
   }
 
-  private write(room: Room, event: object): void {
-    const db = getDb();
-    const now = new Date().toISOString();
-    room.version++;
-    db.prepare('INSERT INTO guess_room_events (room_id, version, event_json, created_at) VALUES (?, ?, ?, ?)')
-      .run(room.roomId, room.version, JSON.stringify(event), now);
-    db.prepare(`
-      INSERT INTO guess_rooms (room_id, phase, state_json, updated_at) VALUES (?, ?, ?, ?)
-      ON CONFLICT (room_id) DO UPDATE SET phase = excluded.phase,
-        state_json = excluded.state_json, updated_at = excluded.updated_at
-    `).run(room.roomId, room.players.length ? room.phase : 'closed', JSON.stringify(room), now);
-  }
-
-  private guessCodes(room: Room, viewerId: string): number[] {
-    const rows = getDb().prepare(`
-      SELECT json_extract(event_json, '$.code') AS code FROM guess_room_events
+  private submittedGuesses(room: Room, viewerId: string | null): SubmittedGuessRow[] {
+    return getDb().prepare(`
+      SELECT json_extract(event_json, '$.playerId') AS playerId,
+        json_extract(event_json, '$.code') AS code, json_extract(event_json, '$.move.outcome') AS outcome
+      FROM guess_room_events
       WHERE room_id = @roomId AND version <= @version AND version > COALESCE((
         SELECT version FROM guess_room_events
         WHERE room_id = @roomId AND version <= @version
@@ -354,43 +451,61 @@ export class GuessService implements OnModuleInit {
         ORDER BY version DESC LIMIT 1
       ), 0)
         AND json_extract(event_json, '$.action') = 'guess'
-        AND json_extract(event_json, '$.playerId') = @viewerId
+        AND (@viewerId IS NULL OR json_extract(event_json, '$.playerId') = @viewerId)
         AND json_type(event_json, '$.code') = 'integer'
-      GROUP BY code ORDER BY MIN(version)
-    `).all({ roomId: room.roomId, version: room.version, viewerId }) as { code: number }[];
-    return rows.map(({ code }) => code);
+        AND json_extract(event_json, '$.move.outcome') IN ('correct', 'incorrect')
+      GROUP BY playerId, code, outcome ORDER BY MIN(version)
+    `).all({ roomId: room.roomId, version: room.version, viewerId }) as SubmittedGuessRow[];
   }
 
-  private view(room: Room, viewerId: string): GuessRoomView {
+  private view(room: Room, viewerId: string): GuessRoomView;
+  private view(room: Room): GuessSpectatorView;
+  private view(room: Room, viewerId?: string): GuessRoomView | GuessSpectatorView {
     const round = room.round;
-    const ownSeat = round?.seats.find((seat) => seat.playerId === viewerId);
-    const guesses = round ? this.guessCodes(room, viewerId) : [];
-    const codes = [...(round?.seats.map((seat) => seat.code) ?? []), ...guesses];
+    const seats = round?.seats ?? [];
+    const ownSeat = seats.find((seat) => seat.playerId === viewerId);
+    const guesses = round ? this.submittedGuesses(room, viewerId ?? null) : [];
+    const visibleSeats = seats.filter((seat) => viewerId === undefined
+      ? (seat.points ?? 0) > 0
+      : seat !== ownSeat || room.phase !== 'playing' || seat.points !== null);
+    const visiblePlayers = new Set(visibleSeats.map((seat) => seat.playerId));
+    const codes = [...visibleSeats.map((seat) => seat.code), ...guesses.map(({ code }) => code)];
+    if (ownSeat) codes.push(ownSeat.code);
     if (round?.selectedCode !== undefined) codes.push(round.selectedCode);
     const cards = new Map(this.cards.getMany(codes).map((card) => [card.code, card]));
+    const reference = (code: number) => ({ code, name: cards.get(code)?.name ?? String(code).padStart(8, '0') });
     const currentGuess = round?.selectedCode === undefined ? undefined : cards.get(round.selectedCode);
-    const players = round
-      ? round.seats.map((seat) => ({
-        playerId: seat.playerId,
-        score: room.players.find((player) => player.playerId === seat.playerId)!.score,
-        roundPoints: seat.points,
-        card: seat === ownSeat && seat.points === null ? null : cards.get(seat.code) ?? null,
-      }))
-      : room.players.map(({ playerId, score }) => ({ playerId, score, roundPoints: null, card: null }));
-    return {
+    const seatsById = new Map(seats.map((seat) => [seat.playerId, seat]));
+    const standings = room.players.map(({ playerId, score, departed }) => ({
+      playerId, score, departed: departed === true, roundPoints: seatsById.get(playerId)?.points ?? null,
+    }));
+    const scores = new Map(standings.map((standing) => [standing.playerId, standing.score]));
+    const players = round ? seats.map(({ playerId, code, points }) => ({
+      playerId, score: scores.get(playerId) ?? 0, roundPoints: points,
+      card: visiblePlayers.has(playerId) ? cards.get(code) ?? null : null,
+    })) : standings.map(({ playerId, score }) => ({ playerId, score, roundPoints: null, card: null }));
+    const publicView: GuessPublicRoomView = {
       ...summary(room),
       version: room.version,
       phase: room.phase,
+      finishReason: room.finishReason ?? null,
       round: round?.number ?? 0,
       poolCount: room.poolCount,
-      hostId: room.players[0].playerId,
-      viewerId,
-      viewerCardKind: cardKind(ownSeat && cards.get(ownSeat.code)?.type),
-      viewerGuesses: guesses.map((code) => ({ code, name: cards.get(code)?.name ?? String(code).padStart(8, '0') })),
+      hostId: activePlayers(room)[0]?.playerId ?? null,
       currentPlayerId: round?.currentPlayerId ?? null,
       currentGuess: currentGuess ? cardRef(currentGuess) : null,
       players,
+      standings,
       lastMove: round?.lastMove ?? null,
+    };
+    if (viewerId === undefined) {
+      return { ...publicView, guesses: guesses.map(({ playerId, code, outcome }) => ({ playerId, card: reference(code), outcome })) };
+    }
+    return {
+      ...publicView,
+      viewerId,
+      viewerCardKind: cardKind(ownSeat && cards.get(ownSeat.code)?.type),
+      viewerGuesses: guesses.map(({ code }) => reference(code)),
     };
   }
 }

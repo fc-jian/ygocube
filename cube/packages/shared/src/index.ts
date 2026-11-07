@@ -96,15 +96,20 @@ export interface GuessMove {
   skippedBy?: string;
 }
 
-export interface GuessRoomView extends GuessRoomSummary {
+export interface GuessStanding {
+  playerId: string;
+  score: number;
+  roundPoints: number | null;
+  departed: boolean;
+}
+
+export interface GuessPublicRoomView extends GuessRoomSummary {
   version: number;
   phase: 'lobby' | 'playing' | 'between_rounds' | 'finished';
+  finishReason: 'inactivity' | 'maintenance' | null;
   round: number;
   poolCount: number;
-  hostId: string;
-  viewerId: string;
-  viewerCardKind: GuessCardKind | null;
-  viewerGuesses: GuessCardRef[];
+  hostId: string | null;
   currentPlayerId: string | null;
   currentGuess: GuessCardRef | null;
   players: {
@@ -113,7 +118,18 @@ export interface GuessRoomView extends GuessRoomSummary {
     roundPoints: number | null;
     card: CardInfo | null;
   }[];
+  standings: GuessStanding[];
   lastMove: GuessMove | null;
+}
+
+export interface GuessRoomView extends GuessPublicRoomView {
+  viewerId: string;
+  viewerCardKind: GuessCardKind | null;
+  viewerGuesses: GuessCardRef[];
+}
+
+export interface GuessSpectatorView extends GuessPublicRoomView {
+  guesses: { playerId: string; card: GuessCardRef; outcome: 'correct' | 'incorrect' }[];
 }
 
 export interface GuessSession {

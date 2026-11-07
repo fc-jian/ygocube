@@ -2,7 +2,7 @@ import type { INestApplication } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
 import type {
-  GuessActionRequest, GuessCardPage, GuessMove, GuessPoolSummary, GuessRoomSummary, GuessRoomView, GuessSession,
+  GuessActionRequest, GuessCardPage, GuessMove, GuessPoolSummary, GuessRoomSummary, GuessRoomView, GuessSession, GuessSpectatorView,
 } from '@ygocube/shared';
 import fs from 'node:fs';
 import { AuthGuard, sha256 } from '../src/auth/auth.guard';
@@ -11,7 +11,7 @@ import { config } from '../src/config';
 import { closeDb, getDb } from '../src/db';
 import { GuessController } from '../src/guess/guess.controller';
 import { GuessPoolsService } from '../src/guess/guess-pools.service';
-import { GuessService } from '../src/guess/guess.service';
+import { GuessService, settleOpenGuessRoomsForMaintenance } from '../src/guess/guess.service';
 import { DEFAULT_GUESS_POOL_CODES } from '../src/guess/default-pool-codes';
 import { RECENCY_GUESS_POOL_CODES } from '../src/guess/recency-pool-codes';
 import { SHORTLIST_GUESS_POOL_CODES } from '../src/guess/shortlist-pool-codes';
@@ -346,6 +346,148 @@ describe('Guess the Card HTTP game', () => {
     expect((await request(path, otherRoom.token)).status).toBe(401);
   });
 
+  it('shows public guesses without revealing unsolved cards and allows membership changes between rounds', async () => {
+    const pool = await createPool('Spectator pool', codes.slice(0, 2));
+    const host = await create('Organizer', pool.poolId);
+    const path = `/rooms/${host.room.roomId}`;
+    const join = (playerId: string) => request<GuessSession>(`${path}/join`, undefined, { playerId });
+    const guest = (await join('Guest')).body;
+    const tokens = new Map([[host.room.viewerId, host.token], [guest.room.viewerId, guest.token]]);
+    async function watch() {
+      const response = await request<GuessSpectatorView>(`${path}/spectate`);
+      expect(response.status).toBe(200);
+      expect(response.body).not.toHaveProperty('viewerId');
+      expect(response.body).not.toHaveProperty('viewerCardKind');
+      expect(response.body).not.toHaveProperty('viewerGuesses');
+      expect(JSON.stringify(response.body)).not.toContain('tokenHash');
+      return response.body;
+    }
+    let state = (await action(path, host.token, { action: 'start', version: guest.room.version })).body;
+    const first = state.currentPlayerId!;
+    const second = state.players.find(({ playerId }) => playerId !== first)!.playerId;
+    const firstView = (await request<GuessRoomView>(path, tokens.get(first))).body;
+    const secondCard = firstView.players.find(({ playerId }) => playerId === second)!.card!;
+    expect((await watch()).players.every(({ card }) => card === null)).toBe(true);
+    expect((await request(path)).status).toBe(401);
+    expect((await request(`${path}/cards`)).status).toBe(401);
+    expect((await join('Early')).status).toBe(409);
+    expect((await action(path, host.token, { action: 'leave', version: state.version })).status).toBe(409);
+
+    state = (await action(path, tokens.get(first)!, { action: 'select', version: state.version, code: secondCard.code })).body;
+    const selecting = await watch();
+    const publicCard = { code: secondCard.code, name: secondCard.name };
+    expect(selecting.currentGuess).toEqual(publicCard);
+    expect(selecting.guesses).toEqual([]);
+    expect(selecting.players.every(({ card }) => card === null)).toBe(true);
+    state = (await action(path, tokens.get(first)!, { action: 'guess', version: state.version, code: secondCard.code })).body;
+    const wrong = { playerId: first, card: publicCard, outcome: 'incorrect' };
+    expect((await watch()).guesses).toEqual([wrong]);
+    expect((await watch()).players.every(({ card }) => card === null)).toBe(true);
+    state = (await action(path, tokens.get(second)!, { action: 'guess', version: state.version, code: secondCard.code })).body;
+    const solved = await watch();
+    expect(solved.guesses).toEqual([wrong, { playerId: second, card: publicCard, outcome: 'correct' }]);
+    expect(solved.players.find(({ playerId }) => playerId === second)?.card?.code).toBe(secondCard.code);
+    expect(solved.players.find(({ playerId }) => playerId === first)?.card).toBeNull();
+    state = (await action(path, tokens.get(first)!, { action: 'surrender', version: state.version })).body;
+    expect(state.phase).toBe('between_rounds');
+    expect(state.players.every(({ card }) => card !== null)).toBe(true);
+    expect((await watch()).players.find(({ playerId }) => playerId === first)?.card).toBeNull();
+
+    expect((await join('Full')).status).toBe(409);
+    expect((await action(path, host.token, { action: 'leave', version: state.version })).status).toBe(200);
+    expect((await request(path, host.token)).status).toBe(401);
+    const between = await watch();
+    expect(between).toMatchObject({ hostId: 'Guest', playerCount: 1 });
+    expect(between.standings.find(({ playerId }) => playerId === 'Organizer')).toMatchObject({
+      departed: true, score: first === 'Organizer' ? 0 : 2,
+    });
+    expect((await action(path, guest.token, { action: 'next', version: between.version })).status).toBe(409);
+    expect((await join('organizer')).status).toBe(409);
+    const newcomer = await join('New player');
+    expect(newcomer.status).toBe(201);
+    expect(newcomer.body.room.standings.find(({ playerId }) => playerId === 'New player')).toMatchObject({ score: 0, departed: false });
+    const next = await action(path, guest.token, { action: 'next', version: newcomer.body.room.version });
+    expect(next.status).toBe(200);
+    const nextWatch = await watch();
+    expect(nextWatch.round).toBe(2);
+    expect(nextWatch.players.map(({ playerId }) => playerId).sort()).toEqual(['Guest', 'New player']);
+    expect(nextWatch.players.every(({ card }) => card === null)).toBe(true);
+    expect(nextWatch.guesses).toEqual([]);
+  });
+
+  it('settles a stale partial round without crediting uncompleted card statistics or letting reads reset the clock', async () => {
+    const pool = await createPool('Inactivity pool', codes.slice(0, 2));
+    const host = await create('Host', pool.poolId);
+    const path = `/rooms/${host.room.roomId}`;
+    const guest = (await request<GuessSession>(`${path}/join`, undefined, { playerId: 'Guest' })).body;
+    let state = (await action(path, host.token, { action: 'start', version: guest.room.version })).body;
+    const tokens = new Map([[host.room.viewerId, host.token], [guest.room.viewerId, guest.token]]);
+    const first = state.currentPlayerId!;
+    const remaining = state.players.find(({ playerId }) => playerId !== first)!.playerId;
+    const other = (await request<GuessRoomView>(path, tokens.get(remaining))).body;
+    const answer = other.players.find(({ playerId }) => playerId === first)!.card!;
+    state = (await action(path, tokens.get(first)!, { action: 'guess', version: state.version, code: answer.code })).body;
+    const db = getDb();
+    const update = db.prepare('UPDATE guess_rooms SET updated_at = ? WHERE room_id = ?');
+    const room = db.prepare('SELECT phase, updated_at FROM guess_rooms WHERE room_id = ?');
+    const day = 24 * 60 * 60 * 1000;
+    const recent = new Date(Date.now() - day + 10 * 60 * 1000).toISOString();
+    update.run(recent, host.room.roomId);
+    await request(path, host.token);
+    await request(`${path}/cards`, host.token);
+    await request(`${path}/spectate`);
+    expect(room.get(host.room.roomId)).toEqual({ phase: 'playing', updated_at: recent });
+    const selected = await action(path, tokens.get(remaining)!, { action: 'select', version: state.version, code: answer.code });
+    expect(selected.status).toBe(200);
+    expect((room.get(host.room.roomId) as { updated_at: string }).updated_at > recent).toBe(true);
+    update.run(new Date(Date.now() - day).toISOString(), host.room.roomId);
+    expect((await action(path, tokens.get(remaining)!, { action: 'skip', version: selected.body.version })).status).toBe(409);
+    const finished = (await request<GuessRoomView>(path, tokens.get(remaining))).body;
+    expect(finished).toMatchObject({ phase: 'finished', finishReason: 'inactivity', currentPlayerId: null, currentGuess: null });
+    expect(finished.version).toBe(selected.body.version + 1);
+    expect(finished.players.every(({ card }) => card !== null)).toBe(true);
+    expect(finished.standings.map(({ score }) => score).sort()).toEqual([0, 2]);
+    const publicResult = (await request<GuessSpectatorView>(`${path}/spectate`)).body;
+    expect(publicResult.players.find(({ playerId }) => playerId === remaining)?.card).toBeNull();
+    for (const code of codes.slice(0, 2)) {
+      expect(await stats(pool.poolId, code)).toEqual({ appearances: 0, averageGuessTurns: null });
+    }
+    const event = db.prepare('SELECT event_json FROM guess_room_events WHERE room_id = ? AND version = ?')
+      .get(host.room.roomId, finished.version) as { event_json: string };
+    expect(JSON.parse(event.event_json)).toEqual({ action: 'finish', reason: 'inactivity' });
+  });
+
+  it('catches up on restart and settles idle rooms in the background without an HTTP request', async () => {
+    const old = await create('Expired lobby', 0);
+    const pending = await create('Waiting lobby', 0);
+    const now = Date.now();
+    const day = 24 * 60 * 60 * 1000;
+    const db = getDb();
+    const update = db.prepare('UPDATE guess_rooms SET updated_at = ? WHERE room_id = ?');
+    update.run(new Date(now - day).toISOString(), old.room.roomId);
+    update.run(new Date(now - day + 60_000).toISOString(), pending.room.roomId);
+    const phase = db.prepare('SELECT phase FROM guess_rooms WHERE room_id = ?').pluck();
+    const service = new GuessService(app.get(CardsService), app.get(GuessPoolsService));
+    jest.useFakeTimers({ now });
+    try {
+      service.onModuleInit();
+      expect(phase.get(old.room.roomId)).toBe('finished');
+      expect(phase.get(pending.room.roomId)).toBe('lobby');
+      jest.advanceTimersByTime(59_999);
+      expect(phase.get(pending.room.roomId)).toBe('lobby');
+      jest.advanceTimersByTime(1);
+      expect(phase.get(pending.room.roomId)).toBe('finished');
+      jest.advanceTimersByTime(60_000);
+      const count = db.prepare('SELECT COUNT(*) FROM guess_room_events WHERE room_id = ?').pluck();
+      expect(count.get(pending.room.roomId)).toBe(2);
+    } finally {
+      service.onModuleDestroy();
+      jest.useRealTimers();
+    }
+    expect((await request(`/rooms/${pending.room.roomId}/join`, undefined, { playerId: 'Late' })).status).toBe(409);
+    expect((await request<GuessRoomSummary[]>('/rooms')).body.some((room) => room.roomId === pending.room.roomId)).toBe(false);
+  });
+
   it('backfills completed legacy rounds and preserves the attempts of a live round', async () => {
     const roomId = '0ABCD123';
     const [aCode, bCode] = codes;
@@ -391,6 +533,22 @@ describe('Guess the Card HTTP game', () => {
     expect(aCorrect.phase).toBe('between_rounds');
     expect(await stats(migrated.poolId, aCode)).toEqual({ appearances: 2, averageGuessTurns: 2.5 });
     expect(await stats(migrated.poolId, bCode)).toEqual({ appearances: 2, averageGuessTurns: 1 });
+  });
+
+  it('finalizes all open rooms for maintenance with one event each and keeps completed rounds', async () => {
+    const waiting = await create('Maintenance lobby', 0);
+    const db = getDb();
+    const open = db.prepare("SELECT room_id FROM guess_rooms WHERE phase IN ('lobby', 'playing', 'between_rounds')").pluck().all() as string[];
+    const history = db.prepare('SELECT * FROM guess_round_cards ORDER BY room_id, round_number, code');
+    const before = history.all();
+    expect(open).toContain(waiting.room.roomId);
+    expect(settleOpenGuessRoomsForMaintenance()).toBe(open.length);
+    expect(settleOpenGuessRoomsForMaintenance()).toBe(0);
+    expect(history.all()).toEqual(before);
+    const event = db.prepare('SELECT event_json FROM guess_room_events WHERE room_id = ? ORDER BY version DESC LIMIT 1').pluck();
+    for (const roomId of open) expect(JSON.parse(event.get(roomId) as string)).toEqual({ action: 'finish', reason: 'maintenance' });
+    const result = (await request<GuessRoomView>(`/rooms/${waiting.room.roomId}`, waiting.token)).body;
+    expect(result).toMatchObject({ phase: 'finished', finishReason: 'maintenance', version: waiting.room.version + 1 });
   });
 
   it('promotes the newest complete default while preserving older pool IDs and members', async () => {

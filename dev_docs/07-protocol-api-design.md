@@ -213,8 +213,9 @@ deadline 和冻结剩余值。
 | `POST /pools` | 仅接受 Cube 超级管理员的 `X-Admin-Token`。请求为 `{name,codes}`，名称唯一，须有 2–20000 个不重复有效编号。返回卡池摘要。卡池创建后固定成员，供多个房间使用 |
 | `GET /pools/:poolId/cards?q=&page=` | 公开查看卡池及统计，沿用搜索与分页规则。每张牌附 `stats: {appearances,averageGuessTurns}` |
 | `POST /rooms` | `{name,playerId,poolId}`。选择已保存的卡池或内置完整卡库。返回 `{token,room}` |
-| `POST /rooms/:roomId/join` | `{playerId}`。可在等候阶段直接加入，房间内 ID 唯一，最多 8 人且不超过卡池卡数。返回 `{token,room}` |
-| `GET /rooms/:roomId` | 本人视角的房间状态，包括 `version`、阶段、当前轮次、房主、行动玩家、按座次排列的玩家、累计分、本轮得分、本人卡片大类及猜牌记录、当前选牌 |
+| `POST /rooms/:roomId/join` | `{playerId}`。等候或轮间可从房间链接加入，在场玩家最多 8 人且不超过卡池卡数。房间内 ID 唯一，返回 `{token,room}` |
+| `GET /rooms/:roomId` | 本人视角的房间状态，包括 `version`、阶段、当前轮次、房主、行动玩家、按座次排列的玩家、累计分、本轮得分、本人卡片大类及猜牌记录、当前选牌及系统结算原因 `finishReason` |
+| `GET /rooms/:roomId/spectate` | 匿名只读。返回房间阶段、当前行动及选牌、座次、积分排名和本轮已提交的猜测，包含猜中或猜错的结果。仅猜中的座位返回所持卡片 |
 | `GET /rooms/:roomId/cards?q=&page=` | 本房间完整卡池的搜索与分页，和当轮发牌结果无关 |
 | `POST /rooms/:roomId/action` | `{action,version,code?}`。操作为 `start/select/guess/skip/host-skip/surrender/next/finish/leave`。`select` 和 `guess` 需要卡池内的 `code`，其余操作省略 `code`。返回更新后的本人视角，退出返回 200 空响应 |
 
@@ -227,11 +228,18 @@ deadline 和冻结剩余值。
 - 猜中按 exact code 判定，本轮第 1 名得玩家人数对应的分数，之后每名依次少 1 分。最后一名未猜中的
   玩家可以继续猜，也可以投降得 0 分并查看答案。每轮结束后所有玩家可以查看排名，同分并列。
   房主可以继续开启下一轮，或终止游戏并锁定排名。房间不预设轮数。
-- `lobby → playing → between_rounds → playing … → finished`。等候阶段可退出，房主退出时由最早
-  加入的剩余玩家接任。开局后锁定成员。服务端每次写入递增 `version`，拒绝旧版本操作。
+- `lobby → playing → between_rounds → playing … → finished`。等候或轮间允许退出，房主退出时由最早
+  加入的在场玩家接任。轮间退出者的积分与 ID 留在排名中，原凭证失效。全部玩家在轮间退出时结算。
+  每轮发牌只使用在场玩家，至少需要两人。服务端每次写入递增 `version`，拒绝旧版本操作。
+- 等候、游戏中和轮间房间自上次成功写入房间状态起满 24 小时自动结算。查看、轮询和搜索不刷新活动时间。
+  服务启动时补结算，运行时定期检查，过期房间不再接受加入或行动。系统结算保留已获得的积分，
+  揭晓本轮卡片并保留原链接供房间成员查看结果，未完成轮次不写入卡池统计。
+  `finishReason` 在超时和发布前批量结算时分别为 `inactivity`、`maintenance`，其他情况为 `null`。
 - 每名玩家未猜中或投降前，本人视角的对应 `card` 为 `null`，其他座位返回 `CardInfo`。
   本人卡片大类 `viewerCardKind` 为 `monster/spell/trap`，没有可用分类时为 `null`。
   房主遵循相同规则，公开列表不含发牌信息。搜索只根据卡池和查询返回结果。
+- 观战响应只公开猜中的座位卡片和本轮实际猜测。投降、自动或手动结算后，未猜中的座位仍保持隐藏。
+  观战响应不含观战者身份字段、玩家凭证或卡种提示。轮间加入者在下次发牌时获得座位。
 - 行动玩家可用 `select` 同步候选牌，全房间成员可在 `currentGuess` 看到其 `{code,name}`。
   选牌不消耗行动，提交、跳过或投降后清空。提交猜测时 `lastMove.card` 记录猜的牌，
   跳过时 `lastMove.outcome` 为 `skipped`，房主代跳时 `lastMove.skippedBy` 为房主 ID。
