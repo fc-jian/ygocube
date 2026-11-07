@@ -7,12 +7,15 @@ import type { GuessText } from './guess-text';
 export const GUESS_PATH = '/games/guess';
 export const sessionKey = (roomId: string) => `yc_guess_session_${roomId}`;
 
-export function guessRequest<T>(path: string, options: { token?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
-  const { token, body, signal } = options;
+export function guessRequest<T>(path: string, options: {
+  token?: string; adminToken?: string; body?: unknown; signal?: AbortSignal;
+} = {}): Promise<T> {
+  const { token, adminToken, body, signal } = options;
   return api<T>(GUESS_PATH + path, {
     method: body === undefined ? 'GET' : 'POST',
     identity: null,
     authorization: token ? `Bearer ${token}` : undefined,
+    adminToken,
     body,
     signal,
   });

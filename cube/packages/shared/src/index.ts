@@ -74,6 +74,7 @@ export interface GuessPoolSummary {
   poolId: number;
   name: string;
   cardCount: number;
+  isDefault: boolean;
 }
 
 export type GuessActionRequest =

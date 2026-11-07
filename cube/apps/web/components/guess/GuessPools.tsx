@@ -26,7 +26,9 @@ export function GuessPoolDirectory() {
         {data.map((pool) => (
           <li key={pool.poolId}>
             <Link href={`${POOL_PATH}/${pool.poolId}`}>
-              <strong className="min-w-0 truncate">{pool.poolId === 0 ? text.fullPool : pool.name}</strong>
+              <strong className="min-w-0 truncate">
+                {pool.poolId === 0 ? text.fullPool : pool.name}{pool.isDefault && ` (${text.defaultPool})`}
+              </strong>
               <span className="guess-pill">{fillText(text.cardCount, { count: pool.cardCount.toLocaleString(language) })}</span>
             </Link>
           </li>
@@ -40,6 +42,7 @@ export function GuessPoolCreator() {
   const router = useRouter();
   const { language, changeLanguage, text } = useGuessLanguage();
   const [name, setName] = useState('');
+  const [adminToken, setAdminToken] = useState('');
   const [codesText, setCodesText] = useState('');
   const [error, setError] = useState<unknown>(null);
   const [invalid, setInvalid] = useState(false);
@@ -56,7 +59,7 @@ export function GuessPoolCreator() {
     setBusy(true);
     try {
       const body: GuessPoolCreateRequest = { name, codes: [...codes] };
-      const pool = await guessRequest<GuessPoolSummary>('/pools', { body });
+      const pool = await guessRequest<GuessPoolSummary>('/pools', { body, adminToken: adminToken.trim() });
       router.push(`${POOL_PATH}/${pool.poolId}`);
     } catch (err) {
       setError(err);
@@ -70,6 +73,8 @@ export function GuessPoolCreator() {
       <header className="guess-room-head"><h1>{text.createPool}</h1></header>
       <section className="guess-panel max-w-3xl">
         <form id="guess-create-pool" className="guess-fields" onSubmit={create}>
+          <label>{text.superToken}<input className="guess-input" value={adminToken} type="password" autoComplete="off" required
+            onChange={(event) => setAdminToken(event.target.value)} /></label>
           <label>{text.poolName}<input className="guess-input" value={name} required maxLength={48}
             onChange={(event) => setName(event.target.value)} /></label>
           <label>{text.codes} ({codes.size})

@@ -151,12 +151,14 @@ class RemoteDuelResourceApplyTests(unittest.TestCase):
         # databases and pointer switching replaced by isolated test doubles.
         source = SCRIPT.with_name('deploy-card-details.py').read_text(encoding='utf-8')
         body = source[source.index('maintenance = None if a.web_only'):source.index("result={'ok':True")]
-        for raced in (False, True):
-            with self.subTest(raced=raced), tempfile.TemporaryDirectory() as directory:
+        for raced, cube_only in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(raced=raced, cube_only=cube_only), tempfile.TemporaryDirectory() as directory:
                 roots = {name: Path(directory) / name for name in ('ygocube', 'ygoduel')}
-                olds = {name: root / 'old' for name, root in roots.items()}
-                news = {name: root / 'new' for name, root in roots.items()}
-                services = [name + '-' + component for name in roots for component in ('api', 'srvpro', 'web')]
+                targets = {'ygocube': roots['ygocube']} if cube_only else roots
+                olds = {name: root / 'old' for name, root in targets.items()}
+                news = {name: root / 'new' for name, root in targets.items()}
+                components = ('api', 'web') if cube_only else ('api', 'srvpro', 'web')
+                services = [name + '-' + component for name in targets for component in components]
                 calls = []
                 def run(*args):
                     calls.append(('run', args))
@@ -167,10 +169,12 @@ class RemoteDuelResourceApplyTests(unittest.TestCase):
                     if len(health_calls) == 1:
                         raise ValueError('public verification failed')
                 database = MagicMock()
-                database.connect.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = ('ok',)
+                database.connect.return_value.__enter__.return_value.execute.side_effect = lambda sql: MagicMock(
+                    **{'fetchone.return_value': ('ok',) if sql == 'PRAGMA integrity_check' else None}
+                )
                 switches = []
                 env = {'a': SimpleNamespace(web_only=False, windbot_root=None, release='fixture'),
-                       'resource_apply': REMOTE, 'roots': roots, 'olds': olds, 'news': news,
+                       'resource_apply': REMOTE, 'roots': roots, 'targets': targets, 'olds': olds, 'news': news,
                        'services': services, 'run': run, 'sqlite3': database, 'health': health,
                        'switch': lambda root, target: switches.append((root, target))}
                 with patch.object(REMOTE.ApplicationMaintenance, 'occupied', side_effect=[False, False, raced]), \
@@ -182,12 +186,13 @@ class RemoteDuelResourceApplyTests(unittest.TestCase):
                         exec(compile(body, 'application-activation-fixture', 'exec'), env)
                 restarts = [args for _, args in calls if args[:2] == ('systemctl', 'restart')]
                 if raced:
-                    self.assertEqual(switches, [(roots[name], news[name]) for name in roots])
+                    self.assertEqual(switches, [(targets[name], news[name]) for name in targets])
                     self.assertFalse(restarts)
                     self.assertEqual(len(health_calls), 1)
                 else:
-                    self.assertEqual(switches[-2:], [(roots[name], olds[name]) for name in roots])
-                    self.assertEqual(len(restarts), 1)
+                    self.assertEqual(switches, [(targets[name], news[name]) for name in targets] +
+                                     [(targets[name], olds[name]) for name in targets])
+                    self.assertEqual(restarts, [('systemctl', 'restart', *services)])
                     self.assertEqual(len(health_calls), 2)
                 self.assertFalse(gate.call_args.kwargs['close'])
 

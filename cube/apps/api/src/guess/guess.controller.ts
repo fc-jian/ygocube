@@ -1,5 +1,5 @@
 import { BadRequestException, Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@nestjs/common';
-import { Public } from '../auth/auth.guard';
+import { Access, Public } from '../auth/auth.guard';
 import { GuessPoolsService } from './guess-pools.service';
 import { GuessService } from './guess.service';
 
@@ -48,43 +48,48 @@ function searchParams(q: unknown, page: unknown): [string, number] {
   return [q.trim(), Number(page)];
 }
 
-// These routes use room credentials, independently of tournament authorization.
-@Public()
 @Controller('games/guess')
 export class GuessController {
   constructor(private readonly guess: GuessService, private readonly pools: GuessPoolsService) {}
 
+  @Public()
   @Get('rooms')
   list() {
     return this.guess.list();
   }
 
+  @Public()
   @Get('cards')
   search(@Query('q') q: unknown = '', @Query('page') page: unknown = '0') {
     return this.pools.search(...searchParams(q, page));
   }
 
+  @Public()
   @Get('pools')
   listPools() {
     return this.pools.list();
   }
 
+  @Access('super-admin')
   @Post('pools')
   createPool(@Body() body: unknown) {
     const input = payload(body, ['name', 'codes']);
     return this.pools.create({ name: text(input.name, 48), codes: poolCodes(input.codes) });
   }
 
+  @Public()
   @Get('pools/:poolId')
   pool(@Param('poolId') id: string) {
     return this.pools.describe(poolId(id));
   }
 
+  @Public()
   @Get('pools/:poolId/cards')
   poolCards(@Param('poolId') id: string, @Query('q') q: unknown = '', @Query('page') page: unknown = '0') {
     return this.pools.browse(poolId(id), ...searchParams(q, page));
   }
 
+  @Public()
   @Post('rooms')
   create(@Body() body: unknown) {
     const input = payload(body, ['name', 'playerId', 'poolId']);
@@ -95,16 +100,19 @@ export class GuessController {
     });
   }
 
+  @Public()
   @Post('rooms/:roomId/join')
   join(@Param('roomId') roomId: string, @Body() body: unknown) {
     return this.guess.join(roomId, playerId(payload(body, ['playerId']).playerId));
   }
 
+  @Public()
   @Get('rooms/:roomId')
   state(@Param('roomId') roomId: string, @Headers('authorization') authorization?: string) {
     return this.guess.state(roomId, authorization);
   }
 
+  @Public()
   @Get('rooms/:roomId/cards')
   roomCards(
     @Param('roomId') roomId: string,
@@ -115,6 +123,7 @@ export class GuessController {
     return this.guess.search(roomId, authorization, ...searchParams(q, page));
   }
 
+  @Public()
   @Post('rooms/:roomId/action')
   @HttpCode(200)
   act(

@@ -13,7 +13,7 @@ export function GuessLobby() {
   const { text, language, changeLanguage } = useGuessLanguage();
   const [name, setName] = useState('');
   const [playerId, setPlayerId] = useState('');
-  const [poolId, setPoolId] = useState(0);
+  const [chosenPoolId, setChosenPoolId] = useState<number | null>(null);
   const [roomCode, setRoomCode] = useState('');
   const [rooms, setRooms] = useState<GuessRoomSummary[] | null>(null);
   const [busy, setBusy] = useState(false);
@@ -21,6 +21,7 @@ export function GuessLobby() {
   const [joinError, setJoinError] = useState(false);
   const [listError, setListError] = useState(false);
   const { data: pools, error: poolError } = useGuessResource<GuessPoolSummary[]>('/pools');
+  const poolId = chosenPoolId ?? pools?.find((pool) => pool.isDefault)?.poolId ?? 0;
 
   const refresh = useCallback(async (signal: AbortSignal) => {
     try {
@@ -73,10 +74,11 @@ export function GuessLobby() {
             <label>{text.playerId}<input className="guess-input" required maxLength={24} value={playerId}
               onChange={(event) => setPlayerId(event.target.value)} /></label>
             <label>{text.pool}<select className="guess-input" value={poolId} required disabled={!pools}
-              onChange={(event) => setPoolId(Number(event.target.value))}>
+              onChange={(event) => setChosenPoolId(Number(event.target.value))}>
               {!pools && <option value={0}>{poolError == null ? text.loading : '—'}</option>}
               {pools?.map((pool) => <option key={pool.poolId} value={pool.poolId}>
-                {pool.poolId === 0 ? text.fullPool : pool.name} · {fillText(text.cardCount, { count: pool.cardCount })}
+                {pool.poolId === 0 ? text.fullPool : pool.name}{pool.isDefault && ` (${text.defaultPool})`}
+                {' · '}{fillText(text.cardCount, { count: pool.cardCount })}
               </option>)}
             </select></label>
             <Link className="guess-nav-link justify-self-start" href={`${GUESS_PATH}/pools/new`}>{text.createPool}</Link>

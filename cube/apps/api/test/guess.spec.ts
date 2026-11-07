@@ -12,9 +12,11 @@ import { closeDb, getDb } from '../src/db';
 import { GuessController } from '../src/guess/guess.controller';
 import { GuessPoolsService } from '../src/guess/guess-pools.service';
 import { GuessService } from '../src/guess/guess.service';
+import { DEFAULT_GUESS_POOL_CODES } from '../src/guess/default-pool-codes';
 import { useTestDb } from './helpers';
 
 describe('Guess the Card HTTP game', () => {
+  const superToken = 'guess-super-token-fixture';
   let app: INestApplication;
   let base: string;
   let codes: number[];
@@ -23,6 +25,7 @@ describe('Guess the Card HTTP game', () => {
 
   beforeAll(async () => {
     useTestDb();
+    config.admin.superToken = superToken;
     const cards = new CardsService();
     const catalog = cards.poolCodes();
     codes = catalog.slice(0, 30);
@@ -45,10 +48,10 @@ describe('Guess the Card HTTP game', () => {
     }
   });
 
-  async function request<T = { code: string }>(path: string, token?: string, body?: unknown) {
+  async function request<T = { code: string }>(path: string, token?: string, body?: unknown, headers: Record<string, string> = {}) {
     const response = await fetch(base + path, {
       method: body === undefined ? 'GET' : 'POST',
-      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...headers },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const json = await response.text();
@@ -56,7 +59,7 @@ describe('Guess the Card HTTP game', () => {
   }
 
   async function createPool(name: string, poolCodes: number[]) {
-    const result = await request<GuessPoolSummary>('/pools', undefined, { name, codes: poolCodes });
+    const result = await request<GuessPoolSummary>('/pools', undefined, { name, codes: poolCodes }, { 'X-Admin-Token': superToken });
     expect(result.status).toBe(201);
     return result.body;
   }
@@ -76,6 +79,20 @@ describe('Guess the Card HTTP game', () => {
     expect(response.status).toBe(200);
     return response.body.cards.find((card) => card.code === code)?.stats;
   }
+
+  it('requires the Cube super token for pool creation while preserving public browsing', async () => {
+    const body = { name: 'Protected pool', codes: codes.slice(0, 2) };
+    getDb().prepare('INSERT INTO create_users(username,token_hash,created_at,active) VALUES(?,?,?,1)')
+      .run('guesscreator', sha256('creator-fixture'), new Date().toISOString());
+    expect((await request('/pools')).status).toBe(200);
+    expect((await request('/pools/0/cards')).status).toBe(200);
+    for (const headers of [{}, { 'X-Admin-Token': 'wrong' },
+      { 'X-Create-User': 'guesscreator', 'X-Create-Token': 'creator-fixture' }, { 'X-Token': superToken }]) {
+      expect((await request('/Pools/', undefined, body, headers as Record<string, string>)).status).toBe(401);
+    }
+    expect((await request('/pools', superToken, body)).status).toBe(401);
+    expect((await createPool(body.name, body.codes)).isDefault).toBe(false);
+  });
 
   it('keeps deals private, records completed rounds and lets the host settle the game', async () => {
     const pool = await createPool('Fixture pool', codes);
@@ -193,11 +210,12 @@ describe('Guess the Card HTTP game', () => {
   });
 
   it('validates room setup, caps simultaneous joins, and hands off a waiting room', async () => {
+    const headers = { 'X-Admin-Token': superToken };
     for (const poolCodes of [[codes[0], tokenCode], [codes[0], codes[0]], [codes[0], -1], [codes[0], 999999999]]) {
-      expect((await request('/pools', undefined, { name: 'Invalid', codes: poolCodes })).status).toBe(400);
+      expect((await request('/pools', undefined, { name: 'Invalid', codes: poolCodes }, headers)).status).toBe(400);
     }
     const small = await createPool('Small pool', codes.slice(0, 2));
-    expect((await request('/pools', undefined, { name: 'SMALL POOL', codes: codes.slice(0, 2) })).body.code).toBe('GUESS_POOL_EXISTS');
+    expect((await request('/pools', undefined, { name: 'SMALL POOL', codes: codes.slice(0, 2) }, headers)).body.code).toBe('GUESS_POOL_EXISTS');
     expect((await request('/rooms', undefined, { name: 'Unknown pool', playerId: 'Host', poolId: 999999 })).status).toBe(404);
     const host = await create('Host', 0);
     const path = `/rooms/${host.room.roomId}`;
@@ -262,5 +280,27 @@ describe('Guess the Card HTTP game', () => {
     expect(aCorrect.phase).toBe('between_rounds');
     expect(await stats(migrated.poolId, aCode)).toEqual({ appearances: 2, averageGuessTurns: 2.5 });
     expect(await stats(migrated.poolId, bCode)).toEqual({ appearances: 2, averageGuessTurns: 1 });
+  });
+
+  it('seeds the curated pool once its whole catalog is available', async () => {
+    const service = app.get(GuessPoolsService);
+    const catalog = jest.spyOn(app.get(CardsService), 'poolCodes');
+    const snapshot = [...DEFAULT_GUESS_POOL_CODES];
+    expect(snapshot).toEqual([...new Set(snapshot)].sort((a, b) => a - b));
+    expect(snapshot.every((code) => code > 0 && code < 100_000_000)).toBe(true);
+    try {
+      catalog.mockReturnValue(snapshot.slice(1));
+      service.onModuleInit();
+      expect(service.list().some((pool) => pool.isDefault)).toBe(false);
+      catalog.mockReturnValue(snapshot);
+      service.onModuleInit();
+      service.onModuleInit();
+      const defaults = (await request<GuessPoolSummary[]>('/pools')).body.filter((pool) => pool.isDefault);
+      expect(defaults).toHaveLength(1);
+      expect(defaults[0].cardCount).toBe(snapshot.length);
+      expect(service.get(defaults[0].poolId).codes).toEqual(snapshot);
+    } finally {
+      catalog.mockRestore();
+    }
   });
 });
