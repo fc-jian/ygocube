@@ -2,11 +2,21 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException, 
 import type { GuessCardPage, GuessCardStats, GuessPoolCreateRequest, GuessPoolSummary } from '@ygocube/shared';
 import { CardsService } from '../cards/cards.service';
 import { getDb } from '../db';
-import { DEFAULT_GUESS_POOL_CODES } from './default-pool-codes';
+import { DEFAULT_GUESS_POOL_CODES as ORIGINAL_GUESS_POOL_CODES } from './default-pool-codes';
+import { SHORTLIST_GUESS_POOL_CODES } from './shortlist-pool-codes';
 
 const PAGE_SIZE = 24;
-const DEFAULT_POOL_KEY = 'builtin:familiar-v1';
-const DEFAULT_POOL_NAME = '常见卡牌';
+const ORIGINAL_POOL_KEY = 'builtin:familiar-v1';
+const SHORTLIST_POOL_KEY = 'builtin:familiar-v2';
+const BUILTIN_POOLS = [
+  { key: ORIGINAL_POOL_KEY, name: '常见卡牌', codes: ORIGINAL_GUESS_POOL_CODES },
+  { key: SHORTLIST_POOL_KEY, name: '常见卡牌精简版', codes: SHORTLIST_GUESS_POOL_CODES },
+];
+const DEFAULT_POOL_ID = `COALESCE(
+  (SELECT id FROM guess_pools WHERE name_key = '${SHORTLIST_POOL_KEY}'),
+  (SELECT id FROM guess_pools WHERE name_key = '${ORIGINAL_POOL_KEY}'),
+  -1
+)`;
 
 interface Pool {
   poolId: number;
@@ -21,31 +31,39 @@ export class GuessPoolsService implements OnModuleInit {
 
   onModuleInit(): void {
     const db = getDb();
-    if (db.prepare('SELECT 1 FROM guess_pools WHERE name_key = ?').get(DEFAULT_POOL_KEY)) return;
+    const exists = db.prepare('SELECT 1 FROM guess_pools WHERE name_key = ?');
+    const pending = BUILTIN_POOLS.filter((pool) => !exists.get(pool.key));
+    if (!pending.length) return;
     const eligible = new Set(this.cards.poolCodes());
-    // Install the entire curated snapshot, or wait until its source catalog is available.
-    if (!DEFAULT_GUESS_POOL_CODES.every((code) => eligible.has(code))) return;
-    db.prepare(`
+    const insert = db.prepare(`
       INSERT INTO guess_pools (name, name_key, codes_json) VALUES (?, ?, ?)
       ON CONFLICT (name_key) DO NOTHING
-    `).run(DEFAULT_POOL_NAME, DEFAULT_POOL_KEY, JSON.stringify(DEFAULT_GUESS_POOL_CODES));
+    `);
+    db.transaction(() => {
+      for (const pool of pending) {
+        if (pool.codes.every((code) => eligible.has(code))) {
+          insert.run(pool.name, pool.key, JSON.stringify(pool.codes));
+        }
+      }
+    }).immediate();
   }
 
   list(): GuessPoolSummary[] {
     const rows = getDb().prepare(`
       SELECT id AS poolId, name, COALESCE(json_array_length(codes_json), ?) AS cardCount,
-        name_key = ? AS isDefault
+        id = ${DEFAULT_POOL_ID} AS isDefault
       FROM guess_pools ORDER BY isDefault DESC, id
-    `).all(this.cards.poolCodes().length, DEFAULT_POOL_KEY) as (Omit<GuessPoolSummary, 'isDefault'> & { isDefault: number })[];
+    `).all(this.cards.poolCodes().length) as (Omit<GuessPoolSummary, 'isDefault'> & { isDefault: number })[];
     return rows.map((row) => ({ ...row, isDefault: row.isDefault === 1 }));
   }
 
   get(poolId: number): Pool {
-    const row = getDb().prepare('SELECT name, name_key, codes_json FROM guess_pools WHERE id = ?')
-      .get(poolId) as { name: string; name_key: string; codes_json: string | null } | undefined;
+    const row = getDb().prepare(`
+      SELECT name, codes_json, id = ${DEFAULT_POOL_ID} AS isDefault FROM guess_pools WHERE id = ?
+    `).get(poolId) as { name: string; codes_json: string | null; isDefault: number } | undefined;
     if (!row) throw new NotFoundException({ code: 'GUESS_POOL_NOT_FOUND' });
     return {
-      poolId, name: row.name, isDefault: row.name_key === DEFAULT_POOL_KEY,
+      poolId, name: row.name, isDefault: row.isDefault === 1,
       codes: row.codes_json === null ? null : JSON.parse(row.codes_json) as number[],
     };
   }
@@ -56,7 +74,7 @@ export class GuessPoolsService implements OnModuleInit {
   }
 
   create({ name, codes }: GuessPoolCreateRequest): GuessPoolSummary {
-    if (name === DEFAULT_POOL_NAME) throw new ConflictException({ code: 'GUESS_POOL_EXISTS' });
+    if (BUILTIN_POOLS.some((pool) => pool.name === name)) throw new ConflictException({ code: 'GUESS_POOL_EXISTS' });
     const eligible = new Set(this.cards.poolCodes());
     if (codes.some((code) => !eligible.has(code))) throw new BadRequestException({ code: 'GUESS_INVALID_POOL' });
     return this.insert(name, `name:${name.toLowerCase()}`, codes);

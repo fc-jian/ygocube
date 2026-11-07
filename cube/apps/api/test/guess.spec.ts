@@ -13,6 +13,7 @@ import { GuessController } from '../src/guess/guess.controller';
 import { GuessPoolsService } from '../src/guess/guess-pools.service';
 import { GuessService } from '../src/guess/guess.service';
 import { DEFAULT_GUESS_POOL_CODES } from '../src/guess/default-pool-codes';
+import { SHORTLIST_GUESS_POOL_CODES } from '../src/guess/shortlist-pool-codes';
 import { useTestDb } from './helpers';
 
 describe('Guess the Card HTTP game', () => {
@@ -92,6 +93,9 @@ describe('Guess the Card HTTP game', () => {
     }
     expect((await request('/pools', superToken, body)).status).toBe(401);
     expect((await createPool(body.name, body.codes)).isDefault).toBe(false);
+    for (const name of ['常见卡牌', '常见卡牌精简版']) {
+      expect((await request('/pools', undefined, { ...body, name }, { 'X-Admin-Token': superToken })).status).toBe(409);
+    }
   });
 
   it('keeps deals private, records completed rounds and lets the host settle the game', async () => {
@@ -282,23 +286,37 @@ describe('Guess the Card HTTP game', () => {
     expect(await stats(migrated.poolId, bCode)).toEqual({ appearances: 2, averageGuessTurns: 1 });
   });
 
-  it('seeds the curated pool once its whole catalog is available', async () => {
+  it('promotes the complete shortlist while preserving the installed original pool', async () => {
     const service = app.get(GuessPoolsService);
     const catalog = jest.spyOn(app.get(CardsService), 'poolCodes');
-    const snapshot = [...DEFAULT_GUESS_POOL_CODES];
-    expect(snapshot).toEqual([...new Set(snapshot)].sort((a, b) => a - b));
-    expect(snapshot.every((code) => code > 0 && code < 100_000_000)).toBe(true);
+    const original = [...DEFAULT_GUESS_POOL_CODES];
+    const shortlist = [...SHORTLIST_GUESS_POOL_CODES];
+    const originalCodes = new Set(original);
+    expect(shortlist).toHaveLength(2145);
+    expect(shortlist).toEqual([...new Set(shortlist)].sort((a, b) => a - b));
+    expect(shortlist.every((code) => code > 0 && code < 100_000_000 && originalCodes.has(code))).toBe(true);
     try {
-      catalog.mockReturnValue(snapshot.slice(1));
+      catalog.mockReturnValue(original.filter((code) => code !== shortlist[0]));
       service.onModuleInit();
       expect(service.list().some((pool) => pool.isDefault)).toBe(false);
-      catalog.mockReturnValue(snapshot);
+      const savedOriginal = getDb().prepare('INSERT INTO guess_pools (name, name_key, codes_json) VALUES (?, ?, ?)')
+        .run('常见卡牌', 'builtin:familiar-v1', JSON.stringify(original));
+      const originalId = Number(savedOriginal.lastInsertRowid);
+      expect((await request<GuessPoolSummary>(`/pools/${originalId}`)).body.isDefault).toBe(true);
+      service.onModuleInit();
+      expect(service.list().filter((pool) => pool.isDefault).map((pool) => pool.poolId)).toEqual([originalId]);
+
+      catalog.mockReturnValue(original);
       service.onModuleInit();
       service.onModuleInit();
-      const defaults = (await request<GuessPoolSummary[]>('/pools')).body.filter((pool) => pool.isDefault);
-      expect(defaults).toHaveLength(1);
-      expect(defaults[0].cardCount).toBe(snapshot.length);
-      expect(service.get(defaults[0].poolId).codes).toEqual(snapshot);
+      const pools = (await request<GuessPoolSummary[]>('/pools')).body;
+      const [selected] = pools;
+      expect(pools.filter((pool) => pool.isDefault)).toEqual([selected]);
+      expect(selected).toMatchObject({ name: '常见卡牌精简版', cardCount: shortlist.length, isDefault: true });
+      expect(selected.poolId).not.toBe(originalId);
+      expect((await request<GuessPoolSummary>(`/pools/${selected.poolId}`)).body).toEqual(selected);
+      expect(service.get(selected.poolId).codes).toEqual(shortlist);
+      expect(service.get(originalId)).toEqual({ poolId: originalId, name: '常见卡牌', codes: original, isDefault: false });
     } finally {
       catalog.mockRestore();
     }

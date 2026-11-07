@@ -209,7 +209,7 @@ deadline 和冻结剩余值。
 | --- | --- |
 | `GET /rooms` | 公开列出最近最多 50 个可加入的等候房间，返回 `roomId/name/playerCount/maxPlayers/poolId/poolName` |
 | `GET /cards?q=&page=` | 公开搜索共享卡库，用于配置卡池。每页 24 条，`page` 从 0 开始，空查询按编号浏览，返回 `{cards,hasMore}` |
-| `GET /pools` / `GET /pools/:poolId` | 公开列出卡池或读取单个卡池的 `{poolId,name,cardCount,isDefault}`。内置完整卡库的 ID 为 0。建房表单默认选中已安装的常见卡牌池 |
+| `GET /pools` / `GET /pools/:poolId` | 公开列出卡池或读取单个卡池的 `{poolId,name,cardCount,isDefault}`。内置完整卡库的 ID 为 0。建房表单优先选中常见卡牌精简版，其次是已安装的原常见卡牌池，再回退至完整卡库 |
 | `POST /pools` | 仅接受 Cube 超级管理员的 `X-Admin-Token`。请求为 `{name,codes}`，名称唯一，须有 2–20000 个不重复有效编号。返回卡池摘要。卡池创建后固定成员，供多个房间使用 |
 | `GET /pools/:poolId/cards?q=&page=` | 公开查看卡池及统计，沿用搜索与分页规则。每张牌附 `stats: {appearances,averageGuessTurns}` |
 | `POST /rooms` | `{name,playerId,poolId}`。选择已保存的卡池或内置完整卡库。返回 `{token,room}` |
@@ -231,7 +231,8 @@ deadline 和冻结剩余值。
   包括投降的牌。平均猜中回合按持牌者第几次轮到自己时猜中计算，仅纳入猜中记录。
   尚无猜中记录时 `averageGuessTurns` 为 `null`。统计按卡池和 exact code 分开累计。
 - 常见卡牌池从已发行的卡库候选中建立。九位编号和衍生物排除。仅按 YGOPro 异画关系取组内
-  最小的有效编号，规则同名卡保持独立。安装时校验完整成员，已有房间和卡池统计仍按原卡池 ID 保存。
+  最小的有效编号，规则同名卡保持独立。原池与精简版分别安装并校验各自的完整成员，按独立 ID
+  累计统计。原池成员、ID 及已有房间统计保留。
 - 旧版房间的完整卡库映射到内置卡池，临时卡池保存为独立卡池。从旧房间事件补算已完成轮次，
   并恢复正在进行的回合计数。已经结算的房间仍可查看结果。
 - `400 BAD_PAYLOAD/GUESS_INVALID_POOL/GUESS_CARD_NOT_IN_POOL`，`401 GUESS_AUTH_REQUIRED`，

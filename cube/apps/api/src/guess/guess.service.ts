@@ -141,10 +141,10 @@ export class GuessService implements OnModuleInit {
 
   create(input: GuessCreateRequest): GuessSession {
     const db = getDb();
-    const pool = this.pools.get(input.poolId);
-    const poolCount = this.pools.availableCodes(pool.codes).length;
-    if (poolCount < 2) throw new BadRequestException({ code: 'GUESS_INVALID_POOL' });
     return db.transaction(() => {
+      const pool = this.pools.get(input.poolId);
+      const poolCount = this.pools.availableCodes(pool.codes).length;
+      if (poolCount < 2) throw new BadRequestException({ code: 'GUESS_INVALID_POOL' });
       const exists = db.prepare('SELECT 1 FROM guess_rooms WHERE room_id = ?');
       let roomId = randomBytes(4).toString('hex').toUpperCase();
       while (exists.get(roomId)) roomId = randomBytes(4).toString('hex').toUpperCase();
