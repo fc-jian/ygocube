@@ -28,3 +28,28 @@
 ## 复核
 
 `scripts/generate-guess-default-pool.py` 从冻结的数据快照生成排序后的精确编号及三份审计文件。原始快照、每个系列的入选情况 `fields.json`、每张候选卡的证据 `cards.jsonl`、来源摘要 `summary.json` 位于本地 `.card-resource-sync/guess-curation-20261107/`。API 在完整卡库可用时初始化一次持久化默认池，发布后可从游戏的卡池目录浏览。
+
+## Aly 发布与验收
+
+| 项目 | 发布值 |
+| --- | --- |
+| 源码 | `codex/card-resource-sync-20261107` · `64e2c376908c8bbc1494a0c06125c478646f1c61` |
+| 资源发布 ID（UTC） | `20261107-144008-64e2c37` |
+| Cube API/Web 发布 ID | `20261107-guess-64e2c37` |
+| 独立 Duel current | `card-sync-20261107-144008-64e2c37` |
+| Cube Web Build ID | `CfHMigPZXpH2UhHyzm68v` |
+| 资源包 SHA256 | `1358198d2c07eee69cbb2b950fad52fee0c8732e682042ec9267bd4c91a460be` |
+| 应用包 SHA256 | `febc97518fd47f376b119e029505307d8eb5f19f3b295d5b1f3be4f666aad482` |
+| 远端资源清单 SHA256 | `dd2f1c3674af4411c4dc90c52cda5a3b75d63a3736ff3af0305907087658d735` |
+| 远端默认池 ID / 编号数组 SHA256 | `2` / `2d639b3fa1a4696fa68f4689d77e410cc9f5a29d07ccda0e174f2174afa4caad` |
+
+上游 YGOPro `176fc60c9bb2d3ee1d984a743647629b1503d4ca` 已包含在 Cube 的 `db1b431ff20d7aac82bda27d027c821571d7723c` 中。script 为 `b83db1cc3f512d3bec2faafb9ecf199143332be1`，ocgcore 为 `3209cd866a55e8501a0ed358d3064d9ae0ae6b30`。主库已是当前上游版本，SHA256 为 `04b1197239517ab50fb49db8450f83e920a81f5d82a83bdc8f9c7f7ed1aa8400`。本次复用已经通过实战与依赖检查的 Cube Linux 宿主，SHA256 为 `0d35af4959ef19311480eac776b1e4e1ef0894dc53e4e4efbc396a1dc40cb5fb`。
+
+官方 Super Pre 包的 SHA256 为 `c8fea4a07bc027093937ef8631936cc695d578ab817d1566d5ae055582c733cb`。与 Aly 上一代清单相比，先行列表从 142 张增至 151 张，服务端扩展文件新增 9 个、更新 73 个。AVIF 新增 9 张，按有效卡库清单移除 37 张旧图，两实例共用的有效 AVIF 集合为 15,168 张。卡名映射新增 123 条、更新 77 条。 [官方先行列表](https://cdn02.moecube.com:444/ygopro-super-pre/data/test-release.json)。
+
+- 发布前两次检查均为 0 个对战宿主、0 条游戏 TCP 连接和 0 轮进行中的猜牌。资源事务和 Cube 应用发布共保存三份数据库备份，完整性与外键检查全部通过。
+- Windows 和 Linux 的应用测试各通过 299 项 API、68 项 Web、41 项协议测试。Linux 完成八人 Cube 模拟赛、先行卡 BO3、重连、换备和 `100268005` 发动检索。资源发布回滚夹具补齐了 Cube 单独发布分支的覆盖。
+- 公网检查通过 30 个静态文件的状态和 MIME、两套 API 的 604 次先行卡编号及完整卡名搜索、302 次 AVIF 类型及摘要检查。Aly 的 Cube 建房与卡组协议探针通过 20 项，验收结束后七个服务均为 active，宿主和游戏 TCP 连接计数均为 0。
+- 默认池已在 [猜牌大厅](https://39.96.220.91/games/guess) 预选。公网验收房间 `F59F6387` 完成三人一轮，验证隐藏自身卡、猜错后换人、3/2/0 分、投降揭牌、结算和统计落库。该验收轮计入默认池统计。无凭据和错误凭据均返回 401，实际 Cube super token 在 Aly 回环请求通过鉴权并进入参数校验，Windows 使用测试 token 完成了真实建池。
+
+实际服务器清单已通过摘要校验并刷新本地基线。旧基线、公网验收日志和应用包位于 `.card-resource-sync/guess-release-20261107/`。两实例的 `backups/card-sync-20261107-144008-64e2c37/` 保存资源回滚点，Cube 的 `backups/20261107-guess-64e2c37/` 保存应用回滚点。验收后已清理远端上传归档和临时探针。工作区另有独立的未跟踪草稿 `dev_docs/16-srvpro-modern-ts-rewrite.md`。
