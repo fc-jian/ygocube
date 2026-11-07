@@ -3,7 +3,8 @@ import {
 } from '@nestjs/common';
 import { randomBytes, randomInt } from 'node:crypto';
 import type {
-  GuessActionRequest, GuessCardPage, GuessCreateRequest, GuessMove, GuessRoomSummary, GuessRoomView, GuessSession,
+  GuessActionRequest, GuessCardKind, GuessCardPage, GuessCardRef, GuessCreateRequest, GuessMove, GuessRoomSummary,
+  GuessRoomView, GuessSession,
 } from '@ygocube/shared';
 import { safeHashEqual, sha256 } from '../auth/auth.guard';
 import { CardsService, TYPE_TOKEN } from '../cards/cards.service';
@@ -30,6 +31,7 @@ interface Round {
   seats: Seat[];
   currentPlayerId: string | null;
   lastMove: GuessMove | null;
+  selectedCode?: number;
 }
 
 interface Room {
@@ -54,6 +56,7 @@ type LegacyEvent =
   | { action: 'start' | 'next'; round: LegacyRound }
   | { action: 'guess' | 'surrender'; playerId: string; move: GuessMove }
   | { action: 'create' | 'join' | 'leave' };
+type TurnCommand = Extract<GuessActionRequest, { action: 'select' | 'guess' | 'skip' | 'host-skip' | 'surrender' }>;
 
 interface RoomRow {
   state_json: string;
@@ -82,6 +85,17 @@ function summary(room: Room): GuessRoomSummary {
     poolId: room.poolId,
     poolName: room.poolName,
   };
+}
+
+function cardKind(type = 0): GuessCardKind | null {
+  if (type & 0x1) return 'monster';
+  if (type & 0x2) return 'spell';
+  if (type & 0x4) return 'trap';
+  return null;
+}
+
+function cardRef({ code, name }: GuessCardRef): GuessCardRef {
+  return { code, name };
 }
 
 @Injectable()
@@ -216,8 +230,8 @@ export class GuessService implements OnModuleInit {
           this.write(room, { action: command.action, playerId, round: room.round });
         }
       } else {
-        const move = this.play(room, player, command.action === 'guess' ? command.code : null);
-        this.write(room, { ...command, playerId, move });
+        const move = this.play(room, player, command);
+        this.write(room, { ...command, playerId, ...(move && { move }) });
         const round = room.round!;
         if (round.currentPlayerId === null) this.pools.recordRound(room.poolId, room.roomId, round.number, round.seats);
       }
@@ -261,36 +275,60 @@ export class GuessService implements OnModuleInit {
     room.phase = 'playing';
   }
 
-  private play(room: Room, player: Player, code: number | null): GuessMove {
+  private poolCard(room: Room, code: number) {
+    const card = this.cards.get(code);
+    const poolCodes = this.pools.get(room.poolId).codes;
+    if (!card || (card.type & TYPE_TOKEN) || (poolCodes && !poolCodes.includes(code))) {
+      throw new BadRequestException({ code: 'GUESS_CARD_NOT_IN_POOL' });
+    }
+    return card;
+  }
+
+  private play(room: Room, player: Player, command: TurnCommand): GuessMove | null {
     const round = room.round;
     if (room.phase !== 'playing' || !round) throw new ConflictException({ code: 'GUESS_WRONG_PHASE' });
-    if (round.currentPlayerId !== player.playerId) throw new ConflictException({ code: 'GUESS_NOT_YOUR_TURN' });
-    const remaining = round.seats.filter((seat) => seat.points === null).length;
-    if (code === null) {
-      if (remaining !== 1) throw new ConflictException({ code: 'GUESS_SURRENDER_TOO_EARLY' });
-    } else {
-      const card = this.cards.get(code);
-      const poolCodes = this.pools.get(room.poolId).codes;
-      if (!card || (card.type & TYPE_TOKEN) || (poolCodes && !poolCodes.includes(code))) {
-        throw new BadRequestException({ code: 'GUESS_CARD_NOT_IN_POOL' });
-      }
+    const hostSkip = command.action === 'host-skip';
+    if (hostSkip) {
+      if (room.players[0] !== player) throw new ForbiddenException({ code: 'GUESS_HOST_REQUIRED' });
+    } else if (round.currentPlayerId !== player.playerId) {
+      throw new ConflictException({ code: 'GUESS_NOT_YOUR_TURN' });
     }
-    const index = round.seats.findIndex((seat) => seat.playerId === player.playerId);
+    if (command.action === 'select') {
+      round.selectedCode = this.poolCard(room, command.code).code;
+      return null;
+    }
+
+    const index = round.seats.findIndex((seat) => seat.playerId === round.currentPlayerId);
     const seat = round.seats[index];
-    if (code !== null) seat.attempts++;
-    seat.points = code === null ? 0 : code === seat.code ? remaining : null;
-    player.score += seat.points ?? 0;
-    round.lastMove = {
-      playerId: player.playerId,
-      points: seat.points,
-      outcome: code === null ? 'surrendered' : seat.points === null ? 'incorrect' : 'correct',
-    };
+    const remaining = round.seats.filter((seat) => seat.points === null).length;
+    const move: GuessMove = { playerId: seat.playerId, points: null, outcome: 'skipped' };
+    if (command.action === 'surrender') {
+      if (remaining !== 1) throw new ConflictException({ code: 'GUESS_SURRENDER_TOO_EARLY' });
+      move.points = 0;
+      move.outcome = 'surrendered';
+    } else if (command.action === 'guess') {
+      const card = this.poolCard(room, command.code);
+      move.card = cardRef(card);
+      if (card.code === seat.code) {
+        move.points = remaining;
+        move.outcome = 'correct';
+        player.score += remaining;
+      } else {
+        move.outcome = 'incorrect';
+      }
+    } else if (hostSkip) {
+      move.skippedBy = player.playerId;
+    }
+    if (command.action !== 'surrender') seat.attempts++;
+    seat.points = move.points;
+    round.lastMove = move;
+    delete round.selectedCode;
     const clockwise = round.seats.slice(index + 1).concat(round.seats.slice(0, index + 1));
     round.currentPlayerId = clockwise.find((candidate) => candidate.points === null)?.playerId ?? null;
     if (round.currentPlayerId === null) {
       room.phase = 'between_rounds';
     }
-    return round.lastMove;
+    return move;
   }
 
   private write(room: Room, event: object): void {
@@ -306,16 +344,37 @@ export class GuessService implements OnModuleInit {
     `).run(room.roomId, room.players.length ? room.phase : 'closed', JSON.stringify(room), now);
   }
 
+  private guessCodes(room: Room, viewerId: string): number[] {
+    const rows = getDb().prepare(`
+      SELECT json_extract(event_json, '$.code') AS code FROM guess_room_events
+      WHERE room_id = @roomId AND version <= @version AND version > COALESCE((
+        SELECT version FROM guess_room_events
+        WHERE room_id = @roomId AND version <= @version
+          AND json_extract(event_json, '$.action') IN ('start', 'next')
+        ORDER BY version DESC LIMIT 1
+      ), 0)
+        AND json_extract(event_json, '$.action') = 'guess'
+        AND json_extract(event_json, '$.playerId') = @viewerId
+        AND json_type(event_json, '$.code') = 'integer'
+      GROUP BY code ORDER BY MIN(version)
+    `).all({ roomId: room.roomId, version: room.version, viewerId }) as { code: number }[];
+    return rows.map(({ code }) => code);
+  }
+
   private view(room: Room, viewerId: string): GuessRoomView {
     const round = room.round;
-    const visibleSeats = round?.seats.filter((seat) => seat.playerId !== viewerId || seat.points !== null) ?? [];
-    const cards = new Map(this.cards.getMany(visibleSeats.map((seat) => seat.code)).map((card) => [card.code, card]));
+    const ownSeat = round?.seats.find((seat) => seat.playerId === viewerId);
+    const guesses = round ? this.guessCodes(room, viewerId) : [];
+    const codes = [...(round?.seats.map((seat) => seat.code) ?? []), ...guesses];
+    if (round?.selectedCode !== undefined) codes.push(round.selectedCode);
+    const cards = new Map(this.cards.getMany(codes).map((card) => [card.code, card]));
+    const currentGuess = round?.selectedCode === undefined ? undefined : cards.get(round.selectedCode);
     const players = round
       ? round.seats.map((seat) => ({
         playerId: seat.playerId,
         score: room.players.find((player) => player.playerId === seat.playerId)!.score,
         roundPoints: seat.points,
-        card: visibleSeats.includes(seat) ? cards.get(seat.code) ?? null : null,
+        card: seat === ownSeat && seat.points === null ? null : cards.get(seat.code) ?? null,
       }))
       : room.players.map(({ playerId, score }) => ({ playerId, score, roundPoints: null, card: null }));
     return {
@@ -326,7 +385,10 @@ export class GuessService implements OnModuleInit {
       poolCount: room.poolCount,
       hostId: room.players[0].playerId,
       viewerId,
+      viewerCardKind: cardKind(ownSeat && cards.get(ownSeat.code)?.type),
+      viewerGuesses: guesses.map((code) => ({ code, name: cards.get(code)?.name ?? String(code).padStart(8, '0') })),
       currentPlayerId: round?.currentPlayerId ?? null,
+      currentGuess: currentGuess ? cardRef(currentGuess) : null,
       players,
       lastMove: round?.lastMove ?? null,
     };

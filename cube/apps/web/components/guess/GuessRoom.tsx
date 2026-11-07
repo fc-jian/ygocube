@@ -3,7 +3,7 @@
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { FormEvent, useCallback, useEffect, useState } from 'react';
-import type { CardInfo, GuessActionRequest, GuessRoomView, GuessSession } from '@ygocube/shared';
+import type { GuessActionRequest, GuessRoomView, GuessSession } from '@ygocube/shared';
 import { CardWithTooltip } from '@/components/CardImage';
 import { closeCardPreview } from '@/components/CardPreview';
 import { ConfirmModal } from '@/components/ConfirmModal';
@@ -24,15 +24,19 @@ function GuessTable({ room, text }: { room: GuessRoomView; text: GuessText }) {
       <div className="guess-table-center">
         <p className="guess-kicker">{fillText(text.round, { current: room.round })}</p>
         <p className="guess-turn" aria-live="polite">{turn}</p>
-        {last && <p className="guess-muted" aria-live="polite">
-          {fillText(text[last.outcome], { player: last.playerId, points: last.points ?? 0 })}
-        </p>}
+        {last && <div className="guess-muted" aria-live="polite">
+          <p>{last.skippedBy
+            ? fillText(text.skippedByHost, { player: last.playerId, host: last.skippedBy })
+            : fillText(text[last.outcome], { player: last.playerId, points: last.points ?? 0 })}</p>
+          {last.card && <p className="truncate" title={last.card.name}>{last.card.name}</p>}
+        </div>}
       </div>
       <ul className="guess-seats">
         {room.players.map((player, index) => {
           const angle = Math.PI * (2 * index / room.players.length - 0.5);
           const current = player.playerId === room.currentPlayerId;
           const self = player.playerId === room.viewerId;
+          const kind = self && room.viewerCardKind ? text.cardKinds[room.viewerCardKind] : null;
           return (
             <li key={player.playerId} className="guess-seat" data-guess-player={player.playerId}
               aria-current={current ? 'true' : undefined}
@@ -40,7 +44,10 @@ function GuessTable({ room, text }: { room: GuessRoomView; text: GuessText }) {
               {player.card ? (
                 <CardWithTooltip code={player.card.code} card={player.card} className="guess-seat-card" />
               ) : (
-                <div className="guess-seat-card guess-card-back" role="img" aria-label={text.unknown}><span aria-hidden="true">?</span></div>
+                <div className="guess-seat-card guess-card-back" role="img" aria-label={kind ? `${text.unknown} · ${kind}` : text.unknown}>
+                  <span aria-hidden="true">?</span>
+                  {kind && <span className="guess-card-kind" aria-hidden="true">{kind}</span>}
+                </div>
               )}
               <span className="guess-seat-name" title={player.playerId}>{player.playerId}</span>
               <span className="guess-seat-badge">
@@ -79,6 +86,19 @@ function GuessScores({ room, text }: { room: GuessRoomView; text: GuessText }) {
   );
 }
 
+function GuessHistory({ guesses, text }: { guesses: GuessRoomView['viewerGuesses']; text: GuessText }) {
+  return (
+    <details className="guess-history" open>
+      <summary>{fillText(text.guessedCards, { count: guesses.length })}</summary>
+      {guesses.length > 0 && <ul>
+        {guesses.map(({ code, name }) => (
+          <li key={code}><span>{name}</span><small className="guess-muted font-mono">{String(code).padStart(8, '0')}</small></li>
+        ))}
+      </ul>}
+    </details>
+  );
+}
+
 export function GuessRoom({ roomId }: { roomId: string }) {
   const router = useRouter();
   const { text, language, changeLanguage } = useGuessLanguage();
@@ -90,7 +110,6 @@ export function GuessRoom({ roomId }: { roomId: string }) {
   const [connectionError, setConnectionError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [selected, setSelected] = useState<CardInfo | null>(null);
   const [confirm, setConfirm] = useState<'surrender' | 'finish' | null>(null);
 
   useEffect(() => { setToken(localStorage.getItem(sessionKey(roomId))); }, [roomId]);
@@ -115,10 +134,7 @@ export function GuessRoom({ roomId }: { roomId: string }) {
   useGuessPolling(token && room?.phase !== 'finished' ? refresh : null, 1500);
 
   const round = room?.round;
-  useEffect(() => {
-    setSelected(null);
-    return () => closeCardPreview();
-  }, [round]);
+  useEffect(() => () => closeCardPreview(), [round]);
 
   async function join(event: FormEvent) {
     event.preventDefault();
@@ -150,7 +166,6 @@ export function GuessRoom({ roomId }: { roomId: string }) {
         router.replace(GUESS_PATH);
       } else if (state) {
         setRoom((previous) => previous && previous.version > state.version ? previous : state);
-        setSelected(null);
       }
     } catch (err) {
       setError(err);
@@ -170,7 +185,9 @@ export function GuessRoom({ roomId }: { roomId: string }) {
   }
 
   const host = room?.hostId === room?.viewerId;
-  const canGuess = room?.phase === 'playing' && room.currentPlayerId === room.viewerId;
+  const playing = room?.phase === 'playing';
+  const canGuess = playing && room.currentPlayerId === room.viewerId;
+  const selected = canGuess ? room.currentGuess : null;
   const canSurrender = canGuess && room.players.filter((player) => player.roundPoints === null).length === 1;
   const canFinish = host && room?.phase === 'between_rounds';
   return (
@@ -227,23 +244,30 @@ export function GuessRoom({ roomId }: { roomId: string }) {
       {token && room && room.phase !== 'lobby' && (
         <div className="guess-game">
           <GuessTable room={room} text={text} />
-          {room.phase === 'playing' && (
-            <section className="guess-panel guess-play">
+          <section className="guess-panel guess-play">
+            {playing && <>
               <h2>{text.pool} <span className="guess-muted">({room.poolCount.toLocaleString(language)})</span></h2>
-              <p className="guess-muted">{text.guessHelp}</p>
+              {!canGuess && room.currentGuess && room.currentPlayerId && <p className="guess-live-guess" role="status">
+                {fillText(text.liveGuess, { player: room.currentPlayerId, card: room.currentGuess.name })}
+              </p>}
               {canGuess && <div className="guess-actions">
                 <p className={selected ? 'font-semibold' : 'guess-muted'}>{selected?.name ?? text.pickFirst}</p>
-                <button type="button" className="guess-primary" disabled={!selected || busy}
-                  onClick={() => selected && void act({ action: 'guess', version: room.version, code: selected.code })}>{text.guess}</button>
-                {canSurrender && <button type="button" className="guess-secondary" disabled={busy}
-                  onClick={() => setConfirm('surrender')}>{text.surrender}</button>}
+                <div className="flex flex-wrap gap-2">
+                  <button type="button" className="guess-primary" disabled={!selected || busy}
+                    onClick={() => selected && void act({ action: 'guess', version: room.version, code: selected.code })}>{text.guess}</button>
+                  <button type="button" className="guess-secondary" disabled={busy}
+                    onClick={() => void act({ action: 'skip', version: room.version })}>{text.skip}</button>
+                  {canSurrender && <button type="button" className="guess-secondary" disabled={busy}
+                    onClick={() => setConfirm('surrender')}>{text.surrender}</button>}
+                </div>
+                <p className="guess-muted">{text.guessHelp}</p>
               </div>}
-              <GuessCards key={room.round} text={text} path={`${roomPath}/cards`} token={token} mode="select"
-                selected={new Set(selected ? [selected.code] : [])} enabled={canGuess && !busy} choose={setSelected} />
-            </section>
-          )}
-          {room.phase === 'between_rounds' && (
-            <section className="guess-panel guess-play">
+              {host && !canGuess && <div>
+                <button type="button" className="guess-secondary" disabled={busy}
+                  onClick={() => void act({ action: 'host-skip', version: room.version })}>{text.hostSkip}</button>
+              </div>}
+            </>}
+            {room.phase === 'between_rounds' && <>
               <h2>{text.roundOver}</h2>
               {host ? (
                 <div className="flex flex-wrap gap-2">
@@ -253,8 +277,13 @@ export function GuessRoom({ roomId }: { roomId: string }) {
                     onClick={() => setConfirm('finish')}>{text.finish}</button>
                 </div>
               ) : <p className="guess-muted">{text.nextHelp}</p>}
-            </section>
-          )}
+            </>}
+            <GuessHistory guesses={room.viewerGuesses} text={text} />
+            {playing && <GuessCards key={room.round} text={text} path={`${roomPath}/cards`} token={token} mode="select"
+              selected={new Set(selected ? [selected.code] : [])} enabled={canGuess && !busy}
+              guessed={new Set(room.viewerGuesses.map(({ code }) => code))}
+              choose={(card) => void act({ action: 'select', version: room.version, code: card.code })} />}
+          </section>
           <GuessScores room={room} text={text} />
           <ConfirmModal open={confirm === 'surrender' && canSurrender || confirm === 'finish' && canFinish}
             title={confirm === 'finish' ? text.finish : text.surrender}

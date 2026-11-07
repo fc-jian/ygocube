@@ -134,10 +134,12 @@ export class GuessController {
     const input = payload(body, ['action', 'version', 'code']);
     const { action } = input;
     const version = integer(input.version, 1, Number.MAX_SAFE_INTEGER);
-    if (action === 'guess') {
+    if (action === 'select' || action === 'guess') {
       return this.guess.act(roomId, authorization, { action, version, code: integer(input.code, 1, Number.MAX_SAFE_INTEGER) });
     }
-    if (input.code !== undefined || (action !== 'start' && action !== 'next' && action !== 'finish' && action !== 'surrender' && action !== 'leave')) {
+    if (input.code !== undefined) badPayload();
+    if (action !== 'start' && action !== 'next' && action !== 'finish' && action !== 'leave'
+      && action !== 'surrender' && action !== 'skip' && action !== 'host-skip') {
       badPayload();
     }
     return this.guess.act(roomId, authorization, { action, version });

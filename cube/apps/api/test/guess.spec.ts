@@ -13,6 +13,7 @@ import { GuessController } from '../src/guess/guess.controller';
 import { GuessPoolsService } from '../src/guess/guess-pools.service';
 import { GuessService } from '../src/guess/guess.service';
 import { DEFAULT_GUESS_POOL_CODES } from '../src/guess/default-pool-codes';
+import { RECENCY_GUESS_POOL_CODES } from '../src/guess/recency-pool-codes';
 import { SHORTLIST_GUESS_POOL_CODES } from '../src/guess/shortlist-pool-codes';
 import { useTestDb } from './helpers';
 
@@ -31,6 +32,8 @@ describe('Guess the Card HTTP game', () => {
     const catalog = cards.poolCodes();
     codes = catalog.slice(0, 30);
     [outsideCode, tokenCode] = catalog.slice(30, 32);
+    const setType = getDb().prepare('UPDATE cards SET type = ? WHERE code = ?');
+    [0x21, 0x10002, 0x100004].forEach((type, index) => setType.run(type, codes[index]));
     getDb().prepare('UPDATE cards SET type = type | ? WHERE code = ?').run(TYPE_TOKEN, tokenCode);
     const module = await Test.createTestingModule({
       controllers: [GuessController],
@@ -93,7 +96,7 @@ describe('Guess the Card HTTP game', () => {
     }
     expect((await request('/pools', superToken, body)).status).toBe(401);
     expect((await createPool(body.name, body.codes)).isDefault).toBe(false);
-    for (const name of ['常见卡牌', '常见卡牌精简版']) {
+    for (const name of ['常见卡牌', '常见卡牌精简版', '常见卡牌近年权重版']) {
       expect((await request('/pools', undefined, { ...body, name }, { 'X-Admin-Token': superToken })).status).toBe(409);
     }
   });
@@ -144,11 +147,23 @@ describe('Guess the Card HTTP game', () => {
     const page = (await request<GuessCardPage>(`${path}/cards?q=测试用效果文本`, alice.token)).body;
     expect(page.cards.map((card) => card.code)).toEqual(codes.slice(0, 24));
     expect(page.cards.every((card) => !card.stats)).toBe(true);
-    expect(page.hasMore).toBe(true);
-    expect((await request<GuessCardPage>(`${path}/cards?page=1`, bob.token)).body.cards.map((card) => card.code)).toEqual(codes.slice(24));
-    expect((await request<GuessCardPage>(`${path}/cards?q=${outsideCode}`, bob.token)).body.cards).toEqual([]);
-    expect((await request<GuessCardPage>(`/cards?q=${outsideCode}`)).body.cards.map((card) => card.code)).toEqual([outsideCode]);
-    expect((await request<GuessCardPage>(`/cards?q=${tokenCode}`)).body.cards).toEqual([]);
+    expect(page).toMatchObject({ totalCount: 30, totalPages: 2, hasMore: true });
+    const nextPage = (await request<GuessCardPage>(`${path}/cards?q=测试用效果文本&page=1`, bob.token)).body;
+    expect(nextPage.cards.map((card) => card.code)).toEqual(codes.slice(24));
+    expect(nextPage).toMatchObject({ totalCount: 30, totalPages: 2, hasMore: false });
+    expect((await request<GuessCardPage>(`${path}/cards?q=测试用效果文本&page=2`, bob.token)).body)
+      .toEqual({ cards: [], totalCount: 30, totalPages: 2, hasMore: false });
+    expect((await request<GuessCardPage>(`${path}/cards?q=${outsideCode}`, bob.token)).body)
+      .toEqual({ cards: [], totalCount: 0, totalPages: 0, hasMore: false });
+    const unscoped = (await request<GuessCardPage>(`/cards?q=${outsideCode}`)).body;
+    expect(unscoped.cards.map((card) => card.code)).toEqual([outsideCode]);
+    expect(unscoped).toMatchObject({ totalCount: 1, totalPages: 1, hasMore: false });
+    expect((await request<GuessCardPage>(`/cards?q=${tokenCode}`)).body)
+      .toEqual({ cards: [], totalCount: 0, totalPages: 0, hasMore: false });
+    const browse = (await request<GuessCardPage>(`/pools/${pool.poolId}/cards?page=1`)).body;
+    expect(browse.cards.map((card) => card.code)).toEqual(codes.slice(24));
+    expect(browse).toMatchObject({ totalCount: 30, totalPages: 2, hasMore: false });
+    expect(browse.cards.every((card) => card.stats?.appearances === 0)).toBe(true);
 
     const first = start.body.currentPlayerId!;
     const second = order[(order.indexOf(first) + 1) % order.length];
@@ -170,14 +185,14 @@ describe('Guess the Card HTTP game', () => {
     expect(state.players.find((player) => player.playerId === first)?.card).toBeNull();
 
     state = (await action(path, secondToken, { action: 'guess', version: state.version, code: answers.get(second)! })).body;
-    expect(state.lastMove).toEqual({ playerId: second, outcome: 'correct', points: 3 });
+    expect(state.lastMove).toMatchObject({ playerId: second, outcome: 'correct', points: 3 });
     expect(state.players.find((player) => player.playerId === second)?.card?.code).toBe(answers.get(second));
     expect(await stats(pool.poolId, answers.get(second)!)).toEqual({ appearances: 0, averageGuessTurns: null });
     expect(state.currentPlayerId).toBe(third);
     state = (await action(path, thirdToken, { action: 'guess', version: state.version, code: answers.get(second)! })).body;
     expect(state.currentPlayerId).toBe(first);
     state = (await action(path, firstToken, { action: 'guess', version: state.version, code: answers.get(first)! })).body;
-    expect(state.lastMove).toEqual({ playerId: first, outcome: 'correct', points: 2 });
+    expect(state.lastMove).toMatchObject({ playerId: first, outcome: 'correct', points: 2 });
     expect(state.currentPlayerId).toBe(third);
     state = (await action(path, thirdToken, { action: 'surrender', version: state.version })).body;
     expect(state.phase).toBe('between_rounds');
@@ -211,6 +226,96 @@ describe('Guess the Card HTTP game', () => {
       .all(alice.room.roomId) as { version: number; event_json: string }[];
     expect(events.map((event) => event.version)).toEqual(Array.from({ length: state.version }, (_, index) => index + 1));
     expect(events.every((event) => !event.event_json.includes('token'))).toBe(true);
+  });
+
+  it('shows a private card kind and history, shares selections, and rotates skipped turns', async () => {
+    const pool = await createPool('Turn controls pool', codes.slice(0, 3));
+    const hostId = 'Host';
+    const host = await create(hostId, pool.poolId);
+    const path = `/rooms/${host.room.roomId}`;
+    const ids = [hostId, 'Guest A', 'Guest B'];
+    const sessions = new Map([[hostId, host.token]]);
+    for (const playerId of ids.slice(1)) {
+      const join = await request<GuessSession>(`${path}/join`, undefined, { playerId });
+      expect(join.status).toBe(201);
+      sessions.set(playerId, join.body.token);
+    }
+    async function read(id: string) {
+      const result = await request<GuessRoomView>(path, sessions.get(id));
+      expect(result.status).toBe(200);
+      return result.body;
+    }
+    let state = await read(hostId);
+    expect(state).toMatchObject({ viewerCardKind: null, viewerGuesses: [], currentGuess: null });
+    async function turn(id: string, command: GuessActionRequest['action'], code?: number) {
+      const result = await request<GuessRoomView>(`${path}/action`, sessions.get(id), { action: command, version: state.version, code });
+      expect(result.status).toBe(200);
+      state = result.body;
+    }
+    await turn(hostId, 'start');
+
+    const views = await Promise.all(ids.map(read));
+    const answers = new Map(views.flatMap(({ players }) => players.flatMap(({ playerId, card }) =>
+      card ? [[playerId, { code: card.code, name: card.name }] as const] : [])));
+    const kinds = ['monster', 'spell', 'trap'];
+    for (const view of views) {
+      const answer = answers.get(view.viewerId)!;
+      expect(view.viewerCardKind).toBe(kinds[codes.indexOf(answer.code)]);
+      expect(view.players.find((player) => player.playerId === view.viewerId)?.card).toBeNull();
+      expect(view.viewerGuesses).toEqual([]);
+    }
+
+    if (state.currentPlayerId === hostId) await turn(hostId, 'skip');
+    const target = state.currentPlayerId!;
+    const targetToken = sessions.get(target)!;
+    const wrong = answers.get(hostId)!;
+    const version = state.version;
+    expect((await action(path, targetToken, { action: 'host-skip', version })).status).toBe(403);
+    expect((await action(path, host.token, { action: 'skip', version })).status).toBe(409);
+    expect((await action(path, host.token, { action: 'select', version, code: wrong.code })).status).toBe(409);
+    expect((await action(path, targetToken, { action: 'select', version, code: outsideCode })).status).toBe(400);
+    await turn(target, 'select', wrong.code);
+    expect(state.currentPlayerId).toBe(target);
+    expect(state.viewerGuesses).toEqual([]);
+    expect((await read(hostId)).currentGuess).toEqual(wrong);
+    const selectedVersion = state.version;
+    await turn(hostId, 'host-skip');
+    expect(state.lastMove).toEqual({ playerId: target, outcome: 'skipped', points: null, skippedBy: hostId });
+    expect(state.currentGuess).toBeNull();
+    expect((await action(path, targetToken, { action: 'guess', version: selectedVersion, code: wrong.code })).status).toBe(409);
+
+    const selfSkipping = state.currentPlayerId!;
+    expect(selfSkipping).not.toBe(target);
+    await turn(selfSkipping, 'select', answers.get(selfSkipping)!.code);
+    await turn(selfSkipping, 'skip');
+    expect(state.lastMove).toEqual({ playerId: selfSkipping, outcome: 'skipped', points: null });
+    expect(state.currentGuess).toBeNull();
+    expect(state.players.every((player) => player.roundPoints === null && player.score === 0)).toBe(true);
+    const third = state.currentPlayerId!;
+    expect(third).not.toBe(target);
+    expect(third).not.toBe(selfSkipping);
+    await turn(third, 'guess', answers.get(third)!.code);
+    expect(state.currentPlayerId).toBe(target);
+    await turn(target, 'guess', wrong.code);
+    expect(state.lastMove).toEqual({ playerId: target, outcome: 'incorrect', points: null, card: wrong });
+    expect(state.viewerGuesses).toEqual([wrong]);
+    expect(state.players.find((player) => player.playerId === target)?.card).toBeNull();
+    expect((await read(selfSkipping)).viewerGuesses).toEqual([]);
+    await turn(selfSkipping, 'guess', answers.get(selfSkipping)!.code);
+    await turn(target, 'guess', wrong.code);
+    expect(state.currentPlayerId).toBe(target);
+    expect(state.viewerGuesses).toEqual([wrong]);
+    const answer = answers.get(target)!;
+    await turn(target, 'select', answer.code);
+    await turn(target, 'guess', answer.code);
+    expect(state.phase).toBe('between_rounds');
+    expect(state.currentGuess).toBeNull();
+    expect(state.viewerGuesses).toEqual([wrong, answer]);
+    expect(await stats(pool.poolId, answer.code)).toEqual({ appearances: 1, averageGuessTurns: 4 });
+    closeDb();
+    expect((await read(target)).viewerGuesses).toEqual([wrong, answer]);
+    await turn(hostId, 'next');
+    expect((await read(target)).viewerGuesses).toEqual([]);
   });
 
   it('validates room setup, caps simultaneous joins, and hands off a waiting room', async () => {
@@ -279,6 +384,8 @@ describe('Guess the Card HTTP game', () => {
     expect(migrated.poolName).toBe(`Legacy room [${roomId}]`);
     expect(await stats(migrated.poolId, aCode)).toEqual({ appearances: 1, averageGuessTurns: 3 });
     expect(migrated.players.find((player) => player.playerId === 'B')?.card).toBeNull();
+    expect(migrated.viewerGuesses).toEqual([]);
+    expect((await request<GuessRoomView>(path, aToken)).body.viewerGuesses.map(({ code }) => code)).toEqual([bCode]);
     const bCorrect = (await action(path, bToken, { action: 'guess', version: migrated.version, code: bCode })).body;
     const aCorrect = (await action(path, aToken, { action: 'guess', version: bCorrect.version, code: aCode })).body;
     expect(aCorrect.phase).toBe('between_rounds');
@@ -286,15 +393,22 @@ describe('Guess the Card HTTP game', () => {
     expect(await stats(migrated.poolId, bCode)).toEqual({ appearances: 2, averageGuessTurns: 1 });
   });
 
-  it('promotes the complete shortlist while preserving the installed original pool', async () => {
+  it('promotes the newest complete default while preserving older pool IDs and members', async () => {
     const service = app.get(GuessPoolsService);
     const catalog = jest.spyOn(app.get(CardsService), 'poolCodes');
     const original = [...DEFAULT_GUESS_POOL_CODES];
     const shortlist = [...SHORTLIST_GUESS_POOL_CODES];
+    const recency = [...RECENCY_GUESS_POOL_CODES];
     const originalCodes = new Set(original);
     expect(shortlist).toHaveLength(2145);
     expect(shortlist).toEqual([...new Set(shortlist)].sort((a, b) => a - b));
     expect(shortlist.every((code) => code > 0 && code < 100_000_000 && originalCodes.has(code))).toBe(true);
+    expect(recency).toHaveLength(2125);
+    expect(recency).toEqual([...new Set(recency)].sort((a, b) => a - b));
+    expect(recency.every((code) => code > 0 && code < 100_000_000)).toBe(true);
+    expect(recency).toContain(6351147);
+    expect(recency).not.toContain(22123627);
+    expect(recency.some((code) => !originalCodes.has(code))).toBe(true);
     try {
       catalog.mockReturnValue(original.filter((code) => code !== shortlist[0]));
       service.onModuleInit();
@@ -308,14 +422,23 @@ describe('Guess the Card HTTP game', () => {
 
       catalog.mockReturnValue(original);
       service.onModuleInit();
+      const [savedShortlist] = service.list();
+      expect(savedShortlist).toMatchObject({ name: '常见卡牌精简版', cardCount: shortlist.length, isDefault: true });
+
+      catalog.mockReturnValue([...new Set([...original, ...recency])]);
+      service.onModuleInit();
       service.onModuleInit();
       const pools = (await request<GuessPoolSummary[]>('/pools')).body;
       const [selected] = pools;
       expect(pools.filter((pool) => pool.isDefault)).toEqual([selected]);
-      expect(selected).toMatchObject({ name: '常见卡牌精简版', cardCount: shortlist.length, isDefault: true });
+      expect(selected).toMatchObject({ name: '常见卡牌近年权重版', cardCount: recency.length, isDefault: true });
       expect(selected.poolId).not.toBe(originalId);
+      expect(selected.poolId).not.toBe(savedShortlist.poolId);
       expect((await request<GuessPoolSummary>(`/pools/${selected.poolId}`)).body).toEqual(selected);
-      expect(service.get(selected.poolId).codes).toEqual(shortlist);
+      expect(service.get(selected.poolId).codes).toEqual(recency);
+      expect(service.get(savedShortlist.poolId)).toEqual({
+        poolId: savedShortlist.poolId, name: savedShortlist.name, codes: shortlist, isDefault: false,
+      });
       expect(service.get(originalId)).toEqual({ poolId: originalId, name: '常见卡牌', codes: original, isDefault: false });
     } finally {
       catalog.mockRestore();

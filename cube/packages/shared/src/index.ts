@@ -78,13 +78,22 @@ export interface GuessPoolSummary {
 }
 
 export type GuessActionRequest =
-  | { action: 'guess'; version: number; code: number }
-  | { action: 'start' | 'surrender' | 'next' | 'finish' | 'leave'; version: number };
+  | { action: 'select' | 'guess'; version: number; code: number }
+  | { action: 'skip' | 'host-skip' | 'surrender'; version: number }
+  | { action: 'start'; version: number }
+  | { action: 'next'; version: number }
+  | { action: 'finish'; version: number }
+  | { action: 'leave'; version: number };
+
+export type GuessCardKind = 'monster' | 'spell' | 'trap';
+export type GuessCardRef = Pick<CardInfo, 'code' | 'name'>;
 
 export interface GuessMove {
   playerId: string;
-  outcome: 'correct' | 'incorrect' | 'surrendered';
+  outcome: 'correct' | 'incorrect' | 'surrendered' | 'skipped';
   points: number | null;
+  card?: GuessCardRef;
+  skippedBy?: string;
 }
 
 export interface GuessRoomView extends GuessRoomSummary {
@@ -94,7 +103,10 @@ export interface GuessRoomView extends GuessRoomSummary {
   poolCount: number;
   hostId: string;
   viewerId: string;
+  viewerCardKind: GuessCardKind | null;
+  viewerGuesses: GuessCardRef[];
   currentPlayerId: string | null;
+  currentGuess: GuessCardRef | null;
   players: {
     playerId: string;
     score: number;
@@ -111,6 +123,8 @@ export interface GuessSession {
 
 export interface GuessCardPage {
   cards: (CardInfo & { stats?: GuessCardStats })[];
+  totalCount: number;
+  totalPages: number;
   hasMore: boolean;
 }
 

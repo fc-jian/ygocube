@@ -18,9 +18,12 @@ ap.add_argument('release')
 ap.add_argument('--activate', action='store_true')
 ap.add_argument('--web-only', action='store_true', help='Preserve API/srvpro and restart only Web services')
 ap.add_argument('--cube-only', action='store_true', help='Activate only Cube API/Web, preserving both duel servers')
+ap.add_argument('--require-idle-guess', action='store_true', help='Defer Cube activation or rollback while a Guess game is open')
 ap.add_argument('--check-page', action='append', default=[], help='Additional public page to verify with its static assets')
 ap.add_argument('--windbot-root', type=P, help='Enable the verified WindBot runtime only on independent Duel')
 a = ap.parse_args()
+if a.require_idle_guess and (not a.cube_only or a.web_only):
+    ap.error('--require-idle-guess requires a Cube API/Web update')
 if any(not re.fullmatch(r'/[A-Za-z0-9._/-]*', path) or path.startswith('//') for path in a.check_page):
     ap.error('--check-page requires a site-relative path')
 if a.windbot_root:
@@ -43,6 +46,23 @@ def occupied():
     if status not in (0, 1):
         raise RuntimeError('Cannot inspect active duel hosts')
     return status == 0
+
+
+class GuessMaintenance(resource_apply.ApplicationMaintenance):
+    def occupied(self):
+        if super().occupied():
+            return True
+        try:
+            dbfile = self.cube_root / 'shared/data/cube.sqlite'
+            with sqlite3.connect(dbfile.as_uri() + '?mode=ro', uri=True) as db:
+                has_rooms = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='guess_rooms'").fetchone()
+                if has_rooms and db.execute("SELECT 1 FROM guess_rooms WHERE phase IN ('playing', 'between_rounds') LIMIT 1").fetchone():
+                    print('An open Guess game prevents Cube maintenance', flush=True)
+                    return True
+        except sqlite3.Error:
+            print('Cannot verify Guess games; deferring Cube maintenance', flush=True)
+            return True
+        return False
 
 def health():
     for _ in range(40):
@@ -133,7 +153,8 @@ for n,root in targets.items():
     config_file = root/'current/config.yaml'
     if not config_file.exists(): config_file = root/'shared/config.yaml'
     shutil.copy2(config_file,backup/'config.yaml')
-maintenance = None if a.web_only else resource_apply.ApplicationMaintenance(roots['ygocube'], roots['ygoduel'], services)
+maintenance_type = GuessMaintenance if a.require_idle_guess else resource_apply.ApplicationMaintenance
+maintenance = None if a.web_only else maintenance_type(roots['ygocube'], roots['ygoduel'], services)
 if maintenance:
     maintenance.begin()
 try:

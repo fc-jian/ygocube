@@ -300,6 +300,11 @@ export function cardDatabasePaths(base: string): string[] {
     : [])];
 }
 
+interface CardSearchOptions {
+  codes?: ReadonlySet<number>;
+  offset?: number;
+}
+
 @Injectable()
 export class CardsService {
   private loaded = false;
@@ -534,7 +539,11 @@ export class CardsService {
    * A card only enters the result when every token occurs somewhere in its
    * indexed text (name, description, fields, type/stat labels, or code).
    */
-  search(q: string, limit?: number, { codes, offset = 0 }: { codes?: ReadonlySet<number>; offset?: number } = {}): CardInfo[] {
+  search(q: string, limit?: number, options?: CardSearchOptions): CardInfo[] {
+    return this.searchPage(q, limit, options).cards;
+  }
+
+  searchPage(q: string, limit?: number, { codes, offset = 0 }: CardSearchOptions = {}): { cards: CardInfo[]; totalCount: number } {
     this.ensureLoaded();
     const tokens = [...new Set(String(q ?? '')
       .normalize('NFKC')
@@ -542,7 +551,7 @@ export class CardsService {
       .trim()
       .split(/\s+/u)
       .filter(Boolean))];
-    if (!tokens.length) return [];
+    if (!tokens.length) return { cards: [], totalCount: 0 };
 
     // search_text is normalized at import time. Escape LIKE metacharacters so
     // a user searching for '%' or '_' still gets literal matching semantics.
@@ -557,6 +566,8 @@ export class CardsService {
       .all(...tokens.map((token) => `%${escapeLike(token)}%`)) as CardRow[];
 
     const matchingRows = codes ? rows.filter((row) => codes.has(row.code)) : rows;
+    const totalCount = matchingRows.length;
+    if (offset >= totalCount) return { cards: [], totalCount };
     const ranked = matchingRows.map((row) => {
       // Include the resolved display name for every row.  This is important
       // for cards whose only available name is the CDB fallback, and also
@@ -579,7 +590,7 @@ export class CardsService {
     const end = limit !== undefined && Number.isFinite(limit)
       ? offset + Math.max(0, Math.floor(limit))
       : undefined;
-    return ranked.slice(offset, end).map(({ row }) => this.toInfo(row));
+    return { cards: ranked.slice(offset, end).map(({ row }) => this.toInfo(row)), totalCount };
   }
 
   // resolve a card image under a ygopro root: <root>/pics/<code>.jpg,

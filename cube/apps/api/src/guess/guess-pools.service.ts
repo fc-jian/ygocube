@@ -3,16 +3,20 @@ import type { GuessCardPage, GuessCardStats, GuessPoolCreateRequest, GuessPoolSu
 import { CardsService } from '../cards/cards.service';
 import { getDb } from '../db';
 import { DEFAULT_GUESS_POOL_CODES as ORIGINAL_GUESS_POOL_CODES } from './default-pool-codes';
+import { RECENCY_GUESS_POOL_CODES } from './recency-pool-codes';
 import { SHORTLIST_GUESS_POOL_CODES } from './shortlist-pool-codes';
 
 const PAGE_SIZE = 24;
 const ORIGINAL_POOL_KEY = 'builtin:familiar-v1';
 const SHORTLIST_POOL_KEY = 'builtin:familiar-v2';
+const RECENCY_POOL_KEY = 'builtin:familiar-v3';
 const BUILTIN_POOLS = [
   { key: ORIGINAL_POOL_KEY, name: '常见卡牌', codes: ORIGINAL_GUESS_POOL_CODES },
   { key: SHORTLIST_POOL_KEY, name: '常见卡牌精简版', codes: SHORTLIST_GUESS_POOL_CODES },
+  { key: RECENCY_POOL_KEY, name: '常见卡牌近年权重版', codes: RECENCY_GUESS_POOL_CODES },
 ];
 const DEFAULT_POOL_ID = `COALESCE(
+  (SELECT id FROM guess_pools WHERE name_key = '${RECENCY_POOL_KEY}'),
   (SELECT id FROM guess_pools WHERE name_key = '${SHORTLIST_POOL_KEY}'),
   (SELECT id FROM guess_pools WHERE name_key = '${ORIGINAL_POOL_KEY}'),
   -1
@@ -102,11 +106,15 @@ export class GuessPoolsService implements OnModuleInit {
 
   search(query: string, page: number, codes: readonly number[] | null = null): GuessCardPage {
     const offset = page * PAGE_SIZE;
-    const count = PAGE_SIZE + 1;
-    const cards = query
-      ? this.cards.search(query, count, { codes: codes === null ? undefined : new Set(codes), offset })
-      : this.cards.getMany(this.availableCodes(codes).slice(offset, offset + count));
-    return { cards: cards.slice(0, PAGE_SIZE), hasMore: cards.length > PAGE_SIZE };
+    let result: Pick<GuessCardPage, 'cards' | 'totalCount'>;
+    if (query) {
+      result = this.cards.searchPage(query, PAGE_SIZE, { codes: codes === null ? undefined : new Set(codes), offset });
+    } else {
+      const available = this.availableCodes(codes);
+      result = { cards: this.cards.getMany(available.slice(offset, offset + PAGE_SIZE)), totalCount: available.length };
+    }
+    const totalPages = Math.ceil(result.totalCount / PAGE_SIZE);
+    return { ...result, totalPages, hasMore: page + 1 < totalPages };
   }
 
   browse(poolId: number, query: string, page: number): GuessCardPage {
