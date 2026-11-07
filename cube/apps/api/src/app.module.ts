@@ -17,9 +17,12 @@ import { config } from './config';
 import { setEventHook } from './events/events.service';
 import { SmallWorldController } from './small-world/small-world.controller';
 import { SmallWorldService } from './small-world/small-world.service';
+import { GuessController } from './guess/guess.controller';
+import { GuessService } from './guess/guess.service';
+import { GuessPoolsService } from './guess/guess-pools.service';
 
 @Module({
-  controllers: [DuelController, ApiController, AdminController, SmallWorldController],
+  controllers: [DuelController, ApiController, AdminController, SmallWorldController, GuessController],
   providers: [
     DuelService,
     { provide: APP_GUARD, useClass: AuthGuard },
@@ -27,6 +30,8 @@ import { SmallWorldService } from './small-world/small-world.service';
     CardsService,
     CardPickStatsService,
     SmallWorldService,
+    GuessService,
+    GuessPoolsService,
     PoolsService,
     RealtimeService,
     {

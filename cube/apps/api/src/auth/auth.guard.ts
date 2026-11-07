@@ -73,7 +73,7 @@ export function safeSecretEqual(value: string, expected: string): boolean {
   return crypto.timingSafeEqual(left, right);
 }
 
-function safeHashEqual(value: string, expectedHash: string | null | undefined): boolean {
+export function safeHashEqual(value: string, expectedHash: string | null | undefined): boolean {
   if (!expectedHash || !/^[0-9a-f]{64}$/i.test(expectedHash)) return false;
   const actual = Buffer.from(sha256(value), 'hex');
   const expected = Buffer.from(expectedHash, 'hex');

@@ -230,13 +230,14 @@ export function identityHeaders(id: Identity | null): Record<string, string> {
 
 export async function api<T = any>(
   path: string,
-  opts: { method?: string; body?: unknown; identity?: Identity | null; createUsername?: string; createToken?: string; adminToken?: string; signal?: AbortSignal } = {},
+  opts: { method?: string; body?: unknown; identity?: Identity | null; createUsername?: string; createToken?: string; adminToken?: string; authorization?: string; signal?: AbortSignal } = {},
 ): Promise<T> {
   const id = opts.identity !== undefined ? opts.identity : manualIdentity ?? readIdentity();
   const headers = identityHeaders(id);
   if (opts.createUsername) headers['X-Create-User'] = encodeURIComponent(opts.createUsername);
   if (opts.createToken) headers['X-Create-Token'] = encodeURIComponent(opts.createToken);
   if (opts.adminToken) headers['X-Admin-Token'] = encodeURIComponent(opts.adminToken);
+  if (opts.authorization) headers.Authorization = opts.authorization;
   const res = await fetch(`${API_BASE}${path}`, {
     method: opts.method ?? 'GET',
     headers,

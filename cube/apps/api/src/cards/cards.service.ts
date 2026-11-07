@@ -534,7 +534,7 @@ export class CardsService {
    * A card only enters the result when every token occurs somewhere in its
    * indexed text (name, description, fields, type/stat labels, or code).
    */
-  search(q: string, limit?: number): CardInfo[] {
+  search(q: string, limit?: number, { codes, offset = 0 }: { codes?: ReadonlySet<number>; offset?: number } = {}): CardInfo[] {
     this.ensureLoaded();
     const tokens = [...new Set(String(q ?? '')
       .normalize('NFKC')
@@ -556,7 +556,8 @@ export class CardsService {
       .prepare(`SELECT * FROM cards WHERE (type & ${TYPE_TOKEN}) = 0 AND ${clauses}`)
       .all(...tokens.map((token) => `%${escapeLike(token)}%`)) as CardRow[];
 
-    const ranked = rows.map((row) => {
+    const matchingRows = codes ? rows.filter((row) => codes.has(row.code)) : rows;
+    const ranked = matchingRows.map((row) => {
       // Include the resolved display name for every row.  This is important
       // for cards whose only available name is the CDB fallback, and also
       // keeps that fallback searchable when a localized mapping exists.
@@ -575,9 +576,10 @@ export class CardsService {
       return a.row.code - b.row.code;
     });
 
-    const infos = ranked.map(({ row }) => this.toInfo(row));
-    if (limit === undefined || !Number.isFinite(limit)) return infos;
-    return infos.slice(0, Math.max(0, Math.floor(limit)));
+    const end = limit !== undefined && Number.isFinite(limit)
+      ? offset + Math.max(0, Math.floor(limit))
+      : undefined;
+    return ranked.slice(offset, end).map(({ row }) => this.toInfo(row));
   }
 
   // resolve a card image under a ygopro root: <root>/pics/<code>.jpg,

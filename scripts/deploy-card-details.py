@@ -17,14 +17,19 @@ ap.add_argument('sha256')
 ap.add_argument('release')
 ap.add_argument('--activate', action='store_true')
 ap.add_argument('--web-only', action='store_true', help='Preserve API/srvpro and restart only Web services')
+ap.add_argument('--cube-only', action='store_true', help='Activate only Cube API/Web, preserving both duel servers')
+ap.add_argument('--check-page', action='append', default=[], help='Additional public page to verify with its static assets')
 ap.add_argument('--windbot-root', type=P, help='Enable the verified WindBot runtime only on independent Duel')
 a = ap.parse_args()
+if any(not re.fullmatch(r'/[A-Za-z0-9._/-]*', path) or path.startswith('//') for path in a.check_page):
+    ap.error('--check-page requires a site-relative path')
 if a.windbot_root:
-    assert not a.web_only
+    assert not a.web_only and not a.cube_only
     assert a.windbot_root.resolve().is_relative_to(P('/opt/ygoduel/windbot'))
     assert all((a.windbot_root/f).is_file() for f in ['run-windbot','WindBot.exe','cards.cdb'])
 assert re.fullmatch(r'[a-z0-9-]+', a.release)
 roots = {n: P('/opt')/n for n in ['ygocube', 'ygoduel']}
+targets = {'ygocube': roots['ygocube']} if a.cube_only else roots
 stage = roots['ygocube']/'.staging'/a.release
 
 def run(*args): return subprocess.check_output(args, text=True).strip()
@@ -33,7 +38,11 @@ def switch(root, target):
     link = root/(a.release+'-next')
     link.symlink_to(target)
     os.replace(link, root/'current')
-def occupied(): return subprocess.run(['pgrep', '-x', 'ygopro'], stdout=subprocess.DEVNULL).returncode == 0
+def occupied():
+    status = subprocess.run(['pgrep', '-x', 'ygopro'], stdout=subprocess.DEVNULL).returncode
+    if status not in (0, 1):
+        raise RuntimeError('Cannot inspect active duel hosts')
+    return status == 0
 
 def health():
     for _ in range(40):
@@ -55,8 +64,10 @@ if not stage.exists():
         t.extractall(stage, filter='data')
 manifest = json.loads((stage/'manifest.json').read_text())
 for f, h in manifest['files'].items(): assert sha(stage/f) == h, f
-olds = {n:(root/'current').resolve() for n,root in roots.items()}
-news = {n:root/'releases'/a.release for n,root in roots.items()}
+if a.cube_only:
+    assert not any(f.startswith('srvpro/') for f in manifest['files']), 'Cube API/Web update cannot include srvpro'
+olds = {n:(root/'current').resolve() for n,root in targets.items()}
+news = {n:root/'releases'/a.release for n,root in targets.items()}
 for n,new in news.items():
     if new.exists():
         assert (new/'COMMIT').read_text().strip() == manifest['sourceCommit']
@@ -73,7 +84,8 @@ for n,new in news.items():
             if target.is_file() or target.is_symlink():target.unlink()
             return shutil.copy2(src,dst)
         shutil.copytree(stage/'api/node_modules', new/'api/node_modules', dirs_exist_ok=True, copy_function=replace_file)
-        shutil.copytree(stage/'srvpro', new/'srvpro', dirs_exist_ok=True, copy_function=replace_file)
+        if not a.cube_only:
+            shutil.copytree(stage/'srvpro', new/'srvpro', dirs_exist_ok=True, copy_function=replace_file)
     app = new/'web'/('standalone/apps/web' if n == 'ygocube' else 'apps/web')
     assert (app/'.next/static').is_dir() and (app/'.next/BUILD_ID').is_file()
     old_static = olds[n]/'web'/('standalone/apps/web/.next/static' if n == 'ygocube' else 'apps/web/.next/static')
@@ -85,7 +97,12 @@ for n,new in news.items():
                     previousRelease=olds[n].name, webBuildId=(app/'.next/BUILD_ID').read_text().strip(),
                     artifactSha256=a.sha256, srvproCommit=manifest['srvproCommit'])
     resource_apply.atomic_write_text(new/'release.json',json.dumps(metadata, indent=2))
-    resource_apply.record_components(new, {'web': manifest['sourceCommit']} if a.web_only else {'api': manifest['sourceCommit'], 'web': manifest['sourceCommit'], 'srvpro': manifest['srvproCommit']}, previous=olds[n])
+    sources = {'web': manifest['sourceCommit']}
+    if not a.web_only:
+        sources['api'] = manifest['sourceCommit']
+        if any(f.startswith('srvpro/') for f in manifest['files']):
+            sources['srvpro'] = manifest['srvproCommit']
+    resource_apply.record_components(new, sources, previous=olds[n])
     resource_apply.atomic_write_text(new/'COMMIT',manifest['sourceCommit']+'\n')
     resource_apply.atomic_write_text(new/'RELEASE_ID',a.release+'\n')
     if n=='ygoduel':resource_apply.link_existing_release_resources(roots['ygocube'],new)
@@ -104,11 +121,12 @@ if a.windbot_root:
     assert isinstance(windbot_config, dict) and 'windbot' not in windbot_config, 'WindBot already configured'
     windbot_config['windbot'] = dict(enabled=True, executable=str(a.windbot_root/'run-windbot'), cwd=str(a.windbot_root), database=str(a.windbot_root/'cards.cdb'), max_processes=4)
 assert a.web_only or not occupied(), 'Active duel host; deployment deferred'
-services = [n+'-'+s for n in roots for s in (['web'] if a.web_only else ['api','srvpro','web'])]
-unchanged = [n+'-'+s for n in roots for s in ['api','srvpro']] if a.web_only else []
+components = ['web'] if a.web_only else ['api','web'] if a.cube_only else ['api','srvpro','web']
+services = [n+'-'+s for n in targets for s in components]
+unchanged = [n+'-'+s for n in roots for s in ['api','srvpro','web'] if n+'-'+s not in services]
 unchanged_state = {s: run('systemctl','show',s,'-p','MainPID','-p','ExecMainStartTimestamp') for s in unchanged}
 nginx = run('systemctl','show','nginx','-p','MainPID','-p','ExecMainStartTimestamp')
-for n,root in roots.items():
+for n,root in targets.items():
     backup=root/'backups'/a.release
     backup.mkdir(parents=True,exist_ok=False)
     (backup/'previous-release.txt').write_text(str(olds[n]))
@@ -125,16 +143,17 @@ try:
         run('systemctl','stop',*services)
     if a.windbot_root:
         (roots['ygoduel']/'shared/config.yaml').write_text(json.dumps(windbot_config, indent=2)+'\n')
-    for n,root in roots.items():
+    for n,root in targets.items():
         dbfile=root/'shared/data'/('cube.sqlite' if n=='ygocube' else 'duel.sqlite')
         with sqlite3.connect(dbfile) as db, sqlite3.connect(root/'backups'/a.release/dbfile.name) as out:
             db.backup(out)
             assert out.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
+            assert out.execute('PRAGMA foreign_key_check').fetchone() is None
         switch(root,news[n])
     run('systemctl','start',*services)
     health()
     results={}
-    for route in ['/','/duel','/duel/decks','/duel/bot/']:
+    for route in dict.fromkeys(['/','/duel','/duel/decks','/duel/bot/', *a.check_page]):
         for attempt in range(30):
             try:
                 with urllib.request.urlopen('https://39.96.220.91'+route,timeout=10) as r: html=r.read().decode()
@@ -156,7 +175,7 @@ except Exception:
         maintenance.stop_services()
     if a.windbot_root:
         shutil.copy2(roots['ygoduel']/'backups'/a.release/'config.yaml', roots['ygoduel']/'shared/config.yaml')
-    for n,root in roots.items():
+    for n,root in targets.items():
         if (root/'current').resolve()!=olds[n]: switch(root,olds[n])
     run('systemctl','restart',*services)
     health()
@@ -165,6 +184,6 @@ except Exception:
     raise
 if maintenance:
     maintenance.finish()
-result={'ok':True,'release':a.release,'commit':manifest['sourceCommit'],'pages':results,'services':services+unchanged+['nginx'],'webOnly':a.web_only}
-for n,root in roots.items(): (root/'backups'/a.release/'verification.json').write_text(json.dumps(result,indent=2))
+result={'ok':True,'release':a.release,'commit':manifest['sourceCommit'],'pages':results,'services':services+unchanged+['nginx'],'webOnly':a.web_only,'cubeOnly':a.cube_only}
+for n,root in targets.items(): (root/'backups'/a.release/'verification.json').write_text(json.dumps(result,indent=2))
 print(json.dumps(result))

@@ -50,6 +50,74 @@ export interface CardInfo {
   pickStats?: CardPickStat[];
 }
 
+export interface GuessRoomSummary {
+  roomId: string;
+  name: string;
+  playerCount: number;
+  maxPlayers: number;
+  poolId: number;
+  poolName: string;
+}
+
+export interface GuessCreateRequest {
+  name: string;
+  playerId: string;
+  poolId: number;
+}
+
+export interface GuessPoolCreateRequest {
+  name: string;
+  codes: number[];
+}
+
+export interface GuessPoolSummary {
+  poolId: number;
+  name: string;
+  cardCount: number;
+}
+
+export type GuessActionRequest =
+  | { action: 'guess'; version: number; code: number }
+  | { action: 'start' | 'surrender' | 'next' | 'finish' | 'leave'; version: number };
+
+export interface GuessMove {
+  playerId: string;
+  outcome: 'correct' | 'incorrect' | 'surrendered';
+  points: number | null;
+}
+
+export interface GuessRoomView extends GuessRoomSummary {
+  version: number;
+  phase: 'lobby' | 'playing' | 'between_rounds' | 'finished';
+  round: number;
+  poolCount: number;
+  hostId: string;
+  viewerId: string;
+  currentPlayerId: string | null;
+  players: {
+    playerId: string;
+    score: number;
+    roundPoints: number | null;
+    card: CardInfo | null;
+  }[];
+  lastMove: GuessMove | null;
+}
+
+export interface GuessSession {
+  token: string;
+  room: GuessRoomView;
+}
+
+export interface GuessCardPage {
+  cards: (CardInfo & { stats?: GuessCardStats })[];
+  hasMore: boolean;
+}
+
+export interface GuessCardStats {
+  appearances: number;
+  averageGuessTurns: number | null;
+}
+
 export interface CandidatePoolInfo {
   poolId: number;
   poolName: string;

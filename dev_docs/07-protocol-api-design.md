@@ -195,6 +195,47 @@ swissRoundCount, playoffSize
 重连成功立即同步状态；退出或切换身份取消旧流及旧身份请求的结果。倒计时使用服务器绝对
 deadline 和冻结剩余值。
 
+### 2.6 Guess the Card 小游戏
+
+网页入口为 `/games/guess`，房间链接为 `/games/guess/:roomId`。在 `/games/guess/pools`
+浏览小游戏卡池，在 `/games/guess/pools/new` 创建卡池。小游戏共用 `CardsService`、名称索引
+和卡图接口。房间、事件、卡池和发牌统计分别存入 `guess_rooms`、`guess_room_events`、
+`guess_pools` 和 `guess_round_cards`。房间写入在同一事务内记录事件，再保存状态和已完成轮次的统计。
+
+以下路径均位于 API 的 `/games/guess` 下。创建和加入时由服务端签发房间专用 token。
+后续房间操作通过 `Authorization: Bearer <token>` 验证玩家，凭据不放入房间链接。
+
+| 方法/路径 | 请求和响应 |
+| --- | --- |
+| `GET /rooms` | 公开列出最近最多 50 个可加入的等候房间，返回 `roomId/name/playerCount/maxPlayers/poolId/poolName` |
+| `GET /cards?q=&page=` | 公开搜索共享卡库，用于配置卡池。每页 24 条，`page` 从 0 开始，空查询按编号浏览，返回 `{cards,hasMore}` |
+| `GET /pools` / `GET /pools/:poolId` | 公开列出卡池或读取单个卡池的 `{poolId,name,cardCount}`。内置完整卡库的 ID 为 0 |
+| `POST /pools` | 公开创建小游戏卡池 `{name,codes}`，名称唯一，须有 2–20000 个不重复有效编号。返回卡池摘要。卡池创建后固定成员，供多个房间使用 |
+| `GET /pools/:poolId/cards?q=&page=` | 公开查看卡池及统计，沿用搜索与分页规则。每张牌附 `stats: {appearances,averageGuessTurns}` |
+| `POST /rooms` | `{name,playerId,poolId}`。选择已保存的卡池或内置完整卡库。返回 `{token,room}` |
+| `POST /rooms/:roomId/join` | `{playerId}`。可在等候阶段直接加入，房间内 ID 唯一，最多 8 人且不超过卡池卡数。返回 `{token,room}` |
+| `GET /rooms/:roomId` | 本人视角的房间状态，包括 `version`、阶段、当前轮次、房主、行动玩家、按座次排列的玩家、累计分和本轮得分 |
+| `GET /rooms/:roomId/cards?q=&page=` | 本房间完整卡池的搜索与分页，和当轮发牌结果无关 |
+| `POST /rooms/:roomId/action` | `{action,version,code?}`。操作为 `start/guess/surrender/next/finish/leave`，仅 `guess` 需要 `code`。返回更新后的本人视角，退出返回 200 空响应 |
+
+- 房主在 2–8 人时开始。每轮独立随机安排座位、首位行动玩家及发牌，同轮卡片编号不重复。
+  行动顺序为顺时针，跳过本轮已经猜中的玩家。每次轮到自己只可提交一次，猜错后进入下一人的回合。
+- 猜中按 exact code 判定，本轮第 1 名得玩家人数对应的分数，之后每名依次少 1 分。最后一名未猜中的
+  玩家可以继续猜，也可以投降得 0 分并查看答案。每轮结束后所有玩家可以查看排名，同分并列。
+  房主可以继续开启下一轮，或终止游戏并锁定排名。房间不预设轮数。
+- `lobby → playing → between_rounds → playing … → finished`。等候阶段可退出，房主退出时由最早
+  加入的剩余玩家接任。开局后锁定成员。服务端每次写入递增 `version`，拒绝旧版本操作。
+- 每名玩家未猜中或投降前，本人视角的对应 `card` 为 `null`，其他座位返回 `CardInfo`。
+  房主遵循相同规则，公开列表不含发牌信息。搜索只根据卡池和查询返回结果。
+- 统计仅在完整一轮结束时更新，避免通过公开数据推知正在进行的发牌。每次发出计一次出现，
+  包括投降的牌。平均猜中回合按持牌者第几次轮到自己时猜中计算，仅纳入猜中记录。
+  尚无猜中记录时 `averageGuessTurns` 为 `null`。统计按卡池和 exact code 分开累计。
+- 旧版房间的完整卡库映射到内置卡池，临时卡池保存为独立卡池。从旧房间事件补算已完成轮次，
+  并恢复正在进行的回合计数。已经结算的房间仍可查看结果。
+- `400 BAD_PAYLOAD/GUESS_INVALID_POOL/GUESS_CARD_NOT_IN_POOL`，`401 GUESS_AUTH_REQUIRED`，
+  `403 GUESS_HOST_REQUIRED`，`404 GUESS_ROOM_NOT_FOUND/GUESS_POOL_NOT_FOUND`。卡池重名、房满、
+  ID 重复、阶段不符、非本人行动、版本已过期、人数不足以及提前投降均返回带相应 `GUESS_*` code 的 409。
+
 ## 3. cube API ↔ srvpro
 
 ### 3.1 `POST /cube/create_room`
