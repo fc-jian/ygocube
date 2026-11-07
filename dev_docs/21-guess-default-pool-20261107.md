@@ -88,3 +88,24 @@
 本版收录事务回滚 `06351147`，排除强欲之海鳝 `22123627`。排序后的编号数组 SHA256 为
 `cf87870b690a446a9056cf343f162422839d1be5531f42ffbd517ab9c1cea30a`。复核数据与导入验收位于
 `data/local-dev/guess-recency-20261108/`。完整卡库、原池和精简版继续作为独立卡池供建房选择。
+
+### Aly 发布与验收
+
+`20261108-guess-recency-35af702` 从 `codex/guess-turn-controls` 的
+`35af7028fcd894f301e83d9715d583a677dc3f0f` 构建，Web Build ID 为 `YCSq4WdFOSlFzLo8imbBi`。
+应用包 SHA256 为 `9216f0590e2aa518ff9789ea0729bc7c4b66e6b9bcc4c0c7438251f92459430e`。
+新版为默认 4 号卡池，2 号原池和 3 号精简版保留编号、成员与统计。
+
+Cube API 与 Web 切换前确认原生对局空闲，备份至 `/opt/ygocube/backups/20261108-guess-recency-35af702/`。
+`cube.sqlite` 的 SHA256 为 `b2996e65a86fbdcb8134bef7f9ebf569bd52168f1dcfe72c1edc16cbe5d6aa1e`。
+随后结算 1 个进行中房间和 2 个轮间房间。现场验证每个房间追加一条结算事件并保留原有积分，
+此前的 276 条 Guess 事件、24 条发牌统计和 3 个已结算房间均与备份一致。
+
+Windows 和 Linux 各通过 413 项自动化测试。本地浏览器验证三人完整一轮、轮间换人、
+24 小时无活动结算和匿名观战的卡片可见范围。公网验证默认池全部 89 页及编号摘要，
+搜索「龙」为 430 张、18 页，另检查已结算房间的匿名观战、9 个页面和 34 个静态文件。
+Aly 的 7 个服务均正常，两套数据库通过完整性和外键检查。主卡库 SHA256 为
+`04b1197239517ab50fb49db8450f83e920a81f5d82a83bdc8f9c7f7ed1aa8400`，
+资源清单 SHA256 为 `dd2f1c3674af4411c4dc90c52cda5a3b75d63a3736ff3af0305907087658d735`。
+Cube 启动时报告的 3 组历史重复桌号在发布前备份中已存在，由现有兼容逻辑处理。
+本地构建、现场和公网验收日志位于 `data/local-dev/guess-recency-release/`。
