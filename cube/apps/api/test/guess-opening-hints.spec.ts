@@ -1,6 +1,6 @@
 import { buildOpeningHintOptions, drawOpeningHints } from '../src/guess/opening-hints';
 
-const dragon = { code: 89631139, type: 0x11, level: 8, atk: 3000, def: 2500, attribute: 0x10, setCodes: [0xdd], alias: 0 };
+const dragon = { code: 89631139, type: 0x11, level: 8, atk: 3000, def: 2500, attribute: 0x10, setCodes: [0xdd], releaseYear: 1999 };
 const link = { code: 99999991, type: 0x4000021, level: 2, atk: 1600, def: 9000, attribute: 0x20, setCodes: [0x112], alias: 0 };
 const xyz = {
   code: 99999992, type: 0x800021, level: 4, atk: -2, def: -2, attribute: 0x8, setCodes: [0x2a, 0x102a],

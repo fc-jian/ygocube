@@ -14,6 +14,7 @@ export interface CardInfo {
   alias?: number;
   aliasName?: string;
   aliasKind?: 'artwork' | 'rule';
+  releaseYear?: number;
   setCodes: number[];
   setNames: string[];
   inPool?: boolean;

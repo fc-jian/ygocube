@@ -1,5 +1,9 @@
 import { CardInfo } from '@/lib/types';
-import { sortCardCodesByPick as sortSharedCardCodesByPick } from '@ygocube/shared';
+import {
+  CARD_ATTRIBUTES, CARD_LINK_DIRECTIONS, CARD_RACES, cardQueryTokens, sortCardCodesByPick as sortSharedCardCodesByPick,
+} from '@ygocube/shared';
+
+export { cardQueryTokens };
 
 // 卡牌类型/属性展示（与 ygopro 客户端信息一致，dev_docs/06 §5.1）
 const MONSTER = 0x1;
@@ -17,20 +21,8 @@ export function isExtraDeckType(type: number): boolean {
   return (type & 0x4802040) !== 0;
 }
 
-// 注意：本仓库 mycard/ygopro（ocgcore/common.h）的 race 位序与 KONAMI 官方不同（整体重排：战士=0x1、龙=0x2000、幻龙=0x800000、电子界=0x1000000），
-// cards.cdb 数据与该枚举配套，勿改成 KONAMI 官方位掩码。
-const RACE_NAMES: Record<number, string> = {
-  0x1: '战士族', 0x2: '魔法师族', 0x4: '天使族', 0x8: '恶魔族', 0x10: '不死族',
-  0x20: '机械族', 0x40: '水族', 0x80: '炎族', 0x100: '岩石族', 0x200: '鸟兽族',
-  0x400: '植物族', 0x800: '昆虫族', 0x1000: '雷族', 0x2000: '龙族', 0x4000: '兽族',
-  0x8000: '兽战士族', 0x10000: '恐龙族', 0x20000: '鱼族', 0x40000: '海龙族', 0x80000: '爬虫类族',
-  0x100000: '念动力族', 0x200000: '幻神兽族', 0x400000: '创造神族', 0x800000: '幻龙族',
-  0x1000000: '电子界族', 0x2000000: '幻想魔族',
-};
-
-const ATTRIBUTE_NAMES: Record<number, string> = {
-  0x1: '地', 0x2: '水', 0x4: '炎', 0x8: '风', 0x10: '光', 0x20: '暗', 0x40: '神',
-};
+const RACE_NAMES = Object.fromEntries(CARD_RACES.map(([bit, name]) => [bit, name]));
+const ATTRIBUTE_NAMES = Object.fromEntries(CARD_ATTRIBUTES.map(([bit, name]) => [bit, name]));
 
 export function typeLabel(c: CardInfo): string {
   const t = c.type;
@@ -93,10 +85,7 @@ export function atkDefLine(c: CardInfo): string {
 
 export function linkMarkerLine(c: CardInfo): string {
   if (!(c.type & 0x4000000)) return '';
-  const labels: [number, string][] = [
-    [0x40, '↖'], [0x80, '↑'], [0x100, '↗'], [0x8, '←'], [0x20, '→'], [0x1, '↙'], [0x2, '↓'], [0x4, '↘'],
-  ];
-  const arrows = labels.filter(([bit]) => ((c.linkMarkers ?? 0) & bit) !== 0).map(([, label]) => `[${label}]`).join('');
+  const arrows = CARD_LINK_DIRECTIONS.filter(([bit]) => ((c.linkMarkers ?? 0) & bit) !== 0).map(([, label]) => `[${label}]`).join('');
   return arrows ? `连接标记 ${arrows}` : '';
 }
 
@@ -147,15 +136,6 @@ export function canonicalCardCode(code: number, cardMap: Record<number, CardInfo
   return Math.min(...visited);
 }
 
-export function cardQueryTokens(query: string): string[] {
-  return [...new Set(query
-    .normalize('NFKC')
-    .toLowerCase()
-    .trim()
-    .split(/\s+/u)
-    .filter(Boolean))];
-}
-
 /** Normalize card-code arrays received from the API before any spread/iteration. */
 export function safeCardCodes(value: unknown): number[] {
   if (!Array.isArray(value)) return [];
@@ -169,7 +149,7 @@ function searchableCardText(c: CardInfo): string {
   ].join(' ').normalize('NFKC').toLowerCase();
 }
 
-/** Every whitespace-separated keyword must occur in the card's searchable data. */
+/** Every keyword or quoted phrase must occur in the card's searchable data. */
 export function matchesCardQuery(c: CardInfo | undefined, query: string): boolean {
   const tokens = cardQueryTokens(query);
   if (!c || isTokenCard(c)) return false;

@@ -99,6 +99,36 @@ function GuessWithCard({ template, player, card, text }: { template: string; pla
   return <>{before}<GuessCardName key={card.code} card={card} text={text} />{after}</>;
 }
 
+function GuessRoster({ room, text, viewerId, busy, remove }: {
+  room: GuessPublicRoomView;
+  text: GuessText;
+  viewerId?: string;
+  busy?: boolean;
+  remove?: (playerId: string) => void;
+}) {
+  return (
+    <ul className="guess-roster" aria-label={text.activeRoster} aria-live="polite">
+      {room.standings.filter((player) => !player.departed).map(({ playerId }) => (
+        <li key={playerId}>
+          <strong>{playerId}</strong>
+          {playerId === room.hostId && <span className="guess-pill">{text.host}</span>}
+          {playerId === viewerId && <span className="guess-muted">{text.you}</span>}
+          {remove && playerId !== viewerId && <button type="button" className="guess-secondary" disabled={busy}
+            aria-label={fillText(text.removePlayer, { player: playerId })} onClick={() => remove(playerId)}>{text.remove}</button>}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function PreviousSurrender({ room, text }: { room: GuessPublicRoomView; text: GuessText }) {
+  const previous = room.previousSurrender;
+  return previous && <p className="guess-muted" role="status">
+    <GuessWithCard template={fillText(text.previousSurrender, { round: previous.round })}
+      player={previous.playerId} card={previous.card} text={text} />
+  </p>;
+}
+
 function SpectatorGame({ room, text }: { room: GuessSpectatorView; text: GuessText }) {
   return (
     <div className="guess-game">
@@ -106,6 +136,11 @@ function SpectatorGame({ room, text }: { room: GuessSpectatorView; text: GuessTe
       <section className="guess-panel guess-play">
         <h2>{text.spectate}</h2>
         {room.finishReason && <p className="guess-muted">{text.finishReasons[room.finishReason]}</p>}
+        <PreviousSurrender room={room} text={text} />
+        {room.phase === 'between_rounds' && <>
+          <h3>{text.activeRoster}</h3>
+          <GuessRoster room={room} text={text} />
+        </>}
         {room.currentGuess && room.currentPlayerId && <p className="guess-live-guess" role="status">
           <GuessWithCard template={text.liveGuess} player={room.currentPlayerId} card={room.currentGuess} text={text} />
         </p>}
@@ -152,7 +187,7 @@ export function GuessRoom({ roomId }: { roomId: string }) {
   const [connectionError, setConnectionError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [confirm, setConfirm] = useState<'surrender' | 'finish' | null>(null);
+  const [confirm, setConfirm] = useState<{ action: 'surrender' | 'finish' } | { action: 'remove'; playerId: string } | null>(null);
 
   useEffect(() => {
     setRoom(null);
@@ -249,8 +284,11 @@ export function GuessRoom({ roomId }: { roomId: string }) {
     ? room.viewerOpeningHint : null;
   const canGuess = playing && room.currentPlayerId === room.viewerId;
   const selected = canGuess ? room.currentGuess : null;
-  const canSurrender = canGuess && room.players.filter((player) => player.roundPoints === null).length === 1;
+  const lastRemaining = playing && room.players.filter((player) => player.roundPoints === null).length === 1;
+  const canSurrender = canGuess && lastRemaining;
   const canFinish = host && room?.phase === 'between_rounds';
+  const removeTarget = confirm?.action === 'remove' ? confirm.playerId : undefined;
+  const canRemove = canFinish && room.standings.some((player) => player.playerId === removeTarget && !player.departed);
   const spectator = token === null ? watched : null;
   const canJoin = spectator?.phase === 'lobby' || spectator?.phase === 'between_rounds';
   return (
@@ -289,15 +327,7 @@ export function GuessRoom({ roomId }: { roomId: string }) {
             </Link>
             {' · '}{fillText(text.cardCount, { count: room.poolCount.toLocaleString(language) })}
           </p>
-          <ul className="guess-roster">
-            {room.players.map((player) => (
-              <li key={player.playerId}>
-                <strong>{player.playerId}</strong>
-                {player.playerId === room.hostId && <span className="guess-pill">{text.host}</span>}
-                {player.playerId === room.viewerId && <span className="guess-muted">{text.you}</span>}
-              </li>
-            ))}
-          </ul>
+          <GuessRoster room={room} text={text} viewerId={room.viewerId} />
           <div className="flex flex-wrap gap-2">
             {host && <button type="button" className="guess-primary" disabled={busy || room.playerCount < 2}
               onClick={() => void act({ action: 'start', version: room.version })}>{text.start}</button>}
@@ -310,6 +340,7 @@ export function GuessRoom({ roomId }: { roomId: string }) {
         <div className="guess-game">
           {room.round > 0 && <GuessTable room={room} text={text} />}
           <section className="guess-panel guess-play">
+            <PreviousSurrender room={room} text={text} />
             {playing && <>
               <h2>{text.pool} <span className="guess-muted">({room.poolCount.toLocaleString(language)})</span></h2>
               {openingHint && <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1" data-guess-opening-hint>
@@ -328,7 +359,7 @@ export function GuessRoom({ roomId }: { roomId: string }) {
                   <button type="button" className="guess-secondary" disabled={busy}
                     onClick={() => void act({ action: 'skip', version: room.version })}>{text.skip}</button>
                   {canSurrender && <button type="button" className="guess-secondary" disabled={busy}
-                    onClick={() => setConfirm('surrender')}>{text.surrender}</button>}
+                    onClick={() => setConfirm({ action: 'surrender' })}>{text.surrender}</button>}
                 </div>
                 <p className="guess-muted">{text.guessHelp}</p>
               </div>}
@@ -336,15 +367,23 @@ export function GuessRoom({ roomId }: { roomId: string }) {
                 <button type="button" className="guess-secondary" disabled={busy}
                   onClick={() => void act({ action: 'host-skip', version: room.version })}>{text.hostSkip}</button>
               </div>}
+              {host && lastRemaining && <div className="grid gap-1">
+                <p className="guess-muted">{fillText(text.forceNextHelp, { player: room.currentPlayerId ?? '' })}</p>
+                <div><button type="button" className="guess-primary" disabled={busy || room.playerCount < 2}
+                  onClick={() => void act({ action: 'next', version: room.version })}>{text.forceNext}</button></div>
+              </div>}
             </>}
             {room.phase === 'between_rounds' && <>
               <h2>{text.roundOver}</h2>
+              <h3>{text.activeRoster}</h3>
+              <GuessRoster room={room} text={text} viewerId={room.viewerId} busy={busy}
+                remove={host ? (playerId) => setConfirm({ action: 'remove', playerId }) : undefined} />
               <div className="flex flex-wrap gap-2">
                 {host && <>
                   <button type="button" className="guess-primary" disabled={busy || room.playerCount < 2}
                     onClick={() => void act({ action: 'next', version: room.version })}>{text.next}</button>
                   <button type="button" className="guess-secondary" disabled={busy}
-                    onClick={() => setConfirm('finish')}>{text.finish}</button>
+                    onClick={() => setConfirm({ action: 'finish' })}>{text.finish}</button>
                 </>}
                 <button type="button" className="guess-secondary" disabled={busy}
                   onClick={() => void act({ action: 'leave', version: room.version })}>{text.leave}</button>
@@ -354,18 +393,19 @@ export function GuessRoom({ roomId }: { roomId: string }) {
             </>}
             {room.finishReason && <p className="guess-muted">{text.finishReasons[room.finishReason]}</p>}
             {room.round > 0 && <GuessHistory guesses={room.viewerGuesses} text={text} />}
-            {playing && <GuessCards key={room.round} text={text} path={`${roomPath}/cards`} token={token} mode="select"
+            {playing && <GuessCards key={room.round} text={text} language={language} path={`${roomPath}/cards`} token={token} mode="select"
               selected={new Set(selected ? [selected.code] : [])} enabled={canGuess && !busy}
               wrongGuesses={new Set(room.viewerWrongGuessCodes ?? [])}
               choose={(card) => void act({ action: 'select', version: room.version, code: card.code })} />}
           </section>
           <GuessScores room={room} text={text} viewerId={room.viewerId} />
-          <ConfirmModal open={confirm === 'surrender' && canSurrender || confirm === 'finish' && canFinish}
-            title={confirm === 'finish' ? text.finish : text.surrender}
-            confirmText={confirm === 'finish' ? text.confirmFinish : text.confirm}
+          <ConfirmModal open={confirm?.action === 'surrender' && canSurrender || confirm?.action === 'finish' && canFinish
+            || confirm?.action === 'remove' && canRemove}
+            title={removeTarget ? fillText(text.removePlayer, { player: removeTarget }) : confirm?.action === 'finish' ? text.finish : text.surrender}
+            confirmText={removeTarget ? text.remove : confirm?.action === 'finish' ? text.confirmFinish : text.confirm}
             cancelText={text.cancel} onCancel={() => setConfirm(null)}
-            onConfirm={() => { setConfirm(null); if (confirm) void act({ action: confirm, version: room.version }); }}>
-            <p>{confirm === 'finish' ? text.finishHelp : text.surrenderConfirm}</p>
+            onConfirm={() => { setConfirm(null); if (confirm) void act({ ...confirm, version: room.version }); }}>
+            <p>{removeTarget ? text.removeHelp : confirm?.action === 'finish' ? text.finishHelp : text.surrenderConfirm}</p>
           </ConfirmModal>
         </div>
       )}

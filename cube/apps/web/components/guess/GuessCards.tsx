@@ -1,15 +1,17 @@
 'use client';
 
 import { FormEvent, useEffect, useState } from 'react';
-import type { CardInfo, GuessCardPage } from '@ygocube/shared';
+import type { CardInfo, CardSearchFilters, CardSearchParams, GuessCardPage } from '@ygocube/shared';
 import { CardWithTooltip } from '@/components/CardImage';
+import { CardSearchFields, cardSearchQuery, cardSearchRangesValid } from '@/components/CardSearchFields';
 import { guessError, guessRequest } from './guess-client';
-import { fillText, GuessText } from './guess-text';
+import { fillText, GuessLanguage, GuessText } from './guess-text';
 
 type CardSelection = { selected: ReadonlySet<number>; enabled?: boolean; choose: (card: CardInfo) => void };
 
 type GuessCardsProps = {
   text: GuessText;
+  language: GuessLanguage;
   path: string;
   token?: string;
 } & (
@@ -18,19 +20,19 @@ type GuessCardsProps = {
   | ({ mode: 'select'; wrongGuesses: ReadonlySet<number> } & CardSelection)
 );
 
-type CardFilter = { query: string; page: number };
 type CardResponse = {
   path: string;
   token?: string;
-  filter: CardFilter;
+  filter: CardSearchParams;
   data?: GuessCardPage;
   error?: unknown;
 };
 
 export function GuessCards(props: GuessCardsProps) {
-  const { text, path, token, mode } = props;
+  const { text, language, path, token, mode } = props;
   const [input, setInput] = useState('');
-  const [filter, setFilter] = useState<CardFilter>({ query: '', page: 0 });
+  const [draft, setDraft] = useState<CardSearchFilters>({});
+  const [filter, setFilter] = useState<CardSearchParams>({ query: '', page: 0, sort: 'relevance', filters: {} });
   const [response, setResponse] = useState<CardResponse | null>(null);
   const current = response?.filter === filter && response.path === path && response.token === token ? response : null;
   const loading = current === null;
@@ -39,7 +41,7 @@ export function GuessCards(props: GuessCardsProps) {
 
   useEffect(() => {
     const controller = new AbortController();
-    const params = new URLSearchParams({ q: filter.query, page: String(filter.page) });
+    const params = cardSearchQuery(filter);
     guessRequest<GuessCardPage>(`${path}?${params}`, { token, signal: controller.signal }).then((data) => {
       if (!controller.signal.aborted) setResponse({ path, token, filter, data });
     }).catch((err: unknown) => {
@@ -50,15 +52,21 @@ export function GuessCards(props: GuessCardsProps) {
 
   function search(event: FormEvent) {
     event.preventDefault();
-    setFilter({ query: input.trim(), page: 0 });
+    if (cardSearchRangesValid(draft)) setFilter({ query: input.trim(), page: 0, sort: 'relevance', filters: draft });
   }
 
   return (
     <div className="guess-card-picker">
-      <form className="guess-inline" onSubmit={search}>
-        <input className="guess-input" aria-label={text.searchLabel} placeholder={text.searchHint} value={input}
-          maxLength={100} onChange={(event) => setInput(event.target.value)} />
-        <button className="guess-secondary" type="submit">{text.search}</button>
+      <form className="grid gap-2" onSubmit={search}>
+        <div className="guess-inline">
+          <input className="guess-input" aria-label={text.searchLabel} placeholder={text.searchHint} value={input}
+            maxLength={100} onChange={(event) => setInput(event.target.value)} />
+          <button className="guess-secondary" type="submit">{text.search}</button>
+        </div>
+        <CardSearchFields value={draft} onChange={setDraft} locale={language}
+          onClear={() => { setDraft({}); setFilter({ ...filter, page: 0, filters: {} }); }}>
+          <button type="submit" className="guess-secondary">{text.applyFilters}</button>
+        </CardSearchFields>
       </form>
       {loading && <p className="guess-muted" role="status">{text.loading}</p>}
       {error != null && <p className="guess-error" role="alert">{guessError(error, text)}</p>}

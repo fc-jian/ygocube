@@ -19,14 +19,20 @@ ap.add_argument('release')
 ap.add_argument('--activate', action='store_true')
 ap.add_argument('--web-only', action='store_true', help='Preserve API/srvpro and restart only Web services')
 ap.add_argument('--cube-only', action='store_true', help='Activate only Cube API/Web, preserving both duel servers')
+ap.add_argument('--api-web-only', action='store_true', help='Activate both API/Web pairs while preserving the duel servers')
 guess_action = ap.add_mutually_exclusive_group()
 guess_action.add_argument('--require-idle-guess', action='store_true', help='Defer Cube activation or rollback while a Guess game is open')
 guess_action.add_argument('--settle-open-guess', action='store_true', help='Finalize open Guess rooms after the Cube database backup and before switching releases')
 ap.add_argument('--check-page', action='append', default=[], help='Additional public page to verify with its static assets')
 ap.add_argument('--windbot-root', type=P, help='Enable the verified WindBot runtime only on independent Duel')
 a = ap.parse_args()
-if (a.require_idle_guess or a.settle_open_guess) and (not a.cube_only or a.web_only):
+if a.api_web_only and (a.cube_only or a.web_only or a.windbot_root):
+    ap.error('--api-web-only requires both application targets and no srvpro update')
+application_only = a.cube_only or a.api_web_only
+if a.require_idle_guess and (not application_only or a.web_only):
     ap.error('Guess maintenance flags require a Cube API/Web update')
+if a.settle_open_guess and (not a.cube_only or a.web_only):
+    ap.error('--settle-open-guess requires a Cube-only API/Web update')
 if any(not re.fullmatch(r'/[A-Za-z0-9._/-]*', path) or path.startswith('//') for path in a.check_page):
     ap.error('--check-page requires a site-relative path')
 if a.windbot_root:
@@ -123,8 +129,8 @@ if not stage.exists():
         t.extractall(stage, filter='data')
 manifest = json.loads((stage/'manifest.json').read_text())
 for f, h in manifest['files'].items(): assert sha(stage/f) == h, f
-if a.cube_only:
-    assert not any(f.startswith('srvpro/') for f in manifest['files']), 'Cube API/Web update cannot include srvpro'
+if application_only:
+    assert not any(f.startswith('srvpro/') for f in manifest['files']), 'API/Web update cannot include srvpro'
 olds = {n:(root/'current').resolve() for n,root in targets.items()}
 news = {n:root/'releases'/a.release for n,root in targets.items()}
 for n,new in news.items():
@@ -143,7 +149,7 @@ for n,new in news.items():
             if target.is_file() or target.is_symlink():target.unlink()
             return shutil.copy2(src,dst)
         shutil.copytree(stage/'api/node_modules', new/'api/node_modules', dirs_exist_ok=True, copy_function=replace_file)
-        if not a.cube_only:
+        if not application_only:
             shutil.copytree(stage/'srvpro', new/'srvpro', dirs_exist_ok=True, copy_function=replace_file)
     app = new/'web'/('standalone/apps/web' if n == 'ygocube' else 'apps/web')
     assert (app/'.next/static').is_dir() and (app/'.next/BUILD_ID').is_file()
@@ -180,7 +186,7 @@ if a.windbot_root:
     assert isinstance(windbot_config, dict) and 'windbot' not in windbot_config, 'WindBot already configured'
     windbot_config['windbot'] = dict(enabled=True, executable=str(a.windbot_root/'run-windbot'), cwd=str(a.windbot_root), database=str(a.windbot_root/'cards.cdb'), max_processes=4)
 assert a.web_only or not occupied(), 'Active duel host; deployment deferred'
-components = ['web'] if a.web_only else ['api','web'] if a.cube_only else ['api','srvpro','web']
+components = ['web'] if a.web_only else ['api','web'] if application_only else ['api','srvpro','web']
 services = [n+'-'+s for n in targets for s in components]
 unchanged = [n+'-'+s for n in roots for s in ['api','srvpro','web'] if n+'-'+s not in services]
 unchanged_state = {s: run('systemctl','show',s,'-p','MainPID','-p','ExecMainStartTimestamp') for s in unchanged}
@@ -262,7 +268,7 @@ except Exception:
     raise
 if maintenance:
     maintenance.finish()
-result={'ok':True,'release':a.release,'commit':manifest['sourceCommit'],'pages':results,'services':services+unchanged+['nginx'],'webOnly':a.web_only,'cubeOnly':a.cube_only}
+result={'ok':True,'release':a.release,'commit':manifest['sourceCommit'],'pages':results,'services':services+unchanged+['nginx'],'webOnly':a.web_only,'cubeOnly':a.cube_only,'apiWebOnly':application_only and not a.web_only}
 if settled_guess_rooms is not None:
     result['settledGuessRooms'] = settled_guess_rooms
 for n,root in targets.items(): (root/'backups'/a.release/'verification.json').write_text(json.dumps(result,indent=2))

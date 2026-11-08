@@ -83,7 +83,7 @@ export function GuessPoolCreator() {
             <span className="guess-muted" id="guess-code-hint">{text.poolHint} {text.codeHint}</span>
           </label>
         </form>
-        <GuessCards text={text} path="/cards" selected={codes} mode="add"
+        <GuessCards text={text} language={language} path="/cards" selected={codes} mode="add"
           choose={(card) => setCodesText((value) => `${value.trim()} ${card.code}`.trim())} />
         {invalid && <p className="guess-error" role="alert">{text.errors.GUESS_INVALID_POOL}</p>}
         {error != null && <p className="guess-error" role="alert">{guessError(error, text)}</p>}
@@ -107,7 +107,7 @@ export function GuessPoolDetail({ poolId }: { poolId: number }) {
       {!data && error == null && <p className="guess-muted" role="status">{text.loading}</p>}
       {data && <section className="guess-panel max-w-3xl">
         <p className="guess-muted">{text.statsHelp}</p>
-        <GuessCards text={text} path={`${path}/cards`} mode="browse" />
+        <GuessCards text={text} language={language} path={`${path}/cards`} mode="browse" />
       </section>}
     </GuessFrame>
   );

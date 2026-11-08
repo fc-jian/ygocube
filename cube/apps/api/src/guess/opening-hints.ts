@@ -1,9 +1,8 @@
 import { randomInt } from 'node:crypto';
-import type { CardInfo, GuessOpeningHint, GuessOpeningHintGroup, GuessOpeningHintMethod, GuessReleaseEra } from '@ygocube/shared';
+import type { CardInfo, GuessOpeningHint, GuessOpeningHintGroup, GuessOpeningHintMethod } from '@ygocube/shared';
 import { baseCardFieldCodes, isExtraDeckType } from '../cards/cards.service';
-import { FIRST_RELEASE_ERA_CODES } from './first-release-era-codes';
 
-type OpeningCard = Pick<CardInfo, 'code' | 'type' | 'level' | 'attribute' | 'atk' | 'def' | 'setCodes' | 'alias' | 'aliasKind'>;
+type OpeningCard = Pick<CardInfo, 'code' | 'type' | 'level' | 'attribute' | 'atk' | 'def' | 'setCodes' | 'releaseYear'>;
 type CardGroups = Record<GuessOpeningHintMethod, GuessOpeningHintGroup | undefined>;
 type HintPools = Partial<Record<GuessOpeningHintGroup, number[]>>;
 
@@ -17,14 +16,10 @@ const DARK = 0x20;
 const WIND = 0x8;
 const PROPOSALS = 24;
 const REFERENCE_POOL_SIZE = 2378;
-const releaseEras = new Map<number, GuessReleaseEra>();
-for (const [era, codes] of Object.entries(FIRST_RELEASE_ERA_CODES)) {
-  for (const code of codes) releaseEras.set(code, era as GuessReleaseEra);
-}
-
 function groups(card: OpeningCard, largestField: number | null): CardGroups {
-  const releaseEra = releaseEras.get(card.code)
-    ?? (card.aliasKind === 'artwork' ? releaseEras.get(card.alias) : undefined);
+  const year = card.releaseYear;
+  const releaseEra = year === undefined ? undefined : year <= 2014 ? 'through-2014'
+    : year <= 2019 ? '2015-2019' : year <= 2023 ? '2020-2023' : '2024-plus';
   const fieldSize = largestField === null ? 'no-field' : largestField === 0 ? undefined
     : largestField <= 15 ? 'distinct-field-small' : largestField <= 25 ? 'distinct-field-medium' : 'distinct-field-large';
   if (!(card.type & MONSTER)) {

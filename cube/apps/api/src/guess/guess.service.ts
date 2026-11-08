@@ -4,7 +4,7 @@ import {
 } from '@nestjs/common';
 import { randomBytes, randomInt } from 'node:crypto';
 import type {
-  GuessActionRequest, GuessCardKind, GuessCardPage, GuessCardRef, GuessCreateRequest, GuessMove,
+  CardSearchParams, GuessActionRequest, GuessCardKind, GuessCardPage, GuessCardRef, GuessCreateRequest, GuessMove,
   GuessOpeningHint, GuessOpeningHintGroup, GuessRoomSummary,
   GuessPublicRoomView, GuessRoomView, GuessSession, GuessSpectatorView,
 } from '@ygocube/shared';
@@ -35,6 +35,12 @@ interface Seat {
   openingHint?: GuessOpeningHint;
 }
 
+interface PreviousSurrender {
+  round: number;
+  playerId: string;
+  code: number;
+}
+
 interface Round {
   number: number;
   seats: Seat[];
@@ -42,6 +48,7 @@ interface Round {
   lastMove: GuessMove | null;
   selectedCode?: number;
   hintPools?: Partial<Record<GuessOpeningHintGroup, number[]>>;
+  previousSurrender?: PreviousSurrender;
 }
 
 interface Room {
@@ -301,11 +308,11 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
     return this.view(this.load(roomId));
   }
 
-  search(roomId: string, authorization: string | undefined, query: string, page: number): GuessCardPage {
+  search(roomId: string, authorization: string | undefined, params: CardSearchParams): GuessCardPage {
     const room = this.load(roomId);
     const { playerId } = this.authenticate(room, authorization);
     const codes = this.openingCandidates(room.round, playerId) ?? this.pools.get(room.poolId).codes;
-    return this.pools.search(query, page, codes);
+    return this.pools.search(params, codes);
   }
 
   act(roomId: string, authorization: string | undefined, command: GuessActionRequest): GuessRoomView | null {
@@ -317,31 +324,34 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
       if (command.version !== room.version) throw new ConflictException({ code: 'GUESS_STALE_VERSION' });
       if (command.action === 'leave') {
         this.requireJoinable(room);
-        if (room.phase === 'lobby') {
-          room.players = room.players.filter((member) => member !== player);
-        } else {
-          player.departed = true;
-          player.tokenHash = '';
-          if (activePlayers(room).length === 0) room.phase = 'finished';
-        }
+        this.depart(room, player);
         writeRoom(room, { action: 'leave', playerId });
         return null;
       }
-      if (command.action === 'start' || command.action === 'next' || command.action === 'finish') {
+      if (command.action === 'remove' || command.action === 'start' || command.action === 'next' || command.action === 'finish') {
         if (activePlayers(room)[0] !== player) throw new ForbiddenException({ code: 'GUESS_HOST_REQUIRED' });
-        this.requirePhase(room, command.action === 'start' ? 'lobby' : 'between_rounds');
-        if (command.action === 'finish') {
+        if (command.action === 'remove') {
+          this.requirePhase(room, 'between_rounds');
+          const target = activePlayers(room).find((member) => member.playerId === command.playerId);
+          if (!target) throw new NotFoundException({ code: 'GUESS_PLAYER_NOT_IN_ROOM' });
+          if (target === player) throw new BadRequestException({ code: 'GUESS_REMOVE_SELF' });
+          this.depart(room, target);
+          writeRoom(room, { action: 'remove', playerId, targetPlayerId: target.playerId });
+        } else if (command.action === 'finish') {
+          this.requirePhase(room, 'between_rounds');
           room.phase = 'finished';
           writeRoom(room, { action: 'finish', playerId });
         } else {
-          this.deal(room);
+          if (command.action === 'next' && room.phase === 'playing') {
+            this.advanceAfterSurrender(room, player);
+          } else {
+            this.requirePhase(room, command.action === 'start' ? 'lobby' : 'between_rounds');
+            this.deal(room);
+          }
           writeRoom(room, { action: command.action, playerId, round: room.round });
         }
       } else {
-        const move = this.play(room, player, command);
-        writeRoom(room, { ...command, playerId, ...(move && { move }) });
-        const round = room.round!;
-        if (round.currentPlayerId === null) this.pools.recordRound(room.poolId, room.roomId, round.number, round.seats);
+        this.applyTurn(room, player, command);
       }
       return this.view(room, playerId);
     }).immediate();
@@ -369,7 +379,27 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
     if (room.phase !== 'between_rounds') this.requirePhase(room, 'lobby');
   }
 
-  private deal(room: Room): void {
+  private depart(room: Room, player: Player): void {
+    if (room.phase === 'lobby') {
+      room.players = room.players.filter((member) => member !== player);
+    } else {
+      player.departed = true;
+      player.tokenHash = '';
+      if (activePlayers(room).length === 0) room.phase = 'finished';
+    }
+  }
+
+  private advanceAfterSurrender(room: Room, host: Player): void {
+    const round = room.round;
+    const seat = round?.seats.find((candidate) => candidate.playerId === round.currentPlayerId);
+    const remaining = activePlayers(room).find((candidate) => candidate.playerId === seat?.playerId);
+    if (!round || !seat || !remaining) throw new ConflictException({ code: 'GUESS_WRONG_PHASE' });
+    // Both events and the completed-round statistics commit with the new deal.
+    this.applyTurn(room, remaining, { action: 'surrender', version: room.version }, host.playerId);
+    this.deal(room, { round: round.number, playerId: seat.playerId, code: seat.code });
+  }
+
+  private deal(room: Room, previousSurrender?: PreviousSurrender): void {
     const participants = activePlayers(room);
     const count = participants.length;
     if (count < 2) throw new ConflictException({ code: 'GUESS_NEED_PLAYERS' });
@@ -386,6 +416,7 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
       hintPools,
       currentPlayerId: seats[randomInt(count)].playerId,
       lastMove: null,
+      previousSurrender,
     };
     room.phase = 'playing';
   }
@@ -411,6 +442,13 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
       throw new ConflictException({ code: 'GUESS_CARD_ALREADY_GUESSED' });
     }
     return card;
+  }
+
+  private applyTurn(room: Room, player: Player, command: TurnCommand, forcedBy?: string): void {
+    const move = this.play(room, player, command);
+    writeRoom(room, { ...command, playerId: player.playerId, ...(move && { move }), ...(forcedBy && { forcedBy }) });
+    const round = room.round!;
+    if (round.currentPlayerId === null) this.pools.recordRound(room.poolId, room.roomId, round.number, round.seats);
   }
 
   private play(room: Room, player: Player, command: TurnCommand): GuessMove | null {
@@ -491,6 +529,8 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
       : seat !== ownSeat || room.phase !== 'playing' || seat.points !== null);
     const visiblePlayers = new Set(visibleSeats.map((seat) => seat.playerId));
     const codes = [...visibleSeats.map((seat) => seat.code), ...guesses.map(({ code }) => code)];
+    const previous = round?.previousSurrender;
+    if (previous) codes.push(previous.code);
     if (ownSeat && !ownSeat.openingHint) codes.push(ownSeat.code);
     if (round?.selectedCode !== undefined) codes.push(round.selectedCode);
     const cards = new Map(this.cards.getMany(codes).map((card) => [card.code, card]));
@@ -519,6 +559,7 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
       players,
       standings,
       lastMove: round?.lastMove ?? null,
+      ...(previous && { previousSurrender: { round: previous.round, playerId: previous.playerId, card: reference(previous.code) } }),
     };
     if (viewerId === undefined) {
       return { ...publicView, guesses: guesses.map(({ playerId, code, outcome }) => ({ playerId, card: reference(code), outcome })) };

@@ -126,6 +126,34 @@ describe('Guess the Card HTTP game', () => {
     }
   });
 
+  it('uses the same filters for public card pools and private room candidates', async () => {
+    const pool = await createPool('Filter pool', [codes[0], codes[1], codes[2]]);
+    const host = await create('Filter host', pool.poolId);
+    const path = `/rooms/${host.room.roomId}`;
+    const guest = (await request<GuessSession>(`${path}/join`, undefined, { playerId: 'Filter guest' })).body;
+    const params = 'subtype=quick-play';
+    const cards = await request<GuessCardPage>(`/pools/${pool.poolId}/cards?${params}`);
+    expect(cards.body).toMatchObject({ cards: [{ code: codes[1] }], totalCount: 1, totalPages: 1 });
+    expect((await request<GuessCardPage>(`/cards?${params}&q=${codes[1]}`)).body.cards[0]?.code).toBe(codes[1]);
+    expect((await request(`/pools/${pool.poolId}/cards?atkMin=100&atkMax=99`)).status).toBe(400);
+
+    const started = (await action(path, host.token, { action: 'start', version: guest.room.version })).body;
+    const expected = (await request<GuessCardPage>(`${path}/cards`, host.token)).body.cards.filter(({ code }) => code === codes[1]);
+    const narrowed = await request<GuessCardPage>(`${path}/cards?${params}`, host.token);
+    expect(narrowed.body.cards).toEqual(expected);
+    expect(narrowed.body.totalCount).toBe(expected.length);
+    expect((await request(`${path}/cards?${params}`)).status).toBe(401);
+    const tokens = new Map([[host.room.viewerId, host.token], [guest.room.viewerId, guest.token]]);
+    const views = await Promise.all([...tokens.values()].map((token) => request<GuessRoomView>(path, token)));
+    const dealt = new Map(views.flatMap(({ body }) => body.players.filter((seat) => seat.card).map(({ playerId, card }) => [playerId, card!.code])));
+    let state = started;
+    while (state.currentPlayerId) {
+      const current = state.currentPlayerId;
+      state = (await action(path, tokens.get(current)!, { action: 'guess', version: state.version, code: dealt.get(current)! })).body;
+    }
+    await action(path, host.token, { action: 'finish', version: state.version });
+  });
+
   it('keeps deals private, records completed rounds and lets the host settle the game', async () => {
     const pool = await createPool('Fixture pool', uniformCodes);
     const separatePool = await createPool('Separate pool', uniformCodes);
@@ -392,6 +420,71 @@ describe('Guess the Card HTTP game', () => {
     const otherRoom = await create('Other', small.poolId);
     expect(otherRoom.room.maxPlayers).toBe(2);
     expect((await request(path, otherRoom.token)).status).toBe(401);
+  });
+
+  it('atomically settles the last player when the host advances and revokes credentials on removal', async () => {
+    const poolCodes = uniformCodes.slice(0, 3);
+    const pool = await createPool('Host advance pool', poolCodes);
+    const host = await create('Advance host', pool.poolId);
+    const roomId = host.room.roomId;
+    const path = `/rooms/${roomId}`;
+    const guest = (await request<GuessSession>(`${path}/join`, undefined, { playerId: 'Advance guest' })).body;
+    const tokens = new Map([[host.room.viewerId, host.token], [guest.room.viewerId, guest.token]]);
+    async function answers() {
+      const views = await Promise.all([...tokens.values()].map((token) => request<GuessRoomView>(path, token)));
+      return new Map(views.flatMap(({ body }) => body.players.filter(({ card }) => card).map(({ playerId, card }) => [playerId, card!])));
+    }
+    let state = (await action(path, host.token, { action: 'start', version: guest.room.version })).body;
+    expect((await action(path, host.token, { action: 'next', version: state.version })).status).toBe(409);
+    expect((await action(path, host.token, { action: 'remove', version: state.version, playerId: guest.room.viewerId })).status).toBe(409);
+    const dealt = await answers();
+    const first = state.currentPlayerId!;
+    state = (await action(path, tokens.get(first)!, { action: 'guess', code: dealt.get(first)!.code, version: state.version })).body;
+    const last = state.currentPlayerId!;
+    const lastCard = dealt.get(last)!;
+    const version = state.version;
+    expect((await action(path, guest.token, { action: 'next', version })).status).toBe(403);
+
+    const changePool = getDb().prepare('UPDATE guess_pools SET codes_json = ? WHERE id = ?');
+    changePool.run(JSON.stringify([poolCodes[0]]), pool.poolId);
+    try {
+      expect((await action(path, host.token, { action: 'next', version })).status).toBe(409);
+    } finally {
+      changePool.run(JSON.stringify(poolCodes), pool.poolId);
+    }
+    expect((await request<GuessRoomView>(path, host.token)).body).toMatchObject({ round: 1, version, currentPlayerId: last });
+    expect(await stats(pool.poolId, lastCard.code)).toEqual({ appearances: 0, averageGuessTurns: null });
+
+    const next = await action(path, host.token, { action: 'next', version });
+    expect(next.status).toBe(200);
+    state = next.body;
+    const previousSurrender = { round: 1, playerId: last, card: { code: lastCard.code, name: lastCard.name } };
+    expect(state).toMatchObject({ phase: 'playing', round: 2, version: version + 2, previousSurrender });
+    const watching = (await request<GuessSpectatorView>(`${path}/spectate`)).body;
+    expect(watching.previousSurrender).toEqual(previousSurrender);
+    expect(watching.players.every(({ card }) => card === null)).toBe(true);
+    expect(await stats(pool.poolId, lastCard.code)).toEqual({ appearances: 1, averageGuessTurns: null });
+    expect((await action(path, host.token, { action: 'next', version })).status).toBe(409);
+    const events = getDb().prepare('SELECT event_json FROM guess_room_events WHERE room_id=? AND version>? ORDER BY version')
+      .pluck().all(roomId, version).map((event) => JSON.parse(event as string));
+    expect(events).toMatchObject([
+      { action: 'surrender', playerId: last, forcedBy: host.room.viewerId, move: { points: 0 } },
+      { action: 'next', playerId: host.room.viewerId, round: { number: 2 } },
+    ]);
+
+    const roundTwo = await answers();
+    while (state.currentPlayerId) {
+      const current = state.currentPlayerId;
+      state = (await action(path, tokens.get(current)!, { action: 'guess', code: roundTwo.get(current)!.code, version: state.version })).body;
+    }
+    const guestStanding = state.standings.find(({ playerId }) => playerId === guest.room.viewerId)!;
+    expect((await action(path, guest.token, { action: 'remove', version: state.version, playerId: host.room.viewerId })).status).toBe(403);
+    expect((await action(path, host.token, { action: 'remove', version: state.version, playerId: host.room.viewerId })).status).toBe(400);
+    const removed = await action(path, host.token, { action: 'remove', version: state.version, playerId: guest.room.viewerId });
+    expect(removed.body).toMatchObject({ phase: 'between_rounds', playerCount: 1 });
+    expect(removed.body.standings).toContainEqual({ ...guestStanding, departed: true });
+    expect((await request(path, guest.token)).status).toBe(401);
+    expect((await action(path, host.token, { action: 'finish', version: removed.body.version })).status).toBe(200);
   });
 
   it('reveals surrendered cards to spectators and allows membership changes between rounds', async () => {

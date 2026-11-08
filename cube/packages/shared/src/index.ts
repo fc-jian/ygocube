@@ -1,6 +1,8 @@
 // Shared contracts between cube api and web (see dev_docs/07-protocol-api-design.md).
 // Also the reference for the srvpro cube HTTP contract.
 
+export * from './card-search';
+
 export type TournamentPhase = 'registration' | 'drafting' | 'deckbuilding' | 'matches' | 'finished';
 export type DuelStage = 'begin' | 'dueling' | 'siding' | 'end';
 export type MatchFormat = 'round_robin' | 'swiss' | 'double_elimination';
@@ -42,6 +44,7 @@ export interface CardInfo {
   alias: number;
   aliasName?: string;
   aliasKind?: 'artwork' | 'rule';
+  releaseYear?: number;
   setCodes: number[];
   setNames: string[];
   inPool?: boolean;
@@ -83,6 +86,7 @@ export type GuessActionRequest =
   | { action: 'start'; version: number }
   | { action: 'next'; version: number }
   | { action: 'finish'; version: number }
+  | { action: 'remove'; version: number; playerId: string }
   | { action: 'leave'; version: number };
 
 export type GuessCardKind = 'monster' | 'spell' | 'trap';
@@ -144,6 +148,7 @@ export interface GuessPublicRoomView extends GuessRoomSummary {
   }[];
   standings: GuessStanding[];
   lastMove: GuessMove | null;
+  previousSurrender?: { round: number; playerId: string; card: GuessCardRef };
 }
 
 export interface GuessRoomView extends GuessPublicRoomView {
@@ -163,11 +168,15 @@ export interface GuessSession {
   room: GuessRoomView;
 }
 
-export interface GuessCardPage {
-  cards: (CardInfo & { stats?: GuessCardStats })[];
+export interface CardSearchPage {
+  cards: CardInfo[];
   totalCount: number;
   totalPages: number;
   hasMore: boolean;
+}
+
+export interface GuessCardPage extends CardSearchPage {
+  cards: (CardInfo & { stats?: GuessCardStats })[];
 }
 
 export interface GuessCardStats {

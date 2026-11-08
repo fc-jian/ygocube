@@ -1,12 +1,11 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
-import type { GuessCardPage, GuessCardStats, GuessPoolCreateRequest, GuessPoolSummary } from '@ygocube/shared';
+import type { CardSearchParams, GuessCardPage, GuessCardStats, GuessPoolCreateRequest, GuessPoolSummary } from '@ygocube/shared';
 import { CardsService, TYPE_TOKEN } from '../cards/cards.service';
 import { getDb } from '../db';
 import { DEFAULT_GUESS_POOL_CODES as ORIGINAL_GUESS_POOL_CODES } from './default-pool-codes';
 import { RECENCY_GUESS_POOL_CODES } from './recency-pool-codes';
 import { SHORTLIST_GUESS_POOL_CODES } from './shortlist-pool-codes';
 
-const PAGE_SIZE = 24;
 const ORIGINAL_POOL_KEY = 'builtin:familiar-v1';
 const SHORTLIST_POOL_KEY = 'builtin:familiar-v2';
 const RECENCY_POOL_KEY = 'builtin:familiar-v3';
@@ -108,21 +107,12 @@ export class GuessPoolsService implements OnModuleInit {
     return this.cards.getMany(codes).filter((card) => !(card.type & TYPE_TOKEN));
   }
 
-  search(query: string, page: number, codes: readonly number[] | null = null): GuessCardPage {
-    const offset = page * PAGE_SIZE;
-    let result: Pick<GuessCardPage, 'cards' | 'totalCount'>;
-    if (query) {
-      result = this.cards.searchPage(query, PAGE_SIZE, { codes: codes === null ? undefined : new Set(codes), offset });
-    } else {
-      const available = this.availableCodes(codes);
-      result = { cards: this.cards.getMany(available.slice(offset, offset + PAGE_SIZE)), totalCount: available.length };
-    }
-    const totalPages = Math.ceil(result.totalCount / PAGE_SIZE);
-    return { ...result, totalPages, hasMore: page + 1 < totalPages };
+  search(params: CardSearchParams, codes: readonly number[] | null = null): GuessCardPage {
+    return this.cards.searchCatalog(params, codes === null ? undefined : new Set(codes));
   }
 
-  browse(poolId: number, query: string, page: number): GuessCardPage {
-    const result = this.search(query, page, this.get(poolId).codes);
+  browse(poolId: number, params: CardSearchParams): GuessCardPage {
+    const result = this.search(params, this.get(poolId).codes);
     if (!result.cards.length) return result;
     const codes = result.cards.map((card) => card.code);
     const rows = getDb().prepare(`

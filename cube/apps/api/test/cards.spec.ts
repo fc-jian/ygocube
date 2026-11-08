@@ -5,6 +5,7 @@ import { cardAliasKind, decodeCardFields, parseSetCodes, CardsService, readCardN
 import { config } from '../src/config';
 import { useTestDb } from './helpers';
 import { getDb } from '../src/db';
+import { parseCardSearchParams } from '../src/cards/search-params';
 
 describe('ygopro card metadata decoding', () => {
   beforeEach(() => useTestDb());
@@ -226,6 +227,40 @@ describe('ygopro card metadata decoding', () => {
     const [first, second] = cards.poolCodes().slice(0, 2);
     expect(cards.getMany([second, first, second, -1, 999_999_999]).map((card) => card.code))
       .toEqual([second, first]);
+  });
+
+  it('matches quoted phrases and intersects inclusive ranges with card metadata before pagination', () => {
+    const cards = new CardsService();
+    cards.poolCodes();
+    const insert = getDb().prepare(`INSERT INTO cards(code, name, type, alias, level, attribute, race, atk, def, link_markers, search_text)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    insert.run(89631139, '青眼白龙', 0x11, 0, 8, 0x10, 0x2000, 3000, 2500, 0, '青眼白龙 等级 8');
+    insert.run(89631138, '青眼白龙异画', 0x11, 89631139, 8, 0x10, 0x2000, 3000, 2500, 0, '青眼白龙异画 等级 8');
+    insert.run(77000001, '未定攻守', 0x21, 0, 5, 0x20, 0x8, -2, -1, 0, '未定攻守 等级 5');
+    insert.run(77000002, '分离词项', 0x21, 0, 2, 0x4, 0x1, 500, 0, 0, '分离词项 等级 2 描述 5');
+    insert.run(84013237, '超量牌', 0x800021, 0, 4, 0x10, 0x1, 2500, 2000, 0, '超量牌 rank 4');
+    insert.run(77000003, '两个箭头', 0x4000021, 0, 2, 0x10, 0x1000000, 0, 0x3, 0x3, '两个箭头 link 2');
+    insert.run(77000004, '三个箭头', 0x4000021, 0, 3, 0x20, 0x1000000, 2000, 0x83, 0x83, '三个箭头 link 3');
+    insert.run(77000005, '单箭头', 0x4000021, 0, 1, 0x20, 0x1000000, 0, 0x2, 0x2, '单箭头 link 1');
+    insert.run(77000006, '仪式魔法', 0x82, 0, 0, 0, 0, 0, 0, 0, '仪式魔法');
+    insert.run(77000007, '通常魔法', 0x2, 0, 0, 0, 0, 0, 0, 0, '通常魔法');
+
+    const found = (params: Record<string, string>) => cards.searchCatalog(parseCardSearchParams(params)).cards.map(({ code }) => code);
+    expect(found({ q: '等级 5' })).toEqual([77000001, 77000002]);
+    expect(found({ q: '"等级 5"' })).toEqual([77000001]);
+    expect(found({ q: '"RANK 4"', yearMin: '2011', yearMax: '2011' })).toEqual([84013237]);
+    expect(found({ q: '"RANK 4"', levelMin: '4' })).toEqual([]);
+    expect(found({ levelMin: '5', levelMax: '8', attributes: '48', races: '8200', atkMin: '0', defMax: '2500' }))
+      .toEqual([77000001, 89631138, 89631139]);
+    expect(found({ atkMax: '0', defMin: '0', defMax: '0' })).toEqual([77000001]);
+    expect(found({ subtype: 'link', linkMarkers: '3' })).toEqual([77000003, 77000004]);
+    expect(found({ linkMarkers: '3', linkCountMin: '3', linkCountMax: '3' })).toEqual([77000004]);
+    expect(found({ subtype: 'ritual-spell' })).toEqual([77000006]);
+    expect(found({ subtype: 'normal-spell' })).toEqual([77000007]);
+    expect(found({ yearMin: '1999', yearMax: '1999' })).toEqual([89631138, 89631139]);
+    expect(cards.get(89631138)?.releaseYear).toBe(1999);
+    expect(() => parseCardSearchParams({ linkMarkers: '16' })).toThrow();
+    expect(() => parseCardSearchParams({ atkMin: '5', atkMax: '4' })).toThrow();
   });
 
   it('counts base fields once per eligible artwork group and keeps rules-name aliases separate', () => {

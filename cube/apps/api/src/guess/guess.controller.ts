@@ -1,5 +1,6 @@
 import { BadRequestException, Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@nestjs/common';
 import { Access, Public } from '../auth/auth.guard';
+import { parseCardSearchParams } from '../cards/search-params';
 import { GuessPoolsService } from './guess-pools.service';
 import { GuessService } from './guess.service';
 
@@ -43,11 +44,6 @@ function decimalId(value: string, min = 0): number {
   return integer(Number(value), min, Number.MAX_SAFE_INTEGER);
 }
 
-function searchParams(q: unknown, page: unknown): [string, number] {
-  if (typeof q !== 'string' || q.length > 100 || typeof page !== 'string' || !/^\d{1,5}$/.test(page)) badPayload();
-  return [q.trim(), Number(page)];
-}
-
 @Controller('games/guess')
 export class GuessController {
   constructor(private readonly guess: GuessService, private readonly pools: GuessPoolsService) {}
@@ -60,8 +56,8 @@ export class GuessController {
 
   @Public()
   @Get('cards')
-  search(@Query('q') q: unknown = '', @Query('page') page: unknown = '0') {
-    return this.pools.search(...searchParams(q, page));
+  search(@Query() params: Record<string, unknown>) {
+    return this.pools.search(parseCardSearchParams(params));
   }
 
   @Public()
@@ -94,8 +90,8 @@ export class GuessController {
 
   @Public()
   @Get('pools/:poolId/cards')
-  poolCards(@Param('poolId') id: string, @Query('q') q: unknown = '', @Query('page') page: unknown = '0') {
-    return this.pools.browse(decimalId(id), ...searchParams(q, page));
+  poolCards(@Param('poolId') id: string, @Query() params: Record<string, unknown>) {
+    return this.pools.browse(decimalId(id), parseCardSearchParams(params));
   }
 
   @Public()
@@ -132,10 +128,9 @@ export class GuessController {
   roomCards(
     @Param('roomId') roomId: string,
     @Headers('authorization') authorization: string | undefined,
-    @Query('q') q: unknown = '',
-    @Query('page') page: unknown = '0',
+    @Query() params: Record<string, unknown>,
   ) {
-    return this.guess.search(roomId, authorization, ...searchParams(q, page));
+    return this.guess.search(roomId, authorization, parseCardSearchParams(params));
   }
 
   @Public()
@@ -146,9 +141,14 @@ export class GuessController {
     @Headers('authorization') authorization: string | undefined,
     @Body() body: unknown,
   ) {
-    const input = payload(body, ['action', 'version', 'code']);
+    const input = payload(body, ['action', 'version', 'code', 'playerId']);
     const { action } = input;
     const version = integer(input.version, 1, Number.MAX_SAFE_INTEGER);
+    if (action === 'remove') {
+      if (input.code !== undefined) badPayload();
+      return this.guess.act(roomId, authorization, { action, version, playerId: playerId(input.playerId) });
+    }
+    if (input.playerId !== undefined) badPayload();
     if (action === 'select' || action === 'guess') {
       return this.guess.act(roomId, authorization, { action, version, code: integer(input.code, 1, Number.MAX_SAFE_INTEGER) });
     }
