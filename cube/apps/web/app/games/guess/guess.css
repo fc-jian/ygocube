@@ -231,8 +231,8 @@
   width: clamp(4rem, 21%, 7.5rem);
   transform: translate(-50%, -50%);
   text-align: center;
-  pointer-events: auto;
 }
+.guess-seat > :is([role="button"], .guess-seat-name, .guess-seat-hint, .guess-hint-dialog) { pointer-events: auto; }
 .guess-seat-card {
   width: clamp(2.7rem, 11vw, 4.65rem);
   aspect-ratio: 7 / 10;
@@ -254,6 +254,8 @@
 .guess-seat-badge { min-height: 1.15rem; color: #f7d890; font-size: .66rem; }
 .guess-seat-badge:empty { visibility: hidden; }
 .guess-seat-hint {
+  min-width: 1.5rem;
+  min-height: 1.5rem;
   max-width: 100%;
   padding: .08rem .24rem;
   border-radius: .25rem;
@@ -265,6 +267,7 @@
 }
 .guess-hint-trigger {
   cursor: pointer;
+  touch-action: manipulation;
   text-decoration: underline dotted;
   text-underline-offset: .14em;
 }
