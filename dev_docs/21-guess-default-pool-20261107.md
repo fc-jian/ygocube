@@ -218,3 +218,26 @@ SHA256 为 `bcc3a2920e412887d4d302bac1fe6d9c4912297400ea6ab108ede29a8cdbd347`，
 SHA256 为 `aa570cef29bb5229e04f9ab6b8d1cde30ef5a4db369fa24460e002be70f6c7d3`。
 备份及运行库通过完整性和外键检查。Cube 启动日志报告三组既有历史对战桌号重复，已与备份核对。
 验收后清理本次 Aly 上传和解包暂存目录，日志保存在 `data/local-dev/guess-filter-capacity-release/`。
+
+## 子类型取反、标签配色与连接值 Aly 发布
+
+Cube 和独立 Duel 同步发布 `20261109-guess-not-filter-b1ad45b`，源码提交为
+`b1ad45b95bc7ea46f1deaf678afaca4b2dda30e3`。Cube Web Build ID 为 `WvEMSO_dvH3yCRBLbMzz7`，
+Duel Web Build ID 为 `2fWedDrbO5sag1ZqXfzl5`。应用包 SHA256 为
+`2ee0d7942e5a4c20534a2f668b97a29b63f9242cd04ae2bb1a3c948d7532e967`。
+
+Aly 卡库的 515 张连接怪兽均满足连接值等于有效箭头数。网页以统一的等级／阶级／连接值范围筛选数目，
+连接方向仍支持多选取交集。旧 API 的箭头数量参数继续兼容。
+子类型的「非」可作用于标签或括号组，优先于「与」和「或」。确认标签按卡框或大类着色，点击即删除。
+
+Windows 和 Linux 各通过 425 项自动化测试。本地与公网浏览器均验证了十种配色、直接删除、
+无效表达式阻止提交、括号取反和局内候选。公网用 `（超量 或 连接）与 非（灵摆 或 连接）` 与 2–4 区间
+筛选时，默认池命中 101 张，独立 Duel 命中 315 张。默认池内连接值 3 且同时有左下和向下箭头的有 13 张。
+公网两人测试房 `7B871330` 完成一轮并结算，写入两条发牌统计。
+
+切换时已开局的 Guess 房和原生对战均空闲。15 间既有房与发布前备份逐条比对一致。
+七项服务及 33 个公网静态资源通过检查。两份备份位于各实例的 `backups/20261109-guess-not-filter-b1ad45b/`。
+`cube.sqlite` 的 SHA256 为 `34dd505391208b6de8c3429db653e13dad38520954e2420ef4cdce99d54ec4eb`，
+`duel.sqlite` 的 SHA256 为 `bdfede84c83182cdd3f091c13f93d0e6387f3e87a2ac2617f7229a9176b60947`。
+备份和运行库通过完整性及外键检查，卡库和资源清单哈希与切换前一致。
+验收后清理本次 Aly 上传和解包暂存目录，日志保存在 `data/local-dev/guess-not-filter-release/`。
