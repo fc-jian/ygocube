@@ -193,3 +193,28 @@ Cube 与 Duel 的数据库备份各在所属实例的 `backups/20261108-guess-se
 `cube.sqlite` 的 SHA256 为 `62af96d4fa7a1dd87a155f71455c2bc6884f7f8ddd96674b635aa20d27271f52`，
 `duel.sqlite` 的 SHA256 为 `e541a7bbb9d4796e648056d23d595ca9e56ddf4f234d350603ac5d25253db567`。
 备份和运行库通过完整性与外键检查。构建及验收日志位于 `data/local-dev/guess-search-release/`。
+
+## 子类型组合筛选与 Guess 人数 Aly 发布
+
+Cube 和独立 Duel 同步发布 `20261109-guess-filters-capacity-d773f24`，源码提交为
+`d773f243a060d16b19291b989548086b924ea45b`。Cube Web Build ID 为 `uYEop-JbEN0XO_4QDZ7sq`，
+Duel Web Build ID 为 `MLlINCyp3grcRHxijtk7S`。应用包 SHA256 为
+`92240ad7220ab3079d00a7f8ae72902ce981d5b9e81db4bde5a77d6c63c0d2e3`。
+
+切换前确认原生对战空闲。备份两套数据库后，以 `maintenance` 原因结算一间游戏中和一间轮间的
+Guess 房间，并保留一间尚未开局的等候房。结算事件保留既有积分，已完成轮次的卡池统计经比对一致。
+两套 API 与 Web 已切换，七项服务正常。卡库及资源清单哈希与切换前一致。
+
+Linux 发布构建通过 425 项自动化测试，Windows 通过 14 项 Guess 接口回归。公网用
+`（超量 或 连接）与 效果怪兽` 配合 2–4 的统一数值区间，默认池命中 276 张，独立 Duel 命中 741 张。
+公网页面引用的 33 个不同静态资源均返回 200 和正确 MIME。
+
+十个独立浏览器会话在公网房 `6804E5AE` 完成创建、加入、发牌和一轮结算。十张牌各不相同。
+验收覆盖匿名观战、局内组合筛选、跳过、公开当前选牌、猜错锁定、投降揭牌及最终排名。
+九人依次得 10 至 2 分，最后一人投降得 0 分。数据库写入 10 条发牌统计，测试房已结算。
+
+两份备份位于各实例的 `backups/20261109-guess-filters-capacity-d773f24/`。`cube.sqlite` 的
+SHA256 为 `bcc3a2920e412887d4d302bac1fe6d9c4912297400ea6ab108ede29a8cdbd347`，`duel.sqlite` 的
+SHA256 为 `aa570cef29bb5229e04f9ab6b8d1cde30ef5a4db369fa24460e002be70f6c7d3`。
+备份及运行库通过完整性和外键检查。Cube 启动日志报告三组既有历史对战桌号重复，已与备份核对。
+验收后清理本次 Aly 上传和解包暂存目录，日志保存在 `data/local-dev/guess-filter-capacity-release/`。
