@@ -256,6 +256,7 @@ describe('ygopro card metadata decoding', () => {
       .toEqual([77000001, 89631138, 89631139]);
     expect(found({ atkMax: '0', defMin: '0', defMax: '0' })).toEqual([77000001]);
     expect(found({ subtype: 'link', linkMarkers: '3' })).toEqual([77000003, 77000004]);
+    expect(found({ subtype: 'link', linkMarkers: '3', levelMin: '3', levelMax: '3' })).toEqual([77000004]);
     expect(found({ linkMarkers: '3', linkCountMin: '3', linkCountMax: '3' })).toEqual([77000004]);
     expect(found({ subtype: 'ritual-spell' })).toEqual([77000006]);
     expect(found({ subtype: 'normal-spell' })).toEqual([77000007]);
@@ -284,7 +285,13 @@ describe('ygopro card metadata decoding', () => {
     expect(found('(fusion and (tuner or pendulum)) or normal-spell')).toEqual([fusionTuner, fusionPendulum, normalSpell]);
     expect(found('fusion or normal-spell', '2')).toEqual([normalSpell]);
     expect(found('normal-spell and quick-play')).toEqual([]);
-    for (const subtype of ['fusion tuner', 'fusion and', '(fusion or)', '(fusion or xyz', 'fusion)', '()', '__proto__', '( '.repeat(65)]) {
+    expect(found('not tuner and fusion')).toEqual([fusion, fusionPendulum]);
+    expect(found('非（fusion 或 synchro）')).toEqual([normalSpell, quickPlay]);
+    expect(found('not (tuner or pendulum) and (fusion or synchro)')).toEqual([fusion, synchro]);
+    expect(found('NOT not tuner')).toEqual([fusionTuner, synchroTuner]);
+    expect(found('not quick-play', '2')).toEqual([normalSpell]);
+    for (const subtype of ['fusion tuner', 'fusion and', '(fusion or)', '(fusion or xyz', 'fusion)', '()', '__proto__',
+      'not', 'fusion not tuner', 'fusion or not', 'not ()', 'not '.repeat(64) + 'tuner']) {
       expect(() => parseCardSearchParams({ subtype })).toThrow();
     }
   });

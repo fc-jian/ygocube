@@ -61,14 +61,18 @@ export type CardRangeField = keyof typeof CARD_RANGE_LIMITS;
 export type CardSearchRange = { min?: number; max?: number };
 export type CardCategory = 1 | 2 | 4;
 export type CardSubtype = keyof typeof CARD_SUBTYPES;
-type CardSubtypeOperator = 'and' | 'or';
-export type CardSubtypeTag = CardSubtype | CardSubtypeOperator | '(' | ')';
+type CardSubtypeBinaryOperator = 'and' | 'or';
+export type CardSubtypeTag = CardSubtype | CardSubtypeBinaryOperator | 'not' | '(' | ')';
 export type CardSubtypeExpression = CardSubtype | {
-  operator: CardSubtypeOperator;
+  operator: 'not';
+  operand: CardSubtypeExpression;
+} | {
+  operator: CardSubtypeBinaryOperator;
   left: CardSubtypeExpression;
   right: CardSubtypeExpression;
 };
 export const CARD_SUBTYPE_TAG_LIMIT = 64;
+const localizedSubtypeOperators = new Map([['非', 'not'], ['与', 'and'], ['或', 'or']]);
 
 export type CardSearchSort = 'relevance' | 'level' | 'attack' | 'name';
 export type CardSearchFilters = Partial<Record<CardRangeField, CardSearchRange>> & {
@@ -89,7 +93,7 @@ export interface CardSearchParams {
 export function parseCardSubtypeExpression(expression: string): CardSubtypeExpression | null {
   if (expression.length > 2048) return null;
   const tokens = expression.normalize('NFKC').toLowerCase().match(/[()]|[^\s()]+/gu)
-    ?.map((token) => token === '与' ? 'and' : token === '或' ? 'or' : token) ?? [];
+    ?.map((token) => localizedSubtypeOperators.get(token) ?? token) ?? [];
   if (!tokens.length || tokens.length > CARD_SUBTYPE_TAG_LIMIT) return null;
   let index = 0;
 
@@ -102,7 +106,14 @@ export function parseCardSubtypeExpression(expression: string): CardSubtypeExpre
     return token && Object.hasOwn(CARD_SUBTYPES, token) ? token as CardSubtype : null;
   }
 
-  function readBinary(operator: CardSubtypeOperator, readTerm: () => CardSubtypeExpression | null): CardSubtypeExpression | null {
+  function readUnary(): CardSubtypeExpression | null {
+    if (tokens[index] !== 'not') return readOperand();
+    index++;
+    const operand = readUnary();
+    return operand === null ? null : { operator: 'not', operand };
+  }
+
+  function readBinary(operator: CardSubtypeBinaryOperator, readTerm: () => CardSubtypeExpression | null): CardSubtypeExpression | null {
     let left = readTerm();
     while (left !== null && tokens[index] === operator) {
       index++;
@@ -113,7 +124,7 @@ export function parseCardSubtypeExpression(expression: string): CardSubtypeExpre
     return left;
   }
 
-  function readAnd() { return readBinary('and', readOperand); }
+  function readAnd() { return readBinary('and', readUnary); }
   function readOr() { return readBinary('or', readAnd); }
 
   const result = readOr();

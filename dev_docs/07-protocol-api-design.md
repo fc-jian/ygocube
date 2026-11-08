@@ -224,14 +224,17 @@ deadline 和冻结剩余值。
   `totalPages` 为按每页 24 张计算的页数。零结果返回 0 页，超出末页返回空 `cards` 及实际总数和页数。
   筛选先与入口的卡库、卡池或当轮提示候选取交集，再排序、计数和分页。
   `q` 中用英文双引号包住的词组按连续字串查找，例如 `"等级 5"` 和 `"RANK 4"`，各词组和未加引号的词都须匹配。
-  可选参数 `category` 为 1／2／4。`subtype` 可传单个子类型键或由子类型键、`and`、`or`、括号组成的表达式，
-  例如 `(fusion or synchro) and tuner`。`and` 优先于 `or`，括号可改变求值顺序。表达式最多 64 个标签，
+  可选参数 `category` 为 1／2／4。`subtype` 可传单个子类型键或由子类型键、`not`、`and`、`or`、括号组成的表达式，
+  例如 `(fusion or synchro) and not tuner`。`not` 在标签或括号组前取反，优先级依次为 `not`、`and`、`or`，
+  括号可改变求值顺序。`非`、`与`、`或` 分别等同于这三个运算符。取反在当前入口的卡牌范围内求值，
+  仍与大类、其他筛选和候选范围取交集。表达式最多 64 个标签，
   语法不完整或含有未知标签时返回 `400 BAD_PAYLOAD`。
   `attributes` 与 `races` 为位掩码，同一属性或种族栏多选时命中任一即可。`linkMarkers` 为方向位掩码，
   须命中所选的全部箭头。
-  数值范围使用 `levelMin/levelMax`、`atkMin/atkMax`、`defMin/defMax`、`yearMin/yearMax`、
-  `linkCountMin/linkCountMax`，可单独传任一端点，两端均包含。`levelMin/levelMax` 统一筛选怪兽的等级、阶级或连接值。
-  攻守按原始数值筛选，攻守为 `?` 时按 0 匹配。守备筛选限有守备力栏的怪兽，箭头与数目筛选限连接怪兽。
+  数值范围使用 `levelMin/levelMax`、`atkMin/atkMax`、`defMin/defMax`、`yearMin/yearMax`，可单独传任一端点，两端均包含。
+  `levelMin/levelMax` 统一筛选怪兽的等级、阶级或连接值。网页用连接值筛选箭头数，并提供方向选择。
+  旧接口调用仍可传 `linkCountMin/linkCountMax`，按连接怪兽的箭头位掩码计数。守备筛选限有守备力栏的怪兽。
+  攻守按原始数值筛选，攻守为 `?` 时按 0 匹配。
   首发年份取已知 OCG／TCG 最早正式发行年。年份范围只匹配有年份的牌。
 - 房主可单人或多人开局。每轮独立随机安排座位、首位行动玩家及发牌，同轮卡片编号不重复。
   行动顺序为顺时针，跳过本轮已经猜中的玩家。行动玩家可提交一次猜测或主动跳过，房主也可用

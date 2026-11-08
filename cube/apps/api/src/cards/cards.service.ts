@@ -348,6 +348,10 @@ function compileSubtypeMatcher(expression: CardSubtypeExpression): (type: number
     const mask = subtypeMasks.get(category) ?? 0;
     return (type) => (type & category) !== 0 && (flag ? (type & flag) !== 0 : (type & mask) === 0);
   }
+  if (expression.operator === 'not') {
+    const matches = compileSubtypeMatcher(expression.operand);
+    return (type) => !matches(type);
+  }
   const left = compileSubtypeMatcher(expression.left);
   const right = compileSubtypeMatcher(expression.right);
   return expression.operator === 'and'

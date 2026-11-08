@@ -144,6 +144,11 @@ describe('Guess the Card HTTP game', () => {
     const narrowed = await request<GuessCardPage>(`${path}/cards?${params}`, host.token);
     expect(narrowed.body.cards).toEqual(expected);
     expect(narrowed.body.totalCount).toBe(expected.length);
+    const candidates = (await request<GuessCardPage>(`${path}/cards`, host.token)).body.cards;
+    const complement = encodeURIComponent('not (quick-play or counter)');
+    const negated = await request<GuessCardPage>(`${path}/cards?subtype=${complement}`, host.token);
+    expect(negated.body.cards).toEqual(candidates.filter(({ code }) => code === codes[0]));
+    expect(negated.body.totalCount + narrowed.body.totalCount).toBe(candidates.length);
     expect((await request(`${path}/cards?${params}`)).status).toBe(401);
     const tokens = new Map([[host.room.viewerId, host.token], [guest.room.viewerId, guest.token]]);
     const views = await Promise.all([...tokens.values()].map((token) => request<GuessRoomView>(path, token)));

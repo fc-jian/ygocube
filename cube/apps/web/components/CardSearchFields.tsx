@@ -8,20 +8,21 @@ import {
 import { CardSubtypeEditor } from './CardSubtypeEditor';
 
 const fields = Object.keys(CARD_RANGE_LIMITS) as CardRangeField[];
+const visibleFields = ['level', 'atk', 'def', 'year'] as const;
 const masks = ['category', 'subtype', 'attributes', 'races', 'linkMarkers'] as const;
 const arrows = [...CARD_LINK_DIRECTIONS.slice(0, 4), null, ...CARD_LINK_DIRECTIONS.slice(4)];
 const labels = {
   zh: {
     advanced: '高级筛选', clear: '清除筛选', invalid: '请检查范围。两端应为允许的整数，下限不能超过上限。',
     attributes: '属性', races: '种族', directions: '连接标记', minimum: '下限', maximum: '上限',
-    level: '等级／阶级／连接值', atk: '原始攻击力', def: '原始守备力', year: '首发年份', linkCount: '连接标记数',
-    help: '区间含两端，留空代表不限。攻守的「?」按 0 筛选。连接怪兽须包含所有选中的箭头。',
+    level: '等级／阶级／连接值', atk: '原始攻击力', def: '原始守备力', year: '首发年份',
+    help: '区间含两端，留空不限。攻守的「?」按 0 筛选。箭头数用连接值筛选，所选方向须全部匹配。',
   },
   en: {
     advanced: 'Advanced filters', clear: 'Clear filters', invalid: 'Enter valid integers with the minimum at or below the maximum.',
     attributes: 'Attribute', races: 'Monster Type', directions: 'Link arrows', minimum: 'Min', maximum: 'Max',
-    level: 'Level / Rank / Link Rating', atk: 'Original ATK', def: 'Original DEF', year: 'First release year', linkCount: 'Link arrow count',
-    help: 'Ranges include both endpoints. Leave either end blank for no limit. Unknown ATK and DEF count as 0. A Link Monster must have every selected arrow.',
+    level: 'Level / Rank / Link Rating', atk: 'Original ATK', def: 'Original DEF', year: 'First release year',
+    help: 'Ranges include both endpoints. Leave either end blank for no limit. Unknown ATK and DEF count as 0. Use Link Rating for arrow count. All selected directions must match.',
   },
 };
 
@@ -74,7 +75,7 @@ export function CardSearchFields({ value, onChange, onClear, locale = 'zh', chil
   const languageIndex = locale === 'zh' ? 1 : 2;
   const descriptionIndex = locale === 'zh' ? 2 : 3;
   const inputClass = 'w-full min-w-0 rounded border border-slate-500/60 bg-slate-950/40 px-2 py-1 text-sm';
-  const filterCount = fields.filter((field) => value[field]?.min !== undefined || value[field]?.max !== undefined).length
+  const filterCount = visibleFields.filter((field) => value[field]?.min !== undefined || value[field]?.max !== undefined).length
     + masks.filter((field) => field !== 'category' && value[field]).length;
 
   return (
@@ -84,7 +85,7 @@ export function CardSearchFields({ value, onChange, onClear, locale = 'zh', chil
         <CardSubtypeEditor key={editorKey} locale={locale} expression={value.subtype ?? ''} invalid={!subtypeValid(value.subtype)}
           onChange={(subtype) => onChange({ ...value, subtype: subtype || undefined })} />
         <div className="grid grid-cols-[repeat(auto-fit,minmax(9rem,1fr))] gap-2">
-          {fields.map((field) => (
+          {visibleFields.map((field) => (
             <fieldset key={field} className="min-w-0">
               <legend>{text[field]}</legend>
               <div className="mt-1 grid grid-cols-2 gap-1">

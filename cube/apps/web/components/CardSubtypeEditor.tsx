@@ -11,23 +11,46 @@ const options: Option[] = [
   { tag: ')', zh: ')', en: ')', keywords: '右括号 right close' },
   { tag: 'and', zh: '与', en: 'AND' },
   { tag: 'or', zh: '或', en: 'OR' },
+  { tag: 'not', zh: '非', en: 'NOT' },
   ...Object.entries(CARD_SUBTYPES).map(([tag, [, , zh, en]]) => ({ tag: tag as CardSubtype, zh, en })),
 ];
 const optionByTag = new Map(options.map((option) => [option.tag, option]));
+const categoryColors = {
+  1: 'border-orange-300 bg-orange-200 text-orange-950',
+  2: 'border-green-400 bg-green-300 text-green-950',
+  4: 'border-red-300 bg-red-200 text-red-950',
+};
+const frameColors: Partial<Record<CardSubtype, string>> = {
+  'normal-monster': 'border-yellow-300 bg-yellow-200 text-yellow-950',
+  'ritual-monster': 'border-blue-400 bg-blue-300 text-blue-950',
+  fusion: 'border-violet-300 bg-violet-200 text-violet-950',
+  synchro: 'border-slate-300 bg-white text-slate-950',
+  xyz: 'border-slate-500 bg-slate-950 text-slate-100',
+  pendulum: 'border-emerald-300 bg-emerald-100 text-emerald-950',
+  link: 'border-sky-300 bg-sky-200 text-sky-950',
+};
+const chip = 'inline-flex max-w-full items-center rounded border px-1.5 py-0.5 text-xs font-semibold';
+
+function tagColor(tag: CardSubtypeTag): string {
+  const subtype = tag as CardSubtype;
+  const definition = CARD_SUBTYPES[subtype];
+  return definition ? frameColors[subtype] ?? categoryColors[definition[0]] : 'border-slate-500 bg-slate-700 text-slate-100';
+}
+
 const labels = {
   zh: {
     label: '子类型组合', placeholder: '输入标签关键词', none: '没有匹配的标签。',
-    help: '例如（融合 或 同调）与 调整。「与」优先于「或」。点击标签可在其后插入。',
-    invalid: '组合未完成。请配对括号，并用「与」或「或」连接标签。',
+    help: '例如（融合 或 同调）与 非 调整。优先级为「非」「与」「或」。点击标签删除，左右键移动插入位置。',
+    invalid: '请配对括号，用「与」或「或」连接条件，并在「非」后接一个标签或括号组。',
     limit: `最多 ${CARD_SUBTYPE_TAG_LIMIT} 个标签。`,
-    insert: (tag: string) => `在 ${tag} 后插入`, remove: (tag: string) => `删除 ${tag}`,
+    remove: (tag: string) => `删除 ${tag}`,
   },
   en: {
     label: 'Subtype expression', placeholder: 'Find a tag', none: 'No matching tags.',
-    help: 'For example, (Fusion OR Synchro) AND Tuner. AND takes precedence over OR. Click a tag to insert after it.',
-    invalid: 'Complete the expression with matching parentheses and AND or OR between terms.',
+    help: 'Try (Fusion OR Synchro) AND NOT Tuner. NOT binds before AND, then OR. Click a tag to remove it. Use arrow keys to move the insertion point.',
+    invalid: 'Match parentheses, join terms with AND or OR, and follow NOT with a tag or a group.',
     limit: `Up to ${CARD_SUBTYPE_TAG_LIMIT} tags.`,
-    insert: (tag: string) => `Insert after ${tag}`, remove: (tag: string) => `Remove ${tag}`,
+    remove: (tag: string) => `Remove ${tag}`,
   },
 };
 
@@ -70,7 +93,8 @@ export function CardSubtypeEditor({ expression, onChange, invalid, locale }: {
 
   function remove(index: number) {
     onChange(tags.filter((_, current) => current !== index).join(' '));
-    move(position - Number(index < position));
+    setOpen(false);
+    move(index);
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLInputElement>) {
@@ -103,13 +127,10 @@ export function CardSubtypeEditor({ expression, onChange, invalid, locale }: {
 
   const controls = tags.map((tag, index) => {
     const label = optionByTag.get(tag)?.[locale] ?? tag;
-    return <span key={`${index}-${tag}`} data-card-subtype-tag={tag}
-      className="inline-flex max-w-full items-center gap-1 rounded border border-slate-500/60 bg-slate-800 px-1.5 text-xs">
-      <button type="button" className="!min-h-0 !p-0" aria-label={text.insert(label)}
-        onClick={() => move(index + 1)}>{label}</button>
-      <button type="button" className="!min-h-0 !p-0 text-slate-300" aria-label={text.remove(label)}
-        onClick={() => remove(index)}>×</button>
-    </span>;
+    const removeLabel = text.remove(label);
+    return <button key={`${index}-${tag}`} type="button" data-card-subtype-tag={tag}
+      className={`${chip} ${tagColor(tag)} hover:brightness-90`} aria-label={removeLabel} title={removeLabel}
+      onClick={() => remove(index)}>{label}</button>;
   });
   controls.splice(position, 0, (
     <input key="input" id={id} ref={input} className="min-w-[7rem] grow bg-transparent px-1 py-1 text-sm"
@@ -140,7 +161,7 @@ export function CardSubtypeEditor({ expression, onChange, invalid, locale }: {
                 <button id={optionId(index)} role="option" type="button" tabIndex={-1} aria-selected={index === active}
                   className="w-full rounded px-2 py-1 text-left text-sm aria-selected:bg-slate-700"
                   onMouseDown={(event) => event.preventDefault()} onMouseEnter={() => setHighlighted(index)}
-                  onClick={() => insert(option.tag)}>{option[locale]}</button>
+                  onClick={() => insert(option.tag)}><span className={`${chip} ${tagColor(option.tag)}`}>{option[locale]}</span></button>
               </li>
             ))}
           </ul>
