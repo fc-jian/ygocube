@@ -12,6 +12,7 @@ import { closeDb, getDb } from '../src/db';
 import { GuessController } from '../src/guess/guess.controller';
 import { GuessPoolsService } from '../src/guess/guess-pools.service';
 import { GuessService, settleOpenGuessRoomsForMaintenance } from '../src/guess/guess.service';
+import { buildOpeningHintOptions } from '../src/guess/opening-hints';
 import { DEFAULT_GUESS_POOL_CODES } from '../src/guess/default-pool-codes';
 import { RECENCY_GUESS_POOL_CODES } from '../src/guess/recency-pool-codes';
 import { SHORTLIST_GUESS_POOL_CODES } from '../src/guess/shortlist-pool-codes';
@@ -22,6 +23,7 @@ describe('Guess the Card HTTP game', () => {
   let app: INestApplication;
   let base: string;
   let codes: number[];
+  let uniformCodes: number[];
   let tokenCode: number;
   let outsideCode: number;
 
@@ -31,6 +33,7 @@ describe('Guess the Card HTTP game', () => {
     const cards = new CardsService();
     const catalog = cards.poolCodes();
     codes = catalog.slice(0, 30);
+    uniformCodes = catalog.slice(40).filter((code) => code % 10 !== 0).slice(0, 30);
     [outsideCode, tokenCode] = catalog.slice(30, 32);
     const setType = getDb().prepare('UPDATE cards SET type = ? WHERE code = ?');
     [0x21, 0x10002, 0x100004].forEach((type, index) => setType.run(type, codes[index]));
@@ -102,8 +105,8 @@ describe('Guess the Card HTTP game', () => {
   });
 
   it('keeps deals private, records completed rounds and lets the host settle the game', async () => {
-    const pool = await createPool('Fixture pool', codes);
-    const separatePool = await createPool('Separate pool', codes);
+    const pool = await createPool('Fixture pool', uniformCodes);
+    const separatePool = await createPool('Separate pool', uniformCodes);
     const alice = await create('Alice', pool.poolId);
     const path = `/rooms/${alice.room.roomId}`;
     expect((await request(path)).status).toBe(401);
@@ -144,15 +147,16 @@ describe('Guess the Card HTTP game', () => {
       return answers;
     }
     const answers = await readAnswers();
+    const candidates = (playerId: string) => uniformCodes.filter((code) => code === answers.get(playerId) || ![...answers.values()].includes(code));
     const page = (await request<GuessCardPage>(`${path}/cards?q=测试用效果文本`, alice.token)).body;
-    expect(page.cards.map((card) => card.code)).toEqual(codes.slice(0, 24));
+    expect(page.cards.map((card) => card.code)).toEqual(candidates('Alice').slice(0, 24));
     expect(page.cards.every((card) => !card.stats)).toBe(true);
-    expect(page).toMatchObject({ totalCount: 30, totalPages: 2, hasMore: true });
+    expect(page).toMatchObject({ totalCount: 28, totalPages: 2, hasMore: true });
     const nextPage = (await request<GuessCardPage>(`${path}/cards?q=测试用效果文本&page=1`, bob.token)).body;
-    expect(nextPage.cards.map((card) => card.code)).toEqual(codes.slice(24));
-    expect(nextPage).toMatchObject({ totalCount: 30, totalPages: 2, hasMore: false });
+    expect(nextPage.cards.map((card) => card.code)).toEqual(candidates('Bob').slice(24));
+    expect(nextPage).toMatchObject({ totalCount: 28, totalPages: 2, hasMore: false });
     expect((await request<GuessCardPage>(`${path}/cards?q=测试用效果文本&page=2`, bob.token)).body)
-      .toEqual({ cards: [], totalCount: 30, totalPages: 2, hasMore: false });
+      .toEqual({ cards: [], totalCount: 28, totalPages: 2, hasMore: false });
     expect((await request<GuessCardPage>(`${path}/cards?q=${outsideCode}`, bob.token)).body)
       .toEqual({ cards: [], totalCount: 0, totalPages: 0, hasMore: false });
     const unscoped = (await request<GuessCardPage>(`/cards?q=${outsideCode}`)).body;
@@ -161,7 +165,7 @@ describe('Guess the Card HTTP game', () => {
     expect((await request<GuessCardPage>(`/cards?q=${tokenCode}`)).body)
       .toEqual({ cards: [], totalCount: 0, totalPages: 0, hasMore: false });
     const browse = (await request<GuessCardPage>(`/pools/${pool.poolId}/cards?page=1`)).body;
-    expect(browse.cards.map((card) => card.code)).toEqual(codes.slice(24));
+    expect(browse.cards.map((card) => card.code)).toEqual(uniformCodes.slice(24));
     expect(browse).toMatchObject({ totalCount: 30, totalPages: 2, hasMore: false });
     expect(browse.cards.every((card) => card.stats?.appearances === 0)).toBe(true);
 
@@ -176,7 +180,8 @@ describe('Guess the Card HTTP game', () => {
     expect((await action(path, sessions.get(second)!, { action: 'guess', version, code: answers.get(second)! })).status).toBe(409);
     expect((await action(path, firstToken, { action: 'guess', version, code: outsideCode })).status).toBe(400);
     expect((await action(path, firstToken, { action: 'surrender', version })).status).toBe(409);
-    const miss: GuessActionRequest = { action: 'guess', version, code: answers.get(second)! };
+    const missCode = uniformCodes.find((code) => ![...answers.values()].includes(code))!;
+    const miss: GuessActionRequest = { action: 'guess', version, code: missCode };
     const duplicate = await Promise.all([action(path, firstToken, miss), action(path, firstToken, miss)]);
     expect(duplicate.map((response) => response.status).sort()).toEqual([200, 409]);
     let state = duplicate.find((response) => response.status === 200)!.body;
@@ -189,7 +194,7 @@ describe('Guess the Card HTTP game', () => {
     expect(state.players.find((player) => player.playerId === second)?.card?.code).toBe(answers.get(second));
     expect(await stats(pool.poolId, answers.get(second)!)).toEqual({ appearances: 0, averageGuessTurns: null });
     expect(state.currentPlayerId).toBe(third);
-    state = (await action(path, thirdToken, { action: 'guess', version: state.version, code: answers.get(second)! })).body;
+    state = (await action(path, thirdToken, { action: 'guess', version: state.version, code: missCode })).body;
     expect(state.currentPlayerId).toBe(first);
     state = (await action(path, firstToken, { action: 'guess', version: state.version, code: answers.get(first)! })).body;
     expect(state.lastMove).toMatchObject({ playerId: first, outcome: 'correct', points: 2 });
@@ -228,8 +233,9 @@ describe('Guess the Card HTTP game', () => {
     expect(events.every((event) => !event.event_json.includes('token'))).toBe(true);
   });
 
-  it('shows a private card kind and history, shares selections, and rotates skipped turns', async () => {
-    const pool = await createPool('Turn controls pool', codes.slice(0, 3));
+  it('shows all opening hints, locks wrong guesses, shares selections, and rotates skipped turns', async () => {
+    const poolCodes = uniformCodes.slice(0, 5);
+    const pool = await createPool('Turn controls pool', poolCodes);
     const hostId = 'Host';
     const host = await create(hostId, pool.poolId);
     const path = `/rooms/${host.room.roomId}`;
@@ -246,7 +252,7 @@ describe('Guess the Card HTTP game', () => {
       return result.body;
     }
     let state = await read(hostId);
-    expect(state).toMatchObject({ viewerCardKind: null, viewerGuesses: [], currentGuess: null });
+    expect(state).toMatchObject({ viewerOpeningHint: null, viewerCardKind: null, viewerGuesses: [], currentGuess: null });
     async function turn(id: string, command: GuessActionRequest['action'], code?: number) {
       const result = await request<GuessRoomView>(`${path}/action`, sessions.get(id), { action: command, version: state.version, code });
       expect(result.status).toBe(200);
@@ -257,23 +263,34 @@ describe('Guess the Card HTTP game', () => {
     const views = await Promise.all(ids.map(read));
     const answers = new Map(views.flatMap(({ players }) => players.flatMap(({ playerId, card }) =>
       card ? [[playerId, { code: card.code, name: card.name }] as const] : [])));
-    const kinds = ['monster', 'spell', 'trap'];
-    for (const view of views) {
-      const answer = answers.get(view.viewerId)!;
-      expect(view.viewerCardKind).toBe(kinds[codes.indexOf(answer.code)]);
+    const { options: possible } = buildOpeningHintOptions(app.get(CardsService).getMany(poolCodes), ids.map((id) => answers.get(id)!.code));
+    for (const [index, view] of views.entries()) {
+      expect(possible[index]).toContainEqual(view.viewerOpeningHint);
+      expect(view.viewerOpeningHint?.candidateCount).toBe(3);
+      expect(view.viewerCardKind).toBeNull();
       expect(view.players.find((player) => player.playerId === view.viewerId)?.card).toBeNull();
+      for (const player of view.players) {
+        const { method, group } = views.find((other) => other.viewerId === player.playerId)!.viewerOpeningHint!;
+        expect(player.openingHint).toEqual({ method, group });
+      }
+      expect(view).not.toHaveProperty('hintPools');
       expect(view.viewerGuesses).toEqual([]);
+      expect((await read(view.viewerId)).viewerOpeningHint).toEqual(view.viewerOpeningHint);
     }
 
     if (state.currentPlayerId === hostId) await turn(hostId, 'skip');
     const target = state.currentPlayerId!;
     const targetToken = sessions.get(target)!;
-    const wrong = answers.get(hostId)!;
+    const dealtCodes = new Set([...answers.values()].map(({ code }) => code));
+    const wrongCard = (await request<GuessCardPage>(`${path}/cards`, targetToken)).body.cards.find(({ code }) => !dealtCodes.has(code))!;
+    const wrong = { code: wrongCard.code, name: wrongCard.name };
     const version = state.version;
     expect((await action(path, targetToken, { action: 'host-skip', version })).status).toBe(403);
     expect((await action(path, host.token, { action: 'skip', version })).status).toBe(409);
     expect((await action(path, host.token, { action: 'select', version, code: wrong.code })).status).toBe(409);
     expect((await action(path, targetToken, { action: 'select', version, code: outsideCode })).status).toBe(400);
+    expect((await action<{ code: string }>(path, targetToken, { action: 'select', version, code: answers.get(hostId)!.code })).body.code)
+      .toBe('GUESS_CARD_OUTSIDE_HINT');
     await turn(target, 'select', wrong.code);
     expect(state.currentPlayerId).toBe(target);
     expect(state.viewerGuesses).toEqual([]);
@@ -299,10 +316,17 @@ describe('Guess the Card HTTP game', () => {
     await turn(target, 'guess', wrong.code);
     expect(state.lastMove).toEqual({ playerId: target, outcome: 'incorrect', points: null, card: wrong });
     expect(state.viewerGuesses).toEqual([wrong]);
+    expect(state.viewerWrongGuessCodes).toEqual([wrong.code]);
     expect(state.players.find((player) => player.playerId === target)?.card).toBeNull();
     expect((await read(selfSkipping)).viewerGuesses).toEqual([]);
     await turn(selfSkipping, 'guess', answers.get(selfSkipping)!.code);
-    await turn(target, 'guess', wrong.code);
+    for (const actionName of ['select', 'guess'] as const) {
+      const repeat = await action<{ code: string }>(path, targetToken, { action: actionName, version: state.version, code: wrong.code });
+      expect(repeat).toEqual({ status: 409, body: { code: 'GUESS_CARD_ALREADY_GUESSED' } });
+    }
+    const wrongSearch = (await request<GuessCardPage>(`${path}/cards?q=${wrong.code}`, targetToken)).body;
+    expect(wrongSearch.cards.map(({ code }) => code)).toEqual([wrong.code]);
+    await turn(target, 'skip');
     expect(state.currentPlayerId).toBe(target);
     expect(state.viewerGuesses).toEqual([wrong]);
     const answer = answers.get(target)!;
@@ -316,6 +340,7 @@ describe('Guess the Card HTTP game', () => {
     expect((await read(target)).viewerGuesses).toEqual([wrong, answer]);
     await turn(hostId, 'next');
     expect((await read(target)).viewerGuesses).toEqual([]);
+    expect((await read(target)).viewerWrongGuessCodes).toEqual([]);
   });
 
   it('validates room setup, caps simultaneous joins, and hands off a waiting room', async () => {
@@ -347,7 +372,8 @@ describe('Guess the Card HTTP game', () => {
   });
 
   it('shows public guesses without revealing unsolved cards and allows membership changes between rounds', async () => {
-    const pool = await createPool('Spectator pool', codes.slice(0, 2));
+    const poolCodes = uniformCodes.slice(0, 3);
+    const pool = await createPool('Spectator pool', poolCodes);
     const host = await create('Organizer', pool.poolId);
     const path = `/rooms/${host.room.roomId}`;
     const join = (playerId: string) => request<GuessSession>(`${path}/join`, undefined, { playerId });
@@ -358,6 +384,7 @@ describe('Guess the Card HTTP game', () => {
       expect(response.status).toBe(200);
       expect(response.body).not.toHaveProperty('viewerId');
       expect(response.body).not.toHaveProperty('viewerCardKind');
+      expect(response.body).not.toHaveProperty('viewerOpeningHint');
       expect(response.body).not.toHaveProperty('viewerGuesses');
       expect(JSON.stringify(response.body)).not.toContain('tokenHash');
       return response.body;
@@ -367,20 +394,27 @@ describe('Guess the Card HTTP game', () => {
     const second = state.players.find(({ playerId }) => playerId !== first)!.playerId;
     const firstView = (await request<GuessRoomView>(path, tokens.get(first))).body;
     const secondCard = firstView.players.find(({ playerId }) => playerId === second)!.card!;
-    expect((await watch()).players.every(({ card }) => card === null)).toBe(true);
+    const secondView = (await request<GuessRoomView>(path, tokens.get(second))).body;
+    const firstCard = secondView.players.find(({ playerId }) => playerId === first)!.card!;
+    const wrongCode = poolCodes.find((code) => code !== firstCard.code && code !== secondCard.code)!;
+    const wrongCard = app.get(CardsService).get(wrongCode)!;
+    const watching = await watch();
+    expect(watching.players.every(({ card }) => card === null)).toBe(true);
+    expect(watching.players.map(({ openingHint }) => openingHint)).toEqual(state.players.map(({ openingHint }) => openingHint));
     expect((await request(path)).status).toBe(401);
     expect((await request(`${path}/cards`)).status).toBe(401);
     expect((await join('Early')).status).toBe(409);
     expect((await action(path, host.token, { action: 'leave', version: state.version })).status).toBe(409);
 
-    state = (await action(path, tokens.get(first)!, { action: 'select', version: state.version, code: secondCard.code })).body;
+    state = (await action(path, tokens.get(first)!, { action: 'select', version: state.version, code: wrongCode })).body;
     const selecting = await watch();
     const publicCard = { code: secondCard.code, name: secondCard.name };
-    expect(selecting.currentGuess).toEqual(publicCard);
+    const publicWrong = { code: wrongCode, name: wrongCard.name };
+    expect(selecting.currentGuess).toEqual(publicWrong);
     expect(selecting.guesses).toEqual([]);
     expect(selecting.players.every(({ card }) => card === null)).toBe(true);
-    state = (await action(path, tokens.get(first)!, { action: 'guess', version: state.version, code: secondCard.code })).body;
-    const wrong = { playerId: first, card: publicCard, outcome: 'incorrect' };
+    state = (await action(path, tokens.get(first)!, { action: 'guess', version: state.version, code: wrongCode })).body;
+    const wrong = { playerId: first, card: publicWrong, outcome: 'incorrect' };
     expect((await watch()).guesses).toEqual([wrong]);
     expect((await watch()).players.every(({ card }) => card === null)).toBe(true);
     state = (await action(path, tokens.get(second)!, { action: 'guess', version: state.version, code: secondCard.code })).body;
@@ -393,7 +427,6 @@ describe('Guess the Card HTTP game', () => {
     expect(state.players.every(({ card }) => card !== null)).toBe(true);
     expect((await watch()).players.find(({ playerId }) => playerId === first)?.card).toBeNull();
 
-    expect((await join('Full')).status).toBe(409);
     expect((await action(path, host.token, { action: 'leave', version: state.version })).status).toBe(200);
     expect((await request(path, host.token)).status).toBe(401);
     const between = await watch();
@@ -405,9 +438,12 @@ describe('Guess the Card HTTP game', () => {
     expect((await join('organizer')).status).toBe(409);
     const newcomer = await join('New player');
     expect(newcomer.status).toBe(201);
+    expect(newcomer.body.room.viewerOpeningHint).toBeNull();
     expect(newcomer.body.room.standings.find(({ playerId }) => playerId === 'New player')).toMatchObject({ score: 0, departed: false });
     const next = await action(path, guest.token, { action: 'next', version: newcomer.body.room.version });
     expect(next.status).toBe(200);
+    expect(next.body.viewerOpeningHint?.candidateCount).toBe(2);
+    expect((await request<GuessRoomView>(path, newcomer.body.token)).body.viewerOpeningHint?.candidateCount).toBe(2);
     const nextWatch = await watch();
     expect(nextWatch.round).toBe(2);
     expect(nextWatch.players.map(({ playerId }) => playerId).sort()).toEqual(['Guest', 'New player']);
@@ -437,7 +473,8 @@ describe('Guess the Card HTTP game', () => {
     await request(`${path}/cards`, host.token);
     await request(`${path}/spectate`);
     expect(room.get(host.room.roomId)).toEqual({ phase: 'playing', updated_at: recent });
-    const selected = await action(path, tokens.get(remaining)!, { action: 'select', version: state.version, code: answer.code });
+    const remainingCode = codes.slice(0, 2).find((code) => code !== answer.code)!;
+    const selected = await action(path, tokens.get(remaining)!, { action: 'select', version: state.version, code: remainingCode });
     expect(selected.status).toBe(200);
     expect((room.get(host.room.roomId) as { updated_at: string }).updated_at > recent).toBe(true);
     update.run(new Date(Date.now() - day).toISOString(), host.room.roomId);
@@ -526,6 +563,8 @@ describe('Guess the Card HTTP game', () => {
     expect(migrated.poolName).toBe(`Legacy room [${roomId}]`);
     expect(await stats(migrated.poolId, aCode)).toEqual({ appearances: 1, averageGuessTurns: 3 });
     expect(migrated.players.find((player) => player.playerId === 'B')?.card).toBeNull();
+    expect(migrated.viewerOpeningHint).toBeNull();
+    expect(migrated.viewerCardKind).toBe('spell');
     expect(migrated.viewerGuesses).toEqual([]);
     expect((await request<GuessRoomView>(path, aToken)).body.viewerGuesses.map(({ code }) => code)).toEqual([bCode]);
     const bCorrect = (await action(path, bToken, { action: 'guess', version: migrated.version, code: bCode })).body;

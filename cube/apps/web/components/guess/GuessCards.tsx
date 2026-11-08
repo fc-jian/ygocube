@@ -15,7 +15,7 @@ type GuessCardsProps = {
 } & (
   | { mode: 'browse' }
   | ({ mode: 'add' } & CardSelection)
-  | ({ mode: 'select'; guessed: ReadonlySet<number> } & CardSelection)
+  | ({ mode: 'select'; wrongGuesses: ReadonlySet<number> } & CardSelection)
 );
 
 type CardFilter = { query: string; page: number };
@@ -72,6 +72,7 @@ export function GuessCards(props: GuessCardsProps) {
         <ul className={mode === 'browse' ? 'guess-card-results guess-pool-results' : 'guess-card-results'}>
           {matches.cards.map((card) => {
             const active = props.mode !== 'browse' && props.selected.has(card.code);
+            const wrong = props.mode === 'select' && props.wrongGuesses.has(card.code);
             return (
               <li key={card.code} data-guess-code={card.code}>
                 <CardWithTooltip code={card.code} card={card} className="w-8 shrink-0 sm:w-9" />
@@ -79,7 +80,7 @@ export function GuessCards(props: GuessCardsProps) {
                   <p className="truncate text-sm font-semibold" title={card.name}>{card.name}</p>
                   <p className="font-mono text-xs text-slate-400">
                     {String(card.code).padStart(8, '0')}
-                    {props.mode === 'select' && props.guessed.has(card.code) && (
+                    {wrong && (
                       <span className="ml-2 font-sans text-amber-200">{text.alreadyGuessed}</span>
                     )}
                   </p>
@@ -93,7 +94,7 @@ export function GuessCards(props: GuessCardsProps) {
                   )}
                 </div>
                 {props.mode !== 'browse' && (
-                  <button type="button" className={active ? 'guess-selected' : 'guess-secondary'} disabled={props.enabled === false || active}
+                  <button type="button" className={active ? 'guess-selected' : 'guess-secondary'} disabled={props.enabled === false || active || wrong}
                     onClick={() => props.choose(card)}>
                     {mode === 'add' ? active ? text.added : text.add : active ? text.selected : text.select}
                   </button>

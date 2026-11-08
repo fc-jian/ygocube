@@ -4,13 +4,15 @@ import {
 } from '@nestjs/common';
 import { randomBytes, randomInt } from 'node:crypto';
 import type {
-  GuessActionRequest, GuessCardKind, GuessCardPage, GuessCardRef, GuessCreateRequest, GuessMove, GuessRoomSummary,
+  GuessActionRequest, GuessCardKind, GuessCardPage, GuessCardRef, GuessCreateRequest, GuessMove,
+  GuessOpeningHint, GuessOpeningHintGroup, GuessRoomSummary,
   GuessPublicRoomView, GuessRoomView, GuessSession, GuessSpectatorView,
 } from '@ygocube/shared';
 import { safeHashEqual, sha256 } from '../auth/auth.guard';
 import { CardsService, TYPE_TOKEN } from '../cards/cards.service';
 import { getDb } from '../db';
 import { GuessPoolsService } from './guess-pools.service';
+import { drawOpeningHints } from './opening-hints';
 
 const MAX_PLAYERS = 8;
 const ROOM_IDLE_MS = 24 * 60 * 60 * 1000;
@@ -30,6 +32,7 @@ interface Seat {
   code: number;
   points: number | null;
   attempts: number;
+  openingHint?: GuessOpeningHint;
 }
 
 interface Round {
@@ -38,6 +41,7 @@ interface Round {
   currentPlayerId: string | null;
   lastMove: GuessMove | null;
   selectedCode?: number;
+  hintPools?: Partial<Record<GuessOpeningHintGroup, number[]>>;
 }
 
 interface Room {
@@ -299,8 +303,9 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
 
   search(roomId: string, authorization: string | undefined, query: string, page: number): GuessCardPage {
     const room = this.load(roomId);
-    this.authenticate(room, authorization);
-    return this.pools.search(query, page, this.pools.get(room.poolId).codes);
+    const { playerId } = this.authenticate(room, authorization);
+    const codes = this.openingCandidates(room.round, playerId) ?? this.pools.get(room.poolId).codes;
+    return this.pools.search(query, page, codes);
   }
 
   act(roomId: string, authorization: string | undefined, command: GuessActionRequest): GuessRoomView | null {
@@ -371,23 +376,39 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
     const codes = this.pools.availableCodes(this.pools.get(room.poolId).codes);
     if (codes.length < count) throw new ConflictException({ code: 'GUESS_POOL_TOO_SMALL' });
     const answers = sample(codes, count);
+    const { hints, pools: hintPools } = drawOpeningHints(this.cards.getMany(codes), answers);
     const seats = sample(participants, count).map((player, index) => ({
-      playerId: player.playerId, code: answers[index], points: null, attempts: 0,
+      playerId: player.playerId, code: answers[index], points: null, attempts: 0, openingHint: hints[index],
     }));
     room.round = {
       number: (room.round?.number ?? 0) + 1,
       seats,
+      hintPools,
       currentPlayerId: seats[randomInt(count)].playerId,
       lastMove: null,
     };
     room.phase = 'playing';
   }
 
-  private poolCard(room: Room, code: number) {
+  private openingCandidates(round: Round | null, playerId: string): number[] | undefined {
+    const seat = round?.seats.find((entry) => entry.playerId === playerId);
+    if (!round || !seat?.openingHint) return undefined;
+    const visibleCodes = new Set(round.seats.filter((entry) => entry !== seat).map(({ code }) => code));
+    return (round.hintPools?.[seat.openingHint.group] ?? []).filter((code) => !visibleCodes.has(code));
+  }
+
+  private guessCard(room: Room, playerId: string, code: number) {
     const card = this.cards.get(code);
-    const poolCodes = this.pools.get(room.poolId).codes;
-    if (!card || (card.type & TYPE_TOKEN) || (poolCodes && !poolCodes.includes(code))) {
+    if (!card || (card.type & TYPE_TOKEN)) {
       throw new BadRequestException({ code: 'GUESS_CARD_NOT_IN_POOL' });
+    }
+    const candidates = this.openingCandidates(room.round, playerId);
+    const allowed = candidates ?? this.pools.get(room.poolId).codes;
+    if (allowed && !allowed.includes(code)) {
+      throw new BadRequestException({ code: candidates ? 'GUESS_CARD_OUTSIDE_HINT' : 'GUESS_CARD_NOT_IN_POOL' });
+    }
+    if (this.submittedGuesses(room, playerId).some((guess) => guess.code === code && guess.outcome === 'incorrect')) {
+      throw new ConflictException({ code: 'GUESS_CARD_ALREADY_GUESSED' });
     }
     return card;
   }
@@ -402,7 +423,7 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
       throw new ConflictException({ code: 'GUESS_NOT_YOUR_TURN' });
     }
     if (command.action === 'select') {
-      round.selectedCode = this.poolCard(room, command.code).code;
+      round.selectedCode = this.guessCard(room, player.playerId, command.code).code;
       return null;
     }
 
@@ -415,7 +436,7 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
       move.points = 0;
       move.outcome = 'surrendered';
     } else if (command.action === 'guess') {
-      const card = this.poolCard(room, command.code);
+      const card = this.guessCard(room, player.playerId, command.code);
       move.card = cardRef(card);
       if (card.code === seat.code) {
         move.points = remaining;
@@ -470,7 +491,7 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
       : seat !== ownSeat || room.phase !== 'playing' || seat.points !== null);
     const visiblePlayers = new Set(visibleSeats.map((seat) => seat.playerId));
     const codes = [...visibleSeats.map((seat) => seat.code), ...guesses.map(({ code }) => code)];
-    if (ownSeat) codes.push(ownSeat.code);
+    if (ownSeat && !ownSeat.openingHint) codes.push(ownSeat.code);
     if (round?.selectedCode !== undefined) codes.push(round.selectedCode);
     const cards = new Map(this.cards.getMany(codes).map((card) => [card.code, card]));
     const reference = (code: number) => ({ code, name: cards.get(code)?.name ?? String(code).padStart(8, '0') });
@@ -480,10 +501,11 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
       playerId, score, departed: departed === true, roundPoints: seatsById.get(playerId)?.points ?? null,
     }));
     const scores = new Map(standings.map((standing) => [standing.playerId, standing.score]));
-    const players = round ? seats.map(({ playerId, code, points }) => ({
+    const players = round ? seats.map(({ playerId, code, points, openingHint }) => ({
       playerId, score: scores.get(playerId) ?? 0, roundPoints: points,
       card: visiblePlayers.has(playerId) ? cards.get(code) ?? null : null,
-    })) : standings.map(({ playerId, score }) => ({ playerId, score, roundPoints: null, card: null }));
+      openingHint: openingHint ? { method: openingHint.method, group: openingHint.group } : null,
+    })) : standings.map(({ playerId, score }) => ({ playerId, score, roundPoints: null, card: null, openingHint: null }));
     const publicView: GuessPublicRoomView = {
       ...summary(room),
       version: room.version,
@@ -504,8 +526,10 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
     return {
       ...publicView,
       viewerId,
-      viewerCardKind: cardKind(ownSeat && cards.get(ownSeat.code)?.type),
+      viewerOpeningHint: ownSeat?.openingHint ?? null,
+      viewerCardKind: ownSeat?.openingHint ? null : cardKind(ownSeat && cards.get(ownSeat.code)?.type),
       viewerGuesses: guesses.map(({ code }) => reference(code)),
+      viewerWrongGuessCodes: guesses.filter(({ outcome }) => outcome === 'incorrect').map(({ code }) => code),
     };
   }
 }

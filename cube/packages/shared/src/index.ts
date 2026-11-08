@@ -88,6 +88,26 @@ export type GuessActionRequest =
 export type GuessCardKind = 'monster' | 'spell' | 'trap';
 export type GuessCardRef = Pick<CardInfo, 'code' | 'name'>;
 
+export type GuessOpeningHintMethod = 'deck' | 'level' | 'attribute' | 'attack' | 'summon-value' | 'defense'
+  | 'release-era' | 'field-deck' | 'field-size' | 'frame' | 'combat-value' | 'light-dark';
+export type GuessReleaseEra = 'through-2014' | '2015-2019' | '2020-2023' | '2024-plus';
+export type GuessOpeningHintGroup = 'main-monster' | 'extra-monster' | 'spell-trap'
+  | 'low-level' | 'high-level' | 'no-level' | 'dark' | 'light-wind' | 'earth-water-fire-divine'
+  | 'low-attack' | 'medium-attack' | 'high-attack' | 'value-1-3' | 'value-4-6' | 'value-7-plus'
+  | 'low-defense' | 'medium-defense' | 'high-defense' | GuessReleaseEra
+  | 'no-field' | 'field-main-monster' | 'field-extra-monster' | 'field-spell-trap'
+  | 'small-field' | 'medium-field' | 'large-field' | 'regular-frame' | 'special-frame'
+  | 'low-combat-value' | 'medium-combat-value' | 'high-combat-value' | 'light-dark' | 'other-attribute';
+
+export interface GuessOpeningClue {
+  method: GuessOpeningHintMethod;
+  group: GuessOpeningHintGroup;
+}
+
+export interface GuessOpeningHint extends GuessOpeningClue {
+  candidateCount: number;
+}
+
 export interface GuessMove {
   playerId: string;
   outcome: 'correct' | 'incorrect' | 'surrendered' | 'skipped';
@@ -117,6 +137,7 @@ export interface GuessPublicRoomView extends GuessRoomSummary {
     score: number;
     roundPoints: number | null;
     card: CardInfo | null;
+    openingHint: GuessOpeningClue | null;
   }[];
   standings: GuessStanding[];
   lastMove: GuessMove | null;
@@ -124,8 +145,10 @@ export interface GuessPublicRoomView extends GuessRoomSummary {
 
 export interface GuessRoomView extends GuessPublicRoomView {
   viewerId: string;
+  viewerOpeningHint: GuessOpeningHint | null;
   viewerCardKind: GuessCardKind | null;
   viewerGuesses: GuessCardRef[];
+  viewerWrongGuessCodes: number[];
 }
 
 export interface GuessSpectatorView extends GuessPublicRoomView {

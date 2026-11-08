@@ -286,7 +286,7 @@ function resolveStringsConf(configured: string, cdbPath: string): string {
   return candidates.find((candidate, index) => candidates.indexOf(candidate) === index && fs.existsSync(candidate)) ?? '';
 }
 
-function isExtraDeckType(type: number): boolean {
+export function isExtraDeckType(type: number): boolean {
   // this codebase's TYPES_EXTRA_DECK (FUSION 0x40 | SYNCHRO 0x2000 | XYZ 0x800000 | LINK 0x4000000)
   return (type & 0x4802040) !== 0;
 }

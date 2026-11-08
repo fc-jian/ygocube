@@ -214,10 +214,10 @@ deadline 和冻结剩余值。
 | `GET /pools/:poolId/cards?q=&page=` | 公开查看卡池及统计，沿用搜索与分页规则。每张牌附 `stats: {appearances,averageGuessTurns}` |
 | `POST /rooms` | `{name,playerId,poolId}`。选择已保存的卡池或内置完整卡库。返回 `{token,room}` |
 | `POST /rooms/:roomId/join` | `{playerId}`。等候或轮间可从房间链接加入，在场玩家最多 8 人且不超过卡池卡数。房间内 ID 唯一，返回 `{token,room}` |
-| `GET /rooms/:roomId` | 本人视角的房间状态，包括 `version`、阶段、当前轮次、房主、行动玩家、按座次排列的玩家、累计分、本轮得分、本人卡片大类及猜牌记录、当前选牌及系统结算原因 `finishReason` |
-| `GET /rooms/:roomId/spectate` | 匿名只读。返回房间阶段、当前行动及选牌、座次、积分排名和本轮已提交的猜测，包含猜中或猜错的结果。仅猜中的座位返回所持卡片 |
-| `GET /rooms/:roomId/cards?q=&page=` | 本房间完整卡池的搜索与分页，和当轮发牌结果无关 |
-| `POST /rooms/:roomId/action` | `{action,version,code?}`。操作为 `start/select/guess/skip/host-skip/surrender/next/finish/leave`。`select` 和 `guess` 需要卡池内的 `code`，其余操作省略 `code`。返回更新后的本人视角，退出返回 200 空响应 |
+| `GET /rooms/:roomId` | 本人视角的房间状态，包括公开座次与开局提示、当前轮次和行动、积分、本人的候选数与猜牌记录、当前选牌及系统结算原因 `finishReason` |
+| `GET /rooms/:roomId/spectate` | 匿名只读。返回房间阶段、当前行动及选牌、各座位的开局提示、积分排名和本轮已提交的猜测。仅猜中的座位返回所持卡片 |
+| `GET /rooms/:roomId/cards?q=&page=` | 按请求玩家当轮开局提示搜索与分页，去掉其他座位的已知牌。猜错的牌保留在搜索结果中。没有当轮提示时可搜索房间完整卡池 |
+| `POST /rooms/:roomId/action` | `{action,version,code?}`。操作为 `start/select/guess/skip/host-skip/surrender/next/finish/leave`。`select` 和 `guess` 需要本人候选内的 `code`，其余操作省略 `code`。返回更新后的本人视角，退出返回 200 空响应 |
 
 - 三个卡牌搜索入口使用同一分页结构。`totalCount` 为对应卡池与查询筛选后的有效卡牌数，
   `totalPages` 为按每页 24 张计算的页数。零结果返回 0 页，超出末页返回空 `cards` 及实际总数和页数。
@@ -236,14 +236,25 @@ deadline 和冻结剩余值。
   揭晓本轮卡片并保留原链接供房间成员查看结果，未完成轮次不写入卡池统计。
   `finishReason` 在超时和发布前批量结算时分别为 `inactivity`、`maintenance`，其他情况为 `null`。
 - 每名玩家未猜中或投降前，本人视角的对应 `card` 为 `null`，其他座位返回 `CardInfo`。
-  本人卡片大类 `viewerCardKind` 为 `monster/spell/trap`，没有可用分类时为 `null`。
-  房主遵循相同规则，公开列表不含发牌信息。搜索只根据卡池和查询返回结果。
+  新一轮发牌时，每个座位的 `openingHint` 向全房间玩家和观战者公开，包含稳定的 `method` 和 `group`。
+  `viewerOpeningHint` 另向本人返回 `candidateCount`。候选按本轮可发卡池统计，扣除同组的其他座位牌。
+  提示与候选范围同当轮发牌一同持久化，轮询和重连沿用结果。尚无当轮座位时提示为 `null`。
+  已有提示时 `viewerCardKind` 为 `null`，旧轮次仍可用原卡片大类。
+- 卡组、星级、属性、原始攻击力、等级／阶级／连接值、原始守备力、首发年代、字段与卡组、字段规模、
+  卡框、攻守面板、光暗这 12 种方式一起参与抽签。缺少首发年份的卡片使用其他 11 种方式。
+  字段以卡库的基础字段编号归并子字段，字段规模取同一张牌所归属字段中，在本轮卡池里成员数最多的一项。
+  牌按原规则发完后，服务端独立随机提出 24 套每人一种的提示组合，再按全桌候选数的最大差距加权抽取。
+  以 2,378 张卡为基准，差距不超过 150 张时权重相同，超过后每增加 40 张权重减半。
+  其他卡池按有效卡数等比调整这两个数，每个组合保留正权重。
+  房主遵循相同规则，房间列表只返回房间摘要。
 - 观战响应只公开猜中的座位卡片和本轮实际猜测。投降、自动或手动结算后，未猜中的座位仍保持隐藏。
-  观战响应不含观战者身份字段、玩家凭证或卡种提示。轮间加入者在下次发牌时获得座位。
+  观战响应不含本人候选数及身份字段。轮间加入者在下次发牌时获得座位和提示。
 - 行动玩家可用 `select` 同步候选牌，全房间成员可在 `currentGuess` 看到其 `{code,name}`。
   选牌不消耗行动，提交、跳过或投降后清空。提交猜测时 `lastMove.card` 记录猜的牌，
   跳过时 `lastMove.outcome` 为 `skipped`，房主代跳时 `lastMove.skippedBy` 为房主 ID。
-  `viewerGuesses` 从本轮事件提取本人已提交的 `{code,name}`，按首次提交顺序去重，新一轮清空。
+  `viewerGuesses` 从本轮事件提取本人已提交的 `{code,name}`，`viewerWrongGuessCodes` 为其中猜错的编号。
+  已猜错的牌标记并禁用选牌。服务端拒绝超出候选范围或重复提交猜错牌，错误码分别为
+  `GUESS_CARD_OUTSIDE_HINT` 和 `GUESS_CARD_ALREADY_GUESSED`。新一轮清空猜牌记录。
 - 统计仅在完整一轮结束时更新，避免通过公开数据推知正在进行的发牌。每次发出计一次出现，
   包括投降的牌。平均猜中回合按持牌者第几次轮到自己时猜中计算，跳过计一次轮到自己，仅纳入猜中记录。
   尚无猜中记录时 `averageGuessTurns` 为 `null`。统计按卡池和 exact code 分开累计。

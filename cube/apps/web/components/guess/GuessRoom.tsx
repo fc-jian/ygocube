@@ -38,6 +38,8 @@ function GuessTable({ room, text }: { room: GuessPublicRoomView | GuessRoomView;
           const current = player.playerId === room.currentPlayerId;
           const self = player.playerId === viewer?.viewerId;
           const kind = self && viewer?.viewerCardKind ? text.cardKinds[viewer.viewerCardKind] : null;
+          const hint = player.openingHint;
+          const fullHint = hint ? `${text.hintMethods[hint.method]} · ${text.hintGroups[hint.group]}` : undefined;
           return (
             <li key={player.playerId} className="guess-seat" data-guess-player={player.playerId}
               aria-current={current ? 'true' : undefined}
@@ -51,6 +53,9 @@ function GuessTable({ room, text }: { room: GuessPublicRoomView | GuessRoomView;
                 </div>
               )}
               <span className="guess-seat-name" title={player.playerId}>{player.playerId}</span>
+              {hint && <span className="guess-seat-hint" data-guess-seat-hint title={fullHint} aria-label={fullHint}>
+                {text.hintShort[hint.group] ?? text.hintGroups[hint.group]}
+              </span>}
               <span className="guess-seat-badge">
                 {self && text.you}{self && player.roundPoints !== null && ' · '}
                 {player.roundPoints !== null && `+${player.roundPoints}`}
@@ -234,6 +239,8 @@ export function GuessRoom({ roomId }: { roomId: string }) {
 
   const host = room?.hostId === room?.viewerId;
   const playing = room?.phase === 'playing';
+  const openingHint = playing && room.players.some((player) => player.playerId === room.viewerId && !player.card)
+    ? room.viewerOpeningHint : null;
   const canGuess = playing && room.currentPlayerId === room.viewerId;
   const selected = canGuess ? room.currentGuess : null;
   const canSurrender = canGuess && room.players.filter((player) => player.roundPoints === null).length === 1;
@@ -299,6 +306,11 @@ export function GuessRoom({ roomId }: { roomId: string }) {
           <section className="guess-panel guess-play">
             {playing && <>
               <h2>{text.pool} <span className="guess-muted">({room.poolCount.toLocaleString(language)})</span></h2>
+              {openingHint && <p className="flex flex-wrap items-baseline gap-x-2 gap-y-1" data-guess-opening-hint>
+                <span className="guess-muted">{text.hintMethods[openingHint.method]}</span>
+                <strong className="guess-pill">{text.hintGroups[openingHint.group]}</strong>
+                <span className="guess-muted">{fillText(text.hintCandidates, { count: openingHint.candidateCount.toLocaleString(language) })}</span>
+              </p>}
               {!canGuess && room.currentGuess && room.currentPlayerId && <p className="guess-live-guess" role="status">
                 {fillText(text.liveGuess, { player: room.currentPlayerId, card: room.currentGuess.name })}
               </p>}
@@ -338,7 +350,7 @@ export function GuessRoom({ roomId }: { roomId: string }) {
             {room.round > 0 && <GuessHistory guesses={room.viewerGuesses} text={text} />}
             {playing && <GuessCards key={room.round} text={text} path={`${roomPath}/cards`} token={token} mode="select"
               selected={new Set(selected ? [selected.code] : [])} enabled={canGuess && !busy}
-              guessed={new Set(room.viewerGuesses.map(({ code }) => code))}
+              wrongGuesses={new Set(room.viewerWrongGuessCodes ?? [])}
               choose={(card) => void act({ action: 'select', version: room.version, code: card.code })} />}
           </section>
           <GuessScores room={room} text={text} viewerId={room.viewerId} />

@@ -251,6 +251,16 @@
 }
 .guess-seat-badge { min-height: 1.15rem; color: #f7d890; font-size: .66rem; }
 .guess-seat-badge:empty { visibility: hidden; }
+.guess-seat-hint {
+  max-width: 100%;
+  padding: .08rem .24rem;
+  border-radius: .25rem;
+  background: #18382a;
+  color: #d8f0df;
+  font-size: clamp(.58rem, 1.65vw, .71rem);
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
 .guess-scores { width: 100%; table-layout: fixed; text-align: right; font-size: .83rem; }
 .guess-scores :is(th, td) { padding: .4rem .2rem; border-bottom: 1px solid #2e4c3e; }
 .guess-scores th:first-child { width: 52%; text-align: left; overflow-wrap: anywhere; }
