@@ -89,7 +89,7 @@ export type GuessCardKind = 'monster' | 'spell' | 'trap';
 export type GuessCardRef = Pick<CardInfo, 'code' | 'name'>;
 
 export type GuessOpeningHintMethod = 'deck' | 'level' | 'attribute' | 'attack' | 'summon-value' | 'defense'
-  | 'release-era' | 'field-deck' | 'field-size' | 'frame' | 'combat-value' | 'light-dark';
+  | 'release-era' | 'field-deck' | 'field-size' | 'frame' | 'combat-value' | 'combat-compare' | 'light-dark';
 export type GuessReleaseEra = 'through-2014' | '2015-2019' | '2020-2023' | '2024-plus';
 export type GuessOpeningHintGroup = 'main-monster' | 'extra-monster' | 'spell-trap'
   | 'low-level' | 'high-level' | 'no-level' | 'dark' | 'light-wind' | 'earth-water-fire-divine'
@@ -97,7 +97,9 @@ export type GuessOpeningHintGroup = 'main-monster' | 'extra-monster' | 'spell-tr
   | 'low-defense' | 'medium-defense' | 'high-defense' | GuessReleaseEra
   | 'no-field' | 'field-main-monster' | 'field-extra-monster' | 'field-spell-trap'
   | 'small-field' | 'medium-field' | 'large-field' | 'regular-frame' | 'special-frame'
-  | 'low-combat-value' | 'medium-combat-value' | 'high-combat-value' | 'light-dark' | 'other-attribute';
+  | 'catalog-field-small' | 'catalog-field-medium' | 'catalog-field-large'
+  | 'low-combat-value' | 'medium-combat-value' | 'high-combat-value'
+  | 'defense-at-least-attack' | 'attack-over-500' | 'attack-slight-or-unknown' | 'light-dark' | 'other-attribute';
 
 export interface GuessOpeningClue {
   method: GuessOpeningHintMethod;

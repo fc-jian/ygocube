@@ -38,9 +38,9 @@ function poolCodes(value: unknown): number[] {
   return codes;
 }
 
-function poolId(value: string): number {
+function decimalId(value: string, min = 0): number {
   if (!/^\d+$/.test(value)) badPayload();
-  return integer(Number(value), 0, Number.MAX_SAFE_INTEGER);
+  return integer(Number(value), min, Number.MAX_SAFE_INTEGER);
 }
 
 function searchParams(q: unknown, page: unknown): [string, number] {
@@ -65,6 +65,15 @@ export class GuessController {
   }
 
   @Public()
+  @Get('card-details')
+  cardDetails(@Query('codes') codes: unknown) {
+    if (typeof codes !== 'string' || codes.length > 6800) badPayload();
+    const parts = codes.split(',');
+    if (parts.length > 400) badPayload();
+    return this.pools.cardDetails(parts.map((part) => decimalId(part, 1)));
+  }
+
+  @Public()
   @Get('pools')
   listPools() {
     return this.pools.list();
@@ -80,13 +89,13 @@ export class GuessController {
   @Public()
   @Get('pools/:poolId')
   pool(@Param('poolId') id: string) {
-    return this.pools.describe(poolId(id));
+    return this.pools.describe(decimalId(id));
   }
 
   @Public()
   @Get('pools/:poolId/cards')
   poolCards(@Param('poolId') id: string, @Query('q') q: unknown = '', @Query('page') page: unknown = '0') {
-    return this.pools.browse(poolId(id), ...searchParams(q, page));
+    return this.pools.browse(decimalId(id), ...searchParams(q, page));
   }
 
   @Public()

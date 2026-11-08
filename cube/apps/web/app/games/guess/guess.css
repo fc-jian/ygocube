@@ -186,6 +186,8 @@
   overflow-wrap: anywhere;
 }
 .guess-history li small { flex-shrink: 0; }
+.guess-card-name { text-align: inherit; text-decoration: underline; text-underline-offset: .14em; overflow-wrap: anywhere; }
+.guess-card-name:hover, .guess-card-name:focus-visible { color: #ffe6a6; }
 
 .guess-table {
   position: relative;

@@ -3,15 +3,16 @@
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { FormEvent, useCallback, useEffect, useState } from 'react';
-import type { GuessActionRequest, GuessPublicRoomView, GuessRoomView, GuessSession, GuessSpectatorView } from '@ygocube/shared';
+import type { GuessActionRequest, GuessCardRef, GuessPublicRoomView, GuessRoomView, GuessSession, GuessSpectatorView } from '@ygocube/shared';
 import { CardWithTooltip } from '@/components/CardImage';
 import { closeCardPreview } from '@/components/CardPreview';
 import { ConfirmModal } from '@/components/ConfirmModal';
 import { ApiError } from '@/lib/api';
+import { GuessCardName } from './GuessCardName';
 import { GuessCards } from './GuessCards';
 import { GuessFrame, useGuessLanguage } from './GuessFrame';
 import { GUESS_PATH, guessError, guessRequest, sessionKey, useGuessPolling } from './guess-client';
-import { fillText, GuessText } from './guess-text';
+import { fillText, GuessText, openingHintTitle } from './guess-text';
 
 function GuessTable({ room, text }: { room: GuessPublicRoomView | GuessRoomView; text: GuessText }) {
   const viewer = 'viewerId' in room ? room : null;
@@ -29,7 +30,7 @@ function GuessTable({ room, text }: { room: GuessPublicRoomView | GuessRoomView;
           <p>{last.skippedBy
             ? fillText(text.skippedByHost, { player: last.playerId, host: last.skippedBy })
             : fillText(text[last.outcome], { player: last.playerId, points: last.points ?? 0 })}</p>
-          {last.card && <p className="truncate" title={last.card.name}>{last.card.name}</p>}
+          {last.card && <p><GuessCardName key={last.card.code} card={last.card} text={text} /></p>}
         </div>}
       </div>
       <ul className="guess-seats">
@@ -53,7 +54,7 @@ function GuessTable({ room, text }: { room: GuessPublicRoomView | GuessRoomView;
                 </div>
               )}
               <span className="guess-seat-name" title={player.playerId}>{player.playerId}</span>
-              {hint && <span className="guess-seat-hint" data-guess-seat-hint title={fullHint} aria-label={fullHint}>
+              {hint && <span className="guess-seat-hint" data-guess-seat-hint title={openingHintTitle(hint, text)} aria-label={fullHint}>
                 {text.hintShort[hint.group] ?? text.hintGroups[hint.group]}
               </span>}
               <span className="guess-seat-badge">
@@ -95,6 +96,11 @@ function GuessScores({ room, text, viewerId }: { room: GuessPublicRoomView; text
   );
 }
 
+function GuessWithCard({ template, player, card, text }: { template: string; player: string; card: GuessCardRef; text: GuessText }) {
+  const [before, after] = fillText(template, { player }).split('{card}');
+  return <>{before}<GuessCardName key={card.code} card={card} text={text} />{after}</>;
+}
+
 function SpectatorGame({ room, text }: { room: GuessSpectatorView; text: GuessText }) {
   return (
     <div className="guess-game">
@@ -103,14 +109,15 @@ function SpectatorGame({ room, text }: { room: GuessSpectatorView; text: GuessTe
         <h2>{text.spectate}</h2>
         {room.finishReason && <p className="guess-muted">{text.finishReasons[room.finishReason]}</p>}
         {room.currentGuess && room.currentPlayerId && <p className="guess-live-guess" role="status">
-          {fillText(text.liveGuess, { player: room.currentPlayerId, card: room.currentGuess.name })}
+          <GuessWithCard template={text.liveGuess} player={room.currentPlayerId} card={room.currentGuess} text={text} />
         </p>}
         {room.round > 0 && <details className="guess-history" open>
           <summary>{text.submittedGuesses}</summary>
           {room.guesses.length === 0 ? <p className="guess-muted">{text.noSubmittedGuesses}</p> : (
             <ul>{room.guesses.map(({ playerId, card, outcome }) => (
               <li key={`${playerId}:${card.code}`}>
-                <span>{fillText(outcome === 'correct' ? text.publicGuessCorrect : text.publicGuessIncorrect, { player: playerId, card: card.name })}</span>
+                <span><GuessWithCard template={outcome === 'correct' ? text.publicGuessCorrect : text.publicGuessIncorrect}
+                  player={playerId} card={card} text={text} /></span>
               </li>
             ))}</ul>
           )}
@@ -126,8 +133,9 @@ function GuessHistory({ guesses, text }: { guesses: GuessRoomView['viewerGuesses
     <details className="guess-history" open>
       <summary>{fillText(text.guessedCards, { count: guesses.length })}</summary>
       {guesses.length > 0 && <ul>
-        {guesses.map(({ code, name }) => (
-          <li key={code}><span>{name}</span><small className="guess-muted font-mono">{String(code).padStart(8, '0')}</small></li>
+        {guesses.map((card) => (
+          <li key={card.code}><GuessCardName card={card} text={text} />
+            <small className="guess-muted font-mono">{String(card.code).padStart(8, '0')}</small></li>
         ))}
       </ul>}
     </details>
@@ -306,13 +314,14 @@ export function GuessRoom({ roomId }: { roomId: string }) {
           <section className="guess-panel guess-play">
             {playing && <>
               <h2>{text.pool} <span className="guess-muted">({room.poolCount.toLocaleString(language)})</span></h2>
-              {openingHint && <p className="flex flex-wrap items-baseline gap-x-2 gap-y-1" data-guess-opening-hint>
+              {openingHint && <p className="flex flex-wrap items-baseline gap-x-2 gap-y-1" data-guess-opening-hint
+                title={openingHintTitle(openingHint, text)}>
                 <span className="guess-muted">{text.hintMethods[openingHint.method]}</span>
                 <strong className="guess-pill">{text.hintGroups[openingHint.group]}</strong>
                 <span className="guess-muted">{fillText(text.hintCandidates, { count: openingHint.candidateCount.toLocaleString(language) })}</span>
               </p>}
               {!canGuess && room.currentGuess && room.currentPlayerId && <p className="guess-live-guess" role="status">
-                {fillText(text.liveGuess, { player: room.currentPlayerId, card: room.currentGuess.name })}
+                <GuessWithCard template={text.liveGuess} player={room.currentPlayerId} card={room.currentGuess} text={text} />
               </p>}
               {canGuess && <div className="guess-actions">
                 <p className={selected ? 'font-semibold' : 'guess-muted'}>{selected?.name ?? text.pickFirst}</p>

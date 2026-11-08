@@ -1,4 +1,4 @@
-import type { GuessOpeningHintGroup, GuessOpeningHintMethod } from '@ygocube/shared';
+import type { GuessOpeningClue, GuessOpeningHintGroup, GuessOpeningHintMethod } from '@ygocube/shared';
 
 type HintShortLabels = Partial<Record<GuessOpeningHintGroup, string>>;
 
@@ -48,36 +48,66 @@ const zh = {
   theirTurn: '轮到 {player}',
   unknown: '未知',
   cardKinds: { monster: '怪兽', spell: '魔法', trap: '陷阱' },
+  cardDetails: '查看{card}详情',
   hintCandidates: '候选 {count} 张',
   hintMethods: {
     deck: '卡组', level: '星级', attribute: '属性', attack: '原始攻击力', 'summon-value': '等级／阶级／连接值',
     defense: '原始守备力', 'release-era': '首发年代', 'field-deck': '字段与卡组', 'field-size': '字段规模',
-    frame: '卡框', 'combat-value': '原始攻守较大值', 'light-dark': '光暗',
+    frame: '卡框', 'combat-value': '原始攻守较大值', 'combat-compare': '攻守比较', 'light-dark': '光暗',
   } satisfies Record<GuessOpeningHintMethod, string>,
+  hintRules: {
+    deck: '融合、同调、超量和连接怪兽属于额外。仪式和主卡组灵摆怪兽属于主卡组。',
+    level: '按卡面等级分档。超量只有阶级，连接只有连接值，两者都归无等级。',
+    attribute: '按怪兽的原始属性分档。魔法和陷阱归入魔陷。',
+    attack: '按原始攻击力分档。攻击力为 ? 的怪兽归入低攻。',
+    'summon-value': '取怪兽的卡面等级、超量阶级或连接值。魔法和陷阱单独分组。',
+    defense: '按原始守备力分档。守备力为 ? 的怪兽和没有守备力的连接怪兽归入低／无守。',
+    'release-era': '按卡片首次正式发行的年份分档。异画沿用原卡的首发年份。',
+    'field-deck': '按卡库的基础字段编号判断归属。有字段的卡再分为主卡怪兽、额外怪兽和魔陷。',
+    'field-size': '按完整卡库里各基础字段的非衍生物成员数分档。属于多个字段时，取成员最多的字段。',
+    frame: '按原始卡框分档。仪式、灵摆、融合、同调、超量和连接怪兽归入特殊框。',
+    'combat-value': '取原始攻击力和守备力中较大的已知值。连接只看攻击力，两项都未定时归入低档。',
+    'combat-compare': '比较固定的原始攻击力和守备力。连接和任一数值为 ? 的怪兽归入未定组。',
+    'light-dark': '按原始属性区分光／暗怪兽和其他属性怪兽。魔法和陷阱单独分组。',
+  } satisfies Record<GuessOpeningHintMethod, string>,
+  legacyFieldSizeRule: '这一轮按建房卡池里的成员数分档。属于多个字段时，取成员最多的基础字段。',
   hintGroups: {
-    'main-monster': '主卡组怪兽', 'extra-monster': '额外怪兽', 'spell-trap': '魔陷',
-    'low-level': '1–4 星', 'high-level': '5 星起', 'no-level': '超量或连接',
+    'main-monster': '主卡组怪兽', 'extra-monster': '额外卡组怪兽', 'spell-trap': '魔法卡或陷阱卡',
+    'low-level': '等级为 4 星以下的怪兽', 'high-level': '等级为 5 星以上的怪兽', 'no-level': '超量或连接怪兽',
     dark: '暗', 'light-wind': '光或风', 'earth-water-fire-divine': '地、水、炎或神',
-    'low-attack': '≤1,200 或 ?', 'medium-attack': '1,201–2,300', 'high-attack': '≥2,301',
-    'value-1-3': '1–3', 'value-4-6': '4–6', 'value-7-plus': '7+',
-    'low-defense': '≤500、? 或连接', 'medium-defense': '501–1,800', 'high-defense': '≥1,801',
-    'through-2014': '2014 年及以前', '2015-2019': '2015–2019', '2020-2023': '2020–2023', '2024-plus': '2024 年起',
+    'low-attack': '原始攻击力为 1,200 以下或为 ?', 'medium-attack': '原始攻击力为 1,201–2,300（含两端）',
+    'high-attack': '原始攻击力为 2,301 以上',
+    'value-1-3': '等级、阶级或连接值为 3 以下', 'value-4-6': '等级、阶级或连接值为 4–6（含两端）',
+    'value-7-plus': '等级、阶级或连接值为 7 以上',
+    'low-defense': '原始守备力为 500 以下或为 ?，也包括连接怪兽', 'medium-defense': '原始守备力为 501–1,800（含两端）',
+    'high-defense': '原始守备力为 1,801 以上',
+    'through-2014': '2014 年及以前', '2015-2019': '2015–2019 年（含两端）',
+    '2020-2023': '2020–2023 年（含两端）', '2024-plus': '2024 年及以后',
     'no-field': '无字段', 'field-main-monster': '有字段的主卡怪兽', 'field-extra-monster': '有字段的额外怪兽',
-    'field-spell-trap': '有字段的魔陷', 'small-field': '小字段（1–8 张）', 'medium-field': '中字段（9–13 张）',
-    'large-field': '大字段（14 张起）', 'regular-frame': '黄橙框怪兽', 'special-frame': '仪式、灵摆或额外怪兽',
-    'low-combat-value': '≤1,500 或未定', 'medium-combat-value': '1,501–2,400', 'high-combat-value': '≥2,401',
+    'field-spell-trap': '有字段的魔陷', 'small-field': '有字段且最大字段有 8 张以下', 'medium-field': '最大字段有 9–13 张（含两端）',
+    'large-field': '最大字段有 14 张以上', 'regular-frame': '通常或效果怪兽的黄橙卡框', 'special-frame': '仪式、灵摆或额外怪兽',
+    'catalog-field-small': '有字段且最大字段有 15 张以下', 'catalog-field-medium': '最大字段有 16–25 张（含两端）',
+    'catalog-field-large': '最大字段有 26 张以上',
+    'low-combat-value': '较大的已知值为 1,500 以下或两项均未定', 'medium-combat-value': '较大的已知值为 1,501–2,400（含两端）',
+    'high-combat-value': '较大的已知值为 2,401 以上',
+    'defense-at-least-attack': '固定原始守备力等于或高于原始攻击力',
+    'attack-over-500': '固定原始攻击力减去原始守备力为 501 以上',
+    'attack-slight-or-unknown': '原始攻击力比原始守备力高 1–500（含两端），或缺固定攻守数值',
     'light-dark': '光或暗怪兽', 'other-attribute': '其他属性怪兽',
   } satisfies Record<GuessOpeningHintGroup, string>,
   hintShort: {
-    'main-monster': '主卡怪兽', 'no-level': '无等级', 'earth-water-fire-divine': '地水炎神',
+    'main-monster': '主卡怪兽', 'extra-monster': '额外怪兽', 'spell-trap': '魔陷',
+    'low-level': '1–4 星', 'high-level': '5 星起', 'no-level': '无等级', 'earth-water-fire-divine': '地水炎神',
     'low-attack': '低攻', 'medium-attack': '中攻', 'high-attack': '高攻',
     'value-1-3': '数值 1–3', 'value-4-6': '数值 4–6', 'value-7-plus': '数值 7+',
     'low-defense': '低／无守', 'medium-defense': '中守', 'high-defense': '高守',
-    'through-2014': '≤2014', '2024-plus': '2024+',
+    'through-2014': '≤2014', '2015-2019': '2015–2019', '2020-2023': '2020–2023', '2024-plus': '2024+',
     'field-main-monster': '字段主卡', 'field-extra-monster': '字段额外', 'field-spell-trap': '字段魔陷',
     'small-field': '小字段', 'medium-field': '中字段', 'large-field': '大字段',
+    'catalog-field-small': '小字段', 'catalog-field-medium': '中字段', 'catalog-field-large': '大字段',
     'regular-frame': '黄橙框', 'special-frame': '特殊框', 'low-combat-value': '低面板',
     'medium-combat-value': '中面板', 'high-combat-value': '高面板', 'light-dark': '光暗', 'other-attribute': '其他属性',
+    'defense-at-least-attack': '守≥攻', 'attack-over-500': '攻高 >500', 'attack-slight-or-unknown': '攻略高／未定',
   } as HintShortLabels,
   correct: '{player} 猜中，得 {points} 分。',
   incorrect: '{player} 猜错。',
@@ -191,12 +221,29 @@ const en: typeof zh = {
   theirTurn: '{player}’s turn',
   unknown: 'Unknown',
   cardKinds: { monster: 'Monster', spell: 'Spell', trap: 'Trap' },
+  cardDetails: 'View details for {card}',
   hintCandidates: '{count} candidates',
   hintMethods: {
     deck: 'Deck', level: 'Level', attribute: 'Attribute', attack: 'Original ATK', 'summon-value': 'Level / Rank / Link Rating',
     defense: 'Original DEF', 'release-era': 'First release', 'field-deck': 'Archetype and deck', 'field-size': 'Archetype size',
-    frame: 'Card frame', 'combat-value': 'Higher of original ATK and DEF', 'light-dark': 'LIGHT or DARK',
+    frame: 'Card frame', 'combat-value': 'Higher of original ATK and DEF', 'combat-compare': 'ATK and DEF comparison', 'light-dark': 'LIGHT or DARK',
   },
+  hintRules: {
+    deck: 'Fusion, Synchro, Xyz and Link monsters start in the Extra Deck. Ritual and Main Deck Pendulum monsters start in the Main Deck.',
+    level: 'Uses the printed Level. Xyz and Link monsters have a Rank or Link Rating and are grouped as having no Level.',
+    attribute: 'Uses the monster’s original Attribute. Spells and Traps form a separate group.',
+    attack: 'Uses original ATK. Monsters with ? ATK are in the low ATK group.',
+    'summon-value': 'Uses the printed Level, Rank or Link Rating of the monster. Spells and Traps form a separate group.',
+    defense: 'Uses original DEF. Monsters with ? DEF and Link monsters are in the low or no DEF group.',
+    'release-era': 'Uses the year of the card’s first official release. Alternate artwork uses the original card’s year.',
+    'field-deck': 'Uses base archetype codes from the card database. Cards with an archetype are grouped by deck and card type.',
+    'field-size': 'Uses membership in the complete card library. Cards with several archetypes use the one with the most members.',
+    frame: 'Uses the original card frame. Ritual, Pendulum, Fusion, Synchro, Xyz and Link monsters have special frames.',
+    'combat-value': 'Uses the higher known original ATK or DEF. Link monsters use ATK alone. If both are unknown, the card is in the low group.',
+    'combat-compare': 'Compares fixed original ATK and DEF. Link monsters and monsters with ? ATK or DEF are grouped as undetermined.',
+    'light-dark': 'Uses original Attributes. Spells and Traps form a separate group.',
+  },
+  legacyFieldSizeRule: 'This round uses membership in the room’s pool. Cards with several archetypes use the one with the most members.',
   hintGroups: {
     'main-monster': 'Main Deck monster', 'extra-monster': 'Extra Deck monster', 'spell-trap': 'Spell or Trap',
     'low-level': 'Level 1–4', 'high-level': 'Level 5+', 'no-level': 'Xyz or Link',
@@ -208,8 +255,11 @@ const en: typeof zh = {
     'no-field': 'No archetype', 'field-main-monster': 'Main Deck monster with archetype',
     'field-extra-monster': 'Extra Deck monster with archetype', 'field-spell-trap': 'Spell or Trap with archetype',
     'small-field': 'Small (1–8 cards)', 'medium-field': 'Medium (9–13 cards)', 'large-field': 'Large (14+ cards)',
+    'catalog-field-small': 'Small (1–15 cards)', 'catalog-field-medium': 'Medium (16–25 cards)', 'catalog-field-large': 'Large (26+ cards)',
     'regular-frame': 'Yellow or orange monster frame', 'special-frame': 'Ritual, Pendulum or Extra Deck monster',
     'low-combat-value': '≤1,500 or undetermined', 'medium-combat-value': '1,501–2,400', 'high-combat-value': '≥2,401',
+    'defense-at-least-attack': 'DEF is at least ATK', 'attack-over-500': 'ATK exceeds DEF by more than 500',
+    'attack-slight-or-unknown': 'ATK exceeds DEF by 1–500 or a value is undetermined',
     'light-dark': 'LIGHT or DARK monster', 'other-attribute': 'Monster with another Attribute',
   },
   hintShort: {
@@ -221,9 +271,11 @@ const en: typeof zh = {
     'through-2014': '≤2014', '2024-plus': '2024+', 'field-main-monster': 'Archetype Main',
     'field-extra-monster': 'Archetype Extra', 'field-spell-trap': 'Archetype S/T',
     'small-field': 'Small archetype', 'medium-field': 'Mid archetype', 'large-field': 'Large archetype',
+    'catalog-field-small': 'Small archetype', 'catalog-field-medium': 'Mid archetype', 'catalog-field-large': 'Large archetype',
     'regular-frame': 'Regular frame', 'special-frame': 'Special frame', 'low-combat-value': 'Low stats',
     'medium-combat-value': 'Mid stats', 'high-combat-value': 'High stats', 'light-dark': 'LIGHT / DARK',
     'other-attribute': 'Other Attribute',
+    'defense-at-least-attack': 'DEF ≥ ATK', 'attack-over-500': 'ATK leads by >500', 'attack-slight-or-unknown': 'Small ATK lead / ?',
   },
   correct: '{player} guessed correctly and earned {points} points.',
   incorrect: '{player} guessed incorrectly.',
@@ -294,6 +346,12 @@ const en: typeof zh = {
 export type GuessLanguage = 'zh' | 'en';
 export type GuessText = typeof zh;
 export const guessText = { zh, en };
+
+export function openingHintTitle({ method, group }: GuessOpeningClue, text: GuessText): string {
+  const legacyFieldSize = method === 'field-size' && ['small-field', 'medium-field', 'large-field'].includes(group);
+  const rule = legacyFieldSize ? text.legacyFieldSizeRule : text.hintRules[method];
+  return `${text.hintMethods[method]} · ${text.hintGroups[group]}\n${rule}`;
+}
 
 export function fillText(template: string, values: Record<string, string | number>): string {
   return template.replace(/\{(\w+)\}/g, (match, key: string) => String(values[key] ?? match));

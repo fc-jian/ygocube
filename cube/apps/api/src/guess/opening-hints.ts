@@ -1,6 +1,6 @@
 import { randomInt } from 'node:crypto';
 import type { CardInfo, GuessOpeningHint, GuessOpeningHintGroup, GuessOpeningHintMethod, GuessReleaseEra } from '@ygocube/shared';
-import { isExtraDeckType } from '../cards/cards.service';
+import { baseCardFieldCodes, isExtraDeckType } from '../cards/cards.service';
 import { FIRST_RELEASE_ERA_CODES } from './first-release-era-codes';
 
 type OpeningCard = Pick<CardInfo, 'code' | 'type' | 'level' | 'attribute' | 'atk' | 'def' | 'setCodes' | 'alias' | 'aliasKind'>;
@@ -22,22 +22,17 @@ for (const [era, codes] of Object.entries(FIRST_RELEASE_ERA_CODES)) {
   for (const code of codes) releaseEras.set(code, era as GuessReleaseEra);
 }
 
-function fields(card: OpeningCard): number[] {
-  // YGOPro matches the low twelve bits as the base field and the high bits as subfields.
-  return [...new Set(card.setCodes.map((code) => code & 0xfff).filter(Boolean))];
-}
-
 function groups(card: OpeningCard, largestField: number): CardGroups {
   const releaseEra = releaseEras.get(card.code)
     ?? (card.aliasKind === 'artwork' ? releaseEras.get(card.alias) : undefined);
-  const fieldSize = largestField === 0 ? 'no-field' : largestField <= 8 ? 'small-field'
-    : largestField <= 13 ? 'medium-field' : 'large-field';
+  const fieldSize = largestField === 0 ? 'no-field' : largestField <= 15 ? 'catalog-field-small'
+    : largestField <= 25 ? 'catalog-field-medium' : 'catalog-field-large';
   if (!(card.type & MONSTER)) {
     return {
       deck: 'spell-trap', level: 'spell-trap', attribute: 'spell-trap', attack: 'spell-trap',
       'summon-value': 'spell-trap', defense: 'spell-trap', 'release-era': releaseEra,
       'field-deck': largestField ? 'field-spell-trap' : 'no-field', 'field-size': fieldSize,
-      frame: 'spell-trap', 'combat-value': 'spell-trap', 'light-dark': 'spell-trap',
+      frame: 'spell-trap', 'combat-value': 'spell-trap', 'combat-compare': 'spell-trap', 'light-dark': 'spell-trap',
     };
   }
 
@@ -45,6 +40,8 @@ function groups(card: OpeningCard, largestField: number): CardGroups {
   const link = Boolean(card.type & LINK);
   const attribute = card.attribute;
   const combatValue = Math.max(card.atk, link ? -1 : card.def);
+  const fixedCombatValues = !link && card.atk >= 0 && card.def >= 0;
+  const attackLead = card.atk - card.def;
   return {
     deck: extra ? 'extra-monster' : 'main-monster',
     level: card.type & (XYZ | LINK) ? 'no-level' : card.level <= 4 ? 'low-level' : 'high-level',
@@ -57,25 +54,21 @@ function groups(card: OpeningCard, largestField: number): CardGroups {
     'field-size': fieldSize,
     frame: extra || (card.type & (RITUAL | PENDULUM)) ? 'special-frame' : 'regular-frame',
     'combat-value': combatValue <= 1500 ? 'low-combat-value' : combatValue <= 2400 ? 'medium-combat-value' : 'high-combat-value',
+    'combat-compare': fixedCombatValues && attackLead <= 0 ? 'defense-at-least-attack'
+      : fixedCombatValues && attackLead > 500 ? 'attack-over-500' : 'attack-slight-or-unknown',
     'light-dark': attribute === LIGHT || attribute === DARK ? 'light-dark' : 'other-attribute',
   };
 }
 
-export function buildOpeningHintOptions(cards: readonly OpeningCard[], answers: readonly number[]) {
-  const fieldSizes = new Map<number, number>();
-  const fieldsByCode = new Map<number, number[]>();
-  for (const card of cards) {
-    const baseFields = fields(card);
-    fieldsByCode.set(card.code, baseFields);
-    for (const field of baseFields) fieldSizes.set(field, (fieldSizes.get(field) ?? 0) + 1);
-  }
-
+export function buildOpeningHintOptions(
+  cards: readonly OpeningCard[], answers: readonly number[], fieldSizes: ReadonlyMap<number, number>,
+) {
   // Groups shared by several methods have the same membership, such as spell-trap.
   const pools: HintPools = {};
   const dealt = new Map<number, CardGroups>();
   const dealtCodes = new Set(answers);
   for (const card of cards) {
-    const largestField = Math.max(0, ...fieldsByCode.get(card.code)!.map((field) => fieldSizes.get(field)!));
+    const largestField = Math.max(0, ...baseCardFieldCodes(card.setCodes).map((field) => fieldSizes.get(field) ?? 1));
     const cardGroups = groups(card, largestField);
     if (dealtCodes.has(card.code)) dealt.set(card.code, cardGroups);
     for (const group of new Set(Object.values(cardGroups))) {
@@ -97,8 +90,10 @@ export function buildOpeningHintOptions(cards: readonly OpeningCard[], answers: 
   return { options, pools };
 }
 
-export function drawOpeningHints(cards: readonly OpeningCard[], answers: readonly number[]): { hints: GuessOpeningHint[]; pools: HintPools } {
-  const { options, pools } = buildOpeningHintOptions(cards, answers);
+export function drawOpeningHints(
+  cards: readonly OpeningCard[], answers: readonly number[], fieldSizes: ReadonlyMap<number, number>,
+): { hints: GuessOpeningHint[]; pools: HintPools } {
+  const { options, pools } = buildOpeningHintOptions(cards, answers, fieldSizes);
   const tolerance = 150 * cards.length / REFERENCE_POOL_SIZE;
   const halfLife = 40 * cards.length / REFERENCE_POOL_SIZE;
   const proposals = Array.from({ length: PROPOSALS }, () => {

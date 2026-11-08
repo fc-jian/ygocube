@@ -1,6 +1,6 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
 import type { GuessCardPage, GuessCardStats, GuessPoolCreateRequest, GuessPoolSummary } from '@ygocube/shared';
-import { CardsService } from '../cards/cards.service';
+import { CardsService, TYPE_TOKEN } from '../cards/cards.service';
 import { getDb } from '../db';
 import { DEFAULT_GUESS_POOL_CODES as ORIGINAL_GUESS_POOL_CODES } from './default-pool-codes';
 import { RECENCY_GUESS_POOL_CODES } from './recency-pool-codes';
@@ -102,6 +102,10 @@ export class GuessPoolsService implements OnModuleInit {
     if (codes === null) return eligible;
     const allowed = new Set(codes);
     return eligible.filter((code) => allowed.has(code));
+  }
+
+  cardDetails(codes: number[]) {
+    return this.cards.getMany(codes).filter((card) => !(card.type & TYPE_TOKEN));
   }
 
   search(query: string, page: number, codes: readonly number[] | null = null): GuessCardPage {

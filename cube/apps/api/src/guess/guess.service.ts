@@ -376,7 +376,7 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
     const codes = this.pools.availableCodes(this.pools.get(room.poolId).codes);
     if (codes.length < count) throw new ConflictException({ code: 'GUESS_POOL_TOO_SMALL' });
     const answers = sample(codes, count);
-    const { hints, pools: hintPools } = drawOpeningHints(this.cards.getMany(codes), answers);
+    const { hints, pools: hintPools } = drawOpeningHints(this.cards.getMany(codes), answers, this.cards.poolFieldSizes());
     const seats = sample(participants, count).map((player, index) => ({
       playerId: player.playerId, code: answers[index], points: null, attempts: 0, openingHint: hints[index],
     }));
@@ -487,7 +487,7 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
     const ownSeat = seats.find((seat) => seat.playerId === viewerId);
     const guesses = round ? this.submittedGuesses(room, viewerId ?? null) : [];
     const visibleSeats = seats.filter((seat) => viewerId === undefined
-      ? (seat.points ?? 0) > 0
+      ? seat.points != null
       : seat !== ownSeat || room.phase !== 'playing' || seat.points !== null);
     const visiblePlayers = new Set(visibleSeats.map((seat) => seat.playerId));
     const codes = [...visibleSeats.map((seat) => seat.code), ...guesses.map(({ code }) => code)];

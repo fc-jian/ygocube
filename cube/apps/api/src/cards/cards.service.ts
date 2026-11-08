@@ -255,6 +255,19 @@ export function parseSetCodes(raw: string): number[] {
   return out;
 }
 
+function parseMetadataArray(raw: string | null | undefined): unknown[] {
+  try {
+    const value = JSON.parse(raw ?? '[]');
+    return Array.isArray(value) ? value : [];
+  } catch {
+    return [];
+  }
+}
+
+export function baseCardFieldCodes(setCodes: readonly number[]): number[] {
+  return [...new Set(setCodes.map((code) => code & 0xfff).filter(Boolean))];
+}
+
 export function decodeCardFields(type: number, packedLevelValue: number, rawDefense: number) {
   const packedLevel = Number(packedLevelValue ?? 0) >>> 0;
   return {
@@ -308,6 +321,7 @@ interface CardSearchOptions {
 @Injectable()
 export class CardsService {
   private loaded = false;
+  private fieldSizes?: ReadonlyMap<number, number>;
   private readonly canonicalCodes = new Map<number, number>();
   private readonly cardSearchNames = new Map<number, string[]>();
   private cdbMetadataLoaded = false;
@@ -456,14 +470,6 @@ export class CardsService {
   }
 
   private toInfo(r: CardRow): CardInfo {
-    const parseArray = (raw: string | null | undefined): unknown[] => {
-      try {
-        const value = JSON.parse(raw ?? '[]');
-        return Array.isArray(value) ? value : [];
-      } catch {
-        return [];
-      }
-    };
     return {
       code: r.code,
       name: r.name,
@@ -480,8 +486,8 @@ export class CardsService {
       alias: r.alias ?? 0,
       aliasKind: cardAliasKind(r.code, r.alias ?? 0),
       aliasName: r.alias && r.alias !== r.code ? (getDb().prepare('SELECT name FROM cards WHERE code=?').get(r.alias) as { name: string } | undefined)?.name ?? '' : '',
-      setCodes: parseArray(r.setcodes_json).filter((value): value is number => typeof value === 'number'),
-      setNames: parseArray(r.setnames_json).filter((value): value is string => typeof value === 'string'),
+      setCodes: parseMetadataArray(r.setcodes_json).filter((value): value is number => typeof value === 'number'),
+      setNames: parseMetadataArray(r.setnames_json).filter((value): value is string => typeof value === 'string'),
     };
   }
 
@@ -516,6 +522,21 @@ export class CardsService {
     this.ensureLoaded();
     return (getDb().prepare(`SELECT code FROM cards WHERE (type & ${TYPE_TOKEN})=0 ORDER BY code`).all() as { code: number }[])
       .map((row) => row.code);
+  }
+
+  /** Base-field membership across the complete searchable card catalog. */
+  poolFieldSizes(): ReadonlyMap<number, number> {
+    this.ensureLoaded();
+    if (this.fieldSizes) return this.fieldSizes;
+    const sizes = new Map<number, number>();
+    const rows = getDb().prepare(`SELECT setcodes_json FROM cards WHERE (type & ${TYPE_TOKEN})=0`)
+      .iterate() as Iterable<Pick<CardRow, 'setcodes_json'>>;
+    for (const { setcodes_json } of rows) {
+      const codes = parseMetadataArray(setcodes_json).filter((value): value is number => typeof value === 'number');
+      for (const code of baseCardFieldCodes(codes)) sizes.set(code, (sizes.get(code) ?? 0) + 1);
+    }
+    this.fieldSizes = sizes;
+    return sizes;
   }
 
   isExtraDeck(code: number): boolean {

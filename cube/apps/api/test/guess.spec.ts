@@ -2,7 +2,7 @@ import type { INestApplication } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
 import type {
-  GuessActionRequest, GuessCardPage, GuessMove, GuessPoolSummary, GuessRoomSummary, GuessRoomView, GuessSession, GuessSpectatorView,
+  CardInfo, GuessActionRequest, GuessCardPage, GuessMove, GuessPoolSummary, GuessRoomSummary, GuessRoomView, GuessSession, GuessSpectatorView,
 } from '@ygocube/shared';
 import fs from 'node:fs';
 import { AuthGuard, sha256 } from '../src/auth/auth.guard';
@@ -26,6 +26,8 @@ describe('Guess the Card HTTP game', () => {
   let uniformCodes: number[];
   let tokenCode: number;
   let outsideCode: number;
+  let fieldCodes: number[];
+  const fixtureField = 0x1fa;
 
   beforeAll(async () => {
     useTestDb();
@@ -34,10 +36,13 @@ describe('Guess the Card HTTP game', () => {
     const catalog = cards.poolCodes();
     codes = catalog.slice(0, 30);
     uniformCodes = catalog.slice(40).filter((code) => code % 10 !== 0).slice(0, 30);
+    fieldCodes = catalog.slice(120, 146);
     [outsideCode, tokenCode] = catalog.slice(30, 32);
     const setType = getDb().prepare('UPDATE cards SET type = ? WHERE code = ?');
     [0x21, 0x10002, 0x100004].forEach((type, index) => setType.run(type, codes[index]));
     getDb().prepare('UPDATE cards SET type = type | ? WHERE code = ?').run(TYPE_TOKEN, tokenCode);
+    const setFields = getDb().prepare('UPDATE cards SET setcodes_json = ? WHERE code = ?');
+    for (const code of [...fieldCodes, tokenCode]) setFields.run(JSON.stringify([fixtureField, 0x1000 | fixtureField]), code);
     const module = await Test.createTestingModule({
       controllers: [GuessController],
       providers: [GuessService, GuessPoolsService, { provide: CardsService, useValue: cards }, { provide: APP_GUARD, useClass: AuthGuard }],
@@ -101,6 +106,23 @@ describe('Guess the Card HTTP game', () => {
     expect((await createPool(body.name, body.codes)).isDefault).toBe(false);
     for (const name of ['常见卡牌', '常见卡牌精简版', '常见卡牌近年权重版']) {
       expect((await request('/pools', undefined, { ...body, name }, { 'X-Admin-Token': superToken })).status).toBe(409);
+    }
+  });
+
+  it('looks up exact public card details and uses full-catalog field membership for room hints', async () => {
+    const details = await request<CardInfo[]>(`/card-details?codes=${codes[0]},${tokenCode},${codes[0]},999999999`);
+    expect(details.status).toBe(200);
+    expect(details.body).toMatchObject([{ code: codes[0], desc: '测试用效果文本' }]);
+    expect((await request('/card-details?codes=0')).status).toBe(400);
+    expect((await request('/card-details?codes=1&codes=2')).status).toBe(400);
+
+    const cards = app.get(CardsService);
+    const fullFieldSizes = cards.poolFieldSizes();
+    expect(fullFieldSizes.get(fixtureField)).toBe(26);
+    const roomCodes = fieldCodes.slice(0, 2);
+    const { options } = buildOpeningHintOptions(cards.getMany(roomCodes), roomCodes, fullFieldSizes);
+    for (const hints of options) {
+      expect(hints).toContainEqual({ method: 'field-size', group: 'catalog-field-large', candidateCount: 1 });
     }
   });
 
@@ -263,7 +285,8 @@ describe('Guess the Card HTTP game', () => {
     const views = await Promise.all(ids.map(read));
     const answers = new Map(views.flatMap(({ players }) => players.flatMap(({ playerId, card }) =>
       card ? [[playerId, { code: card.code, name: card.name }] as const] : [])));
-    const { options: possible } = buildOpeningHintOptions(app.get(CardsService).getMany(poolCodes), ids.map((id) => answers.get(id)!.code));
+    const cards = app.get(CardsService);
+    const { options: possible } = buildOpeningHintOptions(cards.getMany(poolCodes), ids.map((id) => answers.get(id)!.code), cards.poolFieldSizes());
     for (const [index, view] of views.entries()) {
       expect(possible[index]).toContainEqual(view.viewerOpeningHint);
       expect(view.viewerOpeningHint?.candidateCount).toBe(3);
@@ -371,7 +394,7 @@ describe('Guess the Card HTTP game', () => {
     expect((await request(path, otherRoom.token)).status).toBe(401);
   });
 
-  it('shows public guesses without revealing unsolved cards and allows membership changes between rounds', async () => {
+  it('reveals surrendered cards to spectators and allows membership changes between rounds', async () => {
     const poolCodes = uniformCodes.slice(0, 3);
     const pool = await createPool('Spectator pool', poolCodes);
     const host = await create('Organizer', pool.poolId);
@@ -425,7 +448,7 @@ describe('Guess the Card HTTP game', () => {
     state = (await action(path, tokens.get(first)!, { action: 'surrender', version: state.version })).body;
     expect(state.phase).toBe('between_rounds');
     expect(state.players.every(({ card }) => card !== null)).toBe(true);
-    expect((await watch()).players.find(({ playerId }) => playerId === first)?.card).toBeNull();
+    expect((await watch()).players.find(({ playerId }) => playerId === first)?.card?.code).toBe(firstCard.code);
 
     expect((await action(path, host.token, { action: 'leave', version: state.version })).status).toBe(200);
     expect((await request(path, host.token)).status).toBe(401);
