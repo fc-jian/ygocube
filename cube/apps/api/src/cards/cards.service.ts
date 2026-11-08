@@ -524,16 +524,37 @@ export class CardsService {
       .map((row) => row.code);
   }
 
-  /** Base-field membership across the complete searchable card catalog. */
+  /** Base-field membership across eligible card identities in the complete catalog. */
   poolFieldSizes(): ReadonlyMap<number, number> {
     this.ensureLoaded();
     if (this.fieldSizes) return this.fieldSizes;
+    const rows = getDb().prepare(`SELECT code, alias, setcodes_json FROM cards
+      WHERE code > 0 AND code < 100000000 AND (type & ${TYPE_TOKEN}) = 0`)
+      .all() as Pick<CardRow, 'code' | 'alias' | 'setcodes_json'>[];
+    const eligibleCodes = new Set(rows.map(({ code }) => code));
+    const artworkParents = new Map<number, number>();
+    function representative(code: number): number {
+      let parent = artworkParents.get(code);
+      while (parent !== undefined) {
+        code = parent;
+        parent = artworkParents.get(code);
+      }
+      return code;
+    }
+
+    for (const { code, alias } of rows) {
+      if (!eligibleCodes.has(alias) || cardAliasKind(code, alias) !== 'artwork') continue;
+      const a = representative(code);
+      const b = representative(alias);
+      // Linking only to a lower code keeps the minimum even across chains or cycles.
+      if (a !== b) artworkParents.set(Math.max(a, b), Math.min(a, b));
+    }
+
     const sizes = new Map<number, number>();
-    const rows = getDb().prepare(`SELECT setcodes_json FROM cards WHERE (type & ${TYPE_TOKEN})=0`)
-      .iterate() as Iterable<Pick<CardRow, 'setcodes_json'>>;
-    for (const { setcodes_json } of rows) {
-      const codes = parseMetadataArray(setcodes_json).filter((value): value is number => typeof value === 'number');
-      for (const code of baseCardFieldCodes(codes)) sizes.set(code, (sizes.get(code) ?? 0) + 1);
+    for (const { code, setcodes_json } of rows) {
+      if (artworkParents.has(code)) continue;
+      const setCodes = parseMetadataArray(setcodes_json).filter((value): value is number => typeof value === 'number');
+      for (const field of baseCardFieldCodes(setCodes)) sizes.set(field, (sizes.get(field) ?? 0) + 1);
     }
     this.fieldSizes = sizes;
     return sizes;

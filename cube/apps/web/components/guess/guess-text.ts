@@ -64,13 +64,15 @@ const zh = {
     defense: '按原始守备力分档。守备力为 ? 的怪兽和没有守备力的连接怪兽归入低／无守。',
     'release-era': '按卡片首次正式发行的年份分档。异画沿用原卡的首发年份。',
     'field-deck': '按卡库的基础字段编号判断归属。有字段的卡再分为主卡怪兽、额外怪兽和魔陷。',
-    'field-size': '按完整卡库里各基础字段的非衍生物成员数分档。属于多个字段时，取成员最多的字段。',
+    'field-size': '按完整卡库统计基础字段，排除衍生物和九位及以上编号。异画只计最小有效编号，规则同名分别计数。属于多个字段时，取成员最多的字段。',
     frame: '按原始卡框分档。仪式、灵摆、融合、同调、超量和连接怪兽归入特殊框。',
     'combat-value': '取原始攻击力和守备力中较大的已知值。连接只看攻击力，两项都未定时归入低档。',
     'combat-compare': '比较固定的原始攻击力和守备力。连接和任一数值为 ? 的怪兽归入未定组。',
     'light-dark': '按原始属性区分光／暗怪兽和其他属性怪兽。魔法和陷阱单独分组。',
   } satisfies Record<GuessOpeningHintMethod, string>,
   legacyFieldSizeRule: '这一轮按建房卡池里的成员数分档。属于多个字段时，取成员最多的基础字段。',
+  catalogFieldSizeRule: '这一轮按完整卡库里各基础字段的非衍生物成员数分档。属于多个字段时，取成员最多的字段。',
+  noFieldRule: '卡库没有给这张牌分配基础字段。',
   hintGroups: {
     'main-monster': '主卡组怪兽', 'extra-monster': '额外卡组怪兽', 'spell-trap': '魔法卡或陷阱卡',
     'low-level': '等级为 4 星以下的怪兽', 'high-level': '等级为 5 星以上的怪兽', 'no-level': '超量或连接怪兽',
@@ -88,6 +90,8 @@ const zh = {
     'large-field': '最大字段有 14 张以上', 'regular-frame': '通常或效果怪兽的黄橙卡框', 'special-frame': '仪式、灵摆或额外怪兽',
     'catalog-field-small': '有字段且最大字段有 15 张以下', 'catalog-field-medium': '最大字段有 16–25 张（含两端）',
     'catalog-field-large': '最大字段有 26 张以上',
+    'distinct-field-small': '有字段且最大字段有 15 张以下', 'distinct-field-medium': '最大字段有 16–25 张（含两端）',
+    'distinct-field-large': '最大字段有 26 张以上',
     'low-combat-value': '较大的已知值为 1,500 以下或两项均未定', 'medium-combat-value': '较大的已知值为 1,501–2,400（含两端）',
     'high-combat-value': '较大的已知值为 2,401 以上',
     'defense-at-least-attack': '固定原始守备力等于或高于原始攻击力',
@@ -105,6 +109,7 @@ const zh = {
     'field-main-monster': '字段主卡', 'field-extra-monster': '字段额外', 'field-spell-trap': '字段魔陷',
     'small-field': '小字段', 'medium-field': '中字段', 'large-field': '大字段',
     'catalog-field-small': '小字段', 'catalog-field-medium': '中字段', 'catalog-field-large': '大字段',
+    'distinct-field-small': '小字段', 'distinct-field-medium': '中字段', 'distinct-field-large': '大字段',
     'regular-frame': '黄橙框', 'special-frame': '特殊框', 'low-combat-value': '低面板',
     'medium-combat-value': '中面板', 'high-combat-value': '高面板', 'light-dark': '光暗', 'other-attribute': '其他属性',
     'defense-at-least-attack': '守≥攻', 'attack-over-500': '攻高 >500', 'attack-slight-or-unknown': '攻略高／未定',
@@ -148,6 +153,7 @@ const zh = {
   more: '下一页',
   loading: '加载中…',
   cancel: '取消',
+  close: '关闭',
   confirm: '确认投降',
   errors: {
     BAD_PAYLOAD: '请检查名称、玩家 ID 或卡片编号的格式。',
@@ -237,13 +243,15 @@ const en: typeof zh = {
     defense: 'Uses original DEF. Monsters with ? DEF and Link monsters are in the low or no DEF group.',
     'release-era': 'Uses the year of the card’s first official release. Alternate artwork uses the original card’s year.',
     'field-deck': 'Uses base archetype codes from the card database. Cards with an archetype are grouped by deck and card type.',
-    'field-size': 'Uses membership in the complete card library. Cards with several archetypes use the one with the most members.',
+    'field-size': 'Counts base archetypes across the full card database. Tokens and codes with nine or more digits are excluded. Alternate artworks count once using the lowest eligible code. Cards treated as having the same name by the rules count separately. Cards with several archetypes use the one with the most members.',
     frame: 'Uses the original card frame. Ritual, Pendulum, Fusion, Synchro, Xyz and Link monsters have special frames.',
     'combat-value': 'Uses the higher known original ATK or DEF. Link monsters use ATK alone. If both are unknown, the card is in the low group.',
     'combat-compare': 'Compares fixed original ATK and DEF. Link monsters and monsters with ? ATK or DEF are grouped as undetermined.',
     'light-dark': 'Uses original Attributes. Spells and Traps form a separate group.',
   },
   legacyFieldSizeRule: 'This round uses membership in the room’s pool. Cards with several archetypes use the one with the most members.',
+  catalogFieldSizeRule: 'This round counts non-token members in the full card database. Cards with several archetypes use the one with the most members.',
+  noFieldRule: 'The card database assigns no base archetype to this card.',
   hintGroups: {
     'main-monster': 'Main Deck monster', 'extra-monster': 'Extra Deck monster', 'spell-trap': 'Spell or Trap',
     'low-level': 'Level 1–4', 'high-level': 'Level 5+', 'no-level': 'Xyz or Link',
@@ -256,6 +264,7 @@ const en: typeof zh = {
     'field-extra-monster': 'Extra Deck monster with archetype', 'field-spell-trap': 'Spell or Trap with archetype',
     'small-field': 'Small (1–8 cards)', 'medium-field': 'Medium (9–13 cards)', 'large-field': 'Large (14+ cards)',
     'catalog-field-small': 'Small (1–15 cards)', 'catalog-field-medium': 'Medium (16–25 cards)', 'catalog-field-large': 'Large (26+ cards)',
+    'distinct-field-small': 'Small (1–15 cards)', 'distinct-field-medium': 'Medium (16–25 cards)', 'distinct-field-large': 'Large (26+ cards)',
     'regular-frame': 'Yellow or orange monster frame', 'special-frame': 'Ritual, Pendulum or Extra Deck monster',
     'low-combat-value': '≤1,500 or undetermined', 'medium-combat-value': '1,501–2,400', 'high-combat-value': '≥2,401',
     'defense-at-least-attack': 'DEF is at least ATK', 'attack-over-500': 'ATK exceeds DEF by more than 500',
@@ -272,6 +281,7 @@ const en: typeof zh = {
     'field-extra-monster': 'Archetype Extra', 'field-spell-trap': 'Archetype S/T',
     'small-field': 'Small archetype', 'medium-field': 'Mid archetype', 'large-field': 'Large archetype',
     'catalog-field-small': 'Small archetype', 'catalog-field-medium': 'Mid archetype', 'catalog-field-large': 'Large archetype',
+    'distinct-field-small': 'Small archetype', 'distinct-field-medium': 'Mid archetype', 'distinct-field-large': 'Large archetype',
     'regular-frame': 'Regular frame', 'special-frame': 'Special frame', 'low-combat-value': 'Low stats',
     'medium-combat-value': 'Mid stats', 'high-combat-value': 'High stats', 'light-dark': 'LIGHT / DARK',
     'other-attribute': 'Other Attribute',
@@ -316,6 +326,7 @@ const en: typeof zh = {
   more: 'Next',
   loading: 'Loading…',
   cancel: 'Cancel',
+  close: 'Close',
   confirm: 'Surrender',
   errors: {
     BAD_PAYLOAD: 'Check the name, player ID, or card codes.',
@@ -347,10 +358,14 @@ export type GuessLanguage = 'zh' | 'en';
 export type GuessText = typeof zh;
 export const guessText = { zh, en };
 
-export function openingHintTitle({ method, group }: GuessOpeningClue, text: GuessText): string {
-  const legacyFieldSize = method === 'field-size' && ['small-field', 'medium-field', 'large-field'].includes(group);
-  const rule = legacyFieldSize ? text.legacyFieldSizeRule : text.hintRules[method];
-  return `${text.hintMethods[method]} · ${text.hintGroups[group]}\n${rule}`;
+export function openingHintDetails({ method, group }: GuessOpeningClue, text: GuessText) {
+  let rule = text.hintRules[method];
+  if (method === 'field-size') {
+    if (group === 'no-field') rule = text.noFieldRule;
+    else if (group.startsWith('catalog-field-')) rule = text.catalogFieldSizeRule;
+    else if (['small-field', 'medium-field', 'large-field'].includes(group)) rule = text.legacyFieldSizeRule;
+  }
+  return { title: `${text.hintMethods[method]} · ${text.hintGroups[group]}`, rule };
 }
 
 export function fillText(template: string, values: Record<string, string | number>): string {

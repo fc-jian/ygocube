@@ -1,7 +1,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { cardAliasKind, decodeCardFields, parseSetCodes, CardsService, readCardNameEntries, readCardNameMap, selectYgocdbCardName } from '../src/cards/cards.service';
+import { cardAliasKind, decodeCardFields, parseSetCodes, CardsService, readCardNameEntries, readCardNameMap, selectYgocdbCardName, TYPE_TOKEN } from '../src/cards/cards.service';
 import { config } from '../src/config';
 import { useTestDb } from './helpers';
 import { getDb } from '../src/db';
@@ -226,6 +226,26 @@ describe('ygopro card metadata decoding', () => {
     const [first, second] = cards.poolCodes().slice(0, 2);
     expect(cards.getMany([second, first, second, -1, 999_999_999]).map((card) => card.code))
       .toEqual([second, first]);
+  });
+
+  it('counts base fields once per eligible artwork group and keeps rules-name aliases separate', () => {
+    const cards = new CardsService();
+    cards.poolCodes();
+    const insert = getDb().prepare('INSERT INTO cards(code, name, type, alias, setcodes_json) VALUES (?, ?, ?, ?, ?)');
+    const add = (code: number, type: number, alias: number, fields: number[]) =>
+      insert.run(code, String(code), type, alias, JSON.stringify(fields));
+    add(2_000_000, 0x21, 2_000_002, [0x1fa, 0x11fa, 0x20b]);
+    add(2_000_001, 0x21, 2_000_000, [0x1fb]);
+    add(2_000_002, 0x21, 2_000_001, [0x1fb]);
+    add(5_405_694, 0x21, 0, [0x1fa]);
+    add(5_405_695, 0x21, 5_405_694, [0x1fa]);
+    add(5_405_720, 0x21, 5_405_694, [0x1fa]);
+    add(99_999_999, 0x21, 0, [0x1fa]);
+    add(100_000_000, 0x21, 0, [0x1fa, 0x1fb]);
+    add(3_000_000, 0x21 | TYPE_TOKEN, 0, [0x1fa, 0x1fb]);
+    add(3_000_001, 0x21, 3_000_000, [0x20c]);
+
+    expect(cards.poolFieldSizes()).toEqual(new Map([[0x1fa, 5], [0x20b, 1], [0x20c, 1]]));
   });
 
   it('resolves alias chains and terminates cyclic alias data deterministically', () => {

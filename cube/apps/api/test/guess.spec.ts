@@ -122,7 +122,7 @@ describe('Guess the Card HTTP game', () => {
     const roomCodes = fieldCodes.slice(0, 2);
     const { options } = buildOpeningHintOptions(cards.getMany(roomCodes), roomCodes, fullFieldSizes);
     for (const hints of options) {
-      expect(hints).toContainEqual({ method: 'field-size', group: 'catalog-field-large', candidateCount: 1 });
+      expect(hints).toContainEqual({ method: 'field-size', group: 'distinct-field-large', candidateCount: 1 });
     }
   });
 

@@ -18,7 +18,7 @@ describe('Guess opening hint options', () => {
     expect(Object.fromEntries(dragonHints.map(({ method, group, candidateCount }) => [method, [group, candidateCount]]))).toEqual({
       deck: ['main-monster', 1], level: ['high-level', 1], attribute: ['light-wind', 2], attack: ['high-attack', 1],
       'summon-value': ['value-7-plus', 1], defense: ['high-defense', 1], 'release-era': ['through-2014', 1],
-      'field-deck': ['field-main-monster', 1], 'field-size': ['catalog-field-small', 2], frame: ['regular-frame', 1],
+      'field-deck': ['field-main-monster', 1], 'field-size': ['distinct-field-small', 2], frame: ['regular-frame', 1],
       'combat-value': ['high-combat-value', 1], 'combat-compare': ['attack-slight-or-unknown', 2], 'light-dark': ['light-dark', 1],
     });
     expect(linkHints).toEqual(expect.arrayContaining([
@@ -44,13 +44,20 @@ describe('Guess opening hint options', () => {
     const { options: [linkHints, xyzHints, trapHints] } = buildOpeningHintOptions(
       [shared, xyz, trap, ...extra, ...medium], [shared.code, xyz.code, trap.code], new Map([[0x112, 26], [0x2a, 25]]),
     );
-    expect(linkHints).toContainEqual({ method: 'field-size', group: 'catalog-field-large', candidateCount: 14 });
-    expect(xyzHints).toContainEqual({ method: 'field-size', group: 'catalog-field-medium', candidateCount: 12 });
+    expect(linkHints).toContainEqual({ method: 'field-size', group: 'distinct-field-large', candidateCount: 14 });
+    expect(xyzHints).toContainEqual({ method: 'field-size', group: 'distinct-field-medium', candidateCount: 12 });
     expect(xyzHints).toContainEqual({ method: 'attack', group: 'low-attack', candidateCount: 1 });
     expect(xyzHints).toContainEqual({ method: 'combat-value', group: 'low-combat-value', candidateCount: 1 });
     expect(xyzHints).toHaveLength(12);
     expect(trapHints).toContainEqual({ method: 'defense', group: 'spell-trap', candidateCount: 25 });
     expect(trapHints).toContainEqual({ method: 'field-deck', group: 'no-field', candidateCount: 1 });
+  });
+
+  it('skips field size for cards whose fields have no eligible members', () => {
+    const { options: [spellHints, trapHints] } = buildOpeningHintOptions([spell, trap], [spell.code, trap.code], new Map());
+    expect(spellHints.find(({ method }) => method === 'field-size')).toBeUndefined();
+    expect(spellHints).toContainEqual({ method: 'field-deck', group: 'field-spell-trap', candidateCount: 1 });
+    expect(trapHints).toContainEqual({ method: 'field-size', group: 'no-field', candidateCount: 1 });
   });
 
   it('keeps a 500-point lead in the narrow comparison band and treats Link and ? as undetermined', () => {

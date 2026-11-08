@@ -11,8 +11,9 @@ import { ApiError } from '@/lib/api';
 import { GuessCardName } from './GuessCardName';
 import { GuessCards } from './GuessCards';
 import { GuessFrame, useGuessLanguage } from './GuessFrame';
+import { GuessHintButton } from './GuessHintButton';
 import { GUESS_PATH, guessError, guessRequest, sessionKey, useGuessPolling } from './guess-client';
-import { fillText, GuessText, openingHintTitle } from './guess-text';
+import { fillText, GuessText } from './guess-text';
 
 function GuessTable({ room, text }: { room: GuessPublicRoomView | GuessRoomView; text: GuessText }) {
   const viewer = 'viewerId' in room ? room : null;
@@ -40,7 +41,6 @@ function GuessTable({ room, text }: { room: GuessPublicRoomView | GuessRoomView;
           const self = player.playerId === viewer?.viewerId;
           const kind = self && viewer?.viewerCardKind ? text.cardKinds[viewer.viewerCardKind] : null;
           const hint = player.openingHint;
-          const fullHint = hint ? `${text.hintMethods[hint.method]} · ${text.hintGroups[hint.group]}` : undefined;
           return (
             <li key={player.playerId} className="guess-seat" data-guess-player={player.playerId}
               aria-current={current ? 'true' : undefined}
@@ -54,9 +54,7 @@ function GuessTable({ room, text }: { room: GuessPublicRoomView | GuessRoomView;
                 </div>
               )}
               <span className="guess-seat-name" title={player.playerId}>{player.playerId}</span>
-              {hint && <span className="guess-seat-hint" data-guess-seat-hint title={openingHintTitle(hint, text)} aria-label={fullHint}>
-                {text.hintShort[hint.group] ?? text.hintGroups[hint.group]}
-              </span>}
+              {hint && <GuessHintButton hint={hint} text={text} compact />}
               <span className="guess-seat-badge">
                 {self && text.you}{self && player.roundPoints !== null && ' · '}
                 {player.roundPoints !== null && `+${player.roundPoints}`}
@@ -314,12 +312,11 @@ export function GuessRoom({ roomId }: { roomId: string }) {
           <section className="guess-panel guess-play">
             {playing && <>
               <h2>{text.pool} <span className="guess-muted">({room.poolCount.toLocaleString(language)})</span></h2>
-              {openingHint && <p className="flex flex-wrap items-baseline gap-x-2 gap-y-1" data-guess-opening-hint
-                title={openingHintTitle(openingHint, text)}>
+              {openingHint && <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1" data-guess-opening-hint>
                 <span className="guess-muted">{text.hintMethods[openingHint.method]}</span>
-                <strong className="guess-pill">{text.hintGroups[openingHint.group]}</strong>
+                <GuessHintButton hint={openingHint} text={text} />
                 <span className="guess-muted">{fillText(text.hintCandidates, { count: openingHint.candidateCount.toLocaleString(language) })}</span>
-              </p>}
+              </div>}
               {!canGuess && room.currentGuess && room.currentPlayerId && <p className="guess-live-guess" role="status">
                 <GuessWithCard template={text.liveGuess} player={room.currentPlayerId} card={room.currentGuess} text={text} />
               </p>}

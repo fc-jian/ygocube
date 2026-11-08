@@ -98,6 +98,7 @@ export type GuessOpeningHintGroup = 'main-monster' | 'extra-monster' | 'spell-tr
   | 'no-field' | 'field-main-monster' | 'field-extra-monster' | 'field-spell-trap'
   | 'small-field' | 'medium-field' | 'large-field' | 'regular-frame' | 'special-frame'
   | 'catalog-field-small' | 'catalog-field-medium' | 'catalog-field-large'
+  | 'distinct-field-small' | 'distinct-field-medium' | 'distinct-field-large'
   | 'low-combat-value' | 'medium-combat-value' | 'high-combat-value'
   | 'defense-at-least-attack' | 'attack-over-500' | 'attack-slight-or-unknown' | 'light-dark' | 'other-attribute';
 

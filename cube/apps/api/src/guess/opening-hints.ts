@@ -22,16 +22,16 @@ for (const [era, codes] of Object.entries(FIRST_RELEASE_ERA_CODES)) {
   for (const code of codes) releaseEras.set(code, era as GuessReleaseEra);
 }
 
-function groups(card: OpeningCard, largestField: number): CardGroups {
+function groups(card: OpeningCard, largestField: number | null): CardGroups {
   const releaseEra = releaseEras.get(card.code)
     ?? (card.aliasKind === 'artwork' ? releaseEras.get(card.alias) : undefined);
-  const fieldSize = largestField === 0 ? 'no-field' : largestField <= 15 ? 'catalog-field-small'
-    : largestField <= 25 ? 'catalog-field-medium' : 'catalog-field-large';
+  const fieldSize = largestField === null ? 'no-field' : largestField === 0 ? undefined
+    : largestField <= 15 ? 'distinct-field-small' : largestField <= 25 ? 'distinct-field-medium' : 'distinct-field-large';
   if (!(card.type & MONSTER)) {
     return {
       deck: 'spell-trap', level: 'spell-trap', attribute: 'spell-trap', attack: 'spell-trap',
       'summon-value': 'spell-trap', defense: 'spell-trap', 'release-era': releaseEra,
-      'field-deck': largestField ? 'field-spell-trap' : 'no-field', 'field-size': fieldSize,
+      'field-deck': largestField === null ? 'no-field' : 'field-spell-trap', 'field-size': fieldSize,
       frame: 'spell-trap', 'combat-value': 'spell-trap', 'combat-compare': 'spell-trap', 'light-dark': 'spell-trap',
     };
   }
@@ -50,7 +50,7 @@ function groups(card: OpeningCard, largestField: number): CardGroups {
     'summon-value': card.level <= 3 ? 'value-1-3' : card.level <= 6 ? 'value-4-6' : 'value-7-plus',
     defense: link || card.def <= 500 ? 'low-defense' : card.def <= 1800 ? 'medium-defense' : 'high-defense',
     'release-era': releaseEra,
-    'field-deck': !largestField ? 'no-field' : extra ? 'field-extra-monster' : 'field-main-monster',
+    'field-deck': largestField === null ? 'no-field' : extra ? 'field-extra-monster' : 'field-main-monster',
     'field-size': fieldSize,
     frame: extra || (card.type & (RITUAL | PENDULUM)) ? 'special-frame' : 'regular-frame',
     'combat-value': combatValue <= 1500 ? 'low-combat-value' : combatValue <= 2400 ? 'medium-combat-value' : 'high-combat-value',
@@ -68,7 +68,8 @@ export function buildOpeningHintOptions(
   const dealt = new Map<number, CardGroups>();
   const dealtCodes = new Set(answers);
   for (const card of cards) {
-    const largestField = Math.max(0, ...baseCardFieldCodes(card.setCodes).map((field) => fieldSizes.get(field) ?? 1));
+    const fields = baseCardFieldCodes(card.setCodes);
+    const largestField = fields.length ? Math.max(...fields.map((field) => fieldSizes.get(field) ?? 0)) : null;
     const cardGroups = groups(card, largestField);
     if (dealtCodes.has(card.code)) dealt.set(card.code, cardGroups);
     for (const group of new Set(Object.values(cardGroups))) {

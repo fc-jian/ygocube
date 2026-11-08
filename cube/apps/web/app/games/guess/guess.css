@@ -263,6 +263,27 @@
   line-height: 1.2;
   overflow-wrap: anywhere;
 }
+.guess-hint-trigger {
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: .14em;
+}
+.guess-hint-trigger:hover { background: #2a4c3b; }
+.guess-hint-dialog {
+  width: min(26rem, calc(100vw - 2rem));
+  max-height: calc(100dvh - 2rem);
+  margin: auto;
+  padding: 1.2rem;
+  border: 1px solid #4c6b5d;
+  border-radius: .85rem;
+  background: #11271e;
+  color: #e8f1eb;
+  text-align: start;
+  box-shadow: 0 1rem 3rem #0008;
+}
+.guess-hint-dialog::backdrop { background: #0009; }
+.guess-hint-dialog h2 { margin-bottom: .5rem; color: #f5eedc; font-weight: 750; }
+.guess-hint-dialog p { line-height: 1.55; }
 .guess-scores { width: 100%; table-layout: fixed; text-align: right; font-size: .83rem; }
 .guess-scores :is(th, td) { padding: .4rem .2rem; border-bottom: 1px solid #2e4c3e; }
 .guess-scores th:first-child { width: 52%; text-align: left; overflow-wrap: anywhere; }
