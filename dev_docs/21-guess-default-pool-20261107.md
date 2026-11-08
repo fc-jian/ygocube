@@ -171,3 +171,25 @@ Aly 卡库有 15,170 条卡片记录。字段统计排除 265 张衍生物及 15
 `d3e482974c2597cbca4a6384153c91d079140a9bdd7ec7973de2fddf728164bc`。
 备份和运行库通过完整性与外键检查，历史房间及卡池已与备份核对。
 统计、构建及验收日志位于 `data/local-dev/guess-distinct-fields-release/`。
+
+## 高级检索与房间操作 Aly 发布
+
+Cube 和独立 Duel 同步发布 `20261108-guess-search-9a2a0b7`，由本地提交
+`9a2a0b7542839eca4ad01549821344dd7c825a18` 构建。Cube Web Build ID 为 `7fSpS3s9kNdDY2QfJqhQW`，
+Duel Web Build ID 为 `P5hMq9GBZdIlyhypCj4ab`。应用包 SHA256 为
+`83a7e821e2f0e5f889fc05f0bdf1d89c08421bb638685548872c708c5b0daa98`。
+
+猜牌卡池、房间候选和 Duel 构筑共用结构化筛选、英文双引号词组查询和分页。首发年份按已知 OCG／TCG
+最早正式发行年，从已复核的 YGOPRODeck 日期快照生成。索引覆盖 14,748 个卡号和默认池全部 2,378 张牌。
+房主可按投降结算最后一人并直接开启下一轮。轮间名单随房间轮询更新，房主可移除其他玩家并保留其积分。
+
+Windows 和 Linux 各通过 423 项自动化测试。本地从旧发布启动并续玩四人房，核对了版本、行动人、提示和候选。
+公网卡池组合筛选命中 54 张，指定两个连接方向和数目命中 14 张。Duel 的 `"RANK 4"` 超量筛选命中 218 张，
+指定两个连接方向命中 75 张。公网四人房 `BC29A4F1` 完成两轮，写入 8 条发牌统计。
+
+切换前原生对局空闲。发布后逐条比对了等候、游戏中及轮间各一间既有房，保存状态均与备份一致。
+两套 API 和 Web 切换完成，七项服务和公网静态资源均通过检查。
+Cube 与 Duel 的数据库备份各在所属实例的 `backups/20261108-guess-search-9a2a0b7/` 中。
+`cube.sqlite` 的 SHA256 为 `62af96d4fa7a1dd87a155f71455c2bc6884f7f8ddd96674b635aa20d27271f52`，
+`duel.sqlite` 的 SHA256 为 `e541a7bbb9d4796e648056d23d595ca9e56ddf4f234d350603ac5d25253db567`。
+备份和运行库通过完整性与外键检查。构建及验收日志位于 `data/local-dev/guess-search-release/`。
