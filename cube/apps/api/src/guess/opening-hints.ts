@@ -61,15 +61,18 @@ export function buildOpeningHintOptions(
   // Groups shared by several methods have the same membership, such as spell-trap.
   const pools: HintPools = {};
   const dealt = new Map<number, CardGroups>();
+  const dealtGroupSizes: Partial<Record<GuessOpeningHintGroup, number>> = {};
   const dealtCodes = new Set(answers);
   for (const card of cards) {
     const fields = baseCardFieldCodes(card.setCodes);
     const largestField = fields.length ? Math.max(...fields.map((field) => fieldSizes.get(field) ?? 0)) : null;
     const cardGroups = groups(card, largestField);
-    if (dealtCodes.has(card.code)) dealt.set(card.code, cardGroups);
+    const isDealt = dealtCodes.has(card.code);
+    if (isDealt) dealt.set(card.code, cardGroups);
     for (const group of new Set(Object.values(cardGroups))) {
       if (!group) continue;
       (pools[group] ??= []).push(card.code);
+      if (isDealt) dealtGroupSizes[group] = (dealtGroupSizes[group] ?? 0) + 1;
     }
   }
 
@@ -78,7 +81,7 @@ export function buildOpeningHintOptions(
     const cardGroups = dealt.get(answer)!;
     for (const [method, group] of Object.entries(cardGroups) as [GuessOpeningHintMethod, GuessOpeningHintGroup | undefined][]) {
       if (!group) continue;
-      const visibleMatches = answers.filter((code) => code !== answer && dealt.get(code)![method] === group).length;
+      const visibleMatches = dealtGroupSizes[group]! - 1;
       options.push({ method, group, candidateCount: pools[group]!.length - visibleMatches });
     }
     return options;

@@ -233,6 +233,39 @@
   text-align: center;
 }
 .guess-seat > :is([role="button"], .guess-seat-name, .guess-seat-hint, .guess-hint-dialog) { pointer-events: auto; }
+.guess-table--grid {
+  min-height: 0;
+  height: auto;
+  padding: .75rem;
+  border: 1px solid #38594d;
+  border-radius: 1rem;
+  background: #11271e;
+}
+.guess-table--grid::before, .guess-table--grid::after { display: none; }
+.guess-table--grid .guess-table-center {
+  position: static;
+  width: auto;
+  transform: none;
+  margin-bottom: .75rem;
+}
+.guess-table--grid .guess-seats {
+  position: static;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 5.25rem), 1fr));
+  gap: .6rem;
+  max-height: min(52dvh, 28rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: .25rem;
+  pointer-events: auto;
+}
+.guess-table--grid .guess-seat {
+  position: static;
+  min-width: 0;
+  width: 100%;
+  transform: none;
+  align-content: start;
+}
 .guess-seat-card {
   width: clamp(2.7rem, 11vw, 4.65rem);
   aspect-ratio: 7 / 10;

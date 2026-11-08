@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useState } from 'react';
 import type { CardInfo, CardSearchFilters, CardSearchParams, GuessCardPage } from '@ygocube/shared';
 import { CardWithTooltip } from '@/components/CardImage';
-import { CardSearchFields, cardSearchQuery, cardSearchRangesValid } from '@/components/CardSearchFields';
+import { CardSearchFields, cardSearchFiltersValid, cardSearchQuery } from '@/components/CardSearchFields';
 import { guessError, guessRequest } from './guess-client';
 import { fillText, GuessLanguage, GuessText } from './guess-text';
 
@@ -32,6 +32,7 @@ export function GuessCards(props: GuessCardsProps) {
   const { text, language, path, token, mode } = props;
   const [input, setInput] = useState('');
   const [draft, setDraft] = useState<CardSearchFilters>({});
+  const canSearch = cardSearchFiltersValid(draft);
   const [filter, setFilter] = useState<CardSearchParams>({ query: '', page: 0, sort: 'relevance', filters: {} });
   const [response, setResponse] = useState<CardResponse | null>(null);
   const current = response?.filter === filter && response.path === path && response.token === token ? response : null;
@@ -52,7 +53,7 @@ export function GuessCards(props: GuessCardsProps) {
 
   function search(event: FormEvent) {
     event.preventDefault();
-    if (cardSearchRangesValid(draft)) setFilter({ query: input.trim(), page: 0, sort: 'relevance', filters: draft });
+    if (canSearch) setFilter({ query: input.trim(), page: 0, sort: 'relevance', filters: draft });
   }
 
   return (
@@ -61,11 +62,11 @@ export function GuessCards(props: GuessCardsProps) {
         <div className="guess-inline">
           <input className="guess-input" aria-label={text.searchLabel} placeholder={text.searchHint} value={input}
             maxLength={100} onChange={(event) => setInput(event.target.value)} />
-          <button className="guess-secondary" type="submit">{text.search}</button>
+          <button className="guess-secondary" type="submit" disabled={!canSearch}>{text.search}</button>
         </div>
         <CardSearchFields value={draft} onChange={setDraft} locale={language}
           onClear={() => { setDraft({}); setFilter({ ...filter, page: 0, filters: {} }); }}>
-          <button type="submit" className="guess-secondary">{text.applyFilters}</button>
+          <button type="submit" className="guess-secondary" disabled={!canSearch}>{text.applyFilters}</button>
         </CardSearchFields>
       </form>
       {loading && <p className="guess-muted" role="status">{text.loading}</p>}

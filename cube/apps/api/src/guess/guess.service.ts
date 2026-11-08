@@ -14,10 +14,10 @@ import { getDb } from '../db';
 import { GuessPoolsService } from './guess-pools.service';
 import { drawOpeningHints } from './opening-hints';
 
-const MAX_PLAYERS = 8;
 const ROOM_IDLE_MS = 24 * 60 * 60 * 1000;
 const EXPIRY_INTERVAL_MS = 60 * 1000;
 const OPEN_ROOM_PHASES = "phase IN ('lobby', 'playing', 'between_rounds')";
+const STARTED_ROOM_PHASES = "phase IN ('playing', 'between_rounds')";
 type SystemFinishReason = NonNullable<GuessRoomView['finishReason']>;
 
 interface Player {
@@ -109,7 +109,7 @@ function summary(room: Room): GuessRoomSummary {
     roomId: room.roomId,
     name: room.name,
     playerCount: activePlayers(room).length,
-    maxPlayers: Math.min(room.poolCount, MAX_PLAYERS),
+    maxPlayers: room.poolCount,
     poolId: room.poolId,
     poolName: room.poolName,
   };
@@ -142,10 +142,10 @@ function writeRoom(room: Room, event: object, now = new Date().toISOString()): v
   `).run(room.roomId, room.players.length ? room.phase : 'closed', JSON.stringify(room), now);
 }
 
-function settleRooms(reason: SystemFinishReason, roomId?: string): number {
+function settleRooms(reason: SystemFinishReason, roomId?: string, phases = OPEN_ROOM_PHASES): number {
   const db = getDb();
   const now = Date.now();
-  const where = [OPEN_ROOM_PHASES];
+  const where = [phases];
   const bindings: string[] = [];
   if (reason === 'inactivity') {
     where.push('updated_at <= ?');
@@ -174,8 +174,8 @@ function settleRooms(reason: SystemFinishReason, roomId?: string): number {
   }).immediate();
 }
 
-export function settleOpenGuessRoomsForMaintenance(): number {
-  return settleRooms('maintenance');
+export function settleOpenGuessRoomsForMaintenance(includeLobby = true): number {
+  return settleRooms('maintenance', undefined, includeLobby ? OPEN_ROOM_PHASES : STARTED_ROOM_PHASES);
 }
 
 @Injectable()
@@ -246,9 +246,9 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
   list(): GuessRoomSummary[] {
     const rows = getDb().prepare(`
       SELECT state_json FROM guess_rooms WHERE phase = 'lobby' AND updated_at > ?
-        AND json_array_length(state_json, '$.players') < MIN(?, json_extract(state_json, '$.poolCount'))
+        AND json_array_length(state_json, '$.players') < json_extract(state_json, '$.poolCount')
       ORDER BY updated_at DESC, room_id LIMIT 50
-    `).all(inactivityCutoff(), MAX_PLAYERS) as RoomRow[];
+    `).all(inactivityCutoff()) as RoomRow[];
     return rows.map((row) => summary(JSON.parse(row.state_json) as Room));
   }
 
@@ -257,7 +257,7 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
     return db.transaction(() => {
       const pool = this.pools.get(input.poolId);
       const poolCount = this.pools.availableCodes(pool.codes).length;
-      if (poolCount < 2) throw new BadRequestException({ code: 'GUESS_INVALID_POOL' });
+      if (poolCount === 0) throw new BadRequestException({ code: 'GUESS_INVALID_POOL' });
       const exists = db.prepare('SELECT 1 FROM guess_rooms WHERE room_id = ?');
       let roomId = randomBytes(4).toString('hex').toUpperCase();
       while (exists.get(roomId)) roomId = randomBytes(4).toString('hex').toUpperCase();
@@ -402,7 +402,7 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
   private deal(room: Room, previousSurrender?: PreviousSurrender): void {
     const participants = activePlayers(room);
     const count = participants.length;
-    if (count < 2) throw new ConflictException({ code: 'GUESS_NEED_PLAYERS' });
+    if (count === 0) throw new ConflictException({ code: 'GUESS_NEED_PLAYERS' });
     const codes = this.pools.availableCodes(this.pools.get(room.poolId).codes);
     if (codes.length < count) throw new ConflictException({ code: 'GUESS_POOL_TOO_SMALL' });
     const answers = sample(codes, count);

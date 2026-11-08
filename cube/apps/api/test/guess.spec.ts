@@ -131,14 +131,16 @@ describe('Guess the Card HTTP game', () => {
     const host = await create('Filter host', pool.poolId);
     const path = `/rooms/${host.room.roomId}`;
     const guest = (await request<GuessSession>(`${path}/join`, undefined, { playerId: 'Filter guest' })).body;
-    const params = 'subtype=quick-play';
+    const params = `subtype=${encodeURIComponent('(quick-play or counter)')}`;
     const cards = await request<GuessCardPage>(`/pools/${pool.poolId}/cards?${params}`);
-    expect(cards.body).toMatchObject({ cards: [{ code: codes[1] }], totalCount: 1, totalPages: 1 });
-    expect((await request<GuessCardPage>(`/cards?${params}&q=${codes[1]}`)).body.cards[0]?.code).toBe(codes[1]);
+    expect(cards.body).toMatchObject({ cards: [{ code: codes[1] }, { code: codes[2] }], totalCount: 2, totalPages: 1 });
+    expect((await request<GuessCardPage>(`/cards?subtype=quick-play&q=${codes[1]}`)).body.cards[0]?.code).toBe(codes[1]);
+    expect((await request(`/pools/${pool.poolId}/cards?subtype=quick-play+and`)).status).toBe(400);
     expect((await request(`/pools/${pool.poolId}/cards?atkMin=100&atkMax=99`)).status).toBe(400);
 
     const started = (await action(path, host.token, { action: 'start', version: guest.room.version })).body;
-    const expected = (await request<GuessCardPage>(`${path}/cards`, host.token)).body.cards.filter(({ code }) => code === codes[1]);
+    const expected = (await request<GuessCardPage>(`${path}/cards`, host.token)).body.cards
+      .filter(({ code }) => code === codes[1] || code === codes[2]);
     const narrowed = await request<GuessCardPage>(`${path}/cards?${params}`, host.token);
     expect(narrowed.body.cards).toEqual(expected);
     expect(narrowed.body.totalCount).toBe(expected.length);
@@ -161,7 +163,6 @@ describe('Guess the Card HTTP game', () => {
     const path = `/rooms/${alice.room.roomId}`;
     expect((await request(path)).status).toBe(401);
     expect((await request(`${path}/cards`)).status).toBe(401);
-    expect((await action(path, alice.token, { action: 'start', version: alice.room.version })).status).toBe(409);
     expect((await request(`${path}/join`, undefined, { playerId: 'ALICE' })).body.code).toBe('GUESS_PLAYER_EXISTS');
 
     const bob = (await request<GuessSession>(`${path}/join`, undefined, { playerId: 'Bob' })).body;
@@ -169,7 +170,7 @@ describe('Guess the Card HTTP game', () => {
     const sessions = new Map([['Alice', alice.token], ['Bob', bob.token], ['Cora', cora.token]]);
     const list = (await request<GuessRoomSummary[]>('/rooms')).body;
     expect(list.find((room) => room.roomId === alice.room.roomId)).toEqual({
-      roomId: alice.room.roomId, name: 'Fixture table', playerCount: 3, maxPlayers: 8, poolId: pool.poolId, poolName: pool.name,
+      roomId: alice.room.roomId, name: 'Fixture table', playerCount: 3, maxPlayers: uniformCodes.length, poolId: pool.poolId, poolName: pool.name,
     });
     expect((await action(path, bob.token, { action: 'start', version: cora.room.version })).status).toBe(403);
     const start = await action(path, alice.token, { action: 'start', version: cora.room.version });
@@ -394,7 +395,33 @@ describe('Guess the Card HTTP game', () => {
     expect((await read(target)).viewerWrongGuessCodes).toEqual([]);
   });
 
-  it('validates room setup, caps simultaneous joins, and hands off a waiting room', async () => {
+  it('starts and continues a solo game while keeping its card hidden until the round ends', async () => {
+    const pool = await createPool('Solo pool', uniformCodes.slice(0, 2));
+    const host = await create('Solo player', pool.poolId);
+    const roomId = host.room.roomId;
+    const path = `/rooms/${roomId}`;
+    let state = (await action(path, host.token, { action: 'start', version: host.room.version })).body;
+    expect(state).toMatchObject({ phase: 'playing', round: 1, playerCount: 1, currentPlayerId: 'Solo player',
+      players: [{ playerId: 'Solo player', card: null }] });
+    const watched = (await request<GuessSpectatorView>(`${path}/spectate`)).body;
+    expect(watched.players[0].card).toBeNull();
+    const answer = getDb().prepare("SELECT json_extract(state_json, '$.round.seats[0].code') FROM guess_rooms WHERE room_id = ?")
+      .pluck().get(roomId) as number;
+    state = (await action(path, host.token, { action: 'skip', version: state.version })).body;
+    expect(state.currentPlayerId).toBe('Solo player');
+    state = (await action(path, host.token, { action: 'guess', version: state.version, code: answer })).body;
+    expect(state).toMatchObject({ phase: 'between_rounds', lastMove: { outcome: 'correct', points: 1 } });
+    expect(await stats(pool.poolId, answer)).toEqual({ appearances: 1, averageGuessTurns: 2 });
+    state = (await action(path, host.token, { action: 'next', version: state.version })).body;
+    expect(state).toMatchObject({ phase: 'playing', round: 2 });
+    state = (await action(path, host.token, { action: 'next', version: state.version })).body;
+    expect(state).toMatchObject({ phase: 'playing', round: 3, previousSurrender: { round: 2, playerId: 'Solo player' } });
+    state = (await action(path, host.token, { action: 'surrender', version: state.version })).body;
+    expect(state).toMatchObject({ phase: 'between_rounds', lastMove: { outcome: 'surrendered', points: 0 } });
+    expect((await action(path, host.token, { action: 'finish', version: state.version })).status).toBe(200);
+  });
+
+  it('limits simultaneous joins to the card count and plays with more than eight players', async () => {
     const headers = { 'X-Admin-Token': superToken };
     for (const poolCodes of [[codes[0], tokenCode], [codes[0], codes[0]], [codes[0], -1], [codes[0], 999999999]]) {
       expect((await request('/pools', undefined, { name: 'Invalid', codes: poolCodes }, headers)).status).toBe(400);
@@ -402,24 +429,41 @@ describe('Guess the Card HTTP game', () => {
     const small = await createPool('Small pool', codes.slice(0, 2));
     expect((await request('/pools', undefined, { name: 'SMALL POOL', codes: codes.slice(0, 2) }, headers)).body.code).toBe('GUESS_POOL_EXISTS');
     expect((await request('/rooms', undefined, { name: 'Unknown pool', playerId: 'Host', poolId: 999999 })).status).toBe(404);
-    const host = await create('Host', 0);
+    const large = await createPool('Large room pool', uniformCodes.slice(0, 10));
+    const host = await create('Host', large.poolId);
     const path = `/rooms/${host.room.roomId}`;
-    const visitors = await Promise.all(Array.from({ length: 8 }, (_, index) =>
+    const visitors = await Promise.all(Array.from({ length: 10 }, (_, index) =>
       request<GuessSession>(`${path}/join`, undefined, { playerId: `Guest ${index + 1}` })));
     const joined = visitors.filter((result) => result.status === 201).map((result) => result.body);
-    expect(joined).toHaveLength(7);
+    expect(joined).toHaveLength(9);
     expect(visitors.filter((result) => result.status === 409)).toHaveLength(1);
     const full = (await request<GuessRoomView>(path, host.token)).body;
-    expect(full.playerCount).toBe(8);
+    expect(full).toMatchObject({ playerCount: 10, maxPlayers: 10 });
     expect((await request<GuessRoomSummary[]>('/rooms')).body.some((room) => room.roomId === host.room.roomId)).toBe(false);
     expect((await action(path, host.token, { action: 'leave', version: full.version })).status).toBe(200);
     expect((await request(path, host.token)).status).toBe(401);
     const successor = joined.find((session) => session.room.viewerId === full.players[1].playerId)!;
     const waiting = (await request<GuessRoomView>(path, successor.token)).body;
     expect(waiting.hostId).toBe(successor.room.viewerId);
+    expect((await request<GuessRoomSummary[]>('/rooms')).body).toContainEqual(expect.objectContaining({
+      roomId: host.room.roomId, playerCount: 9, maxPlayers: 10,
+    }));
     const otherRoom = await create('Other', small.poolId);
     expect(otherRoom.room.maxPlayers).toBe(2);
     expect((await request(path, otherRoom.token)).status).toBe(401);
+    let state = (await action(path, successor.token, { action: 'start', version: waiting.version })).body;
+    expect(state.players).toHaveLength(9);
+    expect(state.viewerOpeningHint?.candidateCount).toBe(2);
+    const views = await Promise.all(joined.map(({ token }) => request<GuessRoomView>(path, token)));
+    const dealt = new Map(views.flatMap(({ body }) => body.players.filter(({ card }) => card).map(({ playerId, card }) => [playerId, card!.code])));
+    const tokens = new Map(joined.map(({ room, token }) => [room.viewerId, token]));
+    expect(new Set(dealt.values()).size).toBe(9);
+    while (state.currentPlayerId) {
+      const current = state.currentPlayerId;
+      state = (await action(path, tokens.get(current)!, { action: 'guess', version: state.version, code: dealt.get(current)! })).body;
+    }
+    expect(state.standings.map(({ score }) => score).sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect((await action(path, successor.token, { action: 'finish', version: state.version })).status).toBe(200);
   });
 
   it('atomically settles the last player when the host advances and revokes credentials on removal', async () => {
@@ -550,7 +594,6 @@ describe('Guess the Card HTTP game', () => {
     expect(between.standings.find(({ playerId }) => playerId === 'Organizer')).toMatchObject({
       departed: true, score: first === 'Organizer' ? 0 : 2,
     });
-    expect((await action(path, guest.token, { action: 'next', version: between.version })).status).toBe(409);
     expect((await join('organizer')).status).toBe(409);
     const newcomer = await join('New player');
     expect(newcomer.status).toBe(201);
@@ -692,12 +735,19 @@ describe('Guess the Card HTTP game', () => {
 
   it('finalizes all open rooms for maintenance with one event each and keeps completed rounds', async () => {
     const waiting = await create('Maintenance lobby', 0);
+    const playing = await create('Maintenance playing', 0);
+    const playingPath = `/rooms/${playing.room.roomId}`;
+    expect((await action(playingPath, playing.token, { action: 'start', version: playing.room.version })).status).toBe(200);
     const db = getDb();
     const open = db.prepare("SELECT room_id FROM guess_rooms WHERE phase IN ('lobby', 'playing', 'between_rounds')").pluck().all() as string[];
+    const started = db.prepare("SELECT room_id FROM guess_rooms WHERE phase IN ('playing', 'between_rounds')").pluck().all() as string[];
     const history = db.prepare('SELECT * FROM guess_round_cards ORDER BY room_id, round_number, code');
     const before = history.all();
-    expect(open).toContain(waiting.room.roomId);
-    expect(settleOpenGuessRoomsForMaintenance()).toBe(open.length);
+    expect(started).toContain(playing.room.roomId);
+    expect(settleOpenGuessRoomsForMaintenance(false)).toBe(started.length);
+    expect((await request<GuessRoomView>(`/rooms/${waiting.room.roomId}`, waiting.token)).body)
+      .toMatchObject({ phase: 'lobby', version: waiting.room.version });
+    expect(settleOpenGuessRoomsForMaintenance()).toBe(open.length - started.length);
     expect(settleOpenGuessRoomsForMaintenance()).toBe(0);
     expect(history.all()).toEqual(before);
     const event = db.prepare('SELECT event_json FROM guess_room_events WHERE room_id = ? ORDER BY version DESC LIMIT 1').pluck();

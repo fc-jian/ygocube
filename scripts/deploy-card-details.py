@@ -23,16 +23,16 @@ ap.add_argument('--api-web-only', action='store_true', help='Activate both API/W
 guess_action = ap.add_mutually_exclusive_group()
 guess_action.add_argument('--require-idle-guess', action='store_true', help='Defer Cube activation or rollback while a Guess game is open')
 guess_action.add_argument('--settle-open-guess', action='store_true', help='Finalize open Guess rooms after the Cube database backup and before switching releases')
+guess_action.add_argument('--settle-started-guess', action='store_true', help='Finalize Guess rooms that have started and keep waiting rooms open')
 ap.add_argument('--check-page', action='append', default=[], help='Additional public page to verify with its static assets')
 ap.add_argument('--windbot-root', type=P, help='Enable the verified WindBot runtime only on independent Duel')
 a = ap.parse_args()
 if a.api_web_only and (a.cube_only or a.web_only or a.windbot_root):
     ap.error('--api-web-only requires both application targets and no srvpro update')
 application_only = a.cube_only or a.api_web_only
-if a.require_idle_guess and (not application_only or a.web_only):
+settle_guess = a.settle_open_guess or a.settle_started_guess
+if (a.require_idle_guess or settle_guess) and (not application_only or a.web_only):
     ap.error('Guess maintenance flags require a Cube API/Web update')
-if a.settle_open_guess and (not a.cube_only or a.web_only):
-    ap.error('--settle-open-guess requires a Cube-only API/Web update')
 if any(not re.fullmatch(r'/[A-Za-z0-9._/-]*', path) or path.startswith('//') for path in a.check_page):
     ap.error('--check-page requires a site-relative path')
 if a.windbot_root:
@@ -78,7 +78,7 @@ class GuessMaintenance(resource_apply.ApplicationMaintenance):
         return False
 
 
-def settle_guess_rooms(root, release, expected):
+def settle_guess_rooms(root, release, expected, include_lobby):
     config_file = root/'current/config.yaml'
     if not config_file.is_file():
         config_file = root/'shared/config.yaml'
@@ -92,7 +92,7 @@ def settle_guess_rooms(root, release, expected):
         const { closeDb } = require(app + '/db.js');
         const { settleOpenGuessRoomsForMaintenance } = require(app + '/guess/guess.service.js');
         try {
-          process.stdout.write(JSON.stringify(settleOpenGuessRoomsForMaintenance()));
+          process.stdout.write(JSON.stringify(settleOpenGuessRoomsForMaintenance(process.argv[3] === 'true')));
         } finally {
           closeDb();
         }
@@ -100,7 +100,7 @@ def settle_guess_rooms(root, release, expected):
     database = (root/'shared/data/cube.sqlite').resolve(strict=True)
     result = subprocess.check_output(
         ['runuser', '-u', 'ygocube', '--', 'env', f'CONFIG_FILE={config_file}', '/usr/bin/node',
-         '-e', program, str(release/'api/dist'), str(database)],
+         '-e', program, str(release/'api/dist'), str(database), 'true' if include_lobby else 'false'],
         cwd=release, text=True,
     )
     count = json.loads(result)
@@ -198,11 +198,11 @@ for n,root in targets.items():
     config_file = root/'current/config.yaml'
     if not config_file.exists(): config_file = root/'shared/config.yaml'
     shutil.copy2(config_file,backup/'config.yaml')
-guard_guess = a.require_idle_guess or a.settle_open_guess
+guard_guess = a.require_idle_guess or settle_guess
 maintenance_type = GuessMaintenance if guard_guess else resource_apply.ApplicationMaintenance
 maintenance = None if a.web_only else maintenance_type(roots['ygocube'], roots['ygoduel'], services)
 if maintenance:
-    if a.settle_open_guess:
+    if settle_guess:
         maintenance.check_guess = False
     maintenance.begin()
 candidate_started = False
@@ -212,7 +212,7 @@ try:
         maintenance.stop_services()
     else:
         run('systemctl','stop',*services)
-    if a.settle_open_guess:
+    if settle_guess:
         maintenance.check_guess = True
     if a.windbot_root:
         (roots['ygoduel']/'shared/config.yaml').write_text(json.dumps(windbot_config, indent=2)+'\n')
@@ -223,15 +223,19 @@ try:
             db.backup(out)
             assert out.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
             assert out.execute('PRAGMA foreign_key_check').fetchone() is None
-            if a.settle_open_guess:
+            if settle_guess and n == 'ygocube':
+                phases = ('lobby', 'playing', 'between_rounds') if a.settle_open_guess else ('playing', 'between_rounds')
+                placeholders = ', '.join('?' for _ in phases)
                 expected_guess_rooms = out.execute(
-                    "SELECT COUNT(*) FROM guess_rooms WHERE phase IN ('lobby', 'playing', 'between_rounds')"
+                    f'SELECT COUNT(*) FROM guess_rooms WHERE phase IN ({placeholders})', phases,
                 ).fetchone()[0]
-        if a.settle_open_guess:
-            settled_guess_rooms = settle_guess_rooms(root, news[n], expected_guess_rooms)
-            receipt = {'settledGuessRooms': settled_guess_rooms}
-            (root/'backups'/a.release/'guess-settlement.json').write_text(json.dumps(receipt) + '\n')
-            print(json.dumps(receipt), flush=True)
+    if settle_guess:
+        cube_root = roots['ygocube']
+        settled_guess_rooms = settle_guess_rooms(cube_root, news['ygocube'], expected_guess_rooms, a.settle_open_guess)
+        receipt = {'settledGuessRooms': settled_guess_rooms}
+        (cube_root/'backups'/a.release/'guess-settlement.json').write_text(json.dumps(receipt) + '\n')
+        print(json.dumps(receipt), flush=True)
+    for n,root in targets.items():
         switch(root,news[n])
     candidate_started = True
     run('systemctl','start',*services)

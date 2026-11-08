@@ -1,7 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 import {
-  CARD_ATTRIBUTES, CARD_LINK_DIRECTIONS, CARD_RACES, CARD_RANGE_LIMITS, CARD_SUBTYPES,
-  type CardCategory, type CardRangeField, type CardSearchFilters, type CardSearchParams, type CardSubtype,
+  CARD_ATTRIBUTES, CARD_LINK_DIRECTIONS, CARD_RACES, CARD_RANGE_LIMITS, parseCardSubtypeExpression,
+  type CardCategory, type CardRangeField, type CardSearchFilters, type CardSearchParams,
 } from '@ygocube/shared';
 
 function badPayload(): never {
@@ -30,12 +30,12 @@ export function parseCardSearchParams(query: Record<string, unknown>): CardSearc
   const { q = '', sort = 'relevance', subtype } = query;
   if (typeof q !== 'string' || q.length > 100) badPayload();
   if (sort !== 'relevance' && sort !== 'level' && sort !== 'attack' && sort !== 'name') badPayload();
-  if (subtype !== undefined && (typeof subtype !== 'string' || !Object.hasOwn(CARD_SUBTYPES, subtype))) badPayload();
+  if (subtype !== undefined && (typeof subtype !== 'string' || !parseCardSubtypeExpression(subtype))) badPayload();
   const category = integer(query.category, 1, 4);
   if (category !== undefined && category !== 1 && category !== 2 && category !== 4) badPayload();
   const filters: CardSearchFilters = {
     category: category as CardCategory | undefined,
-    subtype: subtype as CardSubtype | undefined,
+    subtype,
     attributes: mask(query.attributes, attributeMask),
     races: mask(query.races, raceMask),
     linkMarkers: mask(query.linkMarkers, linkMask),

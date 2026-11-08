@@ -249,7 +249,9 @@ describe('ygopro card metadata decoding', () => {
     expect(found({ q: '等级 5' })).toEqual([77000001, 77000002]);
     expect(found({ q: '"等级 5"' })).toEqual([77000001]);
     expect(found({ q: '"RANK 4"', yearMin: '2011', yearMax: '2011' })).toEqual([84013237]);
-    expect(found({ q: '"RANK 4"', levelMin: '4' })).toEqual([]);
+    expect(found({ q: '"RANK 4"', levelMin: '4', levelMax: '4' })).toEqual([84013237]);
+    expect(found({ subtype: 'link', levelMin: '2', levelMax: '2' })).toEqual([77000003]);
+    expect(found({ subtype: 'normal-spell', levelMin: '0' })).toEqual([]);
     expect(found({ levelMin: '5', levelMax: '8', attributes: '48', races: '8200', atkMin: '0', defMax: '2500' }))
       .toEqual([77000001, 89631138, 89631139]);
     expect(found({ atkMax: '0', defMin: '0', defMax: '0' })).toEqual([77000001]);
@@ -261,6 +263,30 @@ describe('ygopro card metadata decoding', () => {
     expect(cards.get(89631138)?.releaseYear).toBe(1999);
     expect(() => parseCardSearchParams({ linkMarkers: '16' })).toThrow();
     expect(() => parseCardSearchParams({ atkMin: '5', atkMax: '4' })).toThrow();
+  });
+
+  it('matches subtype expressions with explicit precedence, nesting and category intersection', () => {
+    const cards = new CardsService();
+    cards.poolCodes();
+    const insert = getDb().prepare('INSERT INTO cards(code, name, type, search_text) VALUES (?, ?, ?, ?)');
+    const fusion = 77000001, fusionTuner = 77000002, synchro = 77000003, synchroTuner = 77000004;
+    const fusionPendulum = 77000005, normalSpell = 77000006, quickPlay = 77000007;
+    for (const [code, type] of [
+      [fusion, 0x41], [fusionTuner, 0x1041], [synchro, 0x2021], [synchroTuner, 0x3021],
+      [fusionPendulum, 0x1000041], [normalSpell, 0x2], [quickPlay, 0x10002],
+    ]) insert.run(code, String(code), type, 'subtypefixture');
+    const found = (subtype: string, category?: string) => cards.searchCatalog(
+      parseCardSearchParams({ q: 'subtypefixture', subtype, category }),
+    ).cards.map(({ code }) => code);
+
+    expect(found('fusion OR synchro and tuner')).toEqual([fusion, fusionTuner, synchroTuner, fusionPendulum]);
+    expect(found('（fusion 或 synchro） 与 tuner')).toEqual([fusionTuner, synchroTuner]);
+    expect(found('(fusion and (tuner or pendulum)) or normal-spell')).toEqual([fusionTuner, fusionPendulum, normalSpell]);
+    expect(found('fusion or normal-spell', '2')).toEqual([normalSpell]);
+    expect(found('normal-spell and quick-play')).toEqual([]);
+    for (const subtype of ['fusion tuner', 'fusion and', '(fusion or)', '(fusion or xyz', 'fusion)', '()', '__proto__', '( '.repeat(65)]) {
+      expect(() => parseCardSearchParams({ subtype })).toThrow();
+    }
   });
 
   it('counts base fields once per eligible artwork group and keeps rules-name aliases separate', () => {

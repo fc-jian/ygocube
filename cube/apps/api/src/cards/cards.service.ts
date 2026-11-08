@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import {
-  CARD_ATTRIBUTES, CARD_LINK_DIRECTIONS, CARD_RACES, CARD_SUBTYPES, cardQueryTokens,
-  type CardSearchFilters, type CardSearchPage, type CardSearchParams, type CardSearchRange, type CardSearchSort,
+  CARD_ATTRIBUTES, CARD_LINK_DIRECTIONS, CARD_RACES, CARD_SUBTYPES, cardQueryTokens, parseCardSubtypeExpression,
+  type CardSearchFilters, type CardSearchPage, type CardSearchParams, type CardSearchRange, type CardSearchSort, type CardSubtypeExpression,
 } from '@ygocube/shared';
 import fs from 'fs';
 import path from 'path';
@@ -96,7 +96,6 @@ interface CardCacheVersionRow {
 // cards.cdb texts.name final fallback in the searchable index.
 const CARD_METADATA_VERSION = 6;
 const MONSTER = 0x1;
-const XYZ = 0x800000;
 const LINK = 0x4000000;
 /** YGOPro TYPE_TOKEN; generated token/derivative cards are not pool cards. */
 export const TYPE_TOKEN = 0x4000;
@@ -343,17 +342,25 @@ for (const [category, flag] of Object.values(CARD_SUBTYPES)) {
   subtypeMasks.set(category, (subtypeMasks.get(category) ?? 0) | flag);
 }
 
+function compileSubtypeMatcher(expression: CardSubtypeExpression): (type: number) => boolean {
+  if (typeof expression === 'string') {
+    const [category, flag] = CARD_SUBTYPES[expression];
+    const mask = subtypeMasks.get(category) ?? 0;
+    return (type) => (type & category) !== 0 && (flag ? (type & flag) !== 0 : (type & mask) === 0);
+  }
+  const left = compileSubtypeMatcher(expression.left);
+  const right = compileSubtypeMatcher(expression.right);
+  return expression.operator === 'and'
+    ? (type) => left(type) && right(type)
+    : (type) => left(type) || right(type);
+}
+
 function matchesFilters(card: SearchCardRow, filters: CardSearchFilters): boolean {
   const { type, attribute, race, level, atk, def, link_markers: markers } = card;
   if (filters.category && !(type & filters.category)) return false;
-  if (filters.subtype) {
-    const [category, flag] = CARD_SUBTYPES[filters.subtype];
-    if (!(type & category)) return false;
-    if (flag ? !(type & flag) : (type & subtypeMasks.get(category)!) !== 0) return false;
-  }
   if (filters.attributes && (!(type & MONSTER) || !(attribute & filters.attributes))) return false;
   if (filters.races && (!(type & MONSTER) || !(race & filters.races))) return false;
-  if (filters.level && (!(type & MONSTER) || (type & (XYZ | LINK)) || !inRange(level, filters.level))) return false;
+  if (filters.level && (!(type & MONSTER) || !inRange(level, filters.level))) return false;
   if (filters.atk && (!(type & MONSTER) || !inRange(Math.max(0, atk), filters.atk))) return false;
   if (filters.def && (!(type & MONSTER) || (type & LINK) || !inRange(Math.max(0, def), filters.def))) return false;
   if (filters.year) {
@@ -650,6 +657,9 @@ export class CardsService {
     this.ensureLoaded();
     const tokens = cardQueryTokens(String(q ?? ''));
     if (!tokens.length && !browse) return { cards: [], totalCount: 0 };
+    const subtype = filters.subtype ? parseCardSubtypeExpression(filters.subtype) : undefined;
+    if (subtype === null) return { cards: [], totalCount: 0 };
+    const matchesSubtype = subtype ? compileSubtypeMatcher(subtype) : undefined;
 
     // search_text is normalized at import time. Escape LIKE metacharacters so
     // a user searching for '%' or '_' still gets literal matching semantics.
@@ -660,7 +670,8 @@ export class CardsService {
         FROM cards WHERE ${clauses.join(' AND ')} ORDER BY code`)
       .all(...tokens.map((token) => `%${escapeLike(token)}%`)) as SearchCardRow[];
 
-    const matchingRows = rows.filter((row) => (!codes || codes.has(row.code)) && matchesFilters(row, filters));
+    const matchingRows = rows.filter((row) => (!codes || codes.has(row.code))
+      && (!matchesSubtype || matchesSubtype(row.type)) && matchesFilters(row, filters));
     const totalCount = matchingRows.length;
     if (offset >= totalCount) return { cards: [], totalCount };
     const end = limit !== undefined && Number.isFinite(limit)

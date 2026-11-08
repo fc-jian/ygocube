@@ -1,10 +1,11 @@
 'use client';
 
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import {
-  CARD_ATTRIBUTES, CARD_LINK_DIRECTIONS, CARD_RACES, CARD_RANGE_LIMITS, CARD_SUBTYPES,
-  type CardRangeField, type CardSearchFilters, type CardSearchParams, type CardSubtype,
+  CARD_ATTRIBUTES, CARD_LINK_DIRECTIONS, CARD_RACES, CARD_RANGE_LIMITS, parseCardSubtypeExpression,
+  type CardRangeField, type CardSearchFilters, type CardSearchParams,
 } from '@ygocube/shared';
+import { CardSubtypeEditor } from './CardSubtypeEditor';
 
 const fields = Object.keys(CARD_RANGE_LIMITS) as CardRangeField[];
 const masks = ['category', 'subtype', 'attributes', 'races', 'linkMarkers'] as const;
@@ -12,16 +13,14 @@ const arrows = [...CARD_LINK_DIRECTIONS.slice(0, 4), null, ...CARD_LINK_DIRECTIO
 const labels = {
   zh: {
     advanced: '高级筛选', clear: '清除筛选', invalid: '请检查范围。两端应为允许的整数，下限不能超过上限。',
-    subtype: '子类型', any: '全部子类型', categories: { 1: '怪兽', 2: '魔法', 4: '陷阱' },
     attributes: '属性', races: '种族', directions: '连接标记', minimum: '下限', maximum: '上限',
-    level: '等级', atk: '原始攻击力', def: '原始守备力', year: '首发年份', linkCount: '连接标记数',
+    level: '等级／阶级／连接值', atk: '原始攻击力', def: '原始守备力', year: '首发年份', linkCount: '连接标记数',
     help: '区间含两端，留空代表不限。攻守的「?」按 0 筛选。连接怪兽须包含所有选中的箭头。',
   },
   en: {
     advanced: 'Advanced filters', clear: 'Clear filters', invalid: 'Enter valid integers with the minimum at or below the maximum.',
-    subtype: 'Subtype', any: 'All subtypes', categories: { 1: 'Monster', 2: 'Spell', 4: 'Trap' },
     attributes: 'Attribute', races: 'Monster Type', directions: 'Link arrows', minimum: 'Min', maximum: 'Max',
-    level: 'Level', atk: 'Original ATK', def: 'Original DEF', year: 'First release year', linkCount: 'Link arrow count',
+    level: 'Level / Rank / Link Rating', atk: 'Original ATK', def: 'Original DEF', year: 'First release year', linkCount: 'Link arrow count',
     help: 'Ranges include both endpoints. Leave either end blank for no limit. Unknown ATK and DEF count as 0. A Link Monster must have every selected arrow.',
   },
 };
@@ -45,7 +44,7 @@ export function hasCardSearchFilters(filters: CardSearchFilters): boolean {
     || fields.some((field) => filters[field]?.min !== undefined || filters[field]?.max !== undefined);
 }
 
-export function cardSearchRangesValid(filters: CardSearchFilters): boolean {
+function cardSearchRangesValid(filters: CardSearchFilters): boolean {
   return fields.every((field) => {
     const [lowest, highest] = CARD_RANGE_LIMITS[field];
     const { min, max } = filters[field] ?? {};
@@ -55,6 +54,14 @@ export function cardSearchRangesValid(filters: CardSearchFilters): boolean {
   });
 }
 
+function subtypeValid(subtype?: string): boolean {
+  return !subtype || parseCardSubtypeExpression(subtype) !== null;
+}
+
+export function cardSearchFiltersValid(filters: CardSearchFilters): boolean {
+  return cardSearchRangesValid(filters) && subtypeValid(filters.subtype);
+}
+
 export function CardSearchFields({ value, onChange, onClear, locale = 'zh', children }: {
   value: CardSearchFilters;
   onChange: (value: CardSearchFilters) => void;
@@ -62,30 +69,20 @@ export function CardSearchFields({ value, onChange, onClear, locale = 'zh', chil
   locale?: 'zh' | 'en';
   children?: ReactNode;
 }) {
+  const [editorKey, setEditorKey] = useState(0);
   const text = labels[locale];
   const languageIndex = locale === 'zh' ? 1 : 2;
   const descriptionIndex = locale === 'zh' ? 2 : 3;
   const inputClass = 'w-full min-w-0 rounded border border-slate-500/60 bg-slate-950/40 px-2 py-1 text-sm';
   const filterCount = fields.filter((field) => value[field]?.min !== undefined || value[field]?.max !== undefined).length
     + masks.filter((field) => field !== 'category' && value[field]).length;
-  const categories = ([1, 2, 4] as const).filter((category) => !value.category || category === value.category);
 
   return (
     <details className="rounded-md border border-slate-500/60 px-2.5 py-2 text-sm">
       <summary className="cursor-pointer font-semibold">{text.advanced}{filterCount > 0 && ` (${filterCount})`}</summary>
       <div className="mt-2 grid gap-3">
-        <label className="grid gap-1">
-          <span>{text.subtype}</span>
-          <select className={inputClass} value={value.subtype ?? ''}
-            onChange={(event) => onChange({ ...value, subtype: (event.target.value || undefined) as CardSubtype | undefined })}>
-            <option value="">{text.any}</option>
-            {categories.map((category) => <optgroup key={category} label={text.categories[category]}>
-              {Object.entries(CARD_SUBTYPES).filter(([, [kind]]) => kind === category).map(([key, definition]) => (
-                <option key={key} value={key}>{definition[descriptionIndex]}</option>
-              ))}
-            </optgroup>)}
-          </select>
-        </label>
+        <CardSubtypeEditor key={editorKey} locale={locale} expression={value.subtype ?? ''} invalid={!subtypeValid(value.subtype)}
+          onChange={(subtype) => onChange({ ...value, subtype: subtype || undefined })} />
         <div className="grid grid-cols-[repeat(auto-fit,minmax(9rem,1fr))] gap-2">
           {fields.map((field) => (
             <fieldset key={field} className="min-w-0">
@@ -137,7 +134,7 @@ export function CardSearchFields({ value, onChange, onClear, locale = 'zh', chil
         <div className="flex flex-wrap items-center gap-2">
           {children}
           <button type="button" className="rounded border border-slate-500/60 px-2 py-1"
-            onClick={onClear ?? (() => onChange({}))}>
+            onClick={() => { setEditorKey((key) => key + 1); if (onClear) onClear(); else onChange({}); }}>
             {text.clear}
           </button>
         </div>

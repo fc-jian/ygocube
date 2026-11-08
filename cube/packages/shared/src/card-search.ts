@@ -61,10 +61,19 @@ export type CardRangeField = keyof typeof CARD_RANGE_LIMITS;
 export type CardSearchRange = { min?: number; max?: number };
 export type CardCategory = 1 | 2 | 4;
 export type CardSubtype = keyof typeof CARD_SUBTYPES;
+type CardSubtypeOperator = 'and' | 'or';
+export type CardSubtypeTag = CardSubtype | CardSubtypeOperator | '(' | ')';
+export type CardSubtypeExpression = CardSubtype | {
+  operator: CardSubtypeOperator;
+  left: CardSubtypeExpression;
+  right: CardSubtypeExpression;
+};
+export const CARD_SUBTYPE_TAG_LIMIT = 64;
+
 export type CardSearchSort = 'relevance' | 'level' | 'attack' | 'name';
 export type CardSearchFilters = Partial<Record<CardRangeField, CardSearchRange>> & {
   category?: CardCategory;
-  subtype?: CardSubtype;
+  subtype?: string;
   attributes?: number;
   races?: number;
   linkMarkers?: number;
@@ -75,6 +84,40 @@ export interface CardSearchParams {
   page: number;
   filters: CardSearchFilters;
   sort: CardSearchSort;
+}
+
+export function parseCardSubtypeExpression(expression: string): CardSubtypeExpression | null {
+  if (expression.length > 2048) return null;
+  const tokens = expression.normalize('NFKC').toLowerCase().match(/[()]|[^\s()]+/gu)
+    ?.map((token) => token === '与' ? 'and' : token === '或' ? 'or' : token) ?? [];
+  if (!tokens.length || tokens.length > CARD_SUBTYPE_TAG_LIMIT) return null;
+  let index = 0;
+
+  function readOperand(): CardSubtypeExpression | null {
+    const token = tokens[index++];
+    if (token === '(') {
+      const group = readOr();
+      return tokens[index++] === ')' ? group : null;
+    }
+    return token && Object.hasOwn(CARD_SUBTYPES, token) ? token as CardSubtype : null;
+  }
+
+  function readBinary(operator: CardSubtypeOperator, readTerm: () => CardSubtypeExpression | null): CardSubtypeExpression | null {
+    let left = readTerm();
+    while (left !== null && tokens[index] === operator) {
+      index++;
+      const right = readTerm();
+      if (right === null) return null;
+      left = { operator, left, right };
+    }
+    return left;
+  }
+
+  function readAnd() { return readBinary('and', readOperand); }
+  function readOr() { return readBinary('or', readAnd); }
+
+  const result = readOr();
+  return index === tokens.length ? result : null;
 }
 
 export function cardQueryTokens(query: string): string[] {

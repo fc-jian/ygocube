@@ -22,8 +22,9 @@ function GuessTable({ room, text }: { room: GuessPublicRoomView | GuessRoomView;
     ? yourTurn ? text.yourTurn : fillText(text.theirTurn, { player: room.currentPlayerId })
     : room.phase === 'finished' ? text.finished : text.roundOver;
   const last = room.lastMove;
+  const circular = room.players.length <= 8;
   return (
-    <div className="guess-table">
+    <div className={circular ? 'guess-table' : 'guess-table guess-table--grid'}>
       <div className="guess-table-center">
         <p className="guess-kicker">{fillText(text.round, { current: room.round })}</p>
         <p className="guess-turn" aria-live="polite">{turn}</p>
@@ -34,7 +35,7 @@ function GuessTable({ room, text }: { room: GuessPublicRoomView | GuessRoomView;
           {last.card && <p><GuessCardName key={last.card.code} card={last.card} text={text} /></p>}
         </div>}
       </div>
-      <ul className="guess-seats">
+      <ul className="guess-seats" aria-label={text.activeRoster} tabIndex={circular ? undefined : 0}>
         {room.players.map((player, index) => {
           const angle = Math.PI * (2 * index / room.players.length - 0.5);
           const current = player.playerId === room.currentPlayerId;
@@ -44,7 +45,7 @@ function GuessTable({ room, text }: { room: GuessPublicRoomView | GuessRoomView;
           return (
             <li key={player.playerId} className="guess-seat" data-guess-player={player.playerId}
               aria-current={current ? 'true' : undefined}
-              style={{ left: `${50 + 37 * Math.cos(angle)}%`, top: `${50 + 36 * Math.sin(angle)}%` }}>
+              style={circular ? { left: `${50 + 37 * Math.cos(angle)}%`, top: `${50 + 36 * Math.sin(angle)}%` } : undefined}>
               {player.card ? (
                 <CardWithTooltip code={player.card.code} card={player.card} className="guess-seat-card" />
               ) : (
@@ -329,7 +330,7 @@ export function GuessRoom({ roomId }: { roomId: string }) {
           </p>
           <GuessRoster room={room} text={text} viewerId={room.viewerId} />
           <div className="flex flex-wrap gap-2">
-            {host && <button type="button" className="guess-primary" disabled={busy || room.playerCount < 2}
+            {host && <button type="button" className="guess-primary" disabled={busy}
               onClick={() => void act({ action: 'start', version: room.version })}>{text.start}</button>}
             <button type="button" className="guess-secondary" disabled={busy}
               onClick={() => void act({ action: 'leave', version: room.version })}>{text.leave}</button>
@@ -369,7 +370,7 @@ export function GuessRoom({ roomId }: { roomId: string }) {
               </div>}
               {host && lastRemaining && <div className="grid gap-1">
                 <p className="guess-muted">{fillText(text.forceNextHelp, { player: room.currentPlayerId ?? '' })}</p>
-                <div><button type="button" className="guess-primary" disabled={busy || room.playerCount < 2}
+                <div><button type="button" className="guess-primary" disabled={busy}
                   onClick={() => void act({ action: 'next', version: room.version })}>{text.forceNext}</button></div>
               </div>}
             </>}
@@ -380,7 +381,7 @@ export function GuessRoom({ roomId }: { roomId: string }) {
                 remove={host ? (playerId) => setConfirm({ action: 'remove', playerId }) : undefined} />
               <div className="flex flex-wrap gap-2">
                 {host && <>
-                  <button type="button" className="guess-primary" disabled={busy || room.playerCount < 2}
+                  <button type="button" className="guess-primary" disabled={busy}
                     onClick={() => void act({ action: 'next', version: room.version })}>{text.next}</button>
                   <button type="button" className="guess-secondary" disabled={busy}
                     onClick={() => setConfirm({ action: 'finish' })}>{text.finish}</button>
@@ -388,8 +389,7 @@ export function GuessRoom({ roomId }: { roomId: string }) {
                 <button type="button" className="guess-secondary" disabled={busy}
                   onClick={() => void act({ action: 'leave', version: room.version })}>{text.leave}</button>
               </div>
-              {room.playerCount < 2 && <p className="guess-muted">{text.needNextPlayers}</p>}
-              {room.playerCount >= 2 && !host && <p className="guess-muted">{text.nextHelp}</p>}
+              {!host && <p className="guess-muted">{text.nextHelp}</p>}
             </>}
             {room.finishReason && <p className="guess-muted">{text.finishReasons[room.finishReason]}</p>}
             {room.round > 0 && <GuessHistory guesses={room.viewerGuesses} text={text} />}

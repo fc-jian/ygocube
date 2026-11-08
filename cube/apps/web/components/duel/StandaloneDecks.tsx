@@ -4,7 +4,7 @@ import { importYdk } from "./import-ydk";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { CardImage } from "@/components/CardImage";
-import { CardSearchFields, cardSearchQuery, cardSearchRangesValid, hasCardSearchFilters } from "@/components/CardSearchFields";
+import { CardSearchFields, cardSearchFiltersValid, cardSearchQuery, hasCardSearchFilters } from "@/components/CardSearchFields";
 import {
   readDecks,
   saveDeck,
@@ -12,7 +12,7 @@ import {
   ydk,
   SavedDeck,
 } from "./deck-storage";
-import { CARD_SUBTYPES, type BrowserDeck, type CardCategory, type CardSearchPage, type CardSearchParams, type CardSearchSort } from "@ygocube/shared";
+import type { BrowserDeck, CardCategory, CardSearchPage, CardSearchParams, CardSearchSort } from "@ygocube/shared";
 import { CardMeta } from "@/components/CardPreview";
 import type { CardInfo } from "@/lib/types";
 import { typeLabel, raceAttrLine, statLine, atkDefLine } from "@/lib/cardInfo";
@@ -87,7 +87,7 @@ export function StandaloneDecks() {
   }, [dirty]);
   useEffect(() => {
     setResults(null);
-    const ready = searchActive && cardSearchRangesValid(search.filters);
+    const ready = searchActive && cardSearchFiltersValid(search.filters);
     setSearching(ready);
     if (!ready) return;
     const controller = new AbortController();
@@ -517,11 +517,7 @@ export function StandaloneDecks() {
               value={search.filters.category ?? 0}
               onChange={(e) => {
                 const category = (Number(e.target.value) || undefined) as CardCategory | undefined;
-                const { subtype } = search.filters;
-                setSearch({ ...search, page: 0, filters: {
-                  ...search.filters, category,
-                  subtype: category && subtype && CARD_SUBTYPES[subtype][0] !== category ? undefined : subtype,
-                } });
+                setSearch({ ...search, page: 0, filters: { ...search.filters, category } });
               }}
             >
               <option value={0}>全部种类</option>
