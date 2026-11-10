@@ -241,3 +241,12 @@ Windows 和 Linux 各通过 425 项自动化测试。本地与公网浏览器均
 `duel.sqlite` 的 SHA256 为 `bdfede84c83182cdd3f091c13f93d0e6387f3e87a2ac2617f7229a9176b60947`。
 备份和运行库通过完整性及外键检查，卡库和资源清单哈希与切换前一致。
 验收后清理本次 Aly 上传和解包暂存目录，日志保存在 `data/local-dev/guess-not-filter-release/`。
+
+## 20261108精选种子
+
+将已审核的 2,378 张卡作为新库默认池，名称为「20261108精选」。按编号升序序列化为紧凑 JSON 数组后，
+SHA-256 为 `eb285aa226397584157f201802fc9d555bc559daeedd2faa69046d07ca8b359d`，
+与该卡池的 Aly 验收记录一致。[卡号种子](../cube/apps/api/src/guess/recency-pool-codes.ts)
+
+继续使用 `builtin:familiar-v3`。安装种子需要本地卡库包含全部入选卡片。已有该键的库保留卡池 ID、
+名称及成员，已保存房间、事件和发牌统计继续关联原卡池。[种子安装逻辑](../cube/apps/api/src/guess/guess-pools.service.ts)

@@ -13,6 +13,8 @@ ygocube/
 └── dev_docs/   # 规划与设计文档（中文），07 是接口契约，修改接口必须先改它
 ```
 
+新增或维护网页小游戏时，使用仓库内的 [ygocube-games 技能](.codex/skills/ygocube-games/SKILL.md)。
+
 ## 架构要点（必须先读）
 
 - srvpro 每房间 spawn 一个 ygopro 无头宿主进程（传统参数 12 位；Cube 追加 `--cube-deck-limits` + 4 个限制，端口从 stdout 读），srvpro 代理玩家流量并追踪比分/卡组。
