@@ -21,7 +21,7 @@ ap.add_argument('--web-only', action='store_true', help='Preserve API/srvpro and
 ap.add_argument('--cube-only', action='store_true', help='Activate only Cube API/Web, preserving both duel servers')
 ap.add_argument('--api-web-only', action='store_true', help='Activate both API/Web pairs while preserving the duel servers')
 guess_action = ap.add_mutually_exclusive_group()
-guess_action.add_argument('--require-idle-guess', action='store_true', help='Defer Cube activation or rollback while a Guess game is open')
+guess_action.add_argument('--require-idle-guess', action='store_true', help='Defer Cube activation or rollback while Guess the Card or Draw & Guess is active')
 guess_action.add_argument('--settle-open-guess', action='store_true', help='Finalize open Guess rooms after the Cube database backup and before switching releases')
 guess_action.add_argument('--settle-started-guess', action='store_true', help='Finalize Guess rooms that have started and keep waiting rooms open')
 ap.add_argument('--check-page', action='append', default=[], help='Additional public page to verify with its static assets')
@@ -63,17 +63,20 @@ class GuessMaintenance(resource_apply.ApplicationMaintenance):
     def occupied(self):
         if super().occupied():
             return True
-        if not self.check_guess:
-            return False
         try:
             dbfile = self.cube_root / 'shared/data/cube.sqlite'
             with closing(sqlite3.connect(dbfile.as_uri() + '?mode=ro', uri=True)) as db:
-                has_rooms = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='guess_rooms'").fetchone()
-                if has_rooms and db.execute("SELECT 1 FROM guess_rooms WHERE phase IN ('playing', 'between_rounds') LIMIT 1").fetchone():
-                    print('An open Guess game prevents Cube maintenance', flush=True)
-                    return True
+                checks = [('dg_rooms', ('drawing', 'guessing', 'reveal', 'relay', 'relay_reveal'), 'Draw & Guess')]
+                if self.check_guess:
+                    checks.append(('guess_rooms', ('playing', 'between_rounds'), 'Guess the Card'))
+                for table, phases, game in checks:
+                    exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+                    placeholders = ', '.join('?' for _ in phases)
+                    if exists and db.execute(f'SELECT 1 FROM {table} WHERE phase IN ({placeholders}) LIMIT 1', phases).fetchone():
+                        print(f'An active {game} room prevents Cube maintenance', flush=True)
+                        return True
         except sqlite3.Error:
-            print('Cannot verify Guess games; deferring Cube maintenance', flush=True)
+            print('Cannot verify card game rooms; deferring Cube maintenance', flush=True)
             return True
         return False
 

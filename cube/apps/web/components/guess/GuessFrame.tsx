@@ -19,17 +19,18 @@ export function useGuessLanguage() {
   return { language, changeLanguage, text: guessText[language] };
 }
 
-export function GuessFrame({ children, language, changeLanguage }: {
+export function GuessFrame({ children, language, changeLanguage, lobby }: {
   children: ReactNode;
   language: GuessLanguage;
   changeLanguage: (language: GuessLanguage) => void;
+  lobby?: { href: string; label: string };
 }) {
   return (
     <main className="guess-shell" lang={language === 'zh' ? 'zh-CN' : 'en'}>
       <header className="guess-nav">
         <div className="flex flex-wrap items-center gap-2 sm:gap-4">
           <Link href="/" className="guess-brand">YGO CUBE</Link>
-          <Link href={GUESS_PATH} className="guess-nav-link">{guessText[language].lobby}</Link>
+          <Link href={lobby?.href ?? GUESS_PATH} className="guess-nav-link">{lobby?.label ?? guessText[language].lobby}</Link>
           <Link href={`${GUESS_PATH}/pools`} className="guess-nav-link">{guessText[language].pools}</Link>
         </div>
         <div className="guess-language" aria-label="Language / 语言">

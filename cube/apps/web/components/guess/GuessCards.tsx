@@ -14,10 +14,11 @@ type GuessCardsProps = {
   language: GuessLanguage;
   path: string;
   token?: string;
+  request?: typeof guessRequest;
 } & (
   | { mode: 'browse' }
   | ({ mode: 'add' } & CardSelection)
-  | ({ mode: 'select'; wrongGuesses: ReadonlySet<number> } & CardSelection)
+  | ({ mode: 'select'; wrongGuesses?: ReadonlySet<number> } & CardSelection)
 );
 
 type CardResponse = {
@@ -29,7 +30,7 @@ type CardResponse = {
 };
 
 export function GuessCards(props: GuessCardsProps) {
-  const { text, language, path, token, mode } = props;
+  const { text, language, path, token, mode, request = guessRequest } = props;
   const [input, setInput] = useState('');
   const [draft, setDraft] = useState<CardSearchFilters>({});
   const canSearch = cardSearchFiltersValid(draft);
@@ -43,13 +44,13 @@ export function GuessCards(props: GuessCardsProps) {
   useEffect(() => {
     const controller = new AbortController();
     const params = cardSearchQuery(filter);
-    guessRequest<GuessCardPage>(`${path}?${params}`, { token, signal: controller.signal }).then((data) => {
+    request<GuessCardPage>(`${path}?${params}`, { token, signal: controller.signal }).then((data) => {
       if (!controller.signal.aborted) setResponse({ path, token, filter, data });
     }).catch((err: unknown) => {
       if (!controller.signal.aborted) setResponse({ path, token, filter, error: err });
     });
     return () => controller.abort();
-  }, [path, filter, token]);
+  }, [path, filter, token, request]);
 
   function search(event: FormEvent) {
     event.preventDefault();
@@ -81,7 +82,7 @@ export function GuessCards(props: GuessCardsProps) {
         <ul className={mode === 'browse' ? 'guess-card-results guess-pool-results' : 'guess-card-results'}>
           {matches.cards.map((card) => {
             const active = props.mode !== 'browse' && props.selected.has(card.code);
-            const wrong = props.mode === 'select' && props.wrongGuesses.has(card.code);
+            const wrong = props.mode === 'select' && props.wrongGuesses?.has(card.code);
             return (
               <li key={card.code} data-guess-code={card.code}>
                 <CardWithTooltip code={card.code} card={card} className="w-8 shrink-0 sm:w-9" />

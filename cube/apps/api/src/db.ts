@@ -69,6 +69,22 @@ export function getDb(): Database.Database {
       PRIMARY KEY (room_id, round_number, code)
     );
     CREATE INDEX IF NOT EXISTS guess_round_cards_pool_code ON guess_round_cards(pool_id, code);
+    CREATE TABLE IF NOT EXISTS dg_rooms (
+      room_id TEXT PRIMARY KEY,
+      phase TEXT NOT NULL,
+      deadline_at INTEGER,
+      state_json TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS dg_rooms_lobby ON dg_rooms(phase, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS dg_rooms_due ON dg_rooms(deadline_at) WHERE deadline_at IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS dg_room_events (
+      room_id TEXT NOT NULL REFERENCES dg_rooms(room_id) DEFERRABLE INITIALLY DEFERRED,
+      version INTEGER NOT NULL,
+      event_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (room_id, version)
+    );
     CREATE TABLE IF NOT EXISTS web_replays (
       tournament_id INTEGER NOT NULL, match_id INTEGER NOT NULL, room_name TEXT NOT NULL,
       complete INTEGER NOT NULL DEFAULT 0, frame_count INTEGER NOT NULL DEFAULT 0,

@@ -2,6 +2,7 @@
 // Also the reference for the srvpro cube HTTP contract.
 
 export * from './card-search';
+export * from './draw-and-guess';
 
 export type TournamentPhase = 'registration' | 'drafting' | 'deckbuilding' | 'matches' | 'finished';
 export type DuelStage = 'begin' | 'dueling' | 'siding' | 'end';

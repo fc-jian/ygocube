@@ -1,36 +1,9 @@
-import { BadRequestException, Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@nestjs/common';
 import { Access, Public } from '../auth/auth.guard';
 import { parseCardSearchParams } from '../cards/search-params';
+import { badPayload, integer, payload, playerId, text } from '../games/room-input';
 import { GuessPoolsService } from './guess-pools.service';
 import { GuessService } from './guess.service';
-
-function badPayload(): never {
-  throw new BadRequestException({ code: 'BAD_PAYLOAD' });
-}
-
-function payload(body: unknown, keys: string[]): Record<string, unknown> {
-  if (body === null || typeof body !== 'object' || Array.isArray(body)) badPayload();
-  if (Object.keys(body).some((key) => !keys.includes(key))) badPayload();
-  return body as Record<string, unknown>;
-}
-
-function text(value: unknown, limit: number): string {
-  if (typeof value !== 'string') badPayload();
-  const normalized = value.normalize('NFKC').trim();
-  if (!normalized || normalized.length > limit || /[\p{Cc}\p{Cf}]/u.test(normalized)) badPayload();
-  return normalized;
-}
-
-function playerId(value: unknown): string {
-  const id = text(value, 24);
-  if (!/^[\p{L}\p{N}_. -]+$/u.test(id)) badPayload();
-  return id;
-}
-
-function integer(value: unknown, min: number, max: number): number {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) badPayload();
-  return value;
-}
 
 function poolCodes(value: unknown): number[] {
   if (!Array.isArray(value) || value.length < 2 || value.length > 20_000) badPayload();

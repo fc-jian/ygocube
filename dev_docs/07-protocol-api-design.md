@@ -296,6 +296,63 @@ deadline 和冻结剩余值。
   ID 重复、阶段不符、非本人行动、版本已过期、人数不足以及提前投降均返回带相应 `GUESS_*` code 的 409。
 - 创建卡池缺少管理员凭据返回 `401 AUTH_REQUIRED`，无效的管理员凭据返回 `401 ADMIN_TOKEN_REMOVED`。
 
+### 2.7 Draw & Guess 小游戏
+
+网页入口为 `/games/dg/`，房间链接为 `/games/dg/:roomId`。共用 §2.6 的 `guess_pools`、卡库、卡图和搜索，
+直接通过 `/games/guess/pools` 选择或管理卡池。房间和追加事件存入同一应用 SQLite 的 `dg_rooms`、
+`dg_room_events`，按版本在同一事务中写入。Draw & Guess 的行动独立计分。
+
+以下路径位于 API 的 `/games/dg` 下。房间 ID 为八位十六进制。创建或加入时签发独立房间凭证，
+玩家请求使用 `Authorization: Bearer <token>`。房间链接可匿名观战。
+
+| 方法/路径 | 请求和响应 |
+| --- | --- |
+| `GET /rooms` | 公开列出最近最多 50 个未满的等候房间，摘要字段同 §2.6，另含 `mode` |
+| `POST /rooms` | `{name,playerId,poolId,mode?,drawSeconds?,guessSeconds?,hintsEnabled?}`。`mode` 为 `classic`（默认）或 `relay`。两项时限默认为 120 秒，可设为 10–600 的整数。经典模式提示默认开启。返回 `{token,room}` |
+| `POST /rooms/:roomId/join` | `{playerId}`，仅等候阶段可加入，返回 `{token,room}`。经典模式人数上限为 16 与有效卡数的较小值，接龙模式为 16。房主需至少两人才能开局 |
+| `GET /rooms/:roomId` | 公开房间状态。带有效凭证时额外返回 `viewerId` 和本人可见的轮内数据。包含 `version`、`serverNow` 和当前阶段的 `deadlineAt`（Unix 毫秒）、房间设置、房主、总积分以及 `turn`（经典）或 `relay`（接龙） |
+| `GET /rooms/:roomId/drawing/:turn` | 公开获取已提交的当前轮画作 `{strokes}`，其余情况返回 404。每笔为 `{color,width,points}`，颜色为六位十六进制 RGB，粗细为 2、5、10 或 18，坐标为 800 × 600 画布内的整数对。每幅最多 500 笔、10,000 个点 |
+| `GET /rooms/:roomId/cards?q=&page=` | 玩家凭证必需。在房间卡池内沿用 §2.6 的精确编号、结构化筛选、排序与分页 |
+| `POST /rooms/:roomId/action` | 房主 `start`，等候玩家 `leave`，经典模式画手 `submit`、猜测者 `guess`。请求为 `{action}`，经典绘图另传 `{turn,drawing}`，经典猜测另传 `{turn,code}`。接龙操作见下文。返回本人房间状态，退出返回 `null` |
+
+- `lobby → drawing → guessing → reveal → drawing … → finished`。按入座顺序每位玩家绘画一次，
+  从有效卡池随机抽取精确编号，同局已发卡片不重复。等候房主退出时由最早加入的在场玩家接任。
+  当轮绘画和猜测期间，只有画手的响应含答案。画作提交前留在画手的浏览器。绘画超时未提交时，本轮以 0 分结束。
+- 提交后发布画作，所有玩家和观战者可查看。非画手同时猜测，同一玩家两次提交须间隔至少一秒，过快返回
+  `429 DG_GUESS_RATE_LIMIT`。猜错后可继续提交。同一轮多个玩家的猜测按服务端事务写入顺序判定，
+  猜中得分为猜测人数减去此前猜中的人数，画手每有一人猜中得 1 分。本人猜中后停止提交，猜测超时未中得 0 分。
+- 提示开启时，从 §2.6 的开局提示分组中随机选择一个能缩小范围的提示，猜测开始过半才对外返回其方式、分组和候选数。
+  猜测和搜索仍可使用整个房间卡池。若卡池内没有能缩小范围的分组，本轮没有提示。
+- 猜测到期或所有猜测者猜中时揭晓答案。轮间停留 10 秒并自动进入下一轮，最后一轮完成后直接显示总积分与该轮结果。
+  时间由服务器执行并持久化，重启后继续处理到期的阶段。等候房间最后一次写入后 24 小时过期。
+  应用发布的小游戏空闲检查涵盖绘画、猜测与轮间阶段。
+- 缺失或无效的玩家凭证返回 `401 DG_AUTH_REQUIRED`，无操作权限返回 403，阶段、轮号、重名、人数或房间容量冲突返回 409。
+  格式错误返回 `400 BAD_PAYLOAD`，猜测超出有效卡池返回 `400 DG_CARD_NOT_IN_POOL`，房间或当前画作不存在返回 404。
+
+#### 接龙模式
+
+- 接龙卡池至少有 3 张有效卡。`lobby → relay → relay_reveal → relay … → finished`，已有未保存 `mode` 的房间按经典模式读取。
+  每轮为每个座位开一条接龙，给各玩家私下发 3 个不同编号的候选卡名。首棒所有玩家同时在 `drawSeconds` 内任选一张并提交画作。
+  之后每棒把各链的画传给下一座位，所有玩家同时在 `guessSeconds` 内猜一次原始卡，并参考收到的画重画。
+  每棒提交齐全或时限到达后统一换棒。一轮共进行与玩家人数相同的棒数，人人在每条链上各画一次。
+- `relay-submit` 请求为 `{action,round,step,code,drawing}`，轮号、棒号均从 1 开始。
+  `code` 在首棒为本人候选中选定的编号，后续为本次猜测的卡号。猜测与重画一并提交，接受后锁定该玩家本棒结果。
+  首棒超时使用发到的第一个候选词，未提交的猜测、画作留空。交接时使用该链上最近一幅已提交的画。
+- 进行中 `relay` 状态包含 `kind: 'active'`、`round`、`step`、`submittedCount`、`viewerSubmitted`、`choices` 和 `hasIncomingDrawing`。
+  候选词只在首棒返回给本人，收到的画只能由当前接收者读取。猜测、对错、积分变化及原始词在该链揭晓前隐藏。
+  接龙不使用半程提示。
+- 所有棒完成后按入座顺序揭晓接龙。`relay` 状态为 `{kind:'reveal',round,revealedCount}`，首条链立即揭晓，
+  房主以 `relay-reveal`（另传 `{round,chain}`，`chain` 为当前已揭晓条数）揭晓下一条。每条链展示原始词、每棒画作、
+  猜测及对错。每次猜中原始 exact code，猜测者得 1 分，实际收到的画的作者得 1 分。积分在对应链揭晓时入账。
+  各玩家公开分项 `relayPoints.guesses/drawings` 及总分。全部揭晓后，房主可 `relay-next` 开新一轮并累计积分，或
+  `relay-finish` 结束，两个操作都另传 `{round}`。揭晓阶段 24 小时无操作时揭晓余下各链并结算。
+
+| 接龙读取路径（`GET`，位于 `/rooms/:roomId` 下） | 响应 |
+| --- | --- |
+| `/relay/:round/incoming/:step` | 当前接收者凭房间 Bearer 读取收到的画 `{strokes}` |
+| `/relay/:round/chains/:chain` | 公开读取当前轮已揭晓的链，包括 `answer`、各棒的玩家、画作标记、猜测及对错 |
+| `/relay/:round/chains/:chain/drawings/:step` | 公开读取当前轮已揭晓链内的一幅画 `{strokes}` |
+
 ## 3. cube API ↔ srvpro
 
 ### 3.1 `POST /cube/create_room`

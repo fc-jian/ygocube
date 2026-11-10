@@ -1,0 +1,59 @@
+.guess-fields .dg-check, .dg-toolbar, .dg-color, .dg-width, .dg-stage, .dg-card, .dg-score-row {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+}
+
+.dg-check input { accent-color: #e9cb82; }
+.dg-grid, .dg-stack { display: grid; gap: 1rem; min-width: 0; align-content: start; }
+.dg-grid { align-items: start; }
+.dg-stage { flex-wrap: wrap; justify-content: space-between; margin-bottom: .85rem; }
+.dg-stage strong { color: #fff2d0; overflow-wrap: anywhere; }
+.dg-clock {
+  padding: .35rem .7rem;
+  border: 1px solid #8c784d;
+  border-radius: .5rem;
+  color: #f9dfa1;
+  background: #28382c;
+  font: 750 1.1rem/1.25 ui-monospace, monospace;
+}
+.dg-toolbar { flex-wrap: wrap; font-size: .8rem; color: #d8e6dc; }
+.dg-color input {
+  width: 2.15rem;
+  height: 2.15rem;
+  padding: .15rem;
+  border: 1px solid #4c6b5d;
+  border-radius: .4rem;
+  background: #0a1914;
+  cursor: pointer;
+}
+.dg-width select { width: auto; padding: .45rem; }
+.dg-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 4 / 3;
+  border-radius: .45rem;
+  background: white;
+}
+.dg-canvas-edit { touch-action: none; cursor: crosshair; }
+.dg-canvas-edit[aria-disabled='true'] { cursor: default; }
+.dg-card { overflow-wrap: anywhere; }
+.dg-score-row { justify-content: space-between; overflow-wrap: anywhere; }
+.dg-score-row span:last-child { flex-shrink: 0; color: #f5d68e; }
+.dg-correct { color: #c2e7a4; }
+.dg-relay-stage {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  padding: .45rem .65rem;
+  border-radius: .55rem;
+  background: #11271e;
+}
+.dg-relay-work .guess-card-results { max-height: 14rem; }
+.dg-relay-story { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); }
+.dg-relay-story h2 { overflow-wrap: anywhere; }
+
+@media (min-width: 56rem) {
+  .dg-grid { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); }
+}
