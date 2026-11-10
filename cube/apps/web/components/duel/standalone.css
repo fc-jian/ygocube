@@ -458,6 +458,10 @@
   flex: 1;
   overflow: auto;
 }
+.deck-search:has(> details[open]) .builder-results {
+  flex: 0 0 auto;
+  overflow: visible;
+}
 .deck-editor .builder-results article {
   display: grid;
   grid-template-columns: 58px minmax(0, 1fr);

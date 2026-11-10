@@ -1,6 +1,8 @@
 // Shared contracts between cube api and web (see dev_docs/07-protocol-api-design.md).
 // Also the reference for the srvpro cube HTTP contract.
 
+export * from './card-search';
+
 export type TournamentPhase = 'registration' | 'drafting' | 'deckbuilding' | 'matches' | 'finished';
 export type DuelStage = 'begin' | 'dueling' | 'siding' | 'end';
 export type MatchFormat = 'round_robin' | 'swiss' | 'double_elimination';
@@ -42,12 +44,144 @@ export interface CardInfo {
   alias: number;
   aliasName?: string;
   aliasKind?: 'artwork' | 'rule';
+  releaseYear?: number;
   setCodes: number[];
   setNames: string[];
   inPool?: boolean;
   inCandidate?: boolean;
   poolStatus?: PoolMembershipStatus;
   pickStats?: CardPickStat[];
+}
+
+export interface GuessRoomSummary {
+  roomId: string;
+  name: string;
+  playerCount: number;
+  maxPlayers: number;
+  poolId: number;
+  poolName: string;
+}
+
+export interface GuessCreateRequest {
+  name: string;
+  playerId: string;
+  poolId: number;
+}
+
+export interface GuessPoolCreateRequest {
+  name: string;
+  codes: number[];
+}
+
+export interface GuessPoolSummary {
+  poolId: number;
+  name: string;
+  cardCount: number;
+  isDefault: boolean;
+}
+
+export type GuessActionRequest =
+  | { action: 'select' | 'guess'; version: number; code: number }
+  | { action: 'skip' | 'host-skip' | 'surrender'; version: number }
+  | { action: 'start'; version: number }
+  | { action: 'next'; version: number }
+  | { action: 'finish'; version: number }
+  | { action: 'remove'; version: number; playerId: string }
+  | { action: 'leave'; version: number };
+
+export type GuessCardKind = 'monster' | 'spell' | 'trap';
+export type GuessCardRef = Pick<CardInfo, 'code' | 'name'>;
+
+export type GuessOpeningHintMethod = 'deck' | 'level' | 'attribute' | 'attack' | 'summon-value' | 'defense'
+  | 'release-era' | 'field-deck' | 'field-size' | 'frame' | 'combat-value' | 'combat-compare' | 'light-dark';
+export type GuessReleaseEra = 'through-2014' | '2015-2019' | '2020-2023' | '2024-plus';
+export type GuessOpeningHintGroup = 'main-monster' | 'extra-monster' | 'spell-trap'
+  | 'low-level' | 'high-level' | 'no-level' | 'dark' | 'light-wind' | 'earth-water-fire-divine'
+  | 'low-attack' | 'medium-attack' | 'high-attack' | 'value-1-3' | 'value-4-6' | 'value-7-plus'
+  | 'low-defense' | 'medium-defense' | 'high-defense' | GuessReleaseEra
+  | 'no-field' | 'field-main-monster' | 'field-extra-monster' | 'field-spell-trap'
+  | 'small-field' | 'medium-field' | 'large-field' | 'regular-frame' | 'special-frame'
+  | 'catalog-field-small' | 'catalog-field-medium' | 'catalog-field-large'
+  | 'distinct-field-small' | 'distinct-field-medium' | 'distinct-field-large'
+  | 'low-combat-value' | 'medium-combat-value' | 'high-combat-value'
+  | 'defense-at-least-attack' | 'attack-over-500' | 'attack-slight-or-unknown' | 'light-dark' | 'other-attribute';
+
+export interface GuessOpeningClue {
+  method: GuessOpeningHintMethod;
+  group: GuessOpeningHintGroup;
+}
+
+export interface GuessOpeningHint extends GuessOpeningClue {
+  candidateCount: number;
+}
+
+export interface GuessMove {
+  playerId: string;
+  outcome: 'correct' | 'incorrect' | 'surrendered' | 'skipped';
+  points: number | null;
+  card?: GuessCardRef;
+  skippedBy?: string;
+}
+
+export interface GuessStanding {
+  playerId: string;
+  score: number;
+  roundPoints: number | null;
+  departed: boolean;
+}
+
+export interface GuessPublicRoomView extends GuessRoomSummary {
+  version: number;
+  phase: 'lobby' | 'playing' | 'between_rounds' | 'finished';
+  finishReason: 'inactivity' | 'maintenance' | null;
+  round: number;
+  poolCount: number;
+  hostId: string | null;
+  currentPlayerId: string | null;
+  currentGuess: GuessCardRef | null;
+  players: {
+    playerId: string;
+    score: number;
+    roundPoints: number | null;
+    card: CardInfo | null;
+    openingHint: GuessOpeningClue | null;
+  }[];
+  standings: GuessStanding[];
+  lastMove: GuessMove | null;
+  previousSurrender?: { round: number; playerId: string; card: GuessCardRef };
+}
+
+export interface GuessRoomView extends GuessPublicRoomView {
+  viewerId: string;
+  viewerOpeningHint: GuessOpeningHint | null;
+  viewerCardKind: GuessCardKind | null;
+  viewerGuesses: GuessCardRef[];
+  viewerWrongGuessCodes: number[];
+}
+
+export interface GuessSpectatorView extends GuessPublicRoomView {
+  guesses: { playerId: string; card: GuessCardRef; outcome: 'correct' | 'incorrect' }[];
+}
+
+export interface GuessSession {
+  token: string;
+  room: GuessRoomView;
+}
+
+export interface CardSearchPage {
+  cards: CardInfo[];
+  totalCount: number;
+  totalPages: number;
+  hasMore: boolean;
+}
+
+export interface GuessCardPage extends CardSearchPage {
+  cards: (CardInfo & { stats?: GuessCardStats })[];
+}
+
+export interface GuessCardStats {
+  appearances: number;
+  averageGuessTurns: number | null;
 }
 
 export interface CandidatePoolInfo {

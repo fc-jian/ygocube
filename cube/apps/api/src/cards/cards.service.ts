@@ -1,9 +1,14 @@
 import { Injectable } from '@nestjs/common';
+import {
+  CARD_ATTRIBUTES, CARD_LINK_DIRECTIONS, CARD_RACES, CARD_SUBTYPES, cardQueryTokens, parseCardSubtypeExpression,
+  type CardSearchFilters, type CardSearchPage, type CardSearchParams, type CardSearchRange, type CardSearchSort, type CardSubtypeExpression,
+} from '@ygocube/shared';
 import fs from 'fs';
 import path from 'path';
 import { getDb } from '../db';
 import { config } from '../config';
 import type { CardPickStat } from './card-pick-stats.service';
+import { FIRST_RELEASE_YEAR_CODES } from './first-release-year-codes';
 
 // Card metadata: structural/effect data is imported from cards.cdb (itself a
 // sqlite db with datas/texts tables, aligned by rowid).  The browser-visible
@@ -32,6 +37,7 @@ export interface CardInfo {
   alias: number;
   aliasName?: string;
   aliasKind?: 'artwork' | 'rule';
+  releaseYear?: number;
   setCodes: number[];
   setNames: string[];
   /** Only populated by public pool-card responses; false means search hit is outside the pool. */
@@ -90,8 +96,18 @@ interface CardCacheVersionRow {
 // cards.cdb texts.name final fallback in the searchable index.
 const CARD_METADATA_VERSION = 6;
 const MONSTER = 0x1;
+const LINK = 0x4000000;
 /** YGOPro TYPE_TOKEN; generated token/derivative cards are not pool cards. */
 export const TYPE_TOKEN = 0x4000;
+
+const firstReleaseYears = new Map<number, number>();
+for (const [year, codes] of Object.entries(FIRST_RELEASE_YEAR_CODES)) {
+  for (const code of codes) firstReleaseYears.set(code, Number(year));
+}
+
+function firstReleaseYear(code: number, alias: number): number | undefined {
+  return firstReleaseYears.get(code) ?? (cardAliasKind(code, alias) === 'artwork' ? firstReleaseYears.get(alias) : undefined);
+}
 
 type YgocdbCardRecord = {
   id?: unknown;
@@ -203,14 +219,8 @@ export function readCardNameMap(file: string): Map<number, string> {
   return new Map([...readCardNameEntries(file)].map(([id, entry]) => [id, entry.displayName]));
 }
 
-const RACE_NAMES: Record<number, string> = {
-  0x1: '战士族', 0x2: '魔法师族', 0x4: '天使族', 0x8: '恶魔族', 0x10: '不死族', 0x20: '机械族',
-  0x40: '水族', 0x80: '炎族', 0x100: '岩石族', 0x200: '鸟兽族', 0x400: '植物族', 0x800: '昆虫族',
-  0x1000: '雷族', 0x2000: '龙族', 0x4000: '兽族', 0x8000: '兽战士族', 0x10000: '恐龙族',
-  0x20000: '鱼族', 0x40000: '海龙族', 0x80000: '爬虫类族', 0x100000: '念动力族',
-  0x200000: '幻神兽族', 0x400000: '创造神族', 0x800000: '幻龙族', 0x1000000: '电子界族', 0x2000000: '幻想魔族',
-};
-const ATTRIBUTE_NAMES: Record<number, string> = { 1: '地', 2: '水', 4: '炎', 8: '风', 16: '光', 32: '暗', 64: '神' };
+const RACE_NAMES = Object.fromEntries(CARD_RACES.map(([bit, name]) => [bit, name]));
+const ATTRIBUTE_NAMES = Object.fromEntries(CARD_ATTRIBUTES.map(([bit, name]) => [bit, name]));
 
 function bitLabels(value: number, labels: Record<number, string>): string[] {
   return Object.entries(labels).filter(([bit]) => (value & Number(bit)) !== 0).map(([, label]) => label);
@@ -255,6 +265,19 @@ export function parseSetCodes(raw: string): number[] {
   return out;
 }
 
+function parseMetadataArray(raw: string | null | undefined): unknown[] {
+  try {
+    const value = JSON.parse(raw ?? '[]');
+    return Array.isArray(value) ? value : [];
+  } catch {
+    return [];
+  }
+}
+
+export function baseCardFieldCodes(setCodes: readonly number[]): number[] {
+  return [...new Set(setCodes.map((code) => code & 0xfff).filter(Boolean))];
+}
+
 export function decodeCardFields(type: number, packedLevelValue: number, rawDefense: number) {
   const packedLevel = Number(packedLevelValue ?? 0) >>> 0;
   return {
@@ -286,7 +309,7 @@ function resolveStringsConf(configured: string, cdbPath: string): string {
   return candidates.find((candidate, index) => candidates.indexOf(candidate) === index && fs.existsSync(candidate)) ?? '';
 }
 
-function isExtraDeckType(type: number): boolean {
+export function isExtraDeckType(type: number): boolean {
   // this codebase's TYPES_EXTRA_DECK (FUSION 0x40 | SYNCHRO 0x2000 | XYZ 0x800000 | LINK 0x4000000)
   return (type & 0x4802040) !== 0;
 }
@@ -300,9 +323,67 @@ export function cardDatabasePaths(base: string): string[] {
     : [])];
 }
 
+interface CardSearchOptions {
+  codes?: ReadonlySet<number>;
+  offset?: number;
+  filters?: CardSearchFilters;
+  sort?: CardSearchSort;
+  browse?: boolean;
+}
+
+type SearchCardRow = Pick<CardRow, 'code' | 'name' | 'type' | 'level' | 'atk' | 'def' | 'race' | 'attribute' | 'alias' | 'link_markers'>;
+
+function inRange(value: number, { min, max }: CardSearchRange): boolean {
+  return (min === undefined || value >= min) && (max === undefined || value <= max);
+}
+
+const subtypeMasks = new Map<number, number>();
+for (const [category, flag] of Object.values(CARD_SUBTYPES)) {
+  subtypeMasks.set(category, (subtypeMasks.get(category) ?? 0) | flag);
+}
+
+function compileSubtypeMatcher(expression: CardSubtypeExpression): (type: number) => boolean {
+  if (typeof expression === 'string') {
+    const [category, flag] = CARD_SUBTYPES[expression];
+    const mask = subtypeMasks.get(category) ?? 0;
+    return (type) => (type & category) !== 0 && (flag ? (type & flag) !== 0 : (type & mask) === 0);
+  }
+  if (expression.operator === 'not') {
+    const matches = compileSubtypeMatcher(expression.operand);
+    return (type) => !matches(type);
+  }
+  const left = compileSubtypeMatcher(expression.left);
+  const right = compileSubtypeMatcher(expression.right);
+  return expression.operator === 'and'
+    ? (type) => left(type) && right(type)
+    : (type) => left(type) || right(type);
+}
+
+function matchesFilters(card: SearchCardRow, filters: CardSearchFilters): boolean {
+  const { type, attribute, race, level, atk, def, link_markers: markers } = card;
+  if (filters.category && !(type & filters.category)) return false;
+  if (filters.attributes && (!(type & MONSTER) || !(attribute & filters.attributes))) return false;
+  if (filters.races && (!(type & MONSTER) || !(race & filters.races))) return false;
+  if (filters.level && (!(type & MONSTER) || !inRange(level, filters.level))) return false;
+  if (filters.atk && (!(type & MONSTER) || !inRange(Math.max(0, atk), filters.atk))) return false;
+  if (filters.def && (!(type & MONSTER) || (type & LINK) || !inRange(Math.max(0, def), filters.def))) return false;
+  if (filters.year) {
+    const year = firstReleaseYear(card.code, card.alias);
+    if (year === undefined || !inRange(year, filters.year)) return false;
+  }
+  if (filters.linkMarkers && (!(type & LINK) || (markers & filters.linkMarkers) !== filters.linkMarkers)) return false;
+  if (filters.linkCount) {
+    if (!(type & LINK)) return false;
+    const count = CARD_LINK_DIRECTIONS.filter(([bit]) => (markers & bit) !== 0).length;
+    if (!inRange(count, filters.linkCount)) return false;
+  }
+  return true;
+}
+
 @Injectable()
 export class CardsService {
   private loaded = false;
+  private fieldSizes?: ReadonlyMap<number, number>;
   private readonly canonicalCodes = new Map<number, number>();
   private readonly cardSearchNames = new Map<number, string[]>();
   private cdbMetadataLoaded = false;
@@ -451,14 +532,6 @@ export class CardsService {
   }
 
   private toInfo(r: CardRow): CardInfo {
-    const parseArray = (raw: string | null | undefined): unknown[] => {
-      try {
-        const value = JSON.parse(raw ?? '[]');
-        return Array.isArray(value) ? value : [];
-      } catch {
-        return [];
-      }
-    };
     return {
       code: r.code,
       name: r.name,
@@ -474,9 +547,10 @@ export class CardsService {
       def: r.def ?? 0,
       alias: r.alias ?? 0,
       aliasKind: cardAliasKind(r.code, r.alias ?? 0),
+      releaseYear: firstReleaseYear(r.code, r.alias ?? 0),
       aliasName: r.alias && r.alias !== r.code ? (getDb().prepare('SELECT name FROM cards WHERE code=?').get(r.alias) as { name: string } | undefined)?.name ?? '' : '',
-      setCodes: parseArray(r.setcodes_json).filter((value): value is number => typeof value === 'number'),
-      setNames: parseArray(r.setnames_json).filter((value): value is string => typeof value === 'string'),
+      setCodes: parseMetadataArray(r.setcodes_json).filter((value): value is number => typeof value === 'number'),
+      setNames: parseMetadataArray(r.setnames_json).filter((value): value is string => typeof value === 'string'),
     };
   }
 
@@ -513,6 +587,42 @@ export class CardsService {
       .map((row) => row.code);
   }
 
+  /** Base-field membership across eligible card identities in the complete catalog. */
+  poolFieldSizes(): ReadonlyMap<number, number> {
+    this.ensureLoaded();
+    if (this.fieldSizes) return this.fieldSizes;
+    const rows = getDb().prepare(`SELECT code, alias, setcodes_json FROM cards
+      WHERE code > 0 AND code < 100000000 AND (type & ${TYPE_TOKEN}) = 0`)
+      .all() as Pick<CardRow, 'code' | 'alias' | 'setcodes_json'>[];
+    const eligibleCodes = new Set(rows.map(({ code }) => code));
+    const artworkParents = new Map<number, number>();
+    function representative(code: number): number {
+      let parent = artworkParents.get(code);
+      while (parent !== undefined) {
+        code = parent;
+        parent = artworkParents.get(code);
+      }
+      return code;
+    }
+
+    for (const { code, alias } of rows) {
+      if (!eligibleCodes.has(alias) || cardAliasKind(code, alias) !== 'artwork') continue;
+      const a = representative(code);
+      const b = representative(alias);
+      // Linking only to a lower code keeps the minimum even across chains or cycles.
+      if (a !== b) artworkParents.set(Math.max(a, b), Math.min(a, b));
+    }
+
+    const sizes = new Map<number, number>();
+    for (const { code, setcodes_json } of rows) {
+      if (artworkParents.has(code)) continue;
+      const setCodes = parseMetadataArray(setcodes_json).filter((value): value is number => typeof value === 'number');
+      for (const field of baseCardFieldCodes(setCodes)) sizes.set(field, (sizes.get(field) ?? 0) + 1);
+    }
+    this.fieldSizes = sizes;
+    return sizes;
+  }
+
   isExtraDeck(code: number): boolean {
     const c = this.get(code);
     return c ? isExtraDeckType(c.type) : false;
@@ -534,28 +644,56 @@ export class CardsService {
    * A card only enters the result when every token occurs somewhere in its
    * indexed text (name, description, fields, type/stat labels, or code).
    */
-  search(q: string, limit?: number): CardInfo[] {
+  search(q: string, limit?: number, options?: CardSearchOptions): CardInfo[] {
+    return this.searchPage(q, limit, options).cards;
+  }
+
+  searchCatalog({ query, page, filters, sort }: CardSearchParams, codes?: ReadonlySet<number>): CardSearchPage {
+    const size = 24;
+    const result = this.searchPage(query, size, { codes, filters, sort, offset: page * size, browse: true });
+    const totalPages = Math.ceil(result.totalCount / size);
+    return { ...result, totalPages, hasMore: page + 1 < totalPages };
+  }
+
+  searchPage(q: string, limit?: number, {
+    codes, offset = 0, filters = {}, sort = 'relevance', browse = false,
+  }: CardSearchOptions = {}): { cards: CardInfo[]; totalCount: number } {
     this.ensureLoaded();
-    const tokens = [...new Set(String(q ?? '')
-      .normalize('NFKC')
-      .toLowerCase()
-      .trim()
-      .split(/\s+/u)
-      .filter(Boolean))];
-    if (!tokens.length) return [];
+    const tokens = cardQueryTokens(String(q ?? ''));
+    if (!tokens.length && !browse) return { cards: [], totalCount: 0 };
+    const subtype = filters.subtype ? parseCardSubtypeExpression(filters.subtype) : undefined;
+    if (subtype === null) return { cards: [], totalCount: 0 };
+    const matchesSubtype = subtype ? compileSubtypeMatcher(subtype) : undefined;
 
     // search_text is normalized at import time. Escape LIKE metacharacters so
     // a user searching for '%' or '_' still gets literal matching semantics.
     const escapeLike = (token: string) => token.replace(/[\\%_]/g, '\\$&');
-    const clauses = tokens.map(() => "search_text LIKE ? ESCAPE '\\'").join(' AND ');
-    // Token/derivative rows are kept in the metadata cache so deck validation
-    // and historical data remain readable, but they must never leak into a
-    // user-facing search result. Keep this predicate server-side so every
-    // caller (draft, deck build, pool and admin search) gets the same policy.
+    const clauses = [`(type & ${TYPE_TOKEN}) = 0`, ...tokens.map(() => "search_text LIKE ? ESCAPE '\\'")];
     const rows = getDb()
-      .prepare(`SELECT * FROM cards WHERE (type & ${TYPE_TOKEN}) = 0 AND ${clauses}`)
-      .all(...tokens.map((token) => `%${escapeLike(token)}%`)) as CardRow[];
+      .prepare(`SELECT code, name, type, level, atk, def, race, attribute, alias, link_markers
+        FROM cards WHERE ${clauses.join(' AND ')} ORDER BY code`)
+      .all(...tokens.map((token) => `%${escapeLike(token)}%`)) as SearchCardRow[];
 
+    const matchingRows = rows.filter((row) => (!codes || codes.has(row.code))
+      && (!matchesSubtype || matchesSubtype(row.type)) && matchesFilters(row, filters));
+    const totalCount = matchingRows.length;
+    if (offset >= totalCount) return { cards: [], totalCount };
+    const end = limit !== undefined && Number.isFinite(limit)
+      ? offset + Math.max(0, Math.floor(limit))
+      : undefined;
+    let ordered: SearchCardRow[];
+    if (sort !== 'relevance') {
+      const compare = sort === 'name' ? (a: SearchCardRow, b: SearchCardRow) => a.name.localeCompare(b.name, 'zh')
+        : sort === 'attack' ? (a: SearchCardRow, b: SearchCardRow) => b.atk - a.atk
+          : (a: SearchCardRow, b: SearchCardRow) => b.level - a.level;
+      ordered = matchingRows.sort((a, b) => compare(a, b) || a.code - b.code);
+    } else {
+      ordered = tokens.length ? this.rankSearch(matchingRows, tokens) : matchingRows;
+    }
+    return { cards: this.getMany(ordered.slice(offset, end).map(({ code }) => code)), totalCount };
+  }
+
+  private rankSearch(rows: SearchCardRow[], tokens: string[]): SearchCardRow[] {
     const ranked = rows.map((row) => {
       // Include the resolved display name for every row.  This is important
       // for cards whose only available name is the CDB fallback, and also
@@ -575,9 +713,7 @@ export class CardsService {
       return a.row.code - b.row.code;
     });
 
-    const infos = ranked.map(({ row }) => this.toInfo(row));
-    if (limit === undefined || !Number.isFinite(limit)) return infos;
-    return infos.slice(0, Math.max(0, Math.floor(limit)));
+    return ranked.map(({ row }) => row);
   }
 
   // resolve a card image under a ygopro root: <root>/pics/<code>.jpg,

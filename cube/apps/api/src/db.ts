@@ -39,6 +39,36 @@ export function getDb(): Database.Database {
       room TEXT NOT NULL, player_id TEXT NOT NULL, credential TEXT NOT NULL UNIQUE,
       data_json TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY(room, player_id)
     );
+    CREATE TABLE IF NOT EXISTS guess_rooms (
+      room_id TEXT PRIMARY KEY,
+      phase TEXT NOT NULL,
+      state_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS guess_rooms_lobby ON guess_rooms(phase, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS guess_room_events (
+      room_id TEXT NOT NULL REFERENCES guess_rooms(room_id) DEFERRABLE INITIALLY DEFERRED,
+      version INTEGER NOT NULL,
+      event_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (room_id, version)
+    );
+    CREATE TABLE IF NOT EXISTS guess_pools (
+      id INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      name_key TEXT NOT NULL UNIQUE,
+      codes_json TEXT
+    );
+    INSERT OR IGNORE INTO guess_pools (id, name, name_key) VALUES (0, '完整卡库', 'name:完整卡库');
+    CREATE TABLE IF NOT EXISTS guess_round_cards (
+      room_id TEXT NOT NULL REFERENCES guess_rooms(room_id),
+      round_number INTEGER NOT NULL,
+      pool_id INTEGER NOT NULL REFERENCES guess_pools(id),
+      code INTEGER NOT NULL,
+      guess_turns INTEGER,
+      PRIMARY KEY (room_id, round_number, code)
+    );
+    CREATE INDEX IF NOT EXISTS guess_round_cards_pool_code ON guess_round_cards(pool_id, code);
     CREATE TABLE IF NOT EXISTS web_replays (
       tournament_id INTEGER NOT NULL, match_id INTEGER NOT NULL, room_name TEXT NOT NULL,
       complete INTEGER NOT NULL DEFAULT 0, frame_count INTEGER NOT NULL DEFAULT 0,

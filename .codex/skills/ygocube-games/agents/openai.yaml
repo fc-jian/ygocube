@@ -1,0 +1,4 @@
+interface:
+  display_name: "YGO Cube 小游戏开发"
+  short_description: "指导 YGO Cube 小游戏的界面、数据、开发测试与 Aly 发布"
+  default_prompt: "使用 $ygocube-games 按项目约定开发或维护网页小游戏。"

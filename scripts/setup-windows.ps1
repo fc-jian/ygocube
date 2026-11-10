@@ -22,7 +22,7 @@ try {
     New-Item -ItemType Directory -Force envs/windows/vips | Out-Null
     tar.exe -xf $archive -C envs/windows/vips
     if ($LASTEXITCODE) { throw 'vips extraction failed' }
-    & $pnpm --dir cube --filter @ygocube/duel-protocol build
+    & $pnpm --dir cube --filter @ygocube/duel-protocol --filter @ygocube/shared build
     if ($LASTEXITCODE) { throw 'Protocol build failed' }
     & $pnpm --dir cube --filter @ygocube/api build
     if ($LASTEXITCODE) { throw 'API build failed' }

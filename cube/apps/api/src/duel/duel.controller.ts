@@ -9,6 +9,7 @@ import {
   Req,
 } from "@nestjs/common";
 import { Access, AuthedRequest, Public } from "../auth/auth.guard";
+import { parseCardSearchParams } from "../cards/search-params";
 import { DuelService } from "./duel.service";
 @Controller()
 export class DuelController {
@@ -43,6 +44,11 @@ export class DuelController {
   search(@Query("q") q: string) {
     if (typeof q !== "string" || q.length > 100) throw new Error("BAD_PAYLOAD");
     return this.duel.searchCards(q);
+  }
+  @Public()
+  @Get("public/duel/search/page")
+  searchPage(@Query() params: Record<string, unknown>) {
+    return this.duel.searchCardPage(parseCardSearchParams(params));
   }
   @Public()
   @Get("public/duel/options")

@@ -1,11 +1,8 @@
 # YGO Cube
 
-YGO Cube is a web control plane for Cube/draft tournaments built around
-YGOPro and srvpro. It keeps tournament state on the server, exposes a player
-and administrator web UI, and coordinates draft packs, deck construction, and
-the match server.
-
-Windows native development and Linux compatibility: [开发环境说明](dev_docs/10-windows-development.md).
+YGO Cube is a web platform for Cube draft tournaments, Yu-Gi-Oh! card games,
+and deck tools. It uses YGOPro and srvpro for duels and shares card metadata
+and search components across its web features.
 
 ## What it provides
 
@@ -23,33 +20,39 @@ Windows native development and Linux compatibility: [开发环境说明](dev_doc
 - Swiss pairings that treat previous opponents as hard exclusions, event-log
   snapshots/revert support, player authentication, SSE updates, and srvpro
   room/deck synchronization.
+- Standalone browser duels and deck building at `/duel` and `/duel/decks`.
+- Guess the Card at `/games/guess`, with solo and multiplayer rooms, public
+  spectating, and reusable game-specific card pools.
+- A Small World bridge finder at `/tools/small-world`.
 
 ## Repository layout
 
 | Path | Purpose |
 | --- | --- |
-| `cube/apps/api` | NestJS API, SQLite projection/event store, draft/deck/match services |
-| `cube/apps/web` | Next.js player and administrator UI |
-| `cube/packages/shared` | Shared TypeScript contracts |
+| `cube/apps/api` | NestJS API, SQLite persistence, and tournament, duel, and game services |
+| `cube/apps/web` | Next.js routes and components for tournaments, duels, games, and tools |
+| `cube/packages/shared` | Shared TypeScript contracts and card search filters |
+| `cube/packages/duel-protocol` | YGOPro wire protocol handling for web duels |
 | `srvpro` | Forked srvpro submodule with Cube room and deck integration |
 | `ygopro` | Forked YGOPro submodule with Cube protocol/client support |
 | `assets` | Runtime card resources provisioned separately (intentionally not tracked) |
 | `dev_docs` | Architecture, protocol, and implementation notes |
 
-The submodules are pinned to the `fc-jian` forks and the feature branches
-declared in `.gitmodules` (`srvpro:cube`, `ygopro:cube-server`). Clone them
-recursively:
+For new games and Guess maintenance, see the [repository game skill](.codex/skills/ygocube-games/SKILL.md).
+
+The root repository pins exact commits of the `fc-jian` forks. Their feature
+branches are `srvpro:cube` and `ygopro:cube-server` as declared in
+`.gitmodules`. Use a recursive clone to check out the pinned commits.
 
 ```bash
 git clone --recurse-submodules https://github.com/fc-jian/ygocube.git
 cd ygocube
-git submodule update --init --recursive
 ```
 
 ## Local development
 
-Requirements: Node.js, pnpm, a working SQLite/native build toolchain, and the
-card/srvpro resources referenced by `config.yaml`.
+Use Node.js 22, the pnpm version pinned in `cube/package.json`, a native build
+toolchain, and the card and srvpro resources referenced by `config.yaml`.
 
 The root `assets/` directory is deliberately excluded from Git.  A deployment
 must provision `cards.cdb`, `ygocdb_cards.json`, `script/`, `pics/`, and
@@ -67,22 +70,21 @@ runtime data; cloning this repository does not create or track local symlinks.
 cp config.example.yaml config.yaml
 # Edit config.yaml: use unique admin tokens and set srvpro/card paths.
 
-cd cube
-pnpm install
-pnpm dev
+pnpm --dir cube install --frozen-lockfile
+pnpm --dir cube dev
 ```
 
-The web UI runs on `http://localhost:3000`; the API runs on
-`http://localhost:3001`. Production builds can be checked independently:
+The workspace dev command uses Web port 3000 and API port 3001. The Windows
+launcher uses 3200 and 3201 for Cube, or 3100 and 3101 with `-Duel`.
+See the [Windows development guide](dev_docs/10-windows-development.md).
 
 ```bash
-cd cube/apps/api
-npm run build
-TMPDIR=/tmp npm test -- --runInBand
-
-cd ../web
-npm run build
+pnpm --dir cube test
+pnpm --dir cube build
 ```
+
+GitHub Actions runs these checks on Windows and Linux.
+[CI workflow](.github/workflows/ci.yml)
 
 The Linux YGOPro host/client build helper is at
 [`scripts/build-ygopro.sh`](scripts/build-ygopro.sh). End-to-end probes live

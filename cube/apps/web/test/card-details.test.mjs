@@ -3,12 +3,16 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
-function load(file) {
+function load(file, modules = {}) {
  const exports = {};
- vm.runInNewContext(ts.transpileModule(fs.readFileSync(new URL(file, import.meta.url), 'utf8'), {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2021}}).outputText, {exports, require: () => ({})});
+ vm.runInNewContext(ts.transpileModule(fs.readFileSync(new URL(file, import.meta.url), 'utf8'), {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2021}}).outputText, {exports, require: (name) => modules[name] ?? {}});
  return exports;
 }
-const info = load('../lib/cardInfo.ts'), bans = load('../lib/banlist.ts');
+const shared = load('../../../packages/shared/src/card-search.ts');
+const info = load('../lib/cardInfo.ts', {'@ygocube/shared': shared}), bans = load('../lib/banlist.ts');
+test('keeps English-quoted card search phrases together', () => {
+ assert.deepEqual([...info.cardQueryTokens(' "等级 5"   "RANK 4" 水族  "rank 4" ')], ['等级 5', 'rank 4', '水族']);
+});
 test('complete monster subtypes and named rules identity', () => {
  for (const [bit, name] of [[0x80,'仪式'],[0x200,'灵魂'],[0x400,'同盟'],[0x800,'二重'],[0x400000,'卡通'],[0x2000000,'特殊召唤']]) assert(info.typeLabel({type: bit | 1}).includes(name));
  assert.equal(info.typeLabel({type:0x82}), '仪式·魔法');

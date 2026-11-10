@@ -26,7 +26,7 @@ export interface AuthedRequest extends Request {
 }
 
 export const Public = () => SetMetadata('public', true);
-export type AccessPolicy = 'player' | 'admin' | 'creator-list' | 'create' | 'candidate';
+export type AccessPolicy = 'player' | 'admin' | 'super-admin' | 'creator-list' | 'create' | 'candidate';
 export const Access = (policy: AccessPolicy) => SetMetadata('accessPolicy', policy);
 
 function routeTournamentId(req: AuthedRequest): string | undefined {
@@ -73,7 +73,7 @@ export function safeSecretEqual(value: string, expected: string): boolean {
   return crypto.timingSafeEqual(left, right);
 }
 
-function safeHashEqual(value: string, expectedHash: string | null | undefined): boolean {
+export function safeHashEqual(value: string, expectedHash: string | null | undefined): boolean {
   if (!expectedHash || !/^[0-9a-f]{64}$/i.test(expectedHash)) return false;
   const actual = Buffer.from(sha256(value), 'hex');
   const expected = Buffer.from(expectedHash, 'hex');
@@ -210,7 +210,7 @@ export class AuthGuard implements CanActivate {
       if (missing.length > 0) throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields: missing });
     }
 
-    if (policy === 'admin' || policy === 'creator-list') {
+    if (policy === 'admin' || policy === 'super-admin' || policy === 'creator-list') {
       const adminToken = headerToken(req);
       if (adminToken) {
         if (isSuper(adminToken)) {
@@ -220,6 +220,9 @@ export class AuthGuard implements CanActivate {
         // Per-tournament admin tokens were revoked. Do not fall back to them
         // or expose whether a token belongs to a particular tournament.
         throw new UnauthorizedException({ code: 'ADMIN_TOKEN_REMOVED' });
+      }
+      if (policy === 'super-admin') {
+        throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields: ['admin_token'] });
       }
 
       const createToken = headerValue(req, 'x-create-token');

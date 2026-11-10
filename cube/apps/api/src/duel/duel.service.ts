@@ -7,6 +7,7 @@ import {
 import { WindBots } from "./windbot";
 import { readReplayCatalog } from "./replay-catalog";
 import { Injectable, OnModuleDestroy } from "@nestjs/common";
+import type { CardSearchParams } from "@ygocube/shared";
 import Database from "better-sqlite3";
 import fs from "fs";
 import { Server } from "http";
@@ -1131,6 +1132,9 @@ export class DuelService implements OnModuleDestroy {
   }
   searchCards(q: string) {
     return this.cards.search(q, 100);
+  }
+  searchCardPage(params: CardSearchParams) {
+    return this.cards.searchCatalog(params);
   }
   cardInfo(codes: number[]) {
     return this.cards.getMany(codes.slice(0, 256));

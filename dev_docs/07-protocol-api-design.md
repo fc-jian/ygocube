@@ -195,6 +195,107 @@ swissRoundCount, playoffSize
 重连成功立即同步状态；退出或切换身份取消旧流及旧身份请求的结果。倒计时使用服务器绝对
 deadline 和冻结剩余值。
 
+### 2.6 Guess the Card 小游戏
+
+网页入口为 `/games/guess`，房间链接为 `/games/guess/:roomId`。在 `/games/guess/pools`
+浏览小游戏卡池，在 `/games/guess/pools/new` 创建卡池。小游戏共用 `CardsService`、名称索引
+和卡图接口。房间、事件、卡池和发牌统计分别存入 `guess_rooms`、`guess_room_events`、
+`guess_pools` 和 `guess_round_cards`。房间写入在同一事务内记录事件，再保存状态和已完成轮次的统计。
+
+以下路径均位于 API 的 `/games/guess` 下。创建和加入时由服务端签发房间专用 token。
+后续房间操作通过 `Authorization: Bearer <token>` 验证玩家，凭据不放入房间链接。
+
+| 方法/路径 | 请求和响应 |
+| --- | --- |
+| `GET /rooms` | 公开列出最近最多 50 个可加入的等候房间，返回 `roomId/name/playerCount/maxPlayers/poolId/poolName` |
+| `GET /cards?q=&page=` | 公开搜索共享卡库，用于配置卡池。每页 24 条，`page` 从 0 开始，空查询按编号浏览，返回 `{cards,totalCount,totalPages,hasMore}`。支持下方的结构化筛选 |
+| `GET /card-details?codes=` | 公开按逗号分隔的精确编号读取 `CardInfo[]`，供已显示的猜测卡名打开详情。最多 400 个编号，结果只含存在的非衍生物 |
+| `GET /pools` / `GET /pools/:poolId` | 公开列出卡池或读取单个卡池的 `{poolId,name,cardCount,isDefault}`。内置完整卡库的 ID 为 0。建房表单按已安装的精选池、精简版、原常见卡牌池、完整卡库的顺序预选 |
+| `POST /pools` | 仅接受 Cube 超级管理员的 `X-Admin-Token`。请求为 `{name,codes}`，名称唯一，须有 2–20000 个不重复有效编号。返回卡池摘要。卡池创建后固定成员，供多个房间使用 |
+| `GET /pools/:poolId/cards?q=&page=` | 公开查看卡池及统计，沿用搜索与分页规则。每张牌附 `stats: {appearances,averageGuessTurns}` |
+| `POST /rooms` | `{name,playerId,poolId}`。选择已保存的卡池或内置完整卡库。返回 `{token,room}` |
+| `POST /rooms/:roomId/join` | `{playerId}`。等候或轮间可从房间链接加入，房间容量 `maxPlayers` 为建房时的可发卡数。房间内 ID 唯一，返回 `{token,room}` |
+| `GET /rooms/:roomId` | 本人视角的房间状态，包括公开座次与开局提示、当前轮次和行动、积分、本人的候选数与猜牌记录、当前选牌及系统结算原因 `finishReason` |
+| `GET /rooms/:roomId/spectate` | 匿名只读。返回房间阶段、当前行动及选牌、各座位的开局提示、积分排名和本轮已提交的猜测。猜中或投降的座位返回所持卡片 |
+| `GET /rooms/:roomId/cards?q=&page=` | 按请求玩家当轮开局提示搜索与分页，去掉其他座位的已知牌。猜错的牌保留在搜索结果中。没有当轮提示时可搜索房间完整卡池 |
+| `POST /rooms/:roomId/action` | `{action,version,code?,playerId?}`。操作为 `start/select/guess/skip/host-skip/surrender/next/finish/leave/remove`。`select` 和 `guess` 需要本人候选内的 `code`。`remove` 需要被移除玩家的 `playerId`。返回更新后的本人视角，退出返回 200 空响应 |
+
+- 三个卡牌搜索入口使用同一分页结构。`totalCount` 为对应卡池与查询筛选后的有效卡牌数，
+  `totalPages` 为按每页 24 张计算的页数。零结果返回 0 页，超出末页返回空 `cards` 及实际总数和页数。
+  筛选先与入口的卡库、卡池或当轮提示候选取交集，再排序、计数和分页。
+  `q` 中用英文双引号包住的词组按连续字串查找，例如 `"等级 5"` 和 `"RANK 4"`，各词组和未加引号的词都须匹配。
+  可选参数 `category` 为 1／2／4。`subtype` 可传单个子类型键或由子类型键、`not`、`and`、`or`、括号组成的表达式，
+  例如 `(fusion or synchro) and not tuner`。`not` 在标签或括号组前取反，优先级依次为 `not`、`and`、`or`，
+  括号可改变求值顺序。`非`、`与`、`或` 分别等同于这三个运算符。取反在当前入口的卡牌范围内求值，
+  仍与大类、其他筛选和候选范围取交集。表达式最多 64 个标签，
+  语法不完整或含有未知标签时返回 `400 BAD_PAYLOAD`。
+  `attributes` 与 `races` 为位掩码，同一属性或种族栏多选时命中任一即可。`linkMarkers` 为方向位掩码，
+  须命中所选的全部箭头。
+  数值范围使用 `levelMin/levelMax`、`atkMin/atkMax`、`defMin/defMax`、`yearMin/yearMax`，可单独传任一端点，两端均包含。
+  `levelMin/levelMax` 统一筛选怪兽的等级、阶级或连接值。网页用连接值筛选箭头数，并提供方向选择。
+  旧接口调用仍可传 `linkCountMin/linkCountMax`，按连接怪兽的箭头位掩码计数。守备筛选限有守备力栏的怪兽。
+  攻守按原始数值筛选，攻守为 `?` 时按 0 匹配。
+  首发年份取已知 OCG／TCG 最早正式发行年。年份范围只匹配有年份的牌。
+- 房主可单人或多人开局。每轮独立随机安排座位、首位行动玩家及发牌，同轮卡片编号不重复。
+  行动顺序为顺时针，跳过本轮已经猜中的玩家。行动玩家可提交一次猜测或主动跳过，房主也可用
+  `host-skip` 结束当前玩家的行动。两种跳过均不计分、不揭晓答案，并按猜错时的顺序轮转。
+  只剩一人未猜中时，下次仍由此人行动。
+- 猜中按 exact code 判定，本轮第 1 名得玩家人数对应的分数，之后每名依次少 1 分。最后一名未猜中的
+  玩家可以继续猜，也可以投降得 0 分并查看答案。每轮结束后所有玩家可以查看排名，同分并列。
+  房主可以继续开启下一轮，或终止游戏并锁定排名。房间不预设轮数。
+  若本轮只剩一人未猜中，房主也可以用 `next` 直接进入下一轮。服务端在同一事务内按投降结算前一轮，
+  写入两条连续版本的投降、开轮事件和前一轮的发牌统计。新一轮通过公开的 `previousSurrender` 显示
+  前一轮号、投降玩家 ID 和所持牌的编号与名称。
+- `lobby → playing → between_rounds → playing … → finished`。等候或轮间允许退出，房主退出时由最早
+  加入的在场玩家接任。轮间退出者的积分与 ID 留在排名中，原凭证失效。全部玩家在轮间退出时结算。
+  房主在轮间可用 `remove` 移除其他在场玩家，被移除者按退出处理。轮间名单由各视角的
+  `standings` 在场成员随房间状态刷新，圆桌继续显示上一轮座位。
+  每轮发牌只使用在场玩家，至少需要一人，发牌时的可用卡数须覆盖在场人数。服务端每次写入递增 `version`，拒绝旧版本操作。
+- 等候、游戏中和轮间房间自上次成功写入房间状态起满 24 小时自动结算。查看、轮询和搜索不刷新活动时间。
+  服务启动时补结算，运行时定期检查，过期房间不再接受加入或行动。系统结算保留已获得的积分，
+  揭晓本轮卡片并保留原链接供房间成员查看结果，未完成轮次不写入卡池统计。
+  `finishReason` 在超时和发布前批量结算时分别为 `inactivity`、`maintenance`，其他情况为 `null`。
+- 每名玩家未猜中或投降前，本人视角的对应 `card` 为 `null`，其他座位返回 `CardInfo`。
+  新一轮发牌时，每个座位的 `openingHint` 向全房间玩家和观战者公开，包含稳定的 `method` 和 `group`。
+  `viewerOpeningHint` 另向本人返回 `candidateCount`。候选按本轮可发卡池统计，扣除同组的其他座位牌。
+  提示与候选范围同当轮发牌一同持久化，轮询和重连沿用结果。尚无当轮座位时提示为 `null`。
+  各座位的简写及本人候选区的提示可悬停或点击查看说明。
+  已有提示时 `viewerCardKind` 为 `null`，旧轮次仍可用原卡片大类。
+- 卡组、星级、属性、原始攻击力、等级／阶级／连接值、原始守备力、首发年代、字段与卡组、字段规模、
+  卡框、攻守面板、攻守比较和光暗共 13 种方式。首发年代仅用于有首发年份的卡片。
+  攻守比较把固定原始守备力不低于攻击力、固定原始攻击力高出超过 500、攻击力高出 1–500 或缺固定攻守、
+  魔陷分别归为四档。连接归入缺固定攻守。
+  字段规模在完整卡库中按基础字段编号归并子字段，同一张牌在同一基础字段只计一次。
+  统计排除衍生物和九位及以上编号，相互关联的异画只计最小有效编号，规则同名卡分别计数。
+  有字段的牌取成员最多的字段，按 1–15、16–25、26 张以上分档，使用 `distinct-field-*` 组号。
+  有字段但各字段均无符合统计条件的成员时，仅使用其他可用方式。各档候选按房间卡池和已知座位牌计算。
+  旧轮次保留原字段分档、说明口径和候选范围。
+  牌按原规则发完后，服务端独立随机提出 24 套每人一种的提示组合，再按全桌候选数的最大差距加权抽取。
+  以 2,378 张卡为基准，差距不超过 150 张时权重相同，超过后每增加 40 张权重减半。
+  其他卡池按有效卡数等比调整这两个数，每个组合保留正权重。
+  房主遵循相同规则，房间列表只返回房间摘要。
+- 观战响应公开猜中或投降的座位卡片及本轮实际猜测。系统自动或维护结算时，尚无本轮结果的座位保持隐藏。
+  观战响应不含本人候选数及身份字段。轮间加入者在下次发牌时获得座位和提示。
+- 行动玩家可用 `select` 同步候选牌，全房间成员可在 `currentGuess` 看到其 `{code,name}`。
+  选牌不消耗行动，提交、跳过或投降后清空。提交猜测时 `lastMove.card` 记录猜的牌，
+  跳过时 `lastMove.outcome` 为 `skipped`，房主代跳时 `lastMove.skippedBy` 为房主 ID。
+  `viewerGuesses` 从本轮事件提取本人已提交的 `{code,name}`，`viewerWrongGuessCodes` 为其中猜错的编号。
+  已猜错的牌标记并禁用选牌。服务端拒绝超出候选范围或重复提交猜错牌，错误码分别为
+  `GUESS_CARD_OUTSIDE_HINT` 和 `GUESS_CARD_ALREADY_GUESSED`。新一轮清空猜牌记录。
+- 统计仅在完整一轮结束时更新，避免通过公开数据推知正在进行的发牌。每次发出计一次出现，
+  包括投降的牌。平均猜中回合按持牌者第几次轮到自己时猜中计算，跳过计一次轮到自己，仅纳入猜中记录。
+  尚无猜中记录时 `averageGuessTurns` 为 `null`。统计按卡池和 exact code 分开累计。
+- 常见卡牌池从已发行的卡库候选中建立。九位编号和衍生物排除。仅按 YGOPro 异画关系取组内
+  最小的有效编号，规则同名卡保持独立。精选池、精简版和原池分别校验完整成员，按独立 ID 累计统计。
+  初始化只在对应内置键缺失时安装种子。精选池沿用 `builtin:familiar-v3`，新库安装「20261108精选」。
+  旧库保留已安装卡池的 ID、名称和成员，已建房间及统计继续引用其原有卡池 ID。
+- 旧版房间的完整卡库映射到内置卡池，临时卡池保存为独立卡池。从旧房间事件补算已完成轮次，
+  并恢复正在进行的回合计数。已经结算的房间仍可查看结果。
+- `400 BAD_PAYLOAD/GUESS_INVALID_POOL/GUESS_CARD_NOT_IN_POOL/GUESS_REMOVE_SELF`，`401 GUESS_AUTH_REQUIRED`，
+  `403 GUESS_HOST_REQUIRED`，`404 GUESS_ROOM_NOT_FOUND/GUESS_POOL_NOT_FOUND/GUESS_PLAYER_NOT_IN_ROOM`。卡池重名、房满、
+  ID 重复、阶段不符、非本人行动、版本已过期、人数不足以及提前投降均返回带相应 `GUESS_*` code 的 409。
+- 创建卡池缺少管理员凭据返回 `401 AUTH_REQUIRED`，无效的管理员凭据返回 `401 ADMIN_TOKEN_REMOVED`。
+
 ## 3. cube API ↔ srvpro
 
 ### 3.1 `POST /cube/create_room`
@@ -278,7 +379,7 @@ srvpro 发送精简的 `room_name/start/end/players/first/wins`；每个 player 
 ## 5. 卡牌元数据与错误码
 
 `CardInfo` 字段：`code/name/type/desc/level/lscale/rscale/linkMarkers/race/`
-`attribute/atk/def/alias/aliasName/aliasKind/setCodes/setNames`。name/code 是 exact 卡表行；alias 只
+`attribute/atk/def/alias/aliasName/aliasKind/setCodes/setNames`，已收录首发年份时返回 `releaseYear`。name/code 是 exact 卡表行；alias 只
 用于卡组规则副本上限与合法性检查，不用于卡池、搜索、状态或详情去重。
 name 的显示值优先来自 `server.card_names_json` 中的 `sc_name` → `md_name` → `jp_name` → `cn_name` → `en_name`；
 若这些字段均为空或映射缺失，异画卡先尝试原版 alias 的名称映射，最后回退到 exact code 对应的 CDB `texts.name` 原名。
@@ -373,6 +474,8 @@ pics: {ygopro_root: "", avif_dir: "assets/pics_avif"}
 `/duel` 和 `/duel/decks` 不依赖比赛身份。以下是匿名入口的明确例外，仍受 Origin、输入大小和连接上限约束：
 
 - `GET /public/duel/search?q=...`：全卡库搜索（最多 100 字查询），排除衍生物，返回最多 100 项元数据。
+- `GET /public/duel/search/page`：卡组构筑用分页搜索，沿用猜牌的查询、结构化筛选和分页结构。
+  `sort` 可为 `relevance`、`level`、`attack` 或 `name`，对完整命中集合排序后分页。
 - `GET /public/duel/options`：返回 srvpro 当前禁限卡表索引与名称。
 - `POST /public/duel/join`：`{name,password,options,deck:{main,extra,side}}`，选项字段为 `mode(0单局/1比赛),lflist,rule,duelRule,timeLimit,startLp,startHand,drawCount,mainMin,mainMax,extraMax,sideMax,noCheck,noShuffle`。密码映射同一个内部房间，首位创建者决定规则；后续加入返回已有规则。返回 `{credential,room,options}`；短期 credential 仅保存当前标签页，用于刷新重连，不能用于 Cube 身份。
 - `POST /public/duel/session {credential}`：换取现有单次 WS 票据。后续操作沿用 §8，卡组由网关上传，房主/准备状态由原生宿主决定。

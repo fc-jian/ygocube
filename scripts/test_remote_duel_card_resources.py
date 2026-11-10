@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from contextlib import closing
 import errno
 import hashlib
 import importlib.util
@@ -150,13 +151,15 @@ class RemoteDuelResourceApplyTests(unittest.TestCase):
         # Execute the real activation/recovery block, with only services,
         # databases and pointer switching replaced by isolated test doubles.
         source = SCRIPT.with_name('deploy-card-details.py').read_text(encoding='utf-8')
-        body = source[source.index('maintenance = None if a.web_only'):source.index("result={'ok':True")]
-        for raced in (False, True):
-            with self.subTest(raced=raced), tempfile.TemporaryDirectory() as directory:
+        body = source[source.index('guard_guess ='):source.index("result={'ok':True")]
+        for raced, cube_only in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(raced=raced, cube_only=cube_only), tempfile.TemporaryDirectory() as directory:
                 roots = {name: Path(directory) / name for name in ('ygocube', 'ygoduel')}
-                olds = {name: root / 'old' for name, root in roots.items()}
-                news = {name: root / 'new' for name, root in roots.items()}
-                services = [name + '-' + component for name in roots for component in ('api', 'srvpro', 'web')]
+                targets = {'ygocube': roots['ygocube']} if cube_only else roots
+                olds = {name: root / 'old' for name, root in targets.items()}
+                news = {name: root / 'new' for name, root in targets.items()}
+                components = ('api', 'web') if cube_only else ('api', 'srvpro', 'web')
+                services = [name + '-' + component for name in targets for component in components]
                 calls = []
                 def run(*args):
                     calls.append(('run', args))
@@ -167,27 +170,34 @@ class RemoteDuelResourceApplyTests(unittest.TestCase):
                     if len(health_calls) == 1:
                         raise ValueError('public verification failed')
                 database = MagicMock()
-                database.connect.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = ('ok',)
+                database.connect.return_value.execute.side_effect = lambda sql: MagicMock(
+                    **{'fetchone.return_value': ('ok',) if sql == 'PRAGMA integrity_check' else None}
+                )
                 switches = []
-                env = {'a': SimpleNamespace(web_only=False, windbot_root=None, release='fixture'),
-                       'resource_apply': REMOTE, 'roots': roots, 'olds': olds, 'news': news,
+                env = {'a': SimpleNamespace(web_only=False, windbot_root=None, release='fixture', require_idle_guess=False),
+                       'resource_apply': REMOTE, 'roots': roots, 'targets': targets, 'olds': olds, 'news': news,
                        'services': services, 'run': run, 'sqlite3': database, 'health': health,
+                       'settle_guess': False, 'closing': closing,
                        'switch': lambda root, target: switches.append((root, target))}
                 with patch.object(REMOTE.ApplicationMaintenance, 'occupied', side_effect=[False, False, raced]), \
                      patch.object(REMOTE, 'maintenance_ingress') as gate, patch.object(REMOTE, 'run', side_effect=run), \
                      patch.object(REMOTE.os, 'kill'), patch.object(REMOTE.signal, 'SIGSTOP', 19, create=True), \
                      patch.object(REMOTE.signal, 'SIGCONT', 18, create=True):
                     expected = RuntimeError if raced else ValueError
-                    with self.assertRaises(expected):
+                    message = 'a duel host appeared' if raced else 'public verification failed'
+                    with self.assertRaisesRegex(expected, message):
                         exec(compile(body, 'application-activation-fixture', 'exec'), env)
-                restarts = [args for _, args in calls if args[:2] == ('systemctl', 'restart')]
+                service_changes = [args for _, args in calls if args[0] == 'systemctl' and args[1] in ('start', 'stop', 'restart')]
+                stop_and_start = [('systemctl', 'stop', *services), ('systemctl', 'start', *services)]
+                self.assertEqual(database.connect.return_value.backup.call_count, len(targets))
                 if raced:
-                    self.assertEqual(switches, [(roots[name], news[name]) for name in roots])
-                    self.assertFalse(restarts)
+                    self.assertEqual(switches, [(targets[name], news[name]) for name in targets])
+                    self.assertEqual(service_changes, stop_and_start)
                     self.assertEqual(len(health_calls), 1)
                 else:
-                    self.assertEqual(switches[-2:], [(roots[name], olds[name]) for name in roots])
-                    self.assertEqual(len(restarts), 1)
+                    self.assertEqual(switches, [(targets[name], news[name]) for name in targets] +
+                                     [(targets[name], olds[name]) for name in targets])
+                    self.assertEqual(service_changes, stop_and_start * 2)
                     self.assertEqual(len(health_calls), 2)
                 self.assertFalse(gate.call_args.kwargs['close'])
 

@@ -4,6 +4,7 @@ import { importYdk } from "./import-ydk";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { CardImage } from "@/components/CardImage";
+import { CardSearchFields, cardSearchFiltersValid, cardSearchQuery, hasCardSearchFilters } from "@/components/CardSearchFields";
 import {
   readDecks,
   saveDeck,
@@ -11,7 +12,7 @@ import {
   ydk,
   SavedDeck,
 } from "./deck-storage";
-import type { BrowserDeck } from "@ygocube/shared";
+import type { BrowserDeck, CardCategory, CardSearchPage, CardSearchParams, CardSearchSort } from "@ygocube/shared";
 import { CardMeta } from "@/components/CardPreview";
 import type { CardInfo } from "@/lib/types";
 import { typeLabel, raceAttrLine, statLine, atkDefLine } from "@/lib/cardInfo";
@@ -38,8 +39,8 @@ export function StandaloneDecks() {
     [deck, setDeck] = useState<BrowserDeck>(blank),
     [id, setId] = useState<string | undefined>(),
     [dirty, setDirty] = useState(false),
-    [q, setQ] = useState(""),
-    [results, setResults] = useState<Info[]>([]),
+    [search, setSearch] = useState<CardSearchParams>({ query: "", page: 0, sort: "relevance", filters: {} }),
+    [results, setResults] = useState<CardSearchPage | null>(null),
     [infos, setInfos] = useState<Record<number, Info>>({}),
     [detail, setDetail] = useState<Info | null>(null),
     [target, setTarget] = useState<"main" | "side">("main"),
@@ -70,8 +71,7 @@ export function StandaloneDecks() {
     if (enlarged) largeCard.current?.showModal();
     else largeCard.current?.close();
   }, [enlarged]);
-  const [kind, setKind] = useState(0),
-    [sort, setSort] = useState("relevance");
+  const searchActive = !!search.query.trim() || hasCardSearchFilters(search.filters);
   useEffect(() => {
     void readDecks().then(setSaved).catch(error => setNotice(error.message));
   }, []);
@@ -86,34 +86,32 @@ export function StandaloneDecks() {
     return () => window.removeEventListener("beforeunload", f);
   }, [dirty]);
   useEffect(() => {
-    let active = true;
-    setResults([]);
-    setSearching(!!q.trim());
+    setResults(null);
+    const ready = searchActive && cardSearchFiltersValid(search.filters);
+    setSearching(ready);
+    if (!ready) return;
+    const controller = new AbortController();
     const timer = setTimeout(() => {
-      if (!q.trim()) {
-        setResults([]);
-        return;
-      }
-      api<Info[]>(`/public/duel/search?q=${encodeURIComponent(q)}`, {
-        identity: null,
+      api<CardSearchPage>(`/public/duel/search/page?${cardSearchQuery(search)}`, {
+        identity: null, signal: controller.signal,
       })
         .then((r) => {
-          if (active) {
+          if (!controller.signal.aborted) {
             setResults(r);
             setInfos((v) => ({
               ...v,
-              ...Object.fromEntries(r.map((c) => [c.code, c])),
+              ...Object.fromEntries(r.cards.map((c) => [c.code, c])),
             }));
           }
         })
-        .catch((e) => active && setNotice(e.message))
-        .finally(() => active && setSearching(false));
+        .catch((e) => { if (!controller.signal.aborted) setNotice(e.message); })
+        .finally(() => { if (!controller.signal.aborted) setSearching(false); });
     }, 250);
     return () => {
-      active = false;
+      controller.abort();
       clearTimeout(timer);
     };
-  }, [q]);
+  }, [search, searchActive]);
   useEffect(() => {
     let active = true;
     const missing = [
@@ -191,18 +189,6 @@ export function StandaloneDecks() {
   const show = (code: number) =>
     setDetail(infos[code] ?? unknownCard(code));
   const summary = (c: Info) => [typeLabel(c), raceAttrLine(c), statLine(c)].filter(Boolean).join(" / ");
-  const filtered = results
-    .filter((c) => !kind || !!(c.type & kind))
-    .slice()
-    .sort((a, b) =>
-      sort === "name"
-        ? a.name.localeCompare(b.name, "zh")
-        : sort === "attack"
-          ? (b.atk ?? -1) - (a.atk ?? -1)
-          : sort === "level"
-            ? (b.level ?? 0) - (a.level ?? 0)
-            : 0,
-    );
   const drop = (zone: DeckZone, index?: number) => {
     if (!drag) return;
     const c = infos[drag.code];
@@ -520,16 +506,19 @@ export function StandaloneDecks() {
         <section className="deck-search" aria-label="卡片搜索与结果">
           <input
             aria-label="搜索卡片"
-            placeholder="卡名、效果、卡号"
+            placeholder={'卡名、效果、卡号，如 "RANK 4"'}
             maxLength={100}
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
+            value={search.query}
+            onChange={(e) => setSearch({ ...search, query: e.target.value, page: 0 })}
           />
           <div className="deck-search-options">
             <select
               aria-label="筛选搜索结果"
-              value={kind}
-              onChange={(e) => setKind(+e.target.value)}
+              value={search.filters.category ?? 0}
+              onChange={(e) => {
+                const category = (Number(e.target.value) || undefined) as CardCategory | undefined;
+                setSearch({ ...search, page: 0, filters: { ...search.filters, category } });
+              }}
             >
               <option value={0}>全部种类</option>
               <option value={1}>怪兽</option>
@@ -538,8 +527,8 @@ export function StandaloneDecks() {
             </select>
             <select
               aria-label="结果排序"
-              value={sort}
-              onChange={(e) => setSort(e.target.value)}
+              value={search.sort}
+              onChange={(e) => setSearch({ ...search, sort: e.target.value as CardSearchSort, page: 0 })}
             >
               <option value="relevance">相关度</option>
               <option value="level">星数 ↓</option>
@@ -547,6 +536,7 @@ export function StandaloneDecks() {
               <option value="name">卡名</option>
             </select>
           </div>
+          <CardSearchFields value={search.filters} onChange={(filters) => setSearch({ ...search, filters, page: 0 })} />
           <label className="deck-search-target">
             添加到
             <select
@@ -558,11 +548,11 @@ export function StandaloneDecks() {
             </select>
           </label>
           <h2>
-            搜索结果 <b>{filtered.length}</b>
-            {results.length === 100 && <small>（前 100 张）</small>}
+            搜索结果 <b>{results?.totalCount ?? 0}</b>
+            {!!results?.totalPages && <small>（第 {search.page + 1} / {results.totalPages} 页）</small>}
           </h2>
           <div className="builder-results">
-            {filtered.map((c) => (
+            {results?.cards.map((c) => (
               <article
                 key={c.code}
                 onMouseEnter={() => setDetail(c)}
@@ -610,8 +600,14 @@ export function StandaloneDecks() {
               </article>
             ))}
             {searching && <p role="status">搜索中…</p>}
-            {!searching && q.trim() && !filtered.length && <p>没有匹配的卡片</p>}
+            {results?.totalCount === 0 && <p>没有匹配的卡片</p>}
           </div>
+          {(search.page > 0 || results?.hasMore) && <div className="deck-search-options">
+            <button type="button" disabled={searching || search.page === 0}
+              onClick={() => setSearch({ ...search, page: search.page - 1 })}>上一页</button>
+            <button type="button" disabled={searching || !results?.hasMore}
+              onClick={() => setSearch({ ...search, page: search.page + 1 })}>下一页</button>
+          </div>}
         </section>
       </div>
       <footer className="deck-editor-footer">
