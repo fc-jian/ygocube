@@ -104,7 +104,7 @@ describe('Guess the Card HTTP game', () => {
     }
     expect((await request('/pools', superToken, body)).status).toBe(401);
     expect((await createPool(body.name, body.codes)).isDefault).toBe(false);
-    for (const name of ['常见卡牌', '常见卡牌精简版', '常见卡牌近年权重版']) {
+    for (const name of ['常见卡牌', '常见卡牌精简版', '常见卡牌近年权重版', '20261108精选']) {
       expect((await request('/pools', undefined, { ...body, name }, { 'X-Admin-Token': superToken })).status).toBe(409);
     }
   });
@@ -771,7 +771,8 @@ describe('Guess the Card HTTP game', () => {
     expect(shortlist).toHaveLength(2145);
     expect(shortlist).toEqual([...new Set(shortlist)].sort((a, b) => a - b));
     expect(shortlist.every((code) => code > 0 && code < 100_000_000 && originalCodes.has(code))).toBe(true);
-    expect(recency).toHaveLength(2125);
+    expect(recency).toHaveLength(2378);
+    expect(sha256(JSON.stringify(recency))).toBe('eb285aa226397584157f201802fc9d555bc559daeedd2faa69046d07ca8b359d');
     expect(recency).toEqual([...new Set(recency)].sort((a, b) => a - b));
     expect(recency.every((code) => code > 0 && code < 100_000_000)).toBe(true);
     expect(recency).toContain(6351147);
@@ -799,7 +800,7 @@ describe('Guess the Card HTTP game', () => {
       const pools = (await request<GuessPoolSummary[]>('/pools')).body;
       const [selected] = pools;
       expect(pools.filter((pool) => pool.isDefault)).toEqual([selected]);
-      expect(selected).toMatchObject({ name: '常见卡牌近年权重版', cardCount: recency.length, isDefault: true });
+      expect(selected).toMatchObject({ name: '20261108精选', cardCount: recency.length, isDefault: true });
       expect(selected.poolId).not.toBe(originalId);
       expect(selected.poolId).not.toBe(savedShortlist.poolId);
       expect((await request<GuessPoolSummary>(`/pools/${selected.poolId}`)).body).toEqual(selected);
@@ -812,4 +813,55 @@ describe('Guess the Card HTTP game', () => {
       catalog.mockRestore();
     }
   });
+});
+
+it('retains the saved default pool, active round and completed-round statistics across restart', () => {
+  useTestDb();
+  const legacyName = '常见卡牌近年权重版';
+  const poolId = 4;
+  const snapshot = () => ({
+    pool: getDb().prepare('SELECT * FROM guess_pools WHERE id = ?').get(poolId),
+    rooms: getDb().prepare('SELECT * FROM guess_rooms ORDER BY room_id').all(),
+    events: getDb().prepare('SELECT * FROM guess_room_events ORDER BY room_id, version').all(),
+    stats: getDb().prepare('SELECT * FROM guess_round_cards ORDER BY room_id, round_number, code').all(),
+  });
+  let restartedGame: GuessService | undefined;
+
+  try {
+    const cards = new CardsService();
+    const codes = cards.poolCodes().slice(0, 2);
+    getDb().prepare('INSERT INTO guess_pools (id, name, name_key, codes_json) VALUES (?, ?, ?, ?)')
+      .run(poolId, legacyName, 'builtin:familiar-v3', JSON.stringify(codes));
+    const game = new GuessService(cards, new GuessPoolsService(cards));
+    const { room, token } = game.create({ name: 'Saved room', playerId: 'Host', poolId });
+    const authorization = `Bearer ${token}`;
+    const opened = game.act(room.roomId, authorization, { action: 'start', version: room.version })!;
+    const answer = getDb().prepare("SELECT json_extract(state_json, '$.round.seats[0].code') FROM guess_rooms WHERE room_id = ?")
+      .pluck().get(room.roomId) as number;
+    const scored = game.act(room.roomId, authorization, { action: 'guess', version: opened.version, code: answer })!;
+    const playing = game.act(room.roomId, authorization, { action: 'next', version: scored.version })!;
+    expect(playing).toMatchObject({ phase: 'playing', round: 2, poolId, poolName: legacyName });
+    const before = snapshot();
+    expect(before.stats).toEqual([{ room_id: room.roomId, round_number: 1, pool_id: poolId, code: answer, guess_turns: 1 }]);
+    closeDb();
+
+    const restartedCards = new CardsService();
+    const eligible = [...new Set([...restartedCards.poolCodes(), ...RECENCY_GUESS_POOL_CODES])];
+    jest.spyOn(restartedCards, 'poolCodes').mockReturnValue(eligible);
+    const restartedPools = new GuessPoolsService(restartedCards);
+    restartedGame = new GuessService(restartedCards, restartedPools);
+    restartedPools.onModuleInit();
+    restartedGame.onModuleInit();
+    expect(restartedPools.list().filter((pool) => pool.isDefault))
+      .toEqual([{ poolId, name: legacyName, cardCount: codes.length, isDefault: true }]);
+    expect(restartedGame.state(room.roomId, authorization)).toEqual(playing);
+    expect(snapshot()).toEqual(before);
+    expect(getDb().pragma('foreign_key_check')).toEqual([]);
+  } finally {
+    restartedGame?.onModuleDestroy();
+    closeDb();
+    for (const suffix of ['', '-wal', '-shm', '.pre-auth-migration.bak']) {
+      fs.rmSync(config.server.dbPath + suffix, { force: true });
+    }
+  }
 });

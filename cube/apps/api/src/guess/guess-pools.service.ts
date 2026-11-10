@@ -12,7 +12,7 @@ const RECENCY_POOL_KEY = 'builtin:familiar-v3';
 const BUILTIN_POOLS = [
   { key: ORIGINAL_POOL_KEY, name: '常见卡牌', codes: ORIGINAL_GUESS_POOL_CODES },
   { key: SHORTLIST_POOL_KEY, name: '常见卡牌精简版', codes: SHORTLIST_GUESS_POOL_CODES },
-  { key: RECENCY_POOL_KEY, name: '常见卡牌近年权重版', codes: RECENCY_GUESS_POOL_CODES },
+  { key: RECENCY_POOL_KEY, name: '20261108精选', codes: RECENCY_GUESS_POOL_CODES },
 ];
 const DEFAULT_POOL_ID = `COALESCE(
   (SELECT id FROM guess_pools WHERE name_key = '${RECENCY_POOL_KEY}'),
@@ -77,7 +77,10 @@ export class GuessPoolsService implements OnModuleInit {
   }
 
   create({ name, codes }: GuessPoolCreateRequest): GuessPoolSummary {
-    if (BUILTIN_POOLS.some((pool) => pool.name === name)) throw new ConflictException({ code: 'GUESS_POOL_EXISTS' });
+    // Older databases retain the previous built-in name.
+    if (name === '常见卡牌近年权重版' || BUILTIN_POOLS.some((pool) => pool.name === name)) {
+      throw new ConflictException({ code: 'GUESS_POOL_EXISTS' });
+    }
     const eligible = new Set(this.cards.poolCodes());
     if (codes.some((code) => !eligible.has(code))) throw new BadRequestException({ code: 'GUESS_INVALID_POOL' });
     return this.insert(name, `name:${name.toLowerCase()}`, codes);
