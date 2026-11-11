@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent, type ReactNode } from 'react';
 import {
   DG_BRUSH_WIDTHS, DG_HEIGHT, DG_MAX_POINTS, DG_MAX_STROKES, DG_WIDTH,
-  type DgBrushWidth, type DgDrawing, type DgPoint, type DgStroke,
+  type DgBrushWidth, type DgDrawing, type DgDrawingPosition, type DgPoint, type DgStroke,
 } from '@ygocube/shared';
 import { useGuessPolling } from '@/components/guess/guess-client';
 import type { GuessText } from '@/components/guess/guess-text';
@@ -26,13 +26,20 @@ function ink(context: CanvasRenderingContext2D, stroke: DgStroke, point: DgPoint
   }
 }
 
-function paint(canvas: HTMLCanvasElement | null, strokes: readonly DgStroke[]) {
+export function paintDgDrawing(canvas: HTMLCanvasElement | null, strokes: readonly DgStroke[], from?: DgDrawingPosition) {
   const context = canvas?.getContext('2d');
   if (!context) return;
-  context.fillStyle = '#ffffff';
-  context.fillRect(0, 0, DG_WIDTH, DG_HEIGHT);
-  for (const stroke of strokes) {
-    stroke.points.forEach((point, index) => ink(context, stroke, point, stroke.points[index - 1]));
+  const strokeIndex = from?.strokeIndex ?? 0;
+  const pointIndex = from?.pointIndex ?? 0;
+  if (strokeIndex === 0 && pointIndex === 0) {
+    context.fillStyle = '#ffffff';
+    context.fillRect(0, 0, DG_WIDTH, DG_HEIGHT);
+  }
+  for (let index = strokeIndex; index < strokes.length; index++) {
+    const stroke = strokes[index];
+    for (let point = index === strokeIndex ? pointIndex : 0; point < stroke.points.length; point++) {
+      ink(context, stroke, stroke.points[point], stroke.points[point - 1]);
+    }
   }
 }
 
@@ -44,22 +51,25 @@ function pointAt(event: PointerEvent<HTMLCanvasElement>): DgPoint {
   ];
 }
 
-export function DgSketch({ text, disabled, submit, submitLabel = text.submitDrawing }: {
+export function DgSketch({ text, disabled, submit, submitLabel = text.submitDrawing, initialDrawing, onEdit }: {
   text: DgText;
   disabled: boolean;
   submit: (drawing: DgDrawing) => void;
   submitLabel?: string;
+  initialDrawing?: DgDrawing;
+  onEdit?: (strokes: DgStroke[], from: DgDrawingPosition) => void;
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
-  const strokes = useRef<DgStroke[]>([]);
-  const pointCount = useRef(0);
+  const [startingStrokes] = useState(() => initialDrawing?.strokes.map((stroke) => ({ ...stroke, points: stroke.points.slice() })) ?? []);
+  const strokes = useRef<DgStroke[]>(startingStrokes);
+  const pointCount = useRef(startingStrokes.reduce((total, stroke) => total + stroke.points.length, 0));
   const pointerId = useRef<number | null>(null);
-  const [strokeCount, setStrokeCount] = useState(0);
+  const [strokeCount, setStrokeCount] = useState(startingStrokes.length);
   const [atLimit, setAtLimit] = useState(false);
   const [color, setColor] = useState('#17212b');
   const [width, setWidth] = useState<DgBrushWidth>(5);
   const [eraser, setEraser] = useState(false);
-  useEffect(() => paint(canvas.current, strokes.current), []);
+  useEffect(() => paintDgDrawing(canvas.current, strokes.current), []);
 
   function start(event: PointerEvent<HTMLCanvasElement>) {
     if (disabled || pointerId.current !== null || event.button !== 0) return;
@@ -77,6 +87,7 @@ export function DgSketch({ text, disabled, submit, submitLabel = text.submitDraw
     pointCount.current++;
     setStrokeCount(strokes.current.length);
     ink(context, stroke, point);
+    onEdit?.(strokes.current, { strokeIndex: strokes.current.length - 1, pointIndex: 0 });
   }
 
   function move(event: PointerEvent<HTMLCanvasElement>) {
@@ -94,6 +105,7 @@ export function DgSketch({ text, disabled, submit, submitLabel = text.submitDraw
     stroke.points.push(point);
     pointCount.current++;
     ink(context, stroke, point, previous);
+    onEdit?.(strokes.current, { strokeIndex: strokes.current.length - 1, pointIndex: stroke.points.length - 1 });
   }
 
   function stop(event: PointerEvent<HTMLCanvasElement>) {
@@ -105,7 +117,8 @@ export function DgSketch({ text, disabled, submit, submitLabel = text.submitDraw
     pointCount.current -= strokes.current.pop()?.points.length ?? 0;
     setStrokeCount(strokes.current.length);
     setAtLimit(false);
-    paint(canvas.current, strokes.current);
+    paintDgDrawing(canvas.current, strokes.current);
+    onEdit?.(strokes.current, { strokeIndex: strokes.current.length, pointIndex: 0 });
   }
 
   function clear() {
@@ -114,7 +127,8 @@ export function DgSketch({ text, disabled, submit, submitLabel = text.submitDraw
     pointCount.current = 0;
     setStrokeCount(0);
     setAtLimit(false);
-    paint(canvas.current, strokes.current);
+    paintDgDrawing(canvas.current, strokes.current);
+    onEdit?.(strokes.current, { strokeIndex: 0, pointIndex: 0 });
   }
 
   return (
@@ -169,7 +183,7 @@ export function DgPicture({ path, title, shared, token, children }: {
   }, [path, token]);
   useGuessPolling(drawing === null ? load : null, 1500);
   useEffect(() => {
-    if (drawing) paint(canvas.current, drawing.strokes);
+    if (drawing) paintDgDrawing(canvas.current, drawing.strokes);
   }, [drawing]);
 
   return (

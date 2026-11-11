@@ -85,6 +85,13 @@ export function getDb(): Database.Database {
       created_at INTEGER NOT NULL,
       PRIMARY KEY (room_id, version)
     );
+    CREATE TABLE IF NOT EXISTS dg_live_drawings (
+      room_id TEXT PRIMARY KEY REFERENCES dg_rooms(room_id),
+      turn INTEGER NOT NULL,
+      revision TEXT NOT NULL,
+      strokes_json TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS web_replays (
       tournament_id INTEGER NOT NULL, match_id INTEGER NOT NULL, room_name TEXT NOT NULL,
       complete INTEGER NOT NULL DEFAULT 0, frame_count INTEGER NOT NULL DEFAULT 0,

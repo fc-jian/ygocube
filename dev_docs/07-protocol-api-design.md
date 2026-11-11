@@ -300,7 +300,7 @@ deadline 和冻结剩余值。
 
 网页入口为 `/games/dg/`，房间链接为 `/games/dg/:roomId`。共用 §2.6 的 `guess_pools`、卡库、卡图和搜索，
 直接通过 `/games/guess/pools` 选择或管理卡池。房间和追加事件存入同一应用 SQLite 的 `dg_rooms`、
-`dg_room_events`，按版本在同一事务中写入。Draw & Guess 的行动独立计分。
+`dg_room_events`，按版本在同一事务中写入。经典模式正在绘制的画面保存在 `dg_live_drawings`。Draw & Guess 的行动独立计分。
 
 以下路径位于 API 的 `/games/dg` 下。房间 ID 为八位十六进制。创建或加入时签发独立房间凭证，
 玩家请求使用 `Authorization: Bearer <token>`。房间链接可匿名观战。
@@ -311,16 +311,24 @@ deadline 和冻结剩余值。
 | `POST /rooms` | `{name,playerId,poolId,mode?,drawSeconds?,guessSeconds?,hintsEnabled?}`。`mode` 为 `classic`（默认）或 `relay`。两项时限默认为 120 秒，可设为 10–600 的整数。经典模式提示默认开启。返回 `{token,room}` |
 | `POST /rooms/:roomId/join` | `{playerId}`，仅等候阶段可加入，返回 `{token,room}`。经典模式人数上限为 16 与有效卡数的较小值，接龙模式为 16。房主需至少两人才能开局 |
 | `GET /rooms/:roomId` | 公开房间状态。带有效凭证时额外返回 `viewerId` 和本人可见的轮内数据。包含 `version`、`serverNow` 和当前阶段的 `deadlineAt`（Unix 毫秒）、房间设置、房主、总积分以及 `turn`（经典）或 `relay`（接龙） |
-| `GET /rooms/:roomId/drawing/:turn` | 公开获取已提交的当前轮画作 `{strokes}`，其余情况返回 404。每笔为 `{color,width,points}`，颜色为六位十六进制 RGB，粗细为 2、5、10 或 18，坐标为 800 × 600 画布内的整数对。每幅最多 500 笔、10,000 个点 |
+| `GET /rooms/:roomId/drawing/:turn` | 公开获取当前轮已定格的画作 `{strokes}`，其余情况返回 404。每笔为 `{color,width,points}`，颜色为六位十六进制 RGB，粗细为 2、5、10 或 18，坐标为 800 × 600 画布内的整数对。每幅最多 500 笔、10,000 个点 |
+| `GET /rooms/:roomId/drawing/:turn/live` | 公开读取经典模式正在绘制的画面 `{revision,strokes}`。空画布的初始版本为 `null` |
+| `POST /rooms/:roomId/drawing/:turn/live` | 仅当前画手可在绘画时更新，传 `{baseRevision,revision,strokeIndex,pointIndex,strokes}`，返回 `{revision}`。两种版本号均使用 UUID，`baseRevision` 可为 `null` |
+| `GET /rooms/:roomId/drawing/:turn/stream` | 公开订阅经典模式的画面 SSE。连接和重连时发送 `snapshot`（画面快照），随后发送 `drawing`（画面更新）。画面定格时发送 `closed`，流中仅含画面数据 |
 | `GET /rooms/:roomId/cards?q=&page=` | 玩家凭证必需。在房间卡池内沿用 §2.6 的精确编号、结构化筛选、排序与分页 |
 | `POST /rooms/:roomId/action` | 房主 `start`，等候玩家 `leave`，经典模式画手 `submit`、猜测者 `guess`。请求为 `{action}`，经典绘图另传 `{turn,drawing}`，经典猜测另传 `{turn,code}`。接龙操作见下文。返回本人房间状态，退出返回 `null` |
 
 - `lobby → drawing → guessing → reveal → drawing … → finished`。按入座顺序每位玩家绘画一次，
   从有效卡池随机抽取精确编号，同局已发卡片不重复。等候房主退出时由最早加入的在场玩家接任。
-  当轮绘画和猜测期间，只有画手的响应含答案。画作提交前留在画手的浏览器。绘画超时未提交时，本轮以 0 分结束。
-- 提交后发布画作，所有玩家和观战者可查看。非画手同时猜测，同一玩家两次提交须间隔至少一秒，过快返回
+  当轮绘画和猜测期间，只有画手的响应含答案。所有玩家和观战者实时看到画笔、撤销与清空。
+  画面更新从 `strokeIndex`、`pointIndex` 指定的位置起替换后续笔画。下标从 0 开始，`pointIndex` 大于 0 时保留该笔的前缀并延长该笔，
+  `pointIndex` 为 0 时可用空 `strokes` 删除后缀。画面上限同时适用于拼接结果。版本过期返回 `409 DG_STALE_DRAWING`，
+  最近一次成功更新的版本可安全重试。画手的两次更新至少间隔 80 毫秒，过快返回 `429 DG_DRAWING_RATE_LIMIT`。
+- 非画手可以在绘画和定格后同时猜测。同一玩家两次提交须间隔至少一秒，过快返回
   `429 DG_GUESS_RATE_LIMIT`。猜错后可继续提交。同一轮多个玩家的猜测按服务端事务写入顺序判定，
   猜中得分为猜测人数减去此前猜中的人数，画手每有一人猜中得 1 分。本人猜中后停止提交，猜测超时未中得 0 分。
+- 画手提交或绘画到时后定格画面，开启 `guessSeconds` 的猜测阶段。绘画到时且画面为空时直接揭晓。
+  任一阶段全员猜中均立即定格并揭晓。猜中记录、限速和积分跨阶段累计。
 - 提示开启时，从 §2.6 的开局提示分组中随机选择一个能缩小范围的提示，猜测开始过半才对外返回其方式、分组和候选数。
   猜测和搜索仍可使用整个房间卡池。若卡池内没有能缩小范围的分组，本轮没有提示。
 - 猜测到期或所有猜测者猜中时揭晓答案。轮间停留 10 秒并自动进入下一轮，最后一轮完成后直接显示总积分与该轮结果。

@@ -1,7 +1,11 @@
 import type { INestApplication } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
-import type { DgActionRequest, DgDrawing, DgRelayChainView, DgRoomView, DgSession, GuessCardPage, GuessPoolSummary } from '@ygocube/shared';
+import type {
+  DgActionRequest, DgDrawing, DgDrawingPatch, DgLiveDrawing, DgRelayChainView, DgRoomView,
+  DgSession, GuessCardPage, GuessPoolSummary,
+} from '@ygocube/shared';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import { AuthGuard } from '../src/auth/auth.guard';
 import { CardsService } from '../src/cards/cards.service';
@@ -12,6 +16,7 @@ import { DgService } from '../src/dg/dg.service';
 import { GuessController } from '../src/guess/guess.controller';
 import { GuessPoolsService } from '../src/guess/guess-pools.service';
 import { GuessService } from '../src/guess/guess.service';
+import { RealtimeService } from '../src/realtime/realtime.service';
 import { useTestDb } from './helpers';
 
 describe('Draw & Guess HTTP game', () => {
@@ -44,7 +49,7 @@ describe('Draw & Guess HTTP game', () => {
     getDb().prepare('UPDATE cards SET type = ? WHERE code = ?').run(0x10002, codes[1]);
     const module = await Test.createTestingModule({
       controllers: [DgController, GuessController],
-      providers: [DgService, GuessService, GuessPoolsService, { provide: CardsService, useValue: cards },
+      providers: [DgService, GuessService, GuessPoolsService, RealtimeService, { provide: CardsService, useValue: cards },
         { provide: APP_GUARD, useClass: AuthGuard }],
     }).compile();
     app = module.createNestApplication({ logger: false });
@@ -71,6 +76,9 @@ describe('Draw & Guess HTTP game', () => {
   const rooms = '/games/dg/rooms';
   const act = <T = DgRoomView>(path: string, token: string, command: DgActionRequest) => request<T>(`${path}/action`, token, command);
   const state = async (path: string, token?: string) => (await request<DgRoomView>(path, token)).body;
+  const firstPatch = (): DgDrawingPatch => ({
+    baseRevision: null, revision: randomUUID(), strokeIndex: 0, pointIndex: 0, strokes: drawing.strokes,
+  });
 
   async function relayRoom(relayPool: number) {
     const { body: host, status } = await request<DgSession>(rooms, undefined, {
@@ -158,7 +166,7 @@ describe('Draw & Guess HTTP game', () => {
 
     now += 10_000;
     closeDb();
-    const restarted = new DgService(app.get(CardsService), app.get(GuessPoolsService));
+    const restarted = new DgService(app.get(CardsService), app.get(GuessPoolsService), app.get(RealtimeService));
     restarted.onModuleInit();
     restarted.onModuleDestroy();
     expect((await state(path)).phase).toBe('reveal');
@@ -168,7 +176,12 @@ describe('Draw & Guess HTTP game', () => {
     const next = await state(path, guest.token);
     expect(next.turn).toMatchObject({ number: 2, drawerId: 'Guest' });
     const code = next.turn!.answer!.code;
-    expect((await act(path, guest.token, { action: 'submit', turn: 2, drawing })).body.deadlineAt).toBe(now + 12_000);
+    expect((await request(`${path}/drawing/2/live`, guest.token, firstPatch())).status).toBe(200);
+    closeDb();
+    expect((await request<DgLiveDrawing>(`${path}/drawing/2/live`)).body.strokes).toEqual(drawing.strokes);
+    now += 10_000;
+    expect(await state(path)).toMatchObject({ phase: 'guessing', deadlineAt: now + 12_000, turn: { hasDrawing: true } });
+    expect((await request<DgDrawing>(`${path}/drawing/2`)).body).toEqual(drawing);
     now += 6000;
     expect((await state(path, host.token)).turn?.hint).toBeNull();
     now += 6000;
@@ -176,6 +189,100 @@ describe('Draw & Guess HTTP game', () => {
     const final = await state(path);
     expect(final.phase).toBe('finished');
     expect(final.players.map(({ score }) => score)).toEqual([0, 0]);
+  });
+
+  it('streams versioned edits before submission and freezes the drawing when everyone guesses it', async () => {
+    const { body: host } = await request<DgSession>(rooms, undefined, { name: 'Live canvas', playerId: 'Artist', poolId });
+    const path = `${rooms}/${host.room.roomId}`;
+    const { body: guest } = await request<DgSession>(`${path}/join`, undefined, { playerId: 'Guesser' });
+    const { body: started } = await act(path, host.token, { action: 'start' });
+    const code = started.turn!.answer!.code;
+    const livePath = `${path}/drawing/1/live`;
+    const signal = AbortSignal.timeout(4000);
+    const stream = await fetch(base + `${path}/drawing/1/stream`, { signal });
+    expect(stream.status).toBe(200);
+    expect(stream.headers.get('content-type')).toContain('text/event-stream');
+    const reader = stream.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffered = '';
+    async function event(name: string) {
+      for (;;) {
+        const boundary = buffered.indexOf('\n\n');
+        if (boundary !== -1) {
+          const frame = buffered.slice(0, boundary);
+          buffered = buffered.slice(boundary + 2);
+          const data = frame.split('\n').find((line) => line.startsWith('data: '));
+          if (!data) continue;
+          expect(frame.split('\n')).toContain(`event: ${name}`);
+          return JSON.parse(data.slice(6));
+        }
+        const { done, value } = await reader.read();
+        if (done) throw new Error(`Missing ${name} event`);
+        buffered += decoder.decode(value, { stream: true });
+      }
+    }
+    try {
+      expect(await event('snapshot')).toEqual({ revision: null, strokes: [] });
+      const first = firstPatch();
+      expect((await request(livePath, undefined, first)).status).toBe(401);
+      expect((await request(livePath, guest.token, first)).status).toBe(403);
+      expect((await request(livePath, host.token, first)).body).toEqual({ revision: first.revision });
+      expect(await event('drawing')).toEqual(first);
+      const version = (await state(path)).version;
+      expect((await request(livePath, host.token, first)).body).toEqual({ revision: first.revision });
+      expect((await state(path)).version).toBe(version);
+      expect((await request(livePath, host.token, firstPatch())).status).toBe(409);
+
+      const extend: DgDrawingPatch = {
+        baseRevision: first.revision, revision: randomUUID(), strokeIndex: 0, pointIndex: 2,
+        strokes: [{ ...drawing.strokes[0], points: [[300, 300]] }],
+      };
+      expect((await request(livePath, host.token, extend)).status).toBe(429);
+      now += 100;
+      expect((await request(livePath, host.token, extend)).status).toBe(200);
+      expect(await event('drawing')).toEqual(extend);
+      expect((await request<DgLiveDrawing>(livePath)).body.strokes[0].points).toEqual([[1, 5], [150, 200], [300, 300]]);
+
+      const clear = { baseRevision: extend.revision, revision: randomUUID(), strokeIndex: 0, pointIndex: 0, strokes: [] };
+      now += 100;
+      expect((await request(livePath, host.token, clear)).status).toBe(200);
+      expect(await event('drawing')).toEqual(clear);
+      expect((await request<DgLiveDrawing>(livePath)).body).toEqual({ revision: clear.revision, strokes: [] });
+      const finalPatch = { ...firstPatch(), baseRevision: clear.revision };
+      now += 100;
+      expect((await request(livePath, host.token, finalPatch)).status).toBe(200);
+      expect(await event('drawing')).toEqual(finalPatch);
+      expect((await state(path)).turn?.answer).toBeNull();
+      expect((await act(path, host.token, { action: 'guess', turn: 1, code })).status).toBe(403);
+      const guessed = await act(path, guest.token, { action: 'guess', turn: 1, code });
+      expect(guessed.body).toMatchObject({ phase: 'reveal', turn: { hasDrawing: true, drawerPoints: 1 } });
+      expect(await event('closed')).toBeNull();
+      expect((await request<DgDrawing>(`${path}/drawing/1`)).body).toEqual(drawing);
+      expect((await request(livePath)).status).toBe(404);
+      expect((await request(livePath, host.token, finalPatch)).status).toBe(409);
+    } finally {
+      await reader.cancel();
+    }
+  });
+
+  it('keeps the solve order and cooldown when the artist submits the picture', async () => {
+    const { body: host } = await request<DgSession>(rooms, undefined, { name: 'Live guesses', playerId: 'Artist', poolId });
+    const path = `${rooms}/${host.room.roomId}`;
+    const { body: first } = await request<DgSession>(`${path}/join`, undefined, { playerId: 'First' });
+    const { body: second } = await request<DgSession>(`${path}/join`, undefined, { playerId: 'Second' });
+    const code = (await act(path, host.token, { action: 'start' })).body.turn!.answer!.code;
+    expect((await act(path, first.token, { action: 'guess', turn: 1, code })).body).toMatchObject({
+      phase: 'drawing', turn: { answer: null, solves: [{ playerId: 'First', points: 2 }] },
+    });
+    const wrong = codes.find((candidate) => candidate !== code)!;
+    expect((await act(path, second.token, { action: 'guess', turn: 1, code: wrong })).body.viewerLastGuess?.correct).toBe(false);
+    expect((await act(path, host.token, { action: 'submit', turn: 1, drawing })).body.phase).toBe('guessing');
+    expect((await act(path, second.token, { action: 'guess', turn: 1, code })).status).toBe(429);
+    expect((await act(path, first.token, { action: 'guess', turn: 1, code })).status).toBe(409);
+    now += 1000;
+    expect((await act(path, second.token, { action: 'guess', turn: 1, code })).body).toMatchObject({
+      phase: 'reveal', turn: { solves: [{ playerId: 'First', points: 2 }, { playerId: 'Second', points: 1 }], drawerPoints: 2 },
+    });
   });
 
   it('rotates a private drawing for every chain across shared barriers and scores in reveal order', async () => {
@@ -263,7 +370,7 @@ describe('Draw & Guess HTTP game', () => {
 
     now += 10_000;
     closeDb();
-    const restarted = new DgService(app.get(CardsService), app.get(GuessPoolsService));
+    const restarted = new DgService(app.get(CardsService), app.get(GuessPoolsService), app.get(RealtimeService));
     restarted.onModuleInit();
     restarted.onModuleDestroy();
     expect((await state(path, bert)).relay).toMatchObject({ step: 2, hasIncomingDrawing: true });

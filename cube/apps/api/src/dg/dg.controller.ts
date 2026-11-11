@@ -1,34 +1,54 @@
-import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query, Res } from '@nestjs/common';
 import {
   DG_BRUSH_WIDTHS, DG_HEIGHT, DG_MAX_POINTS, DG_MAX_SECONDS, DG_MAX_STROKES, DG_MIN_SECONDS, DG_WIDTH,
-  type DgActionRequest, type DgDrawing, type DgPoint,
+  type DgActionRequest, type DgDrawing, type DgDrawingPatch, type DgPoint,
 } from '@ygocube/shared';
+import type { Response } from 'express';
 import { Public } from '../auth/auth.guard';
 import { parseCardSearchParams } from '../cards/search-params';
 import { badPayload, integer, payload, playerId, text } from '../games/room-input';
 import { DgService } from './dg.service';
 
-function parseDrawing(value: unknown): DgDrawing {
-  const { strokes } = payload(value, ['strokes']);
-  if (!Array.isArray(strokes) || strokes.length < 1 || strokes.length > DG_MAX_STROKES) badPayload();
+function parseStrokes(strokes: unknown, minimum: number): DgDrawing['strokes'] {
+  if (!Array.isArray(strokes) || strokes.length < minimum || strokes.length > DG_MAX_STROKES) badPayload();
   let count = 0;
+  return strokes.map((stroke) => {
+    const { color, width, points } = payload(stroke, ['color', 'width', 'points']);
+    if (typeof color !== 'string' || !/^#[0-9a-f]{6}$/i.test(color)) badPayload();
+    const brush = DG_BRUSH_WIDTHS.find((size) => size === width);
+    if (brush === undefined || !Array.isArray(points) || points.length < 1) badPayload();
+    count += points.length;
+    if (count > DG_MAX_POINTS) badPayload();
+    return {
+      color,
+      width: brush,
+      points: points.map((point): DgPoint => {
+        if (!Array.isArray(point) || point.length !== 2) badPayload();
+        return [integer(point[0], 0, DG_WIDTH), integer(point[1], 0, DG_HEIGHT)];
+      }),
+    };
+  });
+}
+
+function parseDrawing(value: unknown): DgDrawing {
+  return { strokes: parseStrokes(payload(value, ['strokes']).strokes, 1) };
+}
+
+function drawingRevision(value: unknown): string {
+  if (typeof value !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value)) badPayload();
+  return value;
+}
+
+function parseDrawingPatch(body: unknown): DgDrawingPatch {
+  const { revision, baseRevision, strokeIndex, pointIndex, strokes } =
+    payload(body, ['revision', 'baseRevision', 'strokeIndex', 'pointIndex', 'strokes']);
+  if (revision === baseRevision) badPayload();
   return {
-    strokes: strokes.map((stroke) => {
-      const { color, width, points } = payload(stroke, ['color', 'width', 'points']);
-      if (typeof color !== 'string' || !/^#[0-9a-f]{6}$/i.test(color)) badPayload();
-      const brush = DG_BRUSH_WIDTHS.find((size) => size === width);
-      if (brush === undefined || !Array.isArray(points) || points.length < 1) badPayload();
-      count += points.length;
-      if (count > DG_MAX_POINTS) badPayload();
-      return {
-        color,
-        width: brush,
-        points: points.map((point): DgPoint => {
-          if (!Array.isArray(point) || point.length !== 2) badPayload();
-          return [integer(point[0], 0, DG_WIDTH), integer(point[1], 0, DG_HEIGHT)];
-        }),
-      };
-    }),
+    revision: drawingRevision(revision),
+    baseRevision: baseRevision === null ? null : drawingRevision(baseRevision),
+    strokeIndex: integer(strokeIndex, 0, DG_MAX_STROKES),
+    pointIndex: integer(pointIndex, 0, DG_MAX_POINTS),
+    strokes: parseStrokes(strokes, 0),
   };
 }
 
@@ -121,6 +141,25 @@ export class DgController {
   @Get('rooms/:roomId/drawing/:turn')
   drawing(@Param('roomId') roomId: string, @Param('turn') turn: string) {
     return this.game.drawing(roomId, pathNumber(turn));
+  }
+
+  @Get('rooms/:roomId/drawing/:turn/live')
+  liveDrawing(@Param('roomId') roomId: string, @Param('turn') turn: string) {
+    return this.game.liveDrawing(roomId, pathNumber(turn));
+  }
+
+  @Post('rooms/:roomId/drawing/:turn/live')
+  @HttpCode(200)
+  updateDrawing(
+    @Param('roomId') roomId: string, @Param('turn') turn: string,
+    @Headers('authorization') authorization: string | undefined, @Body() body: unknown,
+  ) {
+    return this.game.updateDrawing(roomId, pathNumber(turn), authorization, parseDrawingPatch(body));
+  }
+
+  @Get('rooms/:roomId/drawing/:turn/stream')
+  drawingStream(@Param('roomId') roomId: string, @Param('turn') turn: string, @Res() response: Response) {
+    this.game.subscribeDrawing(roomId, pathNumber(turn), response);
   }
 
   @Get('rooms/:roomId/relay/:round/incoming/:step')

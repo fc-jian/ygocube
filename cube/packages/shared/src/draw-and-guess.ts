@@ -42,6 +42,38 @@ export interface DgDrawing {
   strokes: DgStroke[];
 }
 
+export interface DgLiveDrawing extends DgDrawing {
+  revision: string | null;
+}
+
+export interface DgDrawingPosition {
+  strokeIndex: number;
+  pointIndex: number;
+}
+
+export interface DgDrawingPatch extends DgDrawing, DgDrawingPosition {
+  baseRevision: string | null;
+  revision: string;
+}
+
+/** Replace the drawing suffix while keeping the prefix at the given position. */
+export function applyDgDrawingPatch(drawing: DgDrawing, patch: DgDrawingPatch): DgLiveDrawing | null {
+  const { strokeIndex, pointIndex, revision } = patch;
+  if (strokeIndex > drawing.strokes.length) return null;
+  const strokes = drawing.strokes.slice(0, strokeIndex);
+  if (pointIndex > 0) {
+    const previous = drawing.strokes[strokeIndex];
+    const [first, ...rest] = patch.strokes;
+    if (!previous || !first || pointIndex > previous.points.length
+      || previous.color !== first.color || previous.width !== first.width) return null;
+    strokes.push({ ...first, points: [...previous.points.slice(0, pointIndex), ...first.points] }, ...rest);
+  } else {
+    strokes.push(...patch.strokes);
+  }
+  const points = strokes.reduce((total, stroke) => total + stroke.points.length, 0);
+  return strokes.length <= DG_MAX_STROKES && points <= DG_MAX_POINTS ? { revision, strokes } : null;
+}
+
 export type DgActionRequest =
   | { action: 'start' }
   | { action: 'leave' }

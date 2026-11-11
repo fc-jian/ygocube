@@ -6,7 +6,8 @@ import { CardWithTooltip } from '@/components/CardImage';
 import { GuessCards } from '@/components/guess/GuessCards';
 import { GuessHintButton } from '@/components/guess/GuessHintButton';
 import { fillText, guessText, type GuessLanguage } from '@/components/guess/guess-text';
-import { DgPicture, DgSketch } from './DgCanvas';
+import { DgPicture } from './DgCanvas';
+import { DgLivePicture, DgLiveSketch } from './DgLiveCanvas';
 import { dgRequest, useDgClock } from './dg-client';
 import { dgText } from './dg-text';
 
@@ -81,12 +82,14 @@ export function DgTurn({ room, turn, receivedAt, token, language, busy, run }: {
   const { now, seconds, countdown } = useDgClock(room, receivedAt);
   const drawing = room.phase === 'drawing';
   const guessing = room.phase === 'guessing';
+  const canGuess = drawing || guessing;
   const revealed = room.phase === 'reveal' || room.phase === 'finished';
   const isDrawer = room.viewerId === turn.drawerId;
   const solved = turn.solves.some((entry) => entry.playerId === room.viewerId);
   const hintPending = room.deadlineAt !== null && room.serverNow < room.deadlineAt - room.settings.guessSeconds * 500;
   const scores = [...room.players].sort((a, b) => b.score - a.score);
-  const stage = drawing ? text.drawTitle : guessing ? text.guessTitle : room.phase === 'reveal' ? shared.roundOver : shared.finished;
+  const path = `/rooms/${room.roomId}/drawing/${turn.number}`;
+  const stage = drawing ? text.drawAndGuess : guessing ? text.guessTitle : room.phase === 'reveal' ? shared.roundOver : shared.finished;
 
   return (
     <>
@@ -103,11 +106,11 @@ export function DgTurn({ room, turn, receivedAt, token, language, busy, run }: {
         <div className="dg-stack">
           {turn.answer && <DgAnswer card={turn.answer} label={revealed ? text.answer : text.yourCard}
             description={drawing && isDrawer ? text.drawHelp : undefined} />}
-          {drawing && (isDrawer
-            ? <DgSketch key={turn.number} text={text} disabled={busy || seconds === 0}
+          {drawing && (isDrawer && token
+            ? <DgLiveSketch key={turn.number} path={path} token={token} text={text} disabled={busy || seconds === 0}
                 submit={(sketch) => void run({ action: 'submit', turn: turn.number, drawing: sketch })} />
-            : <section className="guess-panel"><p role="status">{fillText(text.waitingDrawing, { player: turn.drawerId })}</p></section>)}
-          {turn.hasDrawing && <DgPicture key={turn.number} path={`/rooms/${room.roomId}/drawing/${turn.number}`} title={text.submittedDrawing} shared={shared} />}
+            : <DgLivePicture key={turn.number} path={path} text={text} />)}
+          {turn.hasDrawing && <DgPicture key={turn.number} path={path} title={text.submittedDrawing} shared={shared} />}
           {revealed && !turn.hasDrawing && <section className="guess-panel"><p>{text.drawTimedOut}</p></section>}
         </div>
         <div className="dg-stack">
@@ -120,10 +123,10 @@ export function DgTurn({ room, turn, receivedAt, token, language, busy, run }: {
               </div> : <p className="guess-muted" role="status">{hintPending ? text.hintPending : text.noHint}</p>}
             </section>
           )}
-          {guessing && (token && !isDrawer && !solved
+          {canGuess && (token && !isDrawer && !solved
             ? <DgGuessPanel key={turn.number} room={room} turn={turn} token={token} language={language} now={now} busy={busy} run={run} />
-            : <section className="guess-panel"><p role="status">{solved ? text.guessedAlready : text.watchingGuess}</p></section>)}
-          {!drawing && <section className="guess-panel">
+            : !isDrawer && <section className="guess-panel"><p role="status">{solved ? text.guessedAlready : text.watchingGuess}</p></section>)}
+          <section className="guess-panel">
             <h2>{text.solveOrder}</h2>
             {turn.solves.length === 0 && <p className="guess-muted">{revealed ? text.noFinalSolves : text.noSolves}</p>}
             <ol className="guess-roster">
@@ -132,7 +135,7 @@ export function DgTurn({ room, turn, receivedAt, token, language, busy, run }: {
               </li>)}
             </ol>
             <p className="guess-muted">{fillText(text.drawerScore, { points: turn.drawerPoints })}</p>
-          </section>}
+          </section>
           <section className="guess-panel">
             <h2>{text.standings}</h2>
             <ul className="guess-roster">
