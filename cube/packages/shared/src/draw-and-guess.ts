@@ -1,6 +1,7 @@
 import type { CardInfo, GuessCardRef, GuessOpeningHint, GuessRoomSummary } from './index';
 
 export const DG_DEFAULT_SECONDS = 120;
+export const DG_DEFAULT_ROUND_SECONDS = 180;
 export const DG_MIN_SECONDS = 10;
 export const DG_MAX_SECONDS = 600;
 export const DG_GUESS_COOLDOWN_MS = 1000;
@@ -11,6 +12,7 @@ export const DG_MAX_STROKES = 500;
 export const DG_MAX_POINTS = 10_000;
 
 export interface DgSettings {
+  roundSeconds?: number;
   drawSeconds: number;
   guessSeconds: number;
   hintsEnabled: boolean;
@@ -77,9 +79,11 @@ export function applyDgDrawingPatch(drawing: DgDrawing, patch: DgDrawingPatch): 
 export type DgActionRequest =
   | { action: 'start' }
   | { action: 'leave' }
-  | { action: 'submit'; turn: number; drawing: DgDrawing }
   | { action: 'guess'; turn: number; code: number }
-  | { action: 'relay-submit'; round: number; step: number; code: number; drawing: DgDrawing }
+  | { action: 'next' | 'finish'; turn: number }
+  | ({ action: 'relay-submit'; round: number; step: number } & (
+    { code: number; drawing?: DgDrawing } | { code?: never; drawing: DgDrawing }
+  ))
   | { action: 'relay-reveal'; round: number; chain: number }
   | { action: 'relay-next'; round: number }
   | { action: 'relay-finish'; round: number };
@@ -100,6 +104,7 @@ export interface DgTurnView {
   drawerId: string;
   hasDrawing: boolean;
   answer: CardInfo | null;
+  hintAt: number | null;
   hint: GuessOpeningHint | null;
   solves: DgSolve[];
   drawerPoints: number;
@@ -110,13 +115,18 @@ export interface DgRelayPoints {
   drawings: number;
 }
 
+export type DgRelayStepAction = 'opening' | 'guess' | 'draw' | 'combined';
+
 export type DgRelayView = {
   kind: 'active';
   round: number;
   step: number;
+  stepCount: number;
+  action: DgRelayStepAction;
   submittedCount: number;
   viewerSubmitted: boolean;
   choices: CardInfo[];
+  prompt: GuessCardRef | null;
   hasIncomingDrawing: boolean;
 } | {
   kind: 'reveal';
@@ -128,6 +138,8 @@ export interface DgRelayChainView {
   answer: CardInfo;
   steps: {
     playerId: string;
+    action: DgRelayStepAction;
+    prompt: GuessCardRef | null;
     hasDrawing: boolean;
     guess: GuessCardRef | null;
     correct: boolean | null;

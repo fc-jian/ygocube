@@ -339,12 +339,17 @@ function inRange(value: number, { min, max }: CardSearchRange): boolean {
 
 const subtypeMasks = new Map<number, number>();
 for (const [category, flag] of Object.values(CARD_SUBTYPES)) {
-  subtypeMasks.set(category, (subtypeMasks.get(category) ?? 0) | flag);
+  if (typeof flag === 'number') subtypeMasks.set(category, (subtypeMasks.get(category) ?? 0) | flag);
 }
 
 function compileSubtypeMatcher(expression: CardSubtypeExpression): (type: number) => boolean {
   if (typeof expression === 'string') {
     const [category, flag] = CARD_SUBTYPES[expression];
+    if (flag === 'any') return (type) => (type & category) !== 0;
+    if (flag === 'main-deck' || flag === 'extra-deck') {
+      const extraDeck = flag === 'extra-deck';
+      return (type) => (type & category) !== 0 && isExtraDeckType(type) === extraDeck;
+    }
     const mask = subtypeMasks.get(category) ?? 0;
     return (type) => (type & category) !== 0 && (flag ? (type & flag) !== 0 : (type & mask) === 0);
   }

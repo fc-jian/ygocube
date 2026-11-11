@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { FormEvent, useCallback, useState } from 'react';
 import {
-  DG_DEFAULT_SECONDS, DG_MAX_SECONDS, DG_MIN_SECONDS,
+  DG_DEFAULT_ROUND_SECONDS, DG_DEFAULT_SECONDS, DG_MAX_SECONDS, DG_MIN_SECONDS,
   type DgCreateRequest, type DgMode, type DgRoomSummary, type DgSession, type GuessPoolSummary,
 } from '@ygocube/shared';
 import { GuessFrame, useGuessLanguage } from '@/components/guess/GuessFrame';
@@ -45,8 +45,11 @@ export function DgLobby() {
     const form = new FormData(event.currentTarget);
     const body: DgCreateRequest = {
       name: String(form.get('name')), playerId: String(form.get('playerId')), poolId, mode,
-      drawSeconds: Number(form.get('drawSeconds')), guessSeconds: Number(form.get('guessSeconds')),
-      hintsEnabled: form.has('hintsEnabled'),
+      ...(isRelay ? {
+        drawSeconds: Number(form.get('drawSeconds')), guessSeconds: Number(form.get('guessSeconds')),
+      } : {
+        roundSeconds: Number(form.get('roundSeconds')), hintsEnabled: form.has('hintsEnabled'),
+      }),
     };
     setBusy(true);
     setCreateError(null);
@@ -91,13 +94,16 @@ export function DgLobby() {
               </option>)}
             </select></label>
             <Link className="guess-nav-link justify-self-start" href={`${GUESS_PATH}/pools/new`}>{shared.createPool}</Link>
-            <div className="grid grid-cols-2 gap-3">
-              <label>{isRelay ? text.relay.firstTime : text.drawTime}<input className="guess-input" type="number" name="drawSeconds" required
+            {isRelay ? <div className="grid grid-cols-2 gap-3">
+              <label>{text.drawTime}<input className="guess-input" type="number" name="drawSeconds" required
                 defaultValue={DG_DEFAULT_SECONDS} min={DG_MIN_SECONDS} max={DG_MAX_SECONDS} /></label>
-              <label>{isRelay ? text.relay.stepTime : text.guessTime}<input className="guess-input" type="number" name="guessSeconds" required
+              <label>{text.guessTime}<input className="guess-input" type="number" name="guessSeconds" required
                 defaultValue={DG_DEFAULT_SECONDS} min={DG_MIN_SECONDS} max={DG_MAX_SECONDS} /></label>
-            </div>
-            {!isRelay && <label className="dg-check"><input name="hintsEnabled" type="checkbox" defaultChecked />{text.hintsEnabled}</label>}
+            </div> : <>
+              <label>{text.roundTime}<input className="guess-input" type="number" name="roundSeconds" required
+                defaultValue={DG_DEFAULT_ROUND_SECONDS} min={DG_MIN_SECONDS} max={DG_MAX_SECONDS} /></label>
+              <label className="dg-check"><input name="hintsEnabled" type="checkbox" defaultChecked />{text.hintsEnabled}</label>
+            </>}
             {(createError ?? poolError) != null && (
               <p className="guess-error" role="alert">{dgError(createError ?? poolError, text, shared)}</p>
             )}

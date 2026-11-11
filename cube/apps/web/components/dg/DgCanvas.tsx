@@ -54,7 +54,7 @@ function pointAt(event: PointerEvent<HTMLCanvasElement>): DgPoint {
 export function DgSketch({ text, disabled, submit, submitLabel = text.submitDrawing, initialDrawing, onEdit }: {
   text: DgText;
   disabled: boolean;
-  submit: (drawing: DgDrawing) => void;
+  submit?: (drawing: DgDrawing) => void;
   submitLabel?: string;
   initialDrawing?: DgDrawing;
   onEdit?: (strokes: DgStroke[], from: DgDrawingPosition) => void;
@@ -157,8 +157,8 @@ export function DgSketch({ text, disabled, submit, submitLabel = text.submitDraw
         aria-label={text.drawingLabel} aria-disabled={disabled} onPointerDown={start} onPointerMove={move}
         onPointerUp={stop} onPointerCancel={stop} onLostPointerCapture={stop} />
       {atLimit && <p role="status" className="guess-muted">{text.drawingLimit}</p>}
-      <button type="button" className="guess-primary" disabled={disabled || !strokeCount}
-        onClick={() => submit({ strokes: strokes.current })}>{submitLabel}</button>
+      {submit && <button type="button" className="guess-primary" disabled={disabled || !strokeCount}
+        onClick={() => submit({ strokes: strokes.current })}>{submitLabel}</button>}
     </section>
   );
 }

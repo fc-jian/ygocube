@@ -68,13 +68,14 @@ function parseAction(body: unknown): DgActionRequest {
       const { turn, code } = payload(body, ['action', 'turn', 'code']);
       return { action, turn: positiveInteger(turn), code: positiveInteger(code) };
     }
-    case 'submit': {
-      const { turn, drawing } = payload(body, ['action', 'turn', 'drawing']);
-      return { action, turn: positiveInteger(turn), drawing: parseDrawing(drawing) };
-    }
+    case 'next':
+    case 'finish':
+      return { action, turn: positiveInteger(payload(body, ['action', 'turn']).turn) };
     case 'relay-submit': {
       const { round, step, code, drawing } = payload(body, ['action', 'round', 'step', 'code', 'drawing']);
-      return { action, round: positiveInteger(round), step: positiveInteger(step), code: positiveInteger(code), drawing: parseDrawing(drawing) };
+      const position = { round: positiveInteger(round), step: positiveInteger(step) };
+      if (code === undefined) return { action, ...position, drawing: parseDrawing(drawing) };
+      return { action, ...position, code: positiveInteger(code), ...(drawing === undefined ? {} : { drawing: parseDrawing(drawing) }) };
     }
     case 'relay-reveal': {
       const { round, chain } = payload(body, ['action', 'round', 'chain']);
@@ -104,8 +105,8 @@ export class DgController {
 
   @Post('rooms')
   create(@Body() body: unknown) {
-    const { name, playerId: id, poolId, mode, drawSeconds, guessSeconds, hintsEnabled } =
-      payload(body, ['name', 'playerId', 'poolId', 'mode', 'drawSeconds', 'guessSeconds', 'hintsEnabled']);
+    const { name, playerId: id, poolId, mode, roundSeconds, drawSeconds, guessSeconds, hintsEnabled } =
+      payload(body, ['name', 'playerId', 'poolId', 'mode', 'roundSeconds', 'drawSeconds', 'guessSeconds', 'hintsEnabled']);
     if (hintsEnabled !== undefined && typeof hintsEnabled !== 'boolean') badPayload();
     if (mode !== undefined && mode !== 'classic' && mode !== 'relay') badPayload();
     return this.game.create({
@@ -113,6 +114,7 @@ export class DgController {
       playerId: playerId(id),
       poolId: integer(poolId, 0, Number.MAX_SAFE_INTEGER),
       mode,
+      roundSeconds: roundSeconds === undefined ? undefined : integer(roundSeconds, DG_MIN_SECONDS, DG_MAX_SECONDS),
       drawSeconds: drawSeconds === undefined ? undefined : integer(drawSeconds, DG_MIN_SECONDS, DG_MAX_SECONDS),
       guessSeconds: guessSeconds === undefined ? undefined : integer(guessSeconds, DG_MIN_SECONDS, DG_MAX_SECONDS),
       hintsEnabled,

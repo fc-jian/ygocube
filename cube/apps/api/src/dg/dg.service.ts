@@ -4,10 +4,10 @@ import {
 } from '@nestjs/common';
 import { randomBytes, randomInt } from 'node:crypto';
 import {
-  applyDgDrawingPatch, DG_DEFAULT_SECONDS, DG_GUESS_COOLDOWN_MS,
+  applyDgDrawingPatch, DG_DEFAULT_ROUND_SECONDS, DG_DEFAULT_SECONDS, DG_GUESS_COOLDOWN_MS, DG_MAX_SECONDS,
   type CardInfo, type CardSearchParams, type DgActionRequest, type DgCreateRequest, type DgDrawing,
   type DgDrawingPatch, type DgLastGuess, type DgLiveDrawing, type DgMode, type DgRelayPoints, type DgRoomSummary, type DgRoomView,
-  type DgSession, type DgSettings, type DgSolve, type GuessOpeningHint,
+  type DgSession, type DgSettings, type DgSolve, type GuessCardRef, type GuessOpeningHint,
 } from '@ygocube/shared';
 import type { Response } from 'express';
 import { safeHashEqual, sha256 } from '../auth/auth.guard';
@@ -18,12 +18,11 @@ import { buildOpeningHintOptions } from '../guess/opening-hints';
 import { RealtimeService } from '../realtime/realtime.service';
 import {
   activeRelayView, closeRelayStep, incomingDrawingVersion, RELAY_CHOICES, relayChainFor, relayOffers,
-  revealRelayChain, revealedRelayView, type RelayRound,
+  relayStepAction, revealRelayChain, revealedRelayView, type RelayRound,
 } from './dg-relay';
 
 const MAX_PLAYERS = 16;
 const ROOM_IDLE_MS = 24 * 60 * 60 * 1000;
-const REVEAL_MS = 10_000;
 const DRAWING_WRITE_INTERVAL_MS = 80;
 
 type Phase = DgRoomView['phase'];
@@ -70,6 +69,12 @@ function newPlayer(playerId: string): { player: Player; token: string } {
 
 function summary({ roomId, name, poolId, poolName, players, maxPlayers, mode = 'classic' }: Room): DgRoomSummary {
   return { roomId, name, poolId, poolName, playerCount: players.length, maxPlayers, mode };
+}
+
+function classicRoundSeconds({ roundSeconds, drawSeconds, guessSeconds }: DgSettings): number {
+  if (roundSeconds !== undefined) return roundSeconds;
+  if (drawSeconds === DG_DEFAULT_SECONDS && guessSeconds === DG_DEFAULT_SECONDS) return DG_DEFAULT_ROUND_SECONDS;
+  return Math.min(DG_MAX_SECONDS, drawSeconds + guessSeconds);
 }
 
 function writeRoom(room: Room, event: object, now: number): void {
@@ -133,11 +138,12 @@ export class DgService implements OnModuleInit, OnModuleDestroy {
       while (exists.get(roomId)) roomId = randomBytes(4).toString('hex').toUpperCase();
       const { player, token } = newPlayer(input.playerId);
       const now = Date.now();
-      const settings = {
+      const settings: DgSettings = {
         drawSeconds: input.drawSeconds ?? DG_DEFAULT_SECONDS,
         guessSeconds: input.guessSeconds ?? DG_DEFAULT_SECONDS,
         hintsEnabled: mode === 'classic' && (input.hintsEnabled ?? true),
       };
+      if (mode === 'classic') settings.roundSeconds = input.roundSeconds ?? classicRoundSeconds(settings);
       const room: Room = {
         roomId, name: input.name, poolId: pool.poolId, poolName: pool.name, maxPlayers, mode,
         version: 0, phase: 'lobby', deadlineAt: now + ROOM_IDLE_MS,
@@ -230,7 +236,7 @@ export class DgService implements OnModuleInit, OnModuleDestroy {
     const room = this.load(roomId);
     const viewer = this.authenticate(room, authorization);
     const round = room.relay;
-    if (room.phase !== 'relay' || round?.number !== roundNumber || round.step !== step) {
+    if (room.phase !== 'relay' || round?.number !== roundNumber || round.step !== step || relayStepAction(round) === 'draw') {
       throw new NotFoundException({ code: 'DG_DRAWING_NOT_FOUND' });
     }
     return this.readDrawing(room.roomId, incomingDrawingVersion(relayChainFor(round, room.players.indexOf(viewer)), step));
@@ -278,18 +284,18 @@ export class DgService implements OnModuleInit, OnModuleDestroy {
           else room.deadlineAt = now + ROOM_IDLE_MS;
           event = { action: 'leave', playerId };
           break;
-        case 'submit': {
-          this.requirePhase(room, 'drawing', now);
-          const turn = this.requireTurn(room, command.turn);
-          if (turn.drawerId !== playerId) throw new ForbiddenException({ code: 'DG_DRAWER_REQUIRED' });
-          turn.drawingVersion = room.version + 1;
-          this.beginGuessing(room, now);
-          event = { action: 'submit', playerId, turn: turn.number, drawing: command.drawing };
-          break;
-        }
         case 'guess':
           this.requirePhase(room, room.phase === 'drawing' ? 'drawing' : 'guessing', now);
           event = this.guess(room, this.requireTurn(room, command.turn), player, command.code, now);
+          break;
+        case 'next':
+        case 'finish':
+          this.requirePhase(room, 'reveal', now);
+          this.requireHost(room, player);
+          this.requireTurn(room, command.turn);
+          if (command.action === 'next') this.deal(room, this.poolCodes(room), now);
+          else this.finish(room);
+          event = { action: command.action, playerId, turn: room.turn };
           break;
         case 'relay-submit':
           this.submitRelay(room, player, command, now);
@@ -330,10 +336,10 @@ export class DgService implements OnModuleInit, OnModuleDestroy {
     if (correct) {
       turn.solves.push({ playerId, points });
       player.score += points;
-      room.players[turn.number - 1].score++;
+      room.players.find((member) => member.playerId === turn.drawerId)!.score++;
       if (turn.solves.length === guessers) {
         if (room.phase === 'drawing') drawing = this.freezeLiveDrawing(room, turn);
-        this.completeTurn(room, now);
+        this.completeTurn(room);
       }
     }
     return { action: 'guess', playerId, turn: turn.number, code, correct, points, drawing };
@@ -342,7 +348,7 @@ export class DgService implements OnModuleInit, OnModuleDestroy {
   private startRelay(room: Room, codes: number[], now: number): void {
     if (codes.length < RELAY_CHOICES) throw new ConflictException({ code: 'DG_POOL_TOO_SMALL' });
     room.relay = {
-      number: (room.relay?.number ?? 0) + 1, step: 1, revealedCount: 0,
+      rules: 'alternating', number: (room.relay?.number ?? 0) + 1, step: 1, revealedCount: 0,
       chains: relayOffers(codes, room.players.length).map((offer) => ({
         choices: this.cards.getMany(offer), answer: null, entries: [],
       })),
@@ -357,22 +363,27 @@ export class DgService implements OnModuleInit, OnModuleDestroy {
     if (command.step !== round.step) throw new ConflictException({ code: 'DG_STALE_RELAY' });
     const chain = relayChainFor(round, room.players.indexOf(player));
     if (chain.entries.length === round.step) throw new ConflictException({ code: 'DG_RELAY_SUBMITTED' });
-    const drawingVersion = room.version + 1;
-    if (round.step === 1) {
-      const choice = chain.choices.find(({ code }) => code === command.code);
+    const action = relayStepAction(round);
+    const { code, drawing } = command;
+    if ((code !== undefined) !== (action !== 'draw') || (drawing !== undefined) !== (action !== 'guess')) {
+      throw new BadRequestException({ code: 'BAD_PAYLOAD' });
+    }
+    let guess: GuessCardRef | null = null;
+    if (action === 'opening') {
+      const choice = chain.choices.find((card) => card.code === code);
       if (!choice) throw new BadRequestException({ code: 'DG_RELAY_CHOICE_REQUIRED' });
       chain.answer = choice;
-      chain.entries.push({ guess: null, drawingVersion });
-    } else {
-      const { code, name } = this.poolCard(room, command.code);
-      chain.entries.push({ guess: { code, name }, drawingVersion });
+    } else if (code !== undefined) {
+      guess = { code, name: this.poolCard(room, code).name };
     }
+    chain.entries.push({ guess, drawingVersion: drawing ? room.version + 1 : null });
     if (round.chains.every(({ entries }) => entries.length === round.step)) this.advanceRelay(room, round, now);
   }
 
   private advanceRelay(room: Room, round: RelayRound, now: number): void {
     if (closeRelayStep(round)) {
-      room.deadlineAt = now + room.settings.guessSeconds * 1000;
+      const seconds = relayStepAction(round) === 'draw' ? room.settings.drawSeconds : room.settings.guessSeconds;
+      room.deadlineAt = now + seconds * 1000;
     } else {
       revealRelayChain(round, room.players);
       room.phase = 'relay_reveal';
@@ -401,7 +412,7 @@ export class DgService implements OnModuleInit, OnModuleDestroy {
 
   private advanceDueRooms(now: number, roomId?: string): void {
     const db = getDb();
-    const condition = roomId === undefined ? 'deadline_at <= ?' : 'deadline_at <= ? AND room_id = ?';
+    const condition = `deadline_at <= ? AND phase != 'reveal'${roomId === undefined ? '' : ' AND room_id = ?'}`;
     const args = roomId === undefined ? [now] : [now, roomId];
     if (!db.prepare(`SELECT 1 FROM dg_rooms WHERE ${condition} LIMIT 1`).get(...args)) return;
     const closed = db.transaction(() => {
@@ -412,17 +423,15 @@ export class DgService implements OnModuleInit, OnModuleDestroy {
         const previousPhase = room.phase;
         let drawing: DgDrawing | undefined;
         if (previousPhase === 'lobby') this.finish(room);
-        else if (previousPhase === 'reveal') this.deal(room, this.poolCodes(room), now);
         else if (previousPhase === 'relay') this.advanceRelay(room, room.relay!, now);
         else if (previousPhase === 'relay_reveal') {
           const round = room.relay!;
           while (round.revealedCount < room.players.length) revealRelayChain(round, room.players);
           this.finish(room);
-        } else if (previousPhase === 'drawing') {
-          drawing = this.freezeLiveDrawing(room, room.turn!);
-          if (drawing) this.beginGuessing(room, now);
-          else this.completeTurn(room, now);
-        } else this.completeTurn(room, now);
+        } else {
+          if (previousPhase === 'drawing') drawing = this.freezeLiveDrawing(room, room.turn!);
+          this.completeTurn(room);
+        }
         const progress = room.relay
           ? { round: room.relay.number, step: room.relay.step, revealedCount: room.relay.revealedCount }
           : { turn: room.turn };
@@ -482,13 +491,15 @@ export class DgService implements OnModuleInit, OnModuleDestroy {
   }
 
   private deal(room: Room, codes: number[], now: number): void {
+    if (!codes.length) throw new ConflictException({ code: 'DG_POOL_TOO_SMALL' });
     const used = new Set(room.usedCodes);
-    const remaining = codes.filter((code) => !used.has(code));
+    let remaining = codes.filter((code) => !used.has(code));
     if (remaining.length === 0) {
-      this.finish(room);
-      return;
+      room.usedCodes = [];
+      remaining = codes;
     }
-    const number = room.usedCodes.length + 1;
+    const number = (room.turn?.number ?? 0) + 1;
+    const drawer = room.players[(number - 1) % room.players.length];
     const code = remaining[randomInt(remaining.length)];
     const answer = this.cards.get(code)!;
     let hint: GuessOpeningHint | null = null;
@@ -499,23 +510,15 @@ export class DgService implements OnModuleInit, OnModuleDestroy {
       if (useful.length) hint = useful[randomInt(useful.length)];
     }
     room.usedCodes.push(code);
-    room.turn = { number, drawerId: room.players[number - 1].playerId, answer, drawingVersion: null, hint, guesses: [], solves: [] };
+    room.turn = { number, drawerId: drawer.playerId, answer, drawingVersion: null, hint, guesses: [], solves: [] };
     room.phase = 'drawing';
-    room.deadlineAt = now + room.settings.drawSeconds * 1000;
+    room.settings.roundSeconds = classicRoundSeconds(room.settings);
+    room.deadlineAt = now + room.settings.roundSeconds * 1000;
   }
 
-  private completeTurn(room: Room, now: number): void {
-    if (room.usedCodes.length >= room.players.length) {
-      this.finish(room);
-    } else {
-      room.phase = 'reveal';
-      room.deadlineAt = now + REVEAL_MS;
-    }
-  }
-
-  private beginGuessing(room: Room, now: number): void {
-    room.phase = 'guessing';
-    room.deadlineAt = now + room.settings.guessSeconds * 1000;
+  private completeTurn(room: Room): void {
+    room.phase = 'reveal';
+    room.deadlineAt = null;
   }
 
   private finish(room: Room): void {
@@ -546,7 +549,9 @@ export class DgService implements OnModuleInit, OnModuleDestroy {
   private load(roomId: string): Room {
     const row = getDb().prepare('SELECT state_json FROM dg_rooms WHERE room_id = ?').get(roomId.toUpperCase()) as RoomRow | undefined;
     if (!row) throw new NotFoundException({ code: 'DG_ROOM_NOT_FOUND' });
-    return JSON.parse(row.state_json) as Room;
+    const room = JSON.parse(row.state_json) as Room;
+    if (room.phase === 'reveal') room.deadlineAt = null;
+    return room;
   }
 
   private authenticate(room: Room, authorization?: string): Player {
@@ -557,14 +562,17 @@ export class DgService implements OnModuleInit, OnModuleDestroy {
   }
 
   private view(room: Room, viewerId?: string): DgRoomView {
-    const { phase, turn, relay, deadlineAt } = room;
+    const { phase, turn, relay, deadlineAt, settings } = room;
     const serverNow = Date.now();
     const last = viewerId === undefined ? undefined : turn?.guesses.find((guess) => guess.playerId === viewerId);
     const canSeeAnswer = phase === 'reveal' || phase === 'finished' || (viewerId !== undefined && viewerId === turn?.drawerId);
-    const canSeeHint = phase === 'guessing' && deadlineAt !== null && serverNow >= deadlineAt - room.settings.guessSeconds * 500;
+    const activeSeconds = phase === 'drawing' ? settings.roundSeconds ?? settings.drawSeconds : settings.guessSeconds;
+    const hintAt = settings.hintsEnabled && deadlineAt !== null && (phase === 'drawing' || phase === 'guessing')
+      ? deadlineAt - activeSeconds * 500 : null;
     const seat = room.players.findIndex(({ playerId }) => playerId === viewerId);
     return {
-      ...summary(room), phase, version: room.version, settings: room.settings, serverNow,
+      ...summary(room), phase, version: room.version, serverNow,
+      settings: room.mode === 'relay' ? settings : { ...settings, roundSeconds: classicRoundSeconds(settings) },
       deadlineAt: phase === 'lobby' || phase === 'relay_reveal' ? null : deadlineAt,
       hostId: room.players[0]?.playerId ?? null,
       players: room.players.map(({ playerId, score, relayPoints }) => room.mode === 'relay'
@@ -572,7 +580,7 @@ export class DgService implements OnModuleInit, OnModuleDestroy {
       turn: turn && {
         number: turn.number, drawerId: turn.drawerId, hasDrawing: turn.drawingVersion !== null,
         answer: canSeeAnswer ? turn.answer : null,
-        hint: canSeeHint ? turn.hint : null,
+        hintAt, hint: hintAt !== null && serverNow >= hintAt ? turn.hint : null,
         solves: turn.solves, drawerPoints: turn.solves.length,
       },
       relay: relay ? phase === 'relay' ? activeRelayView(relay, seat)

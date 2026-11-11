@@ -2,7 +2,7 @@
 
 import { useCallback, useState } from 'react';
 import type { CardInfo, DgActionRequest, DgRelayChainView, DgRelayView, DgRoomView } from '@ygocube/shared';
-import { CardWithTooltip } from '@/components/CardImage';
+import { CardImage, CardWithTooltip } from '@/components/CardImage';
 import { GuessCards } from '@/components/guess/GuessCards';
 import { useGuessPolling } from '@/components/guess/guess-client';
 import { fillText, guessText, type GuessLanguage } from '@/components/guess/guess-text';
@@ -28,23 +28,37 @@ function DgRelayWork({ room, receivedAt, token, language, busy, run, relay }: Re
   const labels = text.relay;
   const { countdown, seconds } = useDgClock(room, receivedAt);
   const [selected, setSelected] = useState<CardInfo | null>(null);
-  const { round, step } = relay;
-  const opening = step === 1;
+  const { round, step, stepCount, action, prompt } = relay;
   const path = `/rooms/${room.roomId}`;
   const canWork = token !== null && !relay.viewerSubmitted;
+  const disabled = busy || seconds === 0;
+  const stage = action === 'combined' ? labels.combined : action === 'guess' ? text.guessTitle : text.drawTitle;
+  const guessPanel = token && (action === 'guess' || action === 'combined') && <section className="guess-panel">
+    <h2>{text.guessTitle}</h2>
+    {action === 'combined' && <p className="guess-muted">{labels.redrawHelp}</p>}
+    <GuessCards mode="select" path={`${path}/cards`} request={dgRequest} token={token}
+      selected={new Set(selected ? [selected.code] : [])} choose={setSelected} enabled={!disabled}
+      text={shared} language={language} />
+    {action === 'guess' && <div className="guess-actions">
+      {selected && <p className="guess-live-guess">{selected.name}</p>}
+      <button type="button" className="guess-primary" disabled={disabled || !selected} onClick={() => {
+        if (selected) void run({ action: 'relay-submit', round, step, code: selected.code });
+      }}>{text.submitGuess}</button>
+    </div>}
+  </section>;
 
   return (
     <>
       <div className="dg-stage dg-relay-stage">
         <div className="min-w-0">
-          <strong>{fillText(labels.turn, { round, step, total: room.playerCount })}</strong>
+          <strong>{fillText(labels.turn, { round, step, total: stepCount })} · {stage}</strong>
           <p className="guess-muted" role="status">{fillText(labels.progress, { count: relay.submittedCount, total: room.playerCount })}</p>
         </div>
         <span className="dg-clock" role="timer">{countdown}</span>
       </div>
       {canWork ? <div className="dg-grid dg-relay-work">
         <div className="dg-stack">
-          {opening ? <section className="guess-panel">
+          {action === 'opening' ? <section className="guess-panel">
             <h2>{labels.choose}</h2>
             <p className="guess-muted">{labels.chooseHelp}</p>
             <ul className="guess-roster">
@@ -52,29 +66,33 @@ function DgRelayWork({ room, receivedAt, token, language, busy, run, relay }: Re
                 <CardWithTooltip code={card.code} card={card} className="w-10 shrink-0 sm:w-12" />
                 <strong className="min-w-0 grow">{card.name}</strong>
                 <button type="button" className={selected?.code === card.code ? 'guess-selected shrink-0' : 'guess-secondary shrink-0'}
-                  aria-pressed={selected?.code === card.code} disabled={busy || seconds === 0}
+                  aria-pressed={selected?.code === card.code} disabled={disabled}
                   onClick={() => setSelected(card)}>{selected?.code === card.code ? shared.selected : shared.select}</button>
               </li>)}
             </ul>
+          </section> : action === 'draw' ? prompt && <section className="guess-panel">
+            <div className="dg-card">
+              <CardImage code={prompt.code} name={prompt.name} className="w-12 shrink-0 sm:w-16" />
+              <div className="min-w-0">
+                <p className="guess-muted">{labels.receivedPrompt}</p>
+                <h2>{prompt.name}</h2>
+              </div>
+            </div>
           </section> : <>
             {relay.hasIncomingDrawing ? <DgPicture path={`${path}/relay/${round}/incoming/${step}`} title={labels.received}
               shared={shared} token={token} /> : <section className="guess-panel"><p>{labels.noIncoming}</p></section>}
-            <section className="guess-panel">
-              <h2>{labels.guess}</h2>
-              <p className="guess-muted">{labels.redrawHelp}</p>
-              <GuessCards mode="select" path={`${path}/cards`} request={dgRequest} token={token}
-                selected={new Set(selected ? [selected.code] : [])} choose={setSelected} enabled={!busy && seconds > 0}
-                text={shared} language={language} />
-            </section>
+            {action === 'combined' && guessPanel}
           </>}
         </div>
-        <div className="dg-stack">
+        {action === 'guess' ? guessPanel : <div className="dg-stack">
           {selected && <p className="guess-actions guess-live-guess">{fillText(labels.selection, { card: selected.name })}</p>}
-          <DgSketch text={text} disabled={busy || seconds === 0 || !selected} submitLabel={opening ? text.submitDrawing : labels.submit}
+          <DgSketch text={text} disabled={disabled || (action === 'draw' ? !prompt : !selected)}
+            submitLabel={action === 'combined' ? labels.submit : text.submitDrawing}
             submit={(drawing) => {
-              if (selected) void run({ action: 'relay-submit', round, step, code: selected.code, drawing });
+              if (action === 'draw') void run({ action: 'relay-submit', round, step, drawing });
+              else if (selected) void run({ action: 'relay-submit', round, step, code: selected.code, drawing });
             }} />
-        </div>
+        </div>}
       </div> : <section className="guess-panel"><p role="status">{token ? labels.waiting : labels.watching}</p></section>}
     </>
   );
@@ -106,15 +124,21 @@ function DgRelayStory({ path, language }: { path: string; language: GuessLanguag
         {result.steps.map((entry, index) => {
           const step = index + 1;
           const title = fillText(labels.stepBy, { step, player: entry.playerId });
+          const guesses = entry.action === 'guess' || entry.action === 'combined';
           const details = <>
+            {entry.prompt && <p className="guess-muted">{fillText(labels.drawPrompt, { card: entry.prompt.name })}</p>}
             {entry.receivedFromStep !== null && <p className="guess-muted">{fillText(labels.source, { step: entry.receivedFromStep })}</p>}
-            {step > 1 && <p className={entry.correct ? 'dg-correct' : 'guess-muted'}>{entry.guess
-              ? fillText(entry.correct ? text.correctGuess : text.incorrectGuess, { card: entry.guess.name })
+            {guesses && <p className={entry.correct ? 'dg-correct' : 'guess-muted'}>{entry.guess
+              ? fillText(entry.correct === null ? labels.unscoredGuess : entry.correct ? text.correctGuess : text.incorrectGuess,
+                { card: entry.guess.name })
               : labels.guessMissing}</p>}
           </>;
           return <li key={step}>
             {entry.hasDrawing ? <DgPicture path={`${path}/drawings/${step}`} title={title} shared={shared}>{details}</DgPicture>
-              : <section className="guess-panel"><h2>{title}</h2>{details}<p className="guess-muted">{labels.drawingMissing}</p></section>}
+              : <section className="guess-panel">
+                <h2>{title}</h2>{details}
+                {entry.action !== 'guess' && <p className="guess-muted">{labels.drawingMissing}</p>}
+              </section>}
           </li>;
         })}
       </ol>
@@ -144,9 +168,9 @@ function DgRelayReview({ room, language, busy, run, relay }: RelayProps & {
             onClick={() => { setPinned(null); void run({ action: 'relay-reveal', round, chain: revealedCount }); }}>{labels.revealNext}</button>
             : <>
               <button type="button" className="guess-primary" disabled={busy}
-                onClick={() => void run({ action: 'relay-next', round })}>{labels.nextRound}</button>
+                onClick={() => void run({ action: 'relay-next', round })}>{text.nextRound}</button>
               <button type="button" className="guess-secondary" disabled={busy}
-                onClick={() => void run({ action: 'relay-finish', round })}>{labels.finish}</button>
+                onClick={() => void run({ action: 'relay-finish', round })}>{text.finish}</button>
             </>}
         </div>}
       </div>

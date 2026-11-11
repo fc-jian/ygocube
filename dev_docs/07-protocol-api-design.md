@@ -225,7 +225,10 @@ deadline 和冻结剩余值。
   筛选先与入口的卡库、卡池或当轮提示候选取交集，再排序、计数和分页。
   `q` 中用英文双引号包住的词组按连续字串查找，例如 `"等级 5"` 和 `"RANK 4"`，各词组和未加引号的词都须匹配。
   可选参数 `category` 为 1／2／4。`subtype` 可传单个子类型键或由子类型键、`not`、`and`、`or`、括号组成的表达式，
-  例如 `(fusion or synchro) and not tuner`。`not` 在标签或括号组前取反，优先级依次为 `not`、`and`、`or`，
+  例如 `(fusion or synchro) and not tuner`。大类键为 `main-deck-monster`（主卡怪兽）、`monster`（怪兽）、
+  `extra-deck-monster`（额外怪兽）、`spell`（魔法卡）及 `trap`（陷阱卡），可和其他子类型键组合。
+  融合、同调、超量、连接怪兽属于额外怪兽，其余怪兽属于主卡怪兽。
+  `not` 在标签或括号组前取反，优先级依次为 `not`、`and`、`or`，
   括号可改变求值顺序。`非`、`与`、`或` 分别等同于这三个运算符。取反在当前入口的卡牌范围内求值，
   仍与大类、其他筛选和候选范围取交集。表达式最多 64 个标签，
   语法不完整或含有未知标签时返回 `400 BAD_PAYLOAD`。
@@ -308,7 +311,7 @@ deadline 和冻结剩余值。
 | 方法/路径 | 请求和响应 |
 | --- | --- |
 | `GET /rooms` | 公开列出最近最多 50 个未满的等候房间，摘要字段同 §2.6，另含 `mode` |
-| `POST /rooms` | `{name,playerId,poolId,mode?,drawSeconds?,guessSeconds?,hintsEnabled?}`。`mode` 为 `classic`（默认）或 `relay`。两项时限默认为 120 秒，可设为 10–600 的整数。经典模式提示默认开启。返回 `{token,room}` |
+| `POST /rooms` | `{name,playerId,poolId,mode?,roundSeconds?,drawSeconds?,guessSeconds?,hintsEnabled?}`。经典模式（`classic`，默认）的 `roundSeconds` 默认为 180 秒，提示默认开启。接龙（`relay`）使用 `drawSeconds`、`guessSeconds`，各默认为 120 秒。时限可设为 10–600 的整数。返回 `{token,room}` |
 | `POST /rooms/:roomId/join` | `{playerId}`，仅等候阶段可加入，返回 `{token,room}`。经典模式人数上限为 16 与有效卡数的较小值，接龙模式为 16。房主需至少两人才能开局 |
 | `GET /rooms/:roomId` | 公开房间状态。带有效凭证时额外返回 `viewerId` 和本人可见的轮内数据。包含 `version`、`serverNow` 和当前阶段的 `deadlineAt`（Unix 毫秒）、房间设置、房主、总积分以及 `turn`（经典）或 `relay`（接龙） |
 | `GET /rooms/:roomId/drawing/:turn` | 公开获取当前轮已定格的画作 `{strokes}`，其余情况返回 404。每笔为 `{color,width,points}`，颜色为六位十六进制 RGB，粗细为 2、5、10 或 18，坐标为 800 × 600 画布内的整数对。每幅最多 500 笔、10,000 个点 |
@@ -316,24 +319,24 @@ deadline 和冻结剩余值。
 | `POST /rooms/:roomId/drawing/:turn/live` | 仅当前画手可在绘画时更新，传 `{baseRevision,revision,strokeIndex,pointIndex,strokes}`，返回 `{revision}`。两种版本号均使用 UUID，`baseRevision` 可为 `null` |
 | `GET /rooms/:roomId/drawing/:turn/stream` | 公开订阅经典模式的画面 SSE。连接和重连时发送 `snapshot`（画面快照），随后发送 `drawing`（画面更新）。画面定格时发送 `closed`，流中仅含画面数据 |
 | `GET /rooms/:roomId/cards?q=&page=` | 玩家凭证必需。在房间卡池内沿用 §2.6 的精确编号、结构化筛选、排序与分页 |
-| `POST /rooms/:roomId/action` | 房主 `start`，等候玩家 `leave`，经典模式画手 `submit`、猜测者 `guess`。请求为 `{action}`，经典绘图另传 `{turn,drawing}`，经典猜测另传 `{turn,code}`。接龙操作见下文。返回本人房间状态，退出返回 `null` |
+| `POST /rooms/:roomId/action` | 房主 `start`，等候玩家 `leave`，经典模式猜测者 `guess` 另传 `{turn,code}`。经典模式揭晓后，房主以 `next` 开下一轮或 `finish` 结束游戏，两者均另传 `{turn}`。接龙操作见下文。返回本人房间状态，退出返回 `null` |
 
-- `lobby → drawing → guessing → reveal → drawing … → finished`。按入座顺序每位玩家绘画一次，
-  从有效卡池随机抽取精确编号，同局已发卡片不重复。等候房主退出时由最早加入的在场玩家接任。
-  当轮绘画和猜测期间，只有画手的响应含答案。所有玩家和观战者实时看到画笔、撤销与清空。
+- 经典模式为 `lobby → drawing → reveal → drawing … → finished`。每轮 `drawing` 内实时绘画与猜测共用一个倒计时。
+  按入座顺序循环安排画手，从有效卡池随机抽取精确编号，抽完一遍后重新抽取。等候房主退出时由最早加入的在场玩家接任。
+  当轮进行中，只有画手的响应含答案。所有玩家和观战者实时看到画笔、撤销与清空。
   画面更新从 `strokeIndex`、`pointIndex` 指定的位置起替换后续笔画。下标从 0 开始，`pointIndex` 大于 0 时保留该笔的前缀并延长该笔，
   `pointIndex` 为 0 时可用空 `strokes` 删除后缀。画面上限同时适用于拼接结果。版本过期返回 `409 DG_STALE_DRAWING`，
   最近一次成功更新的版本可安全重试。画手的两次更新至少间隔 80 毫秒，过快返回 `429 DG_DRAWING_RATE_LIMIT`。
-- 非画手可以在绘画和定格后同时猜测。同一玩家两次提交须间隔至少一秒，过快返回
+- 非画手可以在本轮时限内猜测。同一玩家两次提交须间隔至少一秒，过快返回
   `429 DG_GUESS_RATE_LIMIT`。猜错后可继续提交。同一轮多个玩家的猜测按服务端事务写入顺序判定，
   猜中得分为猜测人数减去此前猜中的人数，画手每有一人猜中得 1 分。本人猜中后停止提交，猜测超时未中得 0 分。
-- 画手提交或绘画到时后定格画面，开启 `guessSeconds` 的猜测阶段。绘画到时且画面为空时直接揭晓。
-  任一阶段全员猜中均立即定格并揭晓。猜中记录、限速和积分跨阶段累计。
-- 提示开启时，从 §2.6 的开局提示分组中随机选择一个能缩小范围的提示，猜测开始过半才对外返回其方式、分组和候选数。
+- 到时或全员猜中后定格画面、揭晓答案并结算本轮。揭晓时 `deadlineAt` 为 `null`，等待房主开启下一轮或结束游戏。后续各轮累计积分。
+- 提示开启时，从 §2.6 的开局提示分组中随机选择一个能缩小范围的提示，本轮过半才对外返回其方式、分组和候选数。
+  `turn.hintAt` 为提示时间的 Unix 毫秒值，供界面显示提示进度。
   猜测和搜索仍可使用整个房间卡池。若卡池内没有能缩小范围的分组，本轮没有提示。
-- 猜测到期或所有猜测者猜中时揭晓答案。轮间停留 10 秒并自动进入下一轮，最后一轮完成后直接显示总积分与该轮结果。
-  时间由服务器执行并持久化，重启后继续处理到期的阶段。等候房间最后一次写入后 24 小时过期。
-  应用发布的小游戏空闲检查涵盖绘画、猜测与轮间阶段。
+- 时间由服务器执行并持久化，重启后继续处理到期的阶段。等候房间最后一次写入后 24 小时过期。
+  旧经典房间中正在进行的轮次沿用已保存的截止时间。旧 `guessing` 阶段可猜到该截止时间，之后统一进入揭晓。
+  旧配置的两项默认时限映射到 180 秒，自定义时限按总秒数换算，上限 600 秒。
 - 缺失或无效的玩家凭证返回 `401 DG_AUTH_REQUIRED`，无操作权限返回 403，阶段、轮号、重名、人数或房间容量冲突返回 409。
   格式错误返回 `400 BAD_PAYLOAD`，猜测超出有效卡池返回 `400 DG_CARD_NOT_IN_POOL`，房间或当前画作不存在返回 404。
 
@@ -341,24 +344,27 @@ deadline 和冻结剩余值。
 
 - 接龙卡池至少有 3 张有效卡。`lobby → relay → relay_reveal → relay … → finished`，已有未保存 `mode` 的房间按经典模式读取。
   每轮为每个座位开一条接龙，给各玩家私下发 3 个不同编号的候选卡名。首棒所有玩家同时在 `drawSeconds` 内任选一张并提交画作。
-  之后每棒把各链的画传给下一座位，所有玩家同时在 `guessSeconds` 内猜一次原始卡，并参考收到的画重画。
-  每棒提交齐全或时限到达后统一换棒。一轮共进行与玩家人数相同的棒数，人人在每条链上各画一次。
-- `relay-submit` 请求为 `{action,round,step,code,drawing}`，轮号、棒号均从 1 开始。
-  `code` 在首棒为本人候选中选定的编号，后续为本次猜测的卡号。猜测与重画一并提交，接受后锁定该玩家本棒结果。
-  首棒超时使用发到的第一个候选词，未提交的猜测、画作留空。交接时使用该链上最近一幅已提交的画。
-- 进行中 `relay` 状态包含 `kind: 'active'`、`round`、`step`、`submittedCount`、`viewerSubmitted`、`choices` 和 `hasIncomingDrawing`。
-  候选词只在首棒返回给本人，收到的画只能由当前接收者读取。猜测、对错、积分变化及原始词在该链揭晓前隐藏。
-  接龙不使用半程提示。
+  之后画作传给下一座位猜卡，猜到的卡名传给再下一座位作为画题。偶数棒猜卡，使用 `guessSeconds`，奇数棒画画，使用 `drawSeconds`。
+  每棒提交齐全或时限到达后统一换棒。一轮进行不超过玩家人数的最大偶数棒，偶数人时停在起始画手前一位，奇数人时停在前两位，末棒均为猜卡。
+- `relay-submit` 传 `{action,round,step,code?,drawing?}`，轮号、棒号均从 1 开始。
+  首棒提交选定的 `code` 和 `drawing`，猜卡棒只提交猜测的 `code`，后续画画棒只提交 `drawing`。接受后锁定该玩家本棒结果。
+  首棒超时使用发到的第一个候选词，未提交的猜测、画作留空。猜卡棒收到该链上最近一幅已提交的画。
+  后续画画棒收到最近的猜测卡，没有已提交的猜测时收到起始词。无画可猜时仍可提交卡名续接，猜测不计分。
+- 进行中 `relay` 状态包含 `kind: 'active'`、`round`、`step`、`stepCount`、`action`、`submittedCount`、`viewerSubmitted`、`choices`、`prompt` 和 `hasIncomingDrawing`。
+  `action` 为 `opening`、`guess` 或 `draw`。首棒候选 `choices` 和后续画题 `prompt` 只返回给当前接收者，收到的画也由当前猜卡者凭证读取。
+  猜测结果在换到下一棒画画时作为画题提供，对错和积分在该链揭晓时公开。接龙不使用半程提示。
 - 所有棒完成后按入座顺序揭晓接龙。`relay` 状态为 `{kind:'reveal',round,revealedCount}`，首条链立即揭晓，
   房主以 `relay-reveal`（另传 `{round,chain}`，`chain` 为当前已揭晓条数）揭晓下一条。每条链展示原始词、每棒画作、
-  猜测及对错。每次猜中原始 exact code，猜测者得 1 分，实际收到的画的作者得 1 分。积分在对应链揭晓时入账。
+  画题、猜测及对错。每次猜中所收到画作的画题 exact code，猜测者和画作作者各得 1 分。积分在对应链揭晓时入账。
   各玩家公开分项 `relayPoints.guesses/drawings` 及总分。全部揭晓后，房主可 `relay-next` 开新一轮并累计积分，或
   `relay-finish` 结束，两个操作都另传 `{round}`。揭晓阶段 24 小时无操作时揭晓余下各链并结算。
+- 已经开始的旧轮继续使用原有规则。首棒之后仍为 `combined`，每棒同时猜卡和重画，按原始卡计分。
+  旧轮可继续揭晓，开始下一轮时切换至交替玩法。
 
 | 接龙读取路径（`GET`，位于 `/rooms/:roomId` 下） | 响应 |
 | --- | --- |
-| `/relay/:round/incoming/:step` | 当前接收者凭房间 Bearer 读取收到的画 `{strokes}` |
-| `/relay/:round/chains/:chain` | 公开读取当前轮已揭晓的链，包括 `answer`、各棒的玩家、画作标记、猜测及对错 |
+| `/relay/:round/incoming/:step` | 当前猜卡者凭房间 Bearer 读取收到的画 `{strokes}` |
+| `/relay/:round/chains/:chain` | 公开读取当前轮已揭晓的链，包括 `answer`、各棒的玩家、`action`、`prompt`、画作标记、猜测及对错 |
 | `/relay/:round/chains/:chain/drawings/:step` | 公开读取当前轮已揭晓链内的一幅画 `{strokes}` |
 
 ## 3. cube API ↔ srvpro

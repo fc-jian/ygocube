@@ -80,14 +80,14 @@ describe('Draw & Guess HTTP game', () => {
     baseRevision: null, revision: randomUUID(), strokeIndex: 0, pointIndex: 0, strokes: drawing.strokes,
   });
 
-  async function relayRoom(relayPool: number) {
+  async function relayRoom(relayPool: number, guests = ['Bert', 'Cy']) {
     const { body: host, status } = await request<DgSession>(rooms, undefined, {
       name: 'Relay room', playerId: 'Ada', poolId: relayPool, mode: 'relay', drawSeconds: 10, guessSeconds: 12,
     });
     expect(status).toBe(201);
     const path = `${rooms}/${host.room.roomId}`;
     const players = [host];
-    for (const playerId of ['Bert', 'Cy']) {
+    for (const playerId of guests) {
       const { body, status } = await request<DgSession>(`${path}/join`, undefined, { playerId });
       expect(status).toBe(201);
       players.push(body);
@@ -103,8 +103,9 @@ describe('Draw & Guess HTTP game', () => {
   it('hides the card and hint, reuses the pool, and scores concurrent guesses in accepted order', async () => {
     const { body: host } = await request<DgSession>(rooms, undefined, { name: 'Draw room', playerId: 'Artist', poolId });
     const path = `${rooms}/${host.room.roomId}`;
-    expect(host.room.settings).toEqual({ drawSeconds: 120, guessSeconds: 120, hintsEnabled: true });
-    getDb().prepare("UPDATE dg_rooms SET state_json = json_remove(state_json, '$.mode') WHERE room_id = ?").run(host.room.roomId);
+    expect(host.room.settings).toMatchObject({ roundSeconds: 180, hintsEnabled: true });
+    getDb().prepare("UPDATE dg_rooms SET state_json = json_remove(state_json, '$.mode', '$.settings.roundSeconds') WHERE room_id = ?")
+      .run(host.room.roomId);
     expect((await state(path)).mode).toBe('classic');
     expect((await act(path, host.token, { action: 'start' })).status).toBe(409);
     const { body: first } = await request<DgSession>(`${path}/join`, undefined, { playerId: 'First' });
@@ -113,27 +114,28 @@ describe('Draw & Guess HTTP game', () => {
     const { body: active } = await act(path, host.token, { action: 'start' });
     const code = active.turn!.answer!.code;
     expect(codes).toContain(code);
-    expect(active.deadlineAt).toBe(now + 120_000);
-    expect((await state(path, first.token)).turn).toMatchObject({ answer: null, hint: null, hasDrawing: false });
+    expect(active.deadlineAt).toBe(now + 180_000);
+    expect((await state(path, first.token)).turn).toMatchObject({ answer: null, hint: null, hintAt: now + 90_000, hasDrawing: false });
     expect((await state(path)).turn?.answer).toBeNull();
     expect((await request(`${path}/drawing/1`)).status).toBe(404);
     expect((await request(`${path}/cards`)).status).toBe(401);
     const filtered = await request<GuessCardPage>(`${path}/cards?category=2`, first.token);
     expect(filtered.body.cards.map((card) => card.code)).toEqual([codes[1]]);
-    expect((await act(path, first.token, { action: 'submit', turn: 1, drawing })).status).toBe(403);
-    const malformed = { strokes: [{ color: 'red', width: 10, points: [[0, 1]] }] };
-    expect((await request(`${path}/action`, host.token, { action: 'submit', turn: 1, drawing: malformed })).status).toBe(400);
-    expect((await act(path, host.token, { action: 'submit', turn: 1, drawing })).body.phase).toBe('guessing');
-    expect((await request<DgDrawing>(`${path}/drawing/1`)).body).toEqual(drawing);
+    const live = `${path}/drawing/1/live`;
+    const malformed = { ...firstPatch(), strokes: [{ color: 'red', width: 10, points: [[0, 1]] }] };
+    expect((await request(live, host.token, malformed)).status).toBe(400);
+    expect((await request(live, host.token, firstPatch())).status).toBe(200);
+    expect((await request(`${path}/drawing/1`)).status).toBe(404);
     expect((await act(path, host.token, { action: 'guess', turn: 1, code })).status).toBe(403);
     expect((await act(path, first.token, { action: 'guess', turn: 1, code: 10003 })).status).toBe(400);
 
-    now += 59_999;
+    now += 89_999;
     expect((await state(path, first.token)).turn?.hint).toBeNull();
     now++;
     expect((await state(path, first.token)).turn?.hint?.candidateCount).toBeLessThan(codes.length);
     const wrong = codes.find((candidate) => candidate !== code)!;
     expect((await act(path, first.token, { action: 'guess', turn: 1, code: wrong })).body.viewerLastGuess?.correct).toBe(false);
+    expect(await state(path, first.token)).toMatchObject({ phase: 'drawing', deadlineAt: active.deadlineAt });
     expect((await state(path, second.token)).viewerLastGuess).toBeNull();
     expect(await act(path, first.token, { action: 'guess', turn: 1, code })).toEqual({
       status: 429, body: { code: 'DG_GUESS_RATE_LIMIT' },
@@ -142,23 +144,29 @@ describe('Draw & Guess HTTP game', () => {
     const attempts = await Promise.all([first, second].map(({ token }) => act(path, token, { action: 'guess', turn: 1, code })));
     expect(attempts.map(({ status }) => status)).toEqual([200, 200]);
     const result = await state(path);
-    expect(result.phase).toBe('reveal');
+    expect(result).toMatchObject({ phase: 'reveal', deadlineAt: null });
     expect(result.turn?.answer?.code).toBe(code);
     expect(result.turn?.drawerPoints).toBe(2);
     expect(result.turn?.solves.map(({ points }) => points)).toEqual([2, 1]);
     expect(result.turn?.solves.map(({ playerId }) => playerId).sort()).toEqual(['First', 'Second']);
+    expect((await request<DgDrawing>(`${path}/drawing/1`)).body).toEqual(drawing);
 
     now += 10_000;
+    expect((await state(path)).phase).toBe('reveal');
+    expect((await act(path, first.token, { action: 'next', turn: 1 })).status).toBe(403);
+    expect((await act(path, first.token, { action: 'finish', turn: 1 })).status).toBe(403);
+    expect((await act(path, host.token, { action: 'next', turn: 1 })).body.phase).toBe('drawing');
     const next = await state(path, first.token);
     expect(next.phase).toBe('drawing');
     expect(next.turn).toMatchObject({ number: 2, drawerId: 'First' });
     expect(next.turn?.answer?.code).not.toBe(code);
+    expect(next.players).toEqual(result.players);
     expect((await request(`${path}/drawing/1`)).status).toBe(404);
   });
 
   it('recovers drawing deadlines from SQLite, applies custom timers, and keeps hints off', async () => {
     const { body: host } = await request<DgSession>(rooms, undefined, {
-      name: 'Timed room', playerId: 'Artist', poolId, drawSeconds: 10, guessSeconds: 12, hintsEnabled: false,
+      name: 'Timed room', playerId: 'Artist', poolId, roundSeconds: 10, hintsEnabled: false,
     });
     const path = `${rooms}/${host.room.roomId}`;
     const { body: guest } = await request<DgSession>(`${path}/join`, undefined, { playerId: 'Guest' });
@@ -172,26 +180,28 @@ describe('Draw & Guess HTTP game', () => {
     expect((await state(path)).phase).toBe('reveal');
     expect((await state(path)).turn).toMatchObject({ hasDrawing: false, drawerPoints: 0, solves: [] });
 
-    now += 10_000;
+    expect((await act(path, host.token, { action: 'next', turn: 1 })).body.phase).toBe('drawing');
     const next = await state(path, guest.token);
     expect(next.turn).toMatchObject({ number: 2, drawerId: 'Guest' });
     const code = next.turn!.answer!.code;
     expect((await request(`${path}/drawing/2/live`, guest.token, firstPatch())).status).toBe(200);
     closeDb();
     expect((await request<DgLiveDrawing>(`${path}/drawing/2/live`)).body.strokes).toEqual(drawing.strokes);
-    now += 10_000;
-    expect(await state(path)).toMatchObject({ phase: 'guessing', deadlineAt: now + 12_000, turn: { hasDrawing: true } });
-    expect((await request<DgDrawing>(`${path}/drawing/2`)).body).toEqual(drawing);
-    now += 6000;
-    expect((await state(path, host.token)).turn?.hint).toBeNull();
-    now += 6000;
+    now += 5000;
+    expect((await state(path, host.token)).turn).toMatchObject({ hint: null, hintAt: null });
+    now += 5000;
     expect((await act(path, host.token, { action: 'guess', turn: 2, code })).status).toBe(409);
-    const final = await state(path);
+    expect(await state(path)).toMatchObject({ phase: 'reveal', deadlineAt: null, turn: { hasDrawing: true } });
+    expect((await request<DgDrawing>(`${path}/drawing/2`)).body).toEqual(drawing);
+    now += 10_000;
+    expect((await state(path)).phase).toBe('reveal');
+    expect((await act(path, host.token, { action: 'finish', turn: 1 })).status).toBe(409);
+    const { body: final } = await act(path, host.token, { action: 'finish', turn: 2 });
     expect(final.phase).toBe('finished');
     expect(final.players.map(({ score }) => score)).toEqual([0, 0]);
   });
 
-  it('streams versioned edits before submission and freezes the drawing when everyone guesses it', async () => {
+  it('streams versioned edits and freezes the drawing when everyone guesses it', async () => {
     const { body: host } = await request<DgSession>(rooms, undefined, { name: 'Live canvas', playerId: 'Artist', poolId });
     const path = `${rooms}/${host.room.roomId}`;
     const { body: guest } = await request<DgSession>(`${path}/join`, undefined, { playerId: 'Guesser' });
@@ -255,7 +265,7 @@ describe('Draw & Guess HTTP game', () => {
       expect((await state(path)).turn?.answer).toBeNull();
       expect((await act(path, host.token, { action: 'guess', turn: 1, code })).status).toBe(403);
       const guessed = await act(path, guest.token, { action: 'guess', turn: 1, code });
-      expect(guessed.body).toMatchObject({ phase: 'reveal', turn: { hasDrawing: true, drawerPoints: 1 } });
+      expect(guessed.body).toMatchObject({ phase: 'reveal', deadlineAt: null, turn: { hasDrawing: true, drawerPoints: 1 } });
       expect(await event('closed')).toBeNull();
       expect((await request<DgDrawing>(`${path}/drawing/1`)).body).toEqual(drawing);
       expect((await request(livePath)).status).toBe(404);
@@ -265,27 +275,58 @@ describe('Draw & Guess HTTP game', () => {
     }
   });
 
-  it('keeps the solve order and cooldown when the artist submits the picture', async () => {
+  it('rotates artists and can draw from the pool again after using every card', async () => {
     const { body: host } = await request<DgSession>(rooms, undefined, { name: 'Live guesses', playerId: 'Artist', poolId });
     const path = `${rooms}/${host.room.roomId}`;
-    const { body: first } = await request<DgSession>(`${path}/join`, undefined, { playerId: 'First' });
-    const { body: second } = await request<DgSession>(`${path}/join`, undefined, { playerId: 'Second' });
-    const code = (await act(path, host.token, { action: 'start' })).body.turn!.answer!.code;
-    expect((await act(path, first.token, { action: 'guess', turn: 1, code })).body).toMatchObject({
-      phase: 'drawing', turn: { answer: null, solves: [{ playerId: 'First', points: 2 }] },
+    const { body: guest } = await request<DgSession>(`${path}/join`, undefined, { playerId: 'Guest' });
+    await act(path, host.token, { action: 'start' });
+    const dealt: number[] = [];
+    for (let turn = 1; turn <= 4; turn++) {
+      const [artist, guesser] = turn % 2 === 1 ? [host, guest] : [guest, host];
+      const active = await state(path, artist.token);
+      expect(active.turn).toMatchObject({ number: turn, drawerId: artist.room.viewerId });
+      const code = active.turn!.answer!.code;
+      dealt.push(code);
+      const { body: result } = await act(path, guesser.token, { action: 'guess', turn, code });
+      expect(result).toMatchObject({ phase: 'reveal', deadlineAt: null });
+      expect(result.players.map(({ score }) => score)).toEqual([turn, turn]);
+      if (turn < 4) expect((await act(path, host.token, { action: 'next', turn })).body.phase).toBe('drawing');
+    }
+    expect(dealt.slice(0, 3).sort()).toEqual(codes);
+    expect(codes).toContain(dealt[3]);
+  });
+
+  it('honors a legacy guessing deadline and waits for the host in an old reveal', async () => {
+    const { body: host } = await request<DgSession>(rooms, undefined, {
+      name: 'Legacy room', playerId: 'Artist', poolId, roundSeconds: 10, drawSeconds: 10, guessSeconds: 12,
     });
-    const wrong = codes.find((candidate) => candidate !== code)!;
-    expect((await act(path, second.token, { action: 'guess', turn: 1, code: wrong })).body.viewerLastGuess?.correct).toBe(false);
-    expect((await act(path, host.token, { action: 'submit', turn: 1, drawing })).body.phase).toBe('guessing');
-    expect((await act(path, second.token, { action: 'guess', turn: 1, code })).status).toBe(429);
-    expect((await act(path, first.token, { action: 'guess', turn: 1, code })).status).toBe(409);
-    now += 1000;
-    expect((await act(path, second.token, { action: 'guess', turn: 1, code })).body).toMatchObject({
-      phase: 'reveal', turn: { solves: [{ playerId: 'First', points: 2 }, { playerId: 'Second', points: 1 }], drawerPoints: 2 },
+    const path = `${rooms}/${host.room.roomId}`;
+    await request<DgSession>(`${path}/join`, undefined, { playerId: 'Guest' });
+    await act(path, host.token, { action: 'start' });
+    await request(`${path}/drawing/1/live`, host.token, firstPatch());
+    now += 10_000;
+    expect((await state(path)).phase).toBe('reveal');
+    const setLegacyPhase = getDb().prepare(`
+      UPDATE dg_rooms SET phase = @phase, deadline_at = @deadline,
+        state_json = json_set(json_remove(state_json, '$.settings.roundSeconds'), '$.phase', @phase, '$.deadlineAt', @deadline)
+      WHERE room_id = @roomId
+    `);
+    const roomId = host.room.roomId;
+    setLegacyPhase.run({ roomId, phase: 'guessing', deadline: now + 12_000 });
+    expect(await state(path)).toMatchObject({
+      phase: 'guessing', deadlineAt: now + 12_000, turn: { hintAt: now + 6000, hint: null, answer: null, hasDrawing: true },
+    });
+    now += 12_000;
+    expect(await state(path)).toMatchObject({ phase: 'reveal', deadlineAt: null });
+    setLegacyPhase.run({ roomId, phase: 'reveal', deadline: now + 10_000 });
+    now += 11_000;
+    expect(await state(path)).toMatchObject({ phase: 'reveal', deadlineAt: null, turn: { number: 1 } });
+    expect((await act(path, host.token, { action: 'next', turn: 1 })).body).toMatchObject({
+      phase: 'drawing', deadlineAt: now + 22_000, settings: { roundSeconds: 22 },
     });
   });
 
-  it('rotates a private drawing for every chain across shared barriers and scores in reveal order', async () => {
+  it('finishes a stored combined relay under its original rules and starts an alternating round', async () => {
     const dealCodes = Array.from({ length: 9 }, (_, index) => 10000 + index);
     const pool = app.get(GuessPoolsService).create({ name: 'Relay pool', codes: dealCodes });
     const { path, players } = await relayRoom(pool.poolId);
@@ -294,6 +335,7 @@ describe('Draw & Guess HTTP game', () => {
     expect(room.mode).toBe('relay');
     expect(room.deadlineAt).toBe(now + 10_000);
     expect(room.settings.hintsEnabled).toBe(false);
+    getDb().prepare("UPDATE dg_rooms SET state_json = json_remove(state_json, '$.relay.rules') WHERE room_id = ?").run(room.roomId);
     expect((await state(path)).relay).toMatchObject({ step: 1, choices: [], hasIncomingDrawing: false });
     const offers = await Promise.all(players.map(async ({ token }) => {
       const view = await state(path, token);
@@ -320,7 +362,7 @@ describe('Draw & Guess HTTP game', () => {
     const next = await state(path, bert);
     expect(next.deadlineAt).toBe(now + 12_000);
     expect(next.turn).toBeNull();
-    expect(next.relay).toMatchObject({ step: 2, choices: [], hasIncomingDrawing: true, submittedCount: 0 });
+    expect(next.relay).toMatchObject({ step: 2, stepCount: 3, action: 'combined', choices: [], hasIncomingDrawing: true, submittedCount: 0 });
     expect((await request(`${path}/relay/1/incoming/2`)).status).toBe(401);
     const received = await Promise.all([ada, bert, cy].map((token) => request<DgDrawing>(`${path}/relay/1/incoming/2`, token)));
     expect(received.map(({ body }) => body)).toEqual([sketches[2], sketches[0], sketches[1]]);
@@ -353,16 +395,79 @@ describe('Draw & Guess HTTP game', () => {
       { score: 3, relayPoints: { guesses: 1, drawings: 2 } },
     ]);
     const newRound = (await act(path, ada, { action: 'relay-next', round: 1 })).body;
-    expect(newRound.relay).toMatchObject({ kind: 'active', round: 2, step: 1, submittedCount: 0 });
+    expect(newRound.relay).toMatchObject({ kind: 'active', round: 2, step: 1, stepCount: 2, action: 'opening', submittedCount: 0 });
     expect(newRound.players).toEqual(all.players);
     expect((await submit(ada, 1, answerA, 0)).status).toBe(409);
+  });
+
+  it('alternates private sketches and guesses, scoring the prompt the artist received', async () => {
+    const dealCodes = Array.from({ length: 12 }, (_, index) => 10000 + index);
+    const pool = app.get(GuessPoolsService).create({ name: 'Alternating relay pool', codes: dealCodes });
+    const { path, players } = await relayRoom(pool.poolId, ['Bert', 'Cy', 'Dee']);
+    const started = (await act(path, players[0].token, { action: 'start' })).body;
+    expect(started.relay).toMatchObject({ step: 1, stepCount: 4, action: 'opening' });
+    const offers = await Promise.all(players.map(async ({ token }) => activeRelay(await state(path, token)).choices));
+    expect(offers.flat().map(({ code }) => code).sort((a, b) => a - b)).toEqual(dealCodes);
+    const [answerA, answerB, answerC, answerD] = offers.map(([card]) => card.code);
+    const sketches: DgDrawing[] = Array.from({ length: 8 }, (_, index) => ({
+      strokes: [{ color: '#a23e17', width: 5, points: [[index, 50]] }],
+    }));
+    const submit = (seat: number, step: number, entry: { code: number; drawing?: DgDrawing } | { drawing: DgDrawing; code?: never }) =>
+      act(path, players[seat].token, { action: 'relay-submit', round: 1, step, ...entry });
+
+    expect((await submit(0, 1, { code: answerA })).status).toBe(400);
+    expect((await submit(0, 1, { code: answerA, drawing: sketches[0] })).body.relay).toMatchObject({ step: 1, submittedCount: 1 });
+    expect((await request(`${path}/relay/1/incoming/2`, players[1].token)).status).toBe(404);
+    for (const seat of [1, 2, 3]) {
+      expect((await submit(seat, 1, { code: offers[seat][0].code, drawing: sketches[seat] })).status).toBe(200);
+    }
+    const secondStep = await state(path, players[1].token);
+    expect(secondStep.deadlineAt).toBe(now + 12_000);
+    expect(secondStep.relay).toMatchObject({ step: 2, action: 'guess', prompt: null, choices: [], hasIncomingDrawing: true });
+    expect((await request(`${path}/relay/1/incoming/2`)).status).toBe(401);
+    const received = await Promise.all(players.map(({ token }) => request<DgDrawing>(`${path}/relay/1/incoming/2`, token)));
+    expect(received.map(({ body }) => body)).toEqual([sketches[3], sketches[0], sketches[1], sketches[2]]);
+    expect((await submit(1, 2, { code: answerB, drawing: sketches[1] })).status).toBe(400);
+    for (const [seat, code] of [answerD, answerB, answerB, answerC].entries()) {
+      expect((await submit(seat, 2, { code })).status).toBe(200);
+    }
+
+    const drawingStep = await state(path, players[2].token);
+    expect(drawingStep.deadlineAt).toBe(now + 10_000);
+    expect(drawingStep.relay).toMatchObject({ step: 3, action: 'draw', prompt: { code: answerB }, hasIncomingDrawing: false });
+    expect((await state(path)).relay).toMatchObject({ step: 3, prompt: null });
+    expect((await request(`${path}/relay/1/incoming/3`, players[2].token)).status).toBe(404);
+    expect((await request(`${path}/relay/1/chains/1`)).status).toBe(404);
+    expect((await submit(2, 3, { code: answerA, drawing: sketches[6] })).status).toBe(400);
+    for (const seat of [0, 1, 2, 3]) expect((await submit(seat, 3, { drawing: sketches[seat + 4] })).status).toBe(200);
+
+    const lastStep = await state(path, players[3].token);
+    expect(lastStep.deadlineAt).toBe(now + 12_000);
+    expect(lastStep.relay).toMatchObject({ step: 4, action: 'guess', prompt: null, hasIncomingDrawing: true });
+    expect((await request<DgDrawing>(`${path}/relay/1/incoming/4`, players[3].token)).body).toEqual(sketches[6]);
+    expect(lastStep.players.every(({ score }) => score === 0)).toBe(true);
+    for (const [seat, code] of [answerB, answerC, answerD, answerB].entries()) expect((await submit(seat, 4, { code })).status).toBe(200);
+
+    const revealed = await state(path);
+    expect(revealed.relay).toEqual({ kind: 'reveal', round: 1, revealedCount: 1 });
+    expect(revealed.players.map(({ score }) => score)).toEqual([0, 0, 1, 1]);
+    const { body: chain } = await request<DgRelayChainView>(`${path}/relay/1/chains/1`);
+    expect(chain.answer.code).toBe(answerA);
+    expect(chain.steps).toMatchObject([
+      { playerId: 'Ada', action: 'opening', hasDrawing: true },
+      { playerId: 'Bert', action: 'guess', guess: { code: answerB }, correct: false, receivedFromStep: 1, hasDrawing: false },
+      { playerId: 'Cy', action: 'draw', prompt: { code: answerB }, hasDrawing: true },
+      { playerId: 'Dee', action: 'guess', guess: { code: answerB }, correct: true, receivedFromStep: 3, hasDrawing: false },
+    ]);
+    expect((await request(`${path}/relay/1/chains/1/drawings/2`)).status).toBe(404);
+    expect((await request<DgDrawing>(`${path}/relay/1/chains/1/drawings/3`)).body).toEqual(sketches[6]);
   });
 
   it('recovers relay deadlines and credits the actual artist when an intervening sketch timed out', async () => {
     const smallPool = app.get(GuessPoolsService).create({ name: 'Two relay cards', codes: codes.slice(0, 2) });
     expect((await request(rooms, undefined, { name: 'Small pool', playerId: 'Ada', mode: 'relay', poolId: smallPool.poolId })).status).toBe(409);
-    const { path, players } = await relayRoom(poolId);
-    const [ada, bert, cy] = players.map(({ token }) => token);
+    const { path, players } = await relayRoom(poolId, ['Bert', 'Cy', 'Dee', 'Eve']);
+    const [ada, bert, cy, dee] = players.map(({ token }) => token);
     const start = (await act(path, ada, { action: 'start' })).body;
     const answer = activeRelay(start).choices[0].code;
     const cyDefault = activeRelay(await state(path, cy)).choices[0].code;
@@ -373,25 +478,32 @@ describe('Draw & Guess HTTP game', () => {
     const restarted = new DgService(app.get(CardsService), app.get(GuessPoolsService), app.get(RealtimeService));
     restarted.onModuleInit();
     restarted.onModuleDestroy();
-    expect((await state(path, bert)).relay).toMatchObject({ step: 2, hasIncomingDrawing: true });
+    expect((await state(path, bert)).relay).toMatchObject({ step: 2, stepCount: 4, action: 'guess', hasIncomingDrawing: true });
     expect((await state(path, cy)).relay).toMatchObject({ step: 2, hasIncomingDrawing: false });
+    expect((await act(path, cy, { action: 'relay-submit', round: 1, step: 2, code: codes[0] })).status).toBe(200);
     now += 12_000;
-    expect((await state(path, cy)).relay).toMatchObject({ step: 3, hasIncomingDrawing: true });
-    expect((await request<DgDrawing>(`${path}/relay/1/incoming/3`, cy)).body).toEqual(drawing);
-    expect((await act(path, cy, { action: 'relay-submit', round: 1, step: 3, code: answer, drawing })).status).toBe(200);
+    expect((await state(path, cy)).relay).toMatchObject({ step: 3, action: 'draw', prompt: { code: answer } });
+    expect((await state(path, dee)).relay).toMatchObject({ step: 3, action: 'draw', prompt: { code: codes[0] } });
+    now += 10_000;
+    expect((await state(path, dee)).relay).toMatchObject({ step: 4, action: 'guess', hasIncomingDrawing: true });
+    expect((await request<DgDrawing>(`${path}/relay/1/incoming/4`, dee)).body).toEqual(drawing);
+    expect((await act(path, dee, { action: 'relay-submit', round: 1, step: 4, code: answer })).status).toBe(200);
     now += 12_000;
     const revealed = await state(path);
     expect(revealed.relay).toEqual({ kind: 'reveal', round: 1, revealedCount: 1 });
-    expect(revealed.players.map(({ score }) => score)).toEqual([1, 0, 1]);
+    expect(revealed.players.map(({ score }) => score)).toEqual([1, 0, 0, 1, 0]);
     const { body: chain } = await request<DgRelayChainView>(`${path}/relay/1/chains/1`);
-    expect(chain.steps[1]).toMatchObject({ playerId: 'Bert', guess: null, correct: null, hasDrawing: false });
-    expect(chain.steps[2]).toMatchObject({ playerId: 'Cy', correct: true, receivedFromStep: 1 });
+    expect(chain.steps.map(({ playerId }) => playerId)).toEqual(['Ada', 'Bert', 'Cy', 'Dee']);
+    expect(chain.steps[2]).toMatchObject({ action: 'draw', hasDrawing: false });
+    expect(chain.steps[3]).toMatchObject({ action: 'guess', correct: true, receivedFromStep: 1 });
 
     now += 24 * 60 * 60 * 1000;
     const final = await state(path);
     expect(final.phase).toBe('finished');
-    expect(final.relay).toEqual({ kind: 'reveal', round: 1, revealedCount: 3 });
+    expect(final.relay).toEqual({ kind: 'reveal', round: 1, revealedCount: 5 });
     expect(final.players).toEqual(revealed.players);
+    expect((await request<DgRelayChainView>(`${path}/relay/1/chains/2`)).body.steps[1])
+      .toMatchObject({ playerId: 'Cy', guess: { code: codes[0] }, correct: null, receivedFromStep: null });
     expect((await request<DgRelayChainView>(`${path}/relay/1/chains/3`)).body.answer.code).toBe(cyDefault);
   });
 });

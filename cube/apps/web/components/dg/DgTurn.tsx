@@ -84,9 +84,10 @@ export function DgTurn({ room, turn, receivedAt, token, language, busy, run }: {
   const guessing = room.phase === 'guessing';
   const canGuess = drawing || guessing;
   const revealed = room.phase === 'reveal' || room.phase === 'finished';
+  const isHost = room.viewerId !== null && room.viewerId === room.hostId;
   const isDrawer = room.viewerId === turn.drawerId;
   const solved = turn.solves.some((entry) => entry.playerId === room.viewerId);
-  const hintPending = room.deadlineAt !== null && room.serverNow < room.deadlineAt - room.settings.guessSeconds * 500;
+  const hintPending = turn.hintAt !== null && room.serverNow < turn.hintAt;
   const scores = [...room.players].sort((a, b) => b.score - a.score);
   const path = `/rooms/${room.roomId}/drawing/${turn.number}`;
   const stage = drawing ? text.drawAndGuess : guessing ? text.guessTitle : room.phase === 'reveal' ? shared.roundOver : shared.finished;
@@ -95,26 +96,29 @@ export function DgTurn({ room, turn, receivedAt, token, language, busy, run }: {
     <>
       <div className="dg-stage">
         <div className="min-w-0">
-          <strong>{fillText(text.turn, { turn: turn.number, total: room.playerCount })} · {stage}</strong>
+          <strong>{fillText(text.turn, { turn: turn.number })} · {stage}</strong>
           <p className="guess-muted break-words">{fillText(text.drawer, { player: turn.drawerId })}</p>
         </div>
-        {running && <span className="dg-clock" role="timer" title={room.phase === 'reveal' ? text.nextTurn : stage}>
-          {room.phase === 'reveal' && <span className="mr-2 text-xs font-sans">{text.nextTurn}</span>}{countdown}
-        </span>}
+        {running && <span className="dg-clock" role="timer" title={stage}>{countdown}</span>}
+        {room.phase === 'reveal' && (isHost ? <div className="flex flex-wrap gap-2">
+          <button type="button" className="guess-primary" disabled={busy}
+            onClick={() => void run({ action: 'next', turn: turn.number })}>{text.nextRound}</button>
+          <button type="button" className="guess-secondary" disabled={busy}
+            onClick={() => void run({ action: 'finish', turn: turn.number })}>{text.finish}</button>
+        </div> : <p className="guess-muted" role="status">{text.waitForNextRound}</p>)}
       </div>
       <div className="dg-grid">
         <div className="dg-stack">
           {turn.answer && <DgAnswer card={turn.answer} label={revealed ? text.answer : text.yourCard}
             description={drawing && isDrawer ? text.drawHelp : undefined} />}
           {drawing && (isDrawer && token
-            ? <DgLiveSketch key={turn.number} path={path} token={token} text={text} disabled={busy || seconds === 0}
-                submit={(sketch) => void run({ action: 'submit', turn: turn.number, drawing: sketch })} />
+            ? <DgLiveSketch key={turn.number} path={path} token={token} text={text} disabled={seconds === 0} />
             : <DgLivePicture key={turn.number} path={path} text={text} />)}
           {turn.hasDrawing && <DgPicture key={turn.number} path={path} title={text.submittedDrawing} shared={shared} />}
           {revealed && !turn.hasDrawing && <section className="guess-panel"><p>{text.drawTimedOut}</p></section>}
         </div>
         <div className="dg-stack">
-          {guessing && room.settings.hintsEnabled && (
+          {canGuess && !isDrawer && room.settings.hintsEnabled && (
             <section className="guess-panel" aria-label={text.hint}>
               {turn.hint ? <div className="flex flex-wrap items-center gap-2">
                 <h2>{text.hint}</h2>

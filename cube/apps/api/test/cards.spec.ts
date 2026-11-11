@@ -296,6 +296,34 @@ describe('ygopro card metadata decoding', () => {
     }
   });
 
+  it('matches card groups and combines them with other subtype tags', () => {
+    const cards = new CardsService();
+    cards.poolCodes();
+    const insert = getDb().prepare('INSERT INTO cards(code, name, type, search_text) VALUES (?, ?, ?, ?)');
+    const normal = 77000001, ritual = 77000002, mainPendulum = 77000003;
+    const fusion = 77000004, synchro = 77000005, xyzPendulum = 77000006, link = 77000007;
+    const normalSpell = 77000008, ritualSpell = 77000009, normalTrap = 77000010, continuousTrap = 77000011;
+    for (const [code, type] of [
+      [normal, 0x11], [ritual, 0xa1], [mainPendulum, 0x1000021],
+      [fusion, 0x41], [synchro, 0x2021], [xyzPendulum, 0x1800021], [link, 0x4000021],
+      [normalSpell, 0x2], [ritualSpell, 0x82], [normalTrap, 0x4], [continuousTrap, 0x20004],
+      [77000012, TYPE_TOKEN | 0x11],
+    ]) insert.run(code, String(code), type, 'cardgroupfixture');
+    const found = (subtype: string, category?: string) => cards.searchCatalog(
+      parseCardSearchParams({ q: 'cardgroupfixture', subtype, category }),
+    ).cards.map(({ code }) => code);
+
+    expect(found('main-deck-monster')).toEqual([normal, ritual, mainPendulum]);
+    expect(found('extra-deck-monster')).toEqual([fusion, synchro, xyzPendulum, link]);
+    expect(found('monster')).toEqual([normal, ritual, mainPendulum, fusion, synchro, xyzPendulum, link]);
+    expect(found('spell')).toEqual([normalSpell, ritualSpell]);
+    expect(found('trap')).toEqual([normalTrap, continuousTrap]);
+    expect(found('normal-trap')).toEqual([normalTrap]);
+    expect(found('（main-deck-monster 或 extra-deck-monster） 与 pendulum')).toEqual([mainPendulum, xyzPendulum]);
+    expect(found('(spell or trap) and not (normal-spell or normal-trap)')).toEqual([ritualSpell, continuousTrap]);
+    expect(found('not monster', '4')).toEqual([normalTrap, continuousTrap]);
+  });
+
   it('counts base fields once per eligible artwork group and keeps rules-name aliases separate', () => {
     const cards = new CardsService();
     cards.poolCodes();

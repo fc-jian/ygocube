@@ -2,7 +2,7 @@
 
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
-import type { DgActionRequest, DgRoomView, DgSession } from '@ygocube/shared';
+import { DG_DEFAULT_ROUND_SECONDS, type DgActionRequest, type DgRoomView, type DgSession } from '@ygocube/shared';
 import { GuessFrame, useGuessLanguage } from '@/components/guess/GuessFrame';
 import { useGuessPolling } from '@/components/guess/guess-client';
 import { fillText, guessText, type GuessLanguage } from '@/components/guess/guess-text';
@@ -125,6 +125,12 @@ function DgRoomSession({ roomId, token, updateToken, language }: {
   }
   const isHost = room.viewerId !== null && room.viewerId === room.hostId;
   const isRelay = room.mode === 'relay';
+  const settings = isRelay ? fillText(text.relay.settings, {
+    draw: room.settings.drawSeconds, guess: room.settings.guessSeconds,
+  }) : fillText(text.settings, {
+    seconds: room.settings.roundSeconds ?? DG_DEFAULT_ROUND_SECONDS,
+    hints: room.settings.hintsEnabled ? text.hintsOn : text.hintsOff,
+  });
 
   return (
     <>
@@ -133,10 +139,8 @@ function DgRoomSession({ roomId, token, updateToken, language }: {
           <p className="guess-kicker">Draw &amp; Guess <span>{room.roomId}</span></p>
           <h1>{room.name}</h1>
           <p className="guess-muted break-words">
-            {room.poolId === 0 ? shared.fullPool : room.poolName} · {isRelay ? text.relay.mode : text.classic} · {fillText(isRelay ? text.relay.settings : text.settings, {
-              draw: room.settings.drawSeconds, guess: room.settings.guessSeconds,
-              hints: room.settings.hintsEnabled ? text.hintsOn : text.hintsOff,
-            })}{!token && ` · ${shared.spectate}`}
+            {room.poolId === 0 ? shared.fullPool : room.poolName} · {isRelay ? text.relay.mode : text.classic} · {settings}
+            {!token && ` · ${shared.spectate}`}
           </p>
         </div>
         <button type="button" className="guess-secondary" onClick={() => void copy()}>{copied ? shared.copied : shared.copy}</button>
