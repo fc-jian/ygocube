@@ -13,6 +13,7 @@ import type { Response } from 'express';
 import { safeHashEqual, sha256 } from '../auth/auth.guard';
 import { CardsService, TYPE_TOKEN } from '../cards/cards.service';
 import { getDb } from '../db';
+import { randomSample } from '../games/random-sample';
 import { GuessPoolsService } from '../guess/guess-pools.service';
 import { buildOpeningHintOptions } from '../guess/opening-hints';
 import { RealtimeService } from '../realtime/realtime.service';
@@ -24,6 +25,8 @@ import {
 const MAX_PLAYERS = 16;
 const ROOM_IDLE_MS = 24 * 60 * 60 * 1000;
 const DRAWING_WRITE_INTERVAL_MS = 80;
+const MONSTER = 0x1;
+const LINK = 0x4000000;
 
 type Phase = DgRoomView['phase'];
 
@@ -51,6 +54,7 @@ interface Room extends Omit<DgRoomSummary, 'playerCount' | 'mode'> {
   deadlineAt: number | null;
   settings: DgSettings;
   players: Player[];
+  drawerOrder?: string[];
   usedCodes: number[];
   turn: Turn | null;
   relay?: RelayRound;
@@ -75,6 +79,12 @@ function classicRoundSeconds({ roundSeconds, drawSeconds, guessSeconds }: DgSett
   if (roundSeconds !== undefined) return roundSeconds;
   if (drawSeconds === DG_DEFAULT_SECONDS && guessSeconds === DG_DEFAULT_SECONDS) return DG_DEFAULT_ROUND_SECONDS;
   return Math.min(DG_MAX_SECONDS, drawSeconds + guessSeconds);
+}
+
+function allowsClassicHint(type: number, method: GuessOpeningHint['method']): boolean {
+  if (method === 'release-era') return true;
+  if (!(type & MONSTER)) return method === 'field-size';
+  return method === 'attack' || method === 'summon-value' || (method === 'defense' && !(type & LINK));
 }
 
 function writeRoom(room: Room, event: object, now: number): void {
@@ -273,7 +283,7 @@ export class DgService implements OnModuleInit, OnModuleDestroy {
           } else {
             if (codes.length < room.players.length) throw new ConflictException({ code: 'DG_POOL_TOO_SMALL' });
             this.deal(room, codes, now);
-            event = { action: 'start', playerId, turn: room.turn };
+            event = { action: 'start', playerId, turn: room.turn, drawerOrder: room.drawerOrder };
           }
           break;
         }
@@ -295,7 +305,8 @@ export class DgService implements OnModuleInit, OnModuleDestroy {
           this.requireTurn(room, command.turn);
           if (command.action === 'next') this.deal(room, this.poolCodes(room), now);
           else this.finish(room);
-          event = { action: command.action, playerId, turn: room.turn };
+          event = { action: command.action, playerId, turn: room.turn,
+            ...(command.action === 'next' && { drawerOrder: room.drawerOrder }) };
           break;
         case 'relay-submit':
           this.submitRelay(room, player, command, now);
@@ -499,18 +510,28 @@ export class DgService implements OnModuleInit, OnModuleDestroy {
       remaining = codes;
     }
     const number = (room.turn?.number ?? 0) + 1;
-    const drawer = room.players[(number - 1) % room.players.length];
+    const index = (number - 1) % room.players.length;
+    if (index === 0 && !room.drawerOrder) {
+      const order = randomSample(room.players.map(({ playerId }) => playerId), room.players.length);
+      if (order[0] === room.turn?.drawerId) {
+        const other = randomInt(1, order.length);
+        [order[0], order[other]] = [order[other], order[0]];
+      }
+      room.drawerOrder = order;
+    }
+    const drawerId = room.drawerOrder?.[index] ?? room.players[index].playerId;
     const code = remaining[randomInt(remaining.length)];
     const answer = this.cards.get(code)!;
     let hint: GuessOpeningHint | null = null;
     if (room.settings.hintsEnabled) {
       const catalog = this.cards.getMany(codes);
       const { options } = buildOpeningHintOptions(catalog, [code], this.cards.poolFieldSizes());
-      const useful = options[0].filter(({ candidateCount }) => candidateCount < catalog.length);
+      const useful = options[0].filter(({ method, candidateCount }) =>
+        allowsClassicHint(answer.type, method) && candidateCount < catalog.length);
       if (useful.length) hint = useful[randomInt(useful.length)];
     }
     room.usedCodes.push(code);
-    room.turn = { number, drawerId: drawer.playerId, answer, drawingVersion: null, hint, guesses: [], solves: [] };
+    room.turn = { number, drawerId, answer, drawingVersion: null, hint, guesses: [], solves: [] };
     room.phase = 'drawing';
     room.settings.roundSeconds = classicRoundSeconds(room.settings);
     room.deadlineAt = now + room.settings.roundSeconds * 1000;
@@ -569,6 +590,8 @@ export class DgService implements OnModuleInit, OnModuleDestroy {
     const activeSeconds = phase === 'drawing' ? settings.roundSeconds ?? settings.drawSeconds : settings.guessSeconds;
     const hintAt = settings.hintsEnabled && deadlineAt !== null && (phase === 'drawing' || phase === 'guessing')
       ? deadlineAt - activeSeconds * 500 : null;
+    const hint = turn?.hint && hintAt !== null && serverNow >= hintAt && allowsClassicHint(turn.answer.type, turn.hint.method)
+      ? turn.hint : null;
     const seat = room.players.findIndex(({ playerId }) => playerId === viewerId);
     return {
       ...summary(room), phase, version: room.version, serverNow,
@@ -580,7 +603,7 @@ export class DgService implements OnModuleInit, OnModuleDestroy {
       turn: turn && {
         number: turn.number, drawerId: turn.drawerId, hasDrawing: turn.drawingVersion !== null,
         answer: canSeeAnswer ? turn.answer : null,
-        hintAt, hint: hintAt !== null && serverNow >= hintAt ? turn.hint : null,
+        hintAt, hint,
         solves: turn.solves, drawerPoints: turn.solves.length,
       },
       relay: relay ? phase === 'relay' ? activeRelayView(relay, seat)

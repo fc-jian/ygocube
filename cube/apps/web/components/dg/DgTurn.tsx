@@ -122,6 +122,7 @@ export function DgTurn({ room, turn, receivedAt, token, language, busy, run }: {
             <section className="guess-panel" aria-label={text.hint}>
               {turn.hint ? <div className="flex flex-wrap items-center gap-2">
                 <h2>{text.hint}</h2>
+                <span className="guess-muted">{shared.hintMethods[turn.hint.method]}</span>
                 <GuessHintButton hint={turn.hint} text={shared} />
                 <span className="guess-muted">{fillText(shared.hintCandidates, { count: turn.hint.candidateCount })}</span>
               </div> : <p className="guess-muted" role="status">{hintPending ? text.hintPending : text.noHint}</p>}

@@ -11,6 +11,7 @@ import type {
 import { safeHashEqual, sha256 } from '../auth/auth.guard';
 import { CardsService, TYPE_TOKEN } from '../cards/cards.service';
 import { getDb } from '../db';
+import { randomSample } from '../games/random-sample';
 import { GuessPoolsService } from './guess-pools.service';
 import { drawOpeningHints } from './opening-hints';
 
@@ -84,15 +85,6 @@ interface SubmittedGuessRow {
   playerId: string;
   code: number;
   outcome: 'correct' | 'incorrect';
-}
-
-function sample<T>(values: readonly T[], count: number): T[] {
-  const items = [...values];
-  for (let index = 0; index < count; index++) {
-    const other = randomInt(index, items.length);
-    [items[index], items[other]] = [items[other], items[index]];
-  }
-  return items.slice(0, count);
 }
 
 function newPlayer(playerId: string) {
@@ -405,9 +397,9 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
     if (count === 0) throw new ConflictException({ code: 'GUESS_NEED_PLAYERS' });
     const codes = this.pools.availableCodes(this.pools.get(room.poolId).codes);
     if (codes.length < count) throw new ConflictException({ code: 'GUESS_POOL_TOO_SMALL' });
-    const answers = sample(codes, count);
+    const answers = randomSample(codes, count);
     const { hints, pools: hintPools } = drawOpeningHints(this.cards.getMany(codes), answers, this.cards.poolFieldSizes());
-    const seats = sample(participants, count).map((player, index) => ({
+    const seats = randomSample(participants, count).map((player, index) => ({
       playerId: player.playerId, code: answers[index], points: null, attempts: 0, openingHint: hints[index],
     }));
     room.round = {

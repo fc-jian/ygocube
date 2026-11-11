@@ -5,7 +5,7 @@ import type {
   DgActionRequest, DgDrawing, DgDrawingPatch, DgLiveDrawing, DgRelayChainView, DgRoomView,
   DgSession, GuessCardPage, GuessPoolSummary,
 } from '@ygocube/shared';
-import { randomUUID } from 'node:crypto';
+import crypto, { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import { AuthGuard } from '../src/auth/auth.guard';
 import { CardsService } from '../src/cards/cards.service';
@@ -47,6 +47,8 @@ describe('Draw & Guess HTTP game', () => {
     const cards = new CardsService();
     cards.poolCodes();
     getDb().prepare('UPDATE cards SET type = ? WHERE code = ?').run(0x10002, codes[1]);
+    getDb().prepare('UPDATE cards SET type = ?, level = 3 WHERE code = ?').run(0x4000021, codes[2]);
+    getDb().prepare("UPDATE cards SET setcodes_json = '[256]' WHERE code IN (?, ?)").run(codes[0], codes[2]);
     const module = await Test.createTestingModule({
       controllers: [DgController, GuessController],
       providers: [DgService, GuessService, GuessPoolsService, RealtimeService, { provide: CardsService, useValue: cards },
@@ -80,6 +82,14 @@ describe('Draw & Guess HTTP game', () => {
     baseRevision: null, revision: randomUUID(), strokeIndex: 0, pointIndex: 0, strokes: drawing.strokes,
   });
 
+  async function classicRoles(path: string, room: DgRoomView, ...players: DgSession[]) {
+    const artist = players.find(({ room: player }) => player.viewerId === room.turn?.drawerId);
+    if (!artist) throw new Error('Expected a classic artist');
+    const guessers = players.filter((player) => player !== artist);
+    const answer = (await state(path, artist.token)).turn!.answer!;
+    return { artist, guessers, answer };
+  }
+
   async function relayRoom(relayPool: number, guests = ['Bert', 'Cy']) {
     const { body: host, status } = await request<DgSession>(rooms, undefined, {
       name: 'Relay room', playerId: 'Ada', poolId: relayPool, mode: 'relay', drawSeconds: 10, guessSeconds: 12,
@@ -112,10 +122,11 @@ describe('Draw & Guess HTTP game', () => {
     const { body: second } = await request<DgSession>(`${path}/join`, undefined, { playerId: 'Second' });
     expect((await act(path, first.token, { action: 'start' })).status).toBe(403);
     const { body: active } = await act(path, host.token, { action: 'start' });
-    const code = active.turn!.answer!.code;
+    const { artist, guessers, answer: { code } } = await classicRoles(path, active, host, first, second);
+    const [guesser, otherGuesser] = guessers;
     expect(codes).toContain(code);
     expect(active.deadlineAt).toBe(now + 180_000);
-    expect((await state(path, first.token)).turn).toMatchObject({ answer: null, hint: null, hintAt: now + 90_000, hasDrawing: false });
+    expect((await state(path, guesser.token)).turn).toMatchObject({ answer: null, hint: null, hintAt: now + 90_000, hasDrawing: false });
     expect((await state(path)).turn?.answer).toBeNull();
     expect((await request(`${path}/drawing/1`)).status).toBe(404);
     expect((await request(`${path}/cards`)).status).toBe(401);
@@ -123,43 +134,43 @@ describe('Draw & Guess HTTP game', () => {
     expect(filtered.body.cards.map((card) => card.code)).toEqual([codes[1]]);
     const live = `${path}/drawing/1/live`;
     const malformed = { ...firstPatch(), strokes: [{ color: 'red', width: 10, points: [[0, 1]] }] };
-    expect((await request(live, host.token, malformed)).status).toBe(400);
-    expect((await request(live, host.token, firstPatch())).status).toBe(200);
+    expect((await request(live, artist.token, malformed)).status).toBe(400);
+    expect((await request(live, artist.token, firstPatch())).status).toBe(200);
     expect((await request(`${path}/drawing/1`)).status).toBe(404);
-    expect((await act(path, host.token, { action: 'guess', turn: 1, code })).status).toBe(403);
-    expect((await act(path, first.token, { action: 'guess', turn: 1, code: 10003 })).status).toBe(400);
+    expect((await act(path, artist.token, { action: 'guess', turn: 1, code })).status).toBe(403);
+    expect((await act(path, guesser.token, { action: 'guess', turn: 1, code: 10003 })).status).toBe(400);
 
     now += 89_999;
-    expect((await state(path, first.token)).turn?.hint).toBeNull();
+    expect((await state(path, guesser.token)).turn?.hint).toBeNull();
     now++;
-    expect((await state(path, first.token)).turn?.hint?.candidateCount).toBeLessThan(codes.length);
+    expect((await state(path, guesser.token)).turn?.hint?.candidateCount).toBeLessThan(codes.length);
     const wrong = codes.find((candidate) => candidate !== code)!;
-    expect((await act(path, first.token, { action: 'guess', turn: 1, code: wrong })).body.viewerLastGuess?.correct).toBe(false);
-    expect(await state(path, first.token)).toMatchObject({ phase: 'drawing', deadlineAt: active.deadlineAt });
-    expect((await state(path, second.token)).viewerLastGuess).toBeNull();
-    expect(await act(path, first.token, { action: 'guess', turn: 1, code })).toEqual({
+    expect((await act(path, guesser.token, { action: 'guess', turn: 1, code: wrong })).body.viewerLastGuess?.correct).toBe(false);
+    expect(await state(path, guesser.token)).toMatchObject({ phase: 'drawing', deadlineAt: active.deadlineAt });
+    expect((await state(path, otherGuesser.token)).viewerLastGuess).toBeNull();
+    expect(await act(path, guesser.token, { action: 'guess', turn: 1, code })).toEqual({
       status: 429, body: { code: 'DG_GUESS_RATE_LIMIT' },
     });
     now += 1000;
-    const attempts = await Promise.all([first, second].map(({ token }) => act(path, token, { action: 'guess', turn: 1, code })));
+    const attempts = await Promise.all(guessers.map(({ token }) => act(path, token, { action: 'guess', turn: 1, code })));
     expect(attempts.map(({ status }) => status)).toEqual([200, 200]);
     const result = await state(path);
     expect(result).toMatchObject({ phase: 'reveal', deadlineAt: null });
     expect(result.turn?.answer?.code).toBe(code);
     expect(result.turn?.drawerPoints).toBe(2);
     expect(result.turn?.solves.map(({ points }) => points)).toEqual([2, 1]);
-    expect(result.turn?.solves.map(({ playerId }) => playerId).sort()).toEqual(['First', 'Second']);
+    expect(result.turn?.solves.map(({ playerId }) => playerId).sort()).toEqual(guessers.map(({ room }) => room.viewerId).sort());
     expect((await request<DgDrawing>(`${path}/drawing/1`)).body).toEqual(drawing);
 
     now += 10_000;
     expect((await state(path)).phase).toBe('reveal');
     expect((await act(path, first.token, { action: 'next', turn: 1 })).status).toBe(403);
     expect((await act(path, first.token, { action: 'finish', turn: 1 })).status).toBe(403);
-    expect((await act(path, host.token, { action: 'next', turn: 1 })).body.phase).toBe('drawing');
-    const next = await state(path, first.token);
+    const { body: next } = await act(path, host.token, { action: 'next', turn: 1 });
     expect(next.phase).toBe('drawing');
-    expect(next.turn).toMatchObject({ number: 2, drawerId: 'First' });
-    expect(next.turn?.answer?.code).not.toBe(code);
+    expect(next.turn?.number).toBe(2);
+    expect(next.turn?.drawerId).not.toBe(active.turn?.drawerId);
+    expect((await classicRoles(path, next, host, first, second)).answer.code).not.toBe(code);
     expect(next.players).toEqual(result.players);
     expect((await request(`${path}/drawing/1`)).status).toBe(404);
   });
@@ -170,7 +181,8 @@ describe('Draw & Guess HTTP game', () => {
     });
     const path = `${rooms}/${host.room.roomId}`;
     const { body: guest } = await request<DgSession>(`${path}/join`, undefined, { playerId: 'Guest' });
-    expect((await act(path, host.token, { action: 'start' })).body.deadlineAt).toBe(now + 10_000);
+    const { body: started } = await act(path, host.token, { action: 'start' });
+    expect(started.deadlineAt).toBe(now + 10_000);
 
     now += 10_000;
     closeDb();
@@ -180,17 +192,17 @@ describe('Draw & Guess HTTP game', () => {
     expect((await state(path)).phase).toBe('reveal');
     expect((await state(path)).turn).toMatchObject({ hasDrawing: false, drawerPoints: 0, solves: [] });
 
-    expect((await act(path, host.token, { action: 'next', turn: 1 })).body.phase).toBe('drawing');
-    const next = await state(path, guest.token);
-    expect(next.turn).toMatchObject({ number: 2, drawerId: 'Guest' });
-    const code = next.turn!.answer!.code;
-    expect((await request(`${path}/drawing/2/live`, guest.token, firstPatch())).status).toBe(200);
+    const { body: next } = await act(path, host.token, { action: 'next', turn: 1 });
+    expect(next).toMatchObject({ phase: 'drawing', turn: { number: 2 } });
+    expect(next.turn?.drawerId).not.toBe(started.turn?.drawerId);
+    const { artist, guessers: [guesser], answer: { code } } = await classicRoles(path, next, host, guest);
+    expect((await request(`${path}/drawing/2/live`, artist.token, firstPatch())).status).toBe(200);
     closeDb();
     expect((await request<DgLiveDrawing>(`${path}/drawing/2/live`)).body.strokes).toEqual(drawing.strokes);
     now += 5000;
-    expect((await state(path, host.token)).turn).toMatchObject({ hint: null, hintAt: null });
+    expect((await state(path, guesser.token)).turn).toMatchObject({ hint: null, hintAt: null });
     now += 5000;
-    expect((await act(path, host.token, { action: 'guess', turn: 2, code })).status).toBe(409);
+    expect((await act(path, guesser.token, { action: 'guess', turn: 2, code })).status).toBe(409);
     expect(await state(path)).toMatchObject({ phase: 'reveal', deadlineAt: null, turn: { hasDrawing: true } });
     expect((await request<DgDrawing>(`${path}/drawing/2`)).body).toEqual(drawing);
     now += 10_000;
@@ -206,7 +218,7 @@ describe('Draw & Guess HTTP game', () => {
     const path = `${rooms}/${host.room.roomId}`;
     const { body: guest } = await request<DgSession>(`${path}/join`, undefined, { playerId: 'Guesser' });
     const { body: started } = await act(path, host.token, { action: 'start' });
-    const code = started.turn!.answer!.code;
+    const { artist, guessers: [guesser], answer: { code } } = await classicRoles(path, started, host, guest);
     const livePath = `${path}/drawing/1/live`;
     const signal = AbortSignal.timeout(4000);
     const stream = await fetch(base + `${path}/drawing/1/stream`, { signal });
@@ -235,80 +247,122 @@ describe('Draw & Guess HTTP game', () => {
       expect(await event('snapshot')).toEqual({ revision: null, strokes: [] });
       const first = firstPatch();
       expect((await request(livePath, undefined, first)).status).toBe(401);
-      expect((await request(livePath, guest.token, first)).status).toBe(403);
-      expect((await request(livePath, host.token, first)).body).toEqual({ revision: first.revision });
+      expect((await request(livePath, guesser.token, first)).status).toBe(403);
+      expect((await request(livePath, artist.token, first)).body).toEqual({ revision: first.revision });
       expect(await event('drawing')).toEqual(first);
       const version = (await state(path)).version;
-      expect((await request(livePath, host.token, first)).body).toEqual({ revision: first.revision });
+      expect((await request(livePath, artist.token, first)).body).toEqual({ revision: first.revision });
       expect((await state(path)).version).toBe(version);
-      expect((await request(livePath, host.token, firstPatch())).status).toBe(409);
+      expect((await request(livePath, artist.token, firstPatch())).status).toBe(409);
 
       const extend: DgDrawingPatch = {
         baseRevision: first.revision, revision: randomUUID(), strokeIndex: 0, pointIndex: 2,
         strokes: [{ ...drawing.strokes[0], points: [[300, 300]] }],
       };
-      expect((await request(livePath, host.token, extend)).status).toBe(429);
+      expect((await request(livePath, artist.token, extend)).status).toBe(429);
       now += 100;
-      expect((await request(livePath, host.token, extend)).status).toBe(200);
+      expect((await request(livePath, artist.token, extend)).status).toBe(200);
       expect(await event('drawing')).toEqual(extend);
-      expect((await request<DgLiveDrawing>(livePath)).body.strokes[0].points).toEqual([[1, 5], [150, 200], [300, 300]]);
+      const { strokes } = (await request<DgLiveDrawing>(livePath)).body;
+      expect(strokes[0].points).toEqual([[1, 5], [150, 200], [300, 300]]);
 
       const clear = { baseRevision: extend.revision, revision: randomUUID(), strokeIndex: 0, pointIndex: 0, strokes: [] };
       now += 100;
-      expect((await request(livePath, host.token, clear)).status).toBe(200);
+      expect((await request(livePath, artist.token, clear)).status).toBe(200);
       expect(await event('drawing')).toEqual(clear);
       expect((await request<DgLiveDrawing>(livePath)).body).toEqual({ revision: clear.revision, strokes: [] });
-      const finalPatch = { ...firstPatch(), baseRevision: clear.revision };
+      const restore = { ...firstPatch(), baseRevision: clear.revision, strokes };
       now += 100;
-      expect((await request(livePath, host.token, finalPatch)).status).toBe(200);
-      expect(await event('drawing')).toEqual(finalPatch);
+      expect((await request(livePath, artist.token, restore)).status).toBe(200);
+      expect(await event('drawing')).toEqual(restore);
       expect((await state(path)).turn?.answer).toBeNull();
-      expect((await act(path, host.token, { action: 'guess', turn: 1, code })).status).toBe(403);
-      const guessed = await act(path, guest.token, { action: 'guess', turn: 1, code });
+      expect((await act(path, artist.token, { action: 'guess', turn: 1, code })).status).toBe(403);
+      const guessed = await act(path, guesser.token, { action: 'guess', turn: 1, code });
       expect(guessed.body).toMatchObject({ phase: 'reveal', deadlineAt: null, turn: { hasDrawing: true, drawerPoints: 1 } });
       expect(await event('closed')).toBeNull();
-      expect((await request<DgDrawing>(`${path}/drawing/1`)).body).toEqual(drawing);
+      expect((await request<DgDrawing>(`${path}/drawing/1`)).body).toEqual({ strokes });
       expect((await request(livePath)).status).toBe(404);
-      expect((await request(livePath, host.token, finalPatch)).status).toBe(409);
+      expect((await request(livePath, artist.token, restore)).status).toBe(409);
     } finally {
       await reader.cancel();
     }
   });
 
-  it('rotates artists and can draw from the pool again after using every card', async () => {
+  it('persists a shuffled order with the guest first and offers only eligible hints', async () => {
     const { body: host } = await request<DgSession>(rooms, undefined, { name: 'Live guesses', playerId: 'Artist', poolId });
     const path = `${rooms}/${host.room.roomId}`;
     const { body: guest } = await request<DgSession>(`${path}/join`, undefined, { playerId: 'Guest' });
-    await act(path, host.token, { action: 'start' });
+    jest.spyOn(crypto, 'randomInt').mockImplementationOnce(() => 1);
+    const { body: started } = await act(path, host.token, { action: 'start' });
+    expect(started.turn).toMatchObject({ number: 1, drawerId: 'Guest', answer: null });
     const dealt: number[] = [];
     for (let turn = 1; turn <= 4; turn++) {
-      const [artist, guesser] = turn % 2 === 1 ? [host, guest] : [guest, host];
+      const [artist, guesser] = turn % 2 === 1 ? [guest, host] : [host, guest];
       const active = await state(path, artist.token);
       expect(active.turn).toMatchObject({ number: turn, drawerId: artist.room.viewerId });
-      const code = active.turn!.answer!.code;
+      const { code, type } = active.turn!.answer!;
       dealt.push(code);
+      now += 90_000;
+      const { hint } = (await state(path, guesser.token)).turn!;
+      expect(hint?.candidateCount).toBeLessThan(codes.length);
+      if (type & 1) {
+        const methods = ['attack', 'summon-value', 'release-era'];
+        if (!(type & 0x4000000)) methods.push('defense');
+        expect(methods).toContain(hint?.method);
+      } else {
+        expect(hint).toEqual({ method: 'field-size', group: 'no-field', candidateCount: 1 });
+      }
       const { body: result } = await act(path, guesser.token, { action: 'guess', turn, code });
       expect(result).toMatchObject({ phase: 'reveal', deadlineAt: null });
       expect(result.players.map(({ score }) => score)).toEqual([turn, turn]);
+      if (turn === 1) closeDb();
       if (turn < 4) expect((await act(path, host.token, { action: 'next', turn })).body.phase).toBe('drawing');
     }
     expect(dealt.slice(0, 3).sort()).toEqual(codes);
     expect(codes).toContain(dealt[3]);
   });
 
-  it('honors a legacy guessing deadline and waits for the host in an old reveal', async () => {
+  it('uses release eras for Spells and Traps when field size cannot narrow the pool', async () => {
+    const spell = 83764719;
+    const trap = 10045474;
+    const insert = getDb().prepare('INSERT INTO cards (code, name, type) VALUES (?, ?, ?)');
+    insert.run(spell, 'Monster Reborn', 0x2);
+    insert.run(trap, 'Infinite Impermanence', 0x4);
+    const pool = app.get(GuessPoolsService).create({ name: 'Release era pool', codes: [spell, trap] });
+    const { body: host } = await request<DgSession>(rooms, undefined, {
+      name: 'Release era hints', playerId: 'Host', poolId: pool.poolId, roundSeconds: 10,
+    });
+    const path = `${rooms}/${host.room.roomId}`;
+    const { body: guest } = await request<DgSession>(`${path}/join`, undefined, { playerId: 'Guest' });
+    let active = (await act(path, host.token, { action: 'start' })).body;
+    for (const turn of [1, 2]) {
+      const { guessers: [guesser], answer: { code } } = await classicRoles(path, active, host, guest);
+      expect((await state(path, guesser.token)).turn?.hint).toBeNull();
+      now += 5000;
+      expect((await state(path, guesser.token)).turn?.hint).toEqual({
+        method: 'release-era', group: code === spell ? 'through-2014' : '2015-2019', candidateCount: 1,
+      });
+      expect((await act(path, guesser.token, { action: 'guess', turn, code })).body.phase).toBe('reveal');
+      if (turn === 1) active = (await act(path, host.token, { action: 'next', turn })).body;
+    }
+  });
+
+  it('preserves a legacy turn while suppressing its card-type hint', async () => {
     const { body: host } = await request<DgSession>(rooms, undefined, {
       name: 'Legacy room', playerId: 'Artist', poolId, roundSeconds: 10, drawSeconds: 10, guessSeconds: 12,
     });
     const path = `${rooms}/${host.room.roomId}`;
-    await request<DgSession>(`${path}/join`, undefined, { playerId: 'Guest' });
-    await act(path, host.token, { action: 'start' });
-    await request(`${path}/drawing/1/live`, host.token, firstPatch());
+    const { body: guest } = await request<DgSession>(`${path}/join`, undefined, { playerId: 'Guest' });
+    const { body: started } = await act(path, host.token, { action: 'start' });
+    const { artist } = await classicRoles(path, started, host, guest);
+    expect((await request(`${path}/drawing/1/live`, artist.token, firstPatch())).status).toBe(200);
     now += 10_000;
     expect((await state(path)).phase).toBe('reveal');
     const setLegacyPhase = getDb().prepare(`
       UPDATE dg_rooms SET phase = @phase, deadline_at = @deadline,
-        state_json = json_set(json_remove(state_json, '$.settings.roundSeconds'), '$.phase', @phase, '$.deadlineAt', @deadline)
+        state_json = json_set(json_remove(state_json, '$.settings.roundSeconds', '$.drawerOrder'),
+          '$.phase', @phase, '$.deadlineAt', @deadline, '$.turn.drawerId', 'Artist',
+          '$.turn.hint', json('{"method":"deck","group":"main-monster","candidateCount":2}'))
       WHERE room_id = @roomId
     `);
     const roomId = host.room.roomId;
@@ -316,13 +370,15 @@ describe('Draw & Guess HTTP game', () => {
     expect(await state(path)).toMatchObject({
       phase: 'guessing', deadlineAt: now + 12_000, turn: { hintAt: now + 6000, hint: null, answer: null, hasDrawing: true },
     });
-    now += 12_000;
+    now += 6000;
+    expect((await state(path, guest.token)).turn?.hint).toBeNull();
+    now += 6000;
     expect(await state(path)).toMatchObject({ phase: 'reveal', deadlineAt: null });
     setLegacyPhase.run({ roomId, phase: 'reveal', deadline: now + 10_000 });
     now += 11_000;
     expect(await state(path)).toMatchObject({ phase: 'reveal', deadlineAt: null, turn: { number: 1 } });
     expect((await act(path, host.token, { action: 'next', turn: 1 })).body).toMatchObject({
-      phase: 'drawing', deadlineAt: now + 22_000, settings: { roundSeconds: 22 },
+      phase: 'drawing', deadlineAt: now + 22_000, settings: { roundSeconds: 22 }, turn: { drawerId: 'Guest' },
     });
   });
 

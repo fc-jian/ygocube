@@ -63,8 +63,10 @@ export function DgSketch({ text, disabled, submit, submitLabel = text.submitDraw
   const [startingStrokes] = useState(() => initialDrawing?.strokes.map((stroke) => ({ ...stroke, points: stroke.points.slice() })) ?? []);
   const strokes = useRef<DgStroke[]>(startingStrokes);
   const pointCount = useRef(startingStrokes.reduce((total, stroke) => total + stroke.points.length, 0));
+  const cleared = useRef<{ strokes: DgStroke[]; pointCount: number }[]>([]);
   const pointerId = useRef<number | null>(null);
   const [strokeCount, setStrokeCount] = useState(startingStrokes.length);
+  const [canUndoClear, setCanUndoClear] = useState(false);
   const [atLimit, setAtLimit] = useState(false);
   const [color, setColor] = useState('#17212b');
   const [width, setWidth] = useState<DgBrushWidth>(5);
@@ -114,18 +116,31 @@ export function DgSketch({ text, disabled, submit, submitLabel = text.submitDraw
 
   function undo() {
     pointerId.current = null;
-    pointCount.current -= strokes.current.pop()?.points.length ?? 0;
+    const removed = strokes.current.pop();
+    const strokeIndex = strokes.current.length;
+    if (removed) {
+      pointCount.current -= removed.points.length;
+    } else {
+      const previous = cleared.current.pop();
+      if (!previous) return;
+      strokes.current = previous.strokes;
+      pointCount.current = previous.pointCount;
+      setCanUndoClear(cleared.current.length > 0);
+    }
     setStrokeCount(strokes.current.length);
     setAtLimit(false);
     paintDgDrawing(canvas.current, strokes.current);
-    onEdit?.(strokes.current, { strokeIndex: strokes.current.length, pointIndex: 0 });
+    onEdit?.(strokes.current, { strokeIndex, pointIndex: 0 });
   }
 
   function clear() {
+    if (!strokes.current.length) return;
     pointerId.current = null;
+    cleared.current.push({ strokes: strokes.current, pointCount: pointCount.current });
     strokes.current = [];
     pointCount.current = 0;
     setStrokeCount(0);
+    setCanUndoClear(true);
     setAtLimit(false);
     paintDgDrawing(canvas.current, strokes.current);
     onEdit?.(strokes.current, { strokeIndex: 0, pointIndex: 0 });
@@ -150,7 +165,7 @@ export function DgSketch({ text, disabled, submit, submitLabel = text.submitDraw
         </label>
         <button type="button" className={eraser ? 'guess-selected' : 'guess-secondary'} aria-pressed={eraser}
           disabled={disabled} onClick={() => setEraser(!eraser)}>{text.eraser}</button>
-        <button type="button" className="guess-secondary" disabled={disabled || !strokeCount} onClick={undo}>{text.undo}</button>
+        <button type="button" className="guess-secondary" disabled={disabled || (!strokeCount && !canUndoClear)} onClick={undo}>{text.undo}</button>
         <button type="button" className="guess-secondary" disabled={disabled || !strokeCount} onClick={clear}>{text.clear}</button>
       </div>
       <canvas ref={canvas} className="dg-canvas dg-canvas-edit" width={DG_WIDTH} height={DG_HEIGHT}
