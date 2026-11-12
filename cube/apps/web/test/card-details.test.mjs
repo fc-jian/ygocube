@@ -30,3 +30,16 @@ test('latest OCG selection and native alias lookup preserve zero', () => {
  assert.equal(bans.cardLimit(lists[1],{code:3}),3);
  assert.equal(bans.latestOcg([]),-1);
 });
+
+test('SC is separate from OCG and future OCG lists are not selected by default', () => {
+ const lists=[
+  {id:0,name:'2027.01.01 OCG',limits:{},format:'OCG',effectiveDate:'2027-01-01'},
+  {id:1,name:'2026.10.01 简体中文 / SC',limits:{3679218:0},format:'SC',effectiveDate:'2026-10-01'},
+  {id:2,name:'2026.10.01 OCG',limits:{3679218:0},format:'OCG',effectiveDate:'2026-10-01'},
+ ];
+ assert.equal(bans.latestOcg(lists,'2026-11-12'),2);
+ assert.equal(bans.latestOcg(lists,'2027-01-01'),0);
+ assert.equal(bans.latestOcg(lists,'2026-09-30'),-1);
+ assert.equal(bans.cardLimit(lists[1],{code:Number('03679218')}),0);
+ assert.equal(bans.cardLimit(lists[1],{code:3679219,alias:3679218}),0);
+});

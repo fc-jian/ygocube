@@ -618,9 +618,11 @@ MSG_CHAINING 保留当前实体 ref 与原始发动位置 originRef，并在短�
 
 CardInfo 增加可选 aliasName：alias 对应 exact code 的显示卡名，查不到时为空字符串。Cube 与 Duel 构筑共用完整类型、属性、种族、等级/阶级、刻度、连接标记、字段及规则同名详情；Duel 不显示抓位统计。
 
-GET /public/duel/options 与私有 /cube/standalone-options 的 lists 每项增加 limits（卡号到 0/1/2/3 的映射），索引与宿主加载顺序保持一致，无限制为空映射。Duel 构筑默认选日期最新的 OCG 表，允许切换，卡图左上角显示禁/限/准限；按 YGOPro 使用 alias（非零时）查表，未列出为 3。此选项只影响构筑显示，不改房间规则。
+GET /public/duel/options 与私有 /cube/standalone-options 的 lists 每项为 `{id,name,limits,format?,effectiveDate?}`。`format` 为 `OCG`、`TCG` 或 `SC`；`effectiveDate` 为 `YYYY-MM-DD`。`limits` 的键为不带前导零的十进制 uint32 卡号，值为 0/1/2；未列出为 3，无限制为空映射。索引严格遵循宿主先 `expansions/lflist.conf` 后根 `lflist.conf` 的全部表头顺序，包括非日期自定义表，不排序、不去重。Duel 构筑默认选已生效且日期最新的 OCG 表，允许切换，卡图左上角显示禁/限/准限；按 YGOPro 使用 alias（非零时）查表。构筑选择不改房间规则，建房所选索引由原生宿主执行。
 
 禁限表名称中的日期使用上游 `lflist.conf` 的日历日期，与服务器时区无关；只有年月的表头按该月 1 日显示。例如 `!2026.10` 显示为 `2026.10.01 OCG`，`!2026.9 TCG` 显示为 `2026.09.01 TCG`。时区转换不能将名称移到前一天。
+
+简体中文环境使用官网单独发布的官方卡表，表头为 `!YYYY.MM.DD SC`，显示为 `YYYY.MM.DD 简体中文 / SC`；不能由 OCG 表翻译或按卡片语言推导。审计快照存放在 `config/banlists/`，标准资源准备在固定上游卡表末尾追加经校验的 SC 表，并向两处运行时 `lflist.conf` 安装相同内容。卡片范围 `rule=2` 与禁限卡表是两个独立选项：前者控制简体中文已发行卡，后者控制同名卡投入数量。
 
 ### 8.11 战斗数值与攻击日志
 

@@ -772,8 +772,9 @@ print(json.dumps({
 PY
   fi
   [[ -f "$ROOT_DIR/ygopro/lflist.conf" ]] || die "upstream lflist.conf is missing"
-  cp -f "$ROOT_DIR/ygopro/lflist.conf" "$runtime/lflist.conf"
-  cp -f "$ROOT_DIR/ygopro/lflist.conf" "$expansions/lflist.conf"
+  python3 "$ROOT_DIR/scripts/official_banlists.py" compose --upstream "$ROOT_DIR/ygopro/lflist.conf" --out "$STATE_DIR/composed-lflist.conf" --metadata-out "$STATE_DIR/official-banlists.json"
+  cp -f "$STATE_DIR/composed-lflist.conf" "$runtime/lflist.conf"
+  cp -f "$STATE_DIR/composed-lflist.conf" "$expansions/lflist.conf"
   local image_archive_meta_file="$STATE_DIR/image-archive-meta.json"
   printf '%s\n' '{"locale":null,"url":null,"etag":null,"size":null,"sha256":null,"entryCount":0,"entries":[]}' > "$image_archive_meta_file"
   if ((SKIP_IMAGES)); then
@@ -814,12 +815,12 @@ PY
     fi
     python3 "$HELPER" avif "$image_source" "$ROOT_DIR/assets/pics_avif" --expansion-pics "$expansions/pics" --previous "$avif_previous" --manifest-out "$STATE_DIR/avif-manifest.json"
   fi
-  python3 - "$STATE_DIR/manifest-extra.json" "$image_archive_meta_file" "$expansion_archive_meta_file" "$STATE_DIR/missing-names.json" "$STATE_DIR/cdb-diff.json" "$UPSTREAM_REPO" "$UPSTREAM_REF" "$UPSTREAM_COMMIT" "$SCRIPT_COMMIT" "$OCGCORE_COMMIT" "$STATE_DIR/ygocdb-archive-meta.json" <<'PY'
+  python3 - "$STATE_DIR/manifest-extra.json" "$image_archive_meta_file" "$expansion_archive_meta_file" "$STATE_DIR/missing-names.json" "$STATE_DIR/cdb-diff.json" "$UPSTREAM_REPO" "$UPSTREAM_REF" "$UPSTREAM_COMMIT" "$SCRIPT_COMMIT" "$OCGCORE_COMMIT" "$STATE_DIR/ygocdb-archive-meta.json" "$STATE_DIR/official-banlists.json" <<'PY'
 import json, sys
-out, image_path, expansion_path, missing, cdb_diff, repo, ref, commit, script, ocgcore, names_path = sys.argv[1:]
+out, image_path, expansion_path, missing, cdb_diff, repo, ref, commit, script, ocgcore, names_path, official_banlists = sys.argv[1:]
 payload = {
     'upstream': {'repo': repo, 'ref': ref, 'commit': commit},
-    'banlistSource': {'repo': repo, 'ref': ref, 'commit': commit, 'path': 'lflist.conf'},
+    'banlistSource': {'repo': repo, 'ref': ref, 'commit': commit, 'path': 'lflist.conf', 'officialLists': json.load(open(official_banlists, encoding='utf-8'))},
     'scriptCommit': script,
     'ocgcoreCommit': ocgcore,
     'imageArchive': json.load(open(image_path, encoding='utf-8')),
@@ -963,7 +964,7 @@ make_payload() {
   mkdir -p "$payload/srvpro/ygopro" "$payload/srvpro/ygopro/script" "$payload/srvpro/ygopro/expansions" "$payload/assets/pics_avif" "$payload/metadata" "$payload/deletes" "$payload/application"
   if ((SRVPRO_APP)); then
     mkdir -p "$payload/application/srvpro"
-    cp -f "$ROOT_DIR/srvpro/ygopro-server.js" "$ROOT_DIR/srvpro/cube-banlists.js" "$payload/application/srvpro/"
+    cp -f "$ROOT_DIR/srvpro/ygopro-server.js" "$ROOT_DIR/srvpro/cube.js" "$ROOT_DIR/srvpro/cube-banlists.js" "$payload/application/srvpro/"
     python3 - "$payload" "$(git -C "$ROOT_DIR/srvpro" rev-parse HEAD)" <<'PYAPP'
 import hashlib, json, pathlib, sys
 payload = pathlib.Path(sys.argv[1])
@@ -1154,16 +1155,13 @@ remote_health() {
   if [[ -n "$expected_names_sha" && -n "$expected_banlist_sha" ]]; then
     local duel_options_file="$STATE_DIR/duel-options-postdeploy.json" duel_search_file="$STATE_DIR/duel-search-postdeploy.json" duel_probe_code
     curl --fail --silent --show-error --retry 5 --retry-delay 2 --max-time 30 "$ALY_PUBLIC_URL/duel-api/public/duel/options" -o "$duel_options_file" || die "Aly independent Duel options endpoint failed"
-    python3 - "$duel_options_file" "$ROOT_DIR/ygopro/lflist.conf" "$ROOT_DIR/scripts/remote-duel-resource-apply.py" <<'PY' || die "Aly independent Duel is missing the latest upstream OCG or TCG ban-list"
+    python3 - "$duel_options_file" "$ROOT_DIR/srvpro/ygopro/lflist.conf" "$ROOT_DIR/scripts/remote-duel-resource-apply.py" <<'PY' || die "Aly independent Duel ban-list entries do not match the prepared resources"
 import importlib.util, json, sys
-lists = {str(item.get('name', '')) for item in json.load(open(sys.argv[1], encoding='utf-8')).get('lists', [])}
-headers = [line[1:].strip() for line in open(sys.argv[2], encoding='utf-8') if line.startswith('!')]
+from pathlib import Path
 spec = importlib.util.spec_from_file_location('remote_duel_resource_apply', sys.argv[3])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
-for expected in [value for value in module.banlist_api_names(headers) if value.endswith(' TCG')][:1] + [value for value in module.banlist_api_names(headers) if value.endswith(' OCG')][:1]:
-    if expected not in lists:
-        raise SystemExit(f'independent Duel is missing upstream ban-list {expected}')
+module.verify_public_banlists(json.load(open(sys.argv[1], encoding='utf-8')), Path(sys.argv[2]))
 PY
     duel_probe_code="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["verification"]["cardCode"])' "$STATE_DIR/deployment-resource-manifest.json")"
     [[ "$duel_probe_code" =~ ^[0-9]+$ ]] || die "missing expansion search probe code"

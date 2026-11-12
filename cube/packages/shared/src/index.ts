@@ -365,6 +365,13 @@ export interface StandaloneDuelOptions {
   mainMin: number; mainMax: number; extraMax: number; sideMax: number;
   noCheck: boolean; noShuffle: boolean;
 }
+export interface DuelBanlist {
+  id: number;
+  name: string;
+  limits: Record<number, number>;
+  format?: 'OCG' | 'TCG' | 'SC';
+  effectiveDate?: string;
+}
 export interface BrowserDeck { name: string; main: number[]; extra: number[]; side: number[]; }
 
 /** Standalone rooms may be entered before choosing a deck. */

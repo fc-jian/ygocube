@@ -45,17 +45,34 @@ def read_json(url: str) -> object:
 
 
 def banlist_api_name(header: str) -> str:
-    match = re.match(r"^\s*(\d{4})\.(\d{1,2})(?:\.(\d{1,2}))?", header)
+    match = re.fullmatch(r"\s*(\d{4})\.(\d{1,2})(?:\.(\d{1,2}))?(?:\s+(?:OCG|TCG|SC))?\s*", header)
     if not match:
-        raise RuntimeError(f"invalid ban-list date header: {header!r}")
+        return header.strip()
     year, month, day = (int(value) if value is not None else None for value in match.groups())
     public_date = date(year, month, day or 1)
-    suffix = "TCG" if "TCG" in header else "OCG"
+    suffix = "简体中文 / SC" if re.search(r"\bSC\b", header) else "TCG" if "TCG" in header else "OCG"
     return f"{public_date:%Y.%m.%d} {suffix}"
 
 
 def banlist_api_names(headers: list[str]) -> list[str]:
     return [banlist_api_name(header) for header in headers]
+
+
+def verify_public_banlists(options: dict, banlist_path: Path) -> None:
+    expected, current = [], None
+    for line in banlist_path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("!"):
+            current = {"name": banlist_api_name(line[1:]), "limits": {}}
+            expected.append(current)
+        elif current is not None:
+            match = re.match(r"^(\d+) +([012])(?:\s|$)", line)
+            if match and int(match[1]) <= 0xffffffff:
+                current["limits"][str(int(match[1]))] = int(match[2])
+    actual = options.get("lists", [])
+    for item in expected:
+        matches = [value for value in actual if value.get("name") == item["name"]]
+        if not matches or not all(value.get("limits") == item["limits"] for value in matches):
+            raise RuntimeError(f"Public ban-list entries differ from native resource: {item['name']}")
 
 
 def wait_healthy(banlist_path: Path | None = None, *, allow_legacy_dates: bool = False, include_cube: bool = False) -> None:
@@ -82,6 +99,8 @@ def wait_healthy(banlist_path: Path | None = None, *, allow_legacy_dates: bool =
                 missing = [name for name in expected if name not in names]
                 if missing:
                     raise RuntimeError(f"the standalone Duel API did not load upstream ban-lists: {missing[:5]}")
+                if not allow_legacy_dates:
+                    verify_public_banlists(options, banlist_path)
             return
         except Exception as exc:
             last_error = exc
@@ -621,9 +640,9 @@ def install_srvpro_application(stage_root: Path, release: Path) -> None:
         return
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     files = metadata.get("files", {})
-    allowed = {"ygopro-server.js", "cube-banlists.js"}
+    allowed = {"ygopro-server.js", "cube.js", "cube-banlists.js"}
     if set(files) != allowed:
-        raise RuntimeError("srvpro application payload must contain its server and ban-list module")
+        raise RuntimeError("srvpro application payload must contain its server, Cube API and ban-list module")
     source = stage_root / "application" / "srvpro"
     verify_file_manifest(source, files, "srvpro application")
     for name in sorted(files):

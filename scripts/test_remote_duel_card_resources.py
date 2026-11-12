@@ -205,6 +205,18 @@ class RemoteDuelResourceApplyTests(unittest.TestCase):
         self.assertEqual(REMOTE.banlist_api_name("2026.10"), "2026.10.01 OCG")
         self.assertEqual(REMOTE.banlist_api_name("2026.9 TCG"), "2026.09.01 TCG")
         self.assertEqual(REMOTE.banlist_api_name("2025.04.01 OCG"), "2025.04.01 OCG")
+        self.assertEqual(REMOTE.banlist_api_name("2026.10.01 SC"), "2026.10.01 简体中文 / SC")
+        self.assertEqual(REMOTE.banlist_api_name("Custom"), "Custom")
+
+    def test_public_banlist_health_checks_card_limits_not_only_names(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'lflist.conf'
+            path.write_text('!2026.10.01 SC\n03679218 0\n123 1\n', encoding='utf-8')
+            item = {'name': '2026.10.01 简体中文 / SC', 'limits': {'3679218': 0, '123': 1}}
+            REMOTE.verify_public_banlists({'lists': [item]}, path)
+            for invalid in ({}, {'03679218': 0, '123': 1}, {'3679218': 3, '123': 1}):
+                with self.assertRaisesRegex(RuntimeError, 'entries differ'):
+                    REMOTE.verify_public_banlists({'lists': [{**item, 'limits': invalid}]}, path)
 
     @unittest.skipIf(os.name == "nt", "Linux systemd signals")
     def test_maintenance_preserves_a_host_that_appears_during_preparation(self) -> None:
@@ -258,7 +270,7 @@ class RemoteDuelResourceApplyTests(unittest.TestCase):
             (old / "release.json").write_text('{"id":"old"}', encoding="utf-8")
             self.make_resources(old)
             files = {}
-            for name in ["ygopro-server.js", "cube-banlists.js"]:
+            for name in ["ygopro-server.js", "cube.js", "cube-banlists.js"]:
                 content = b"new server"
                 (stage / "application/srvpro" / name).write_bytes(content)
                 (old / "srvpro" / name).write_bytes(b"old server")

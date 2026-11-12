@@ -149,9 +149,9 @@ bash scripts/update-card-resources.sh prepare --refresh-names
 - `prepare --refresh-names` 每次读取 YGOCDB 的 `cards.zip.md5`，按其公布的
   `cards.json` MD5 校验缓存/下载归档后再合并 exact-code 映射；MD5、归档 SHA-256、
   记录数及映射文件哈希写入清单。主卡库与 Super Pre CDB 都要通过名称覆盖审计。
-- 禁限卡表来源为同一固定 SHA 的上游 `ygopro/lflist.conf`。准备流程将它分别安装到
+- 禁限卡表以同一固定 SHA 的上游 `ygopro/lflist.conf` 为基础，再由 `scripts/official_banlists.py` 追加 `config/banlists/` 中审核过的官方简体中文 SC 快照。更新前核对官方简体目录是否已有新的生效版本；导入方法和来源见 `config/banlists/README.md`。不得用 OCG 翻译表替代 SC，不能把官网条目 ID 当作卡号。准备流程将合成表分别安装到
   `srvpro/ygopro/lflist.conf` 和 `srvpro/ygopro/expansions/lflist.conf`，并在 manifest
-  的独立 `banlist` 段校验哈希；即使传入 `--skip-expansion`，禁限表仍同步更新。
+  的独立 `banlist` 段校验哈希，`banlistSource.officialLists` 记录官方来源与快照哈希；即使传入 `--skip-expansion`，禁限表仍同步更新。API 卡号键必须去掉前导零，按所有表头的原生加载顺序保留索引，验收逐条比较 `limits`，不能只比较表名。
 - 新增/变更的非衍生物仍缺名称时，读取 `.card-resource-sync/missing-names.json`，
   优先重新运行 `--refresh-names` 并检查确实是 exact code。只有记录了编号、原因和
   影响范围的人工审计例外才可以显式使用 `--allow-missing-names`；不能用它隐藏
@@ -391,7 +391,7 @@ bash scripts/update-card-resources.sh deploy --srvpro-app --confirm-maintenance
 2. 无活动宿主才停止 Duel srvpro，保持入口关闭。随后停止 Cube API/srvpro/Web/Nginx，
    checkpoint/integrity-check，备份数据库/配置/资源/manifest/旧 current 和全部事务工具。
 3. staging 校验路径、归档、SHA 和删除清单，以完整目录原子切换 Cube 资源并重建卡片缓存。
-   `--srvpro-app` 从旧 Cube 应用硬链接生成新 release，只原子替换已验证的两个 JS 文件；
+   `--srvpro-app` 从旧 Cube 应用硬链接生成新 release，只原子替换已验证的三个 JS 文件（`ygopro-server.js`、`cube.js`、`cube-banlists.js`）；
    Duel 的新资源 release 安装同一 srvpro 修改。该参数不能代替任意 API/Web 的完整发布。
 4. 安装并校验 Duel 与 Cube 的同代资源硬链接，保存 Duel 数据库/配置/旧 current，
    使 Duel 卡片缓存失效。两侧子步骤均 deferred start，不能自行提前恢复入口。记录各组件内容哈希与来源，验证同代资源后统一启动，完成本机健康检查与七服务状态检查才移除入口规则。
@@ -478,7 +478,7 @@ srvpro HTTP/TCP/Cube 协议探针和实际宿主启动。两套数据库完整�
    全部通过；Windows 客户端（若要求）为正确架构、可启动且音频依赖可用。
 5. **Aly 运行正常（仅本次获授权发布时）**：备份的 Cube/独立 Duel SQLite integrity 为 `ok`；两套 API、
    srvpro、Web 与 Nginx 均 active；`/api/health`、首页、`/duel/decks`、静态资源、
-   Cube `/api` 与独立 Duel `/duel-api` 新卡搜索、最新 OCG/TCG 禁限表、AVIF endpoint、
+   Cube `/api` 与独立 Duel `/duel-api` 新卡搜索、最新 OCG/TCG/SC 禁限表及逐张禁限值、AVIF endpoint、
    srvpro HTTP/TCP/Cube 探针均通过；两套远端宿主 `ldd` 无 `not found`。
 6. **可恢复且有记录**：release ID、备份目录、旧/新资源 hash、commit、测试结果和
    任何警告已保存；失败 staging 与备份在人工确认前不删除，必要时可用明确 backup ID
