@@ -152,6 +152,7 @@ bash scripts/update-card-resources.sh prepare --refresh-names
 - 禁限卡表以同一固定 SHA 的上游 `ygopro/lflist.conf` 为基础，再由 `scripts/official_banlists.py` 追加 `config/banlists/` 中审核过的官方简体中文 SC 快照。更新前核对官方简体目录是否已有新的生效版本；导入方法和来源见 `config/banlists/README.md`。不得用 OCG 翻译表替代 SC，不能把官网条目 ID 当作卡号。准备流程将合成表分别安装到
   `srvpro/ygopro/lflist.conf` 和 `srvpro/ygopro/expansions/lflist.conf`，并在 manifest
   的独立 `banlist` 段校验哈希，`banlistSource.officialLists` 记录官方来源与快照哈希；即使传入 `--skip-expansion`，禁限表仍同步更新。API 卡号键必须去掉前导零，按所有表头的原生加载顺序保留索引，验收逐条比较 `limits`，不能只比较表名。
+- 逐卡检索验收仅对 HTTP 超时最多重试 3 次，错误卡号/缺卡和持续失败仍触发事务失败；不得跳过内容核验。Cube 若按实际配置关闭 `web_duel.enabled`，公开独立 Duel 选项接口返回 `DUEL_DISABLED` 属于预期，此时通过本机带既有鉴权的 srvpro 选项接口及原生宿主核对 Cube 禁限表；独立 Duel 仍须验收公网接口，不能为了检查而开启 Cube 独立 Duel 功能。
 - 新增/变更的非衍生物仍缺名称时，读取 `.card-resource-sync/missing-names.json`，
   优先重新运行 `--refresh-names` 并检查确实是 exact code。只有记录了编号、原因和
   影响范围的人工审计例外才可以显式使用 `--allow-missing-names`；不能用它隐藏

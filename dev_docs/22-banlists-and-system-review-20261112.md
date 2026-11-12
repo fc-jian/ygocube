@@ -2,7 +2,7 @@
 
 ## 状态与范围
 
-已完成本地修复、官方 SC 卡表接入及 Windows/Linux 验证。生产实例本轮只做只读核查，尚未切换 release 或重启服务；上线需要确认维护窗口。
+已完成本地修复、官方 SC 卡表接入及 Windows/Linux 验证。用户随后明确授权维护窗口，已于 2026-11-13（北京时间）发布到 Aly 的 Cube 与 Duel，完成备份、相关服务重启和公网验收。发布明细见文末。
 
 审查基线为根仓库 `60f68ae`。范围覆盖 Cube API 的鉴权、事件事务/回溯、轮抽计时、卡组/卡池、比赛配对和比分采集，独立 Duel 的凭证/WebSocket/观战，网页构筑与搜索，srvpro/原生宿主禁限表和协议，以及资源发布/回滚脚本。小游戏模块进行了状态存储、定时器和接口边界抽查，运行了对应 API 回归。本次不是对全部第三方依赖或每张 Lua 卡片脚本的逐行审计。
 
@@ -90,4 +90,34 @@ bootstrap 手工创建的实例不是 Nest 注入的实例。真实 CDB 模式�
 
 原始官方响应、复现输出、测试/构建日志、浏览器截图和候选合成卡表保存于 Git 忽略的 `.card-resource-sync/banlists-20261112/`。没有把运行时卡库、凭据或原图提交到 Git。
 
-生产发布尚未执行。`update` 技能要求：“只有用户明确确认维护窗口后，才运行带有 `--confirm-maintenance` 的 deploy”。本次需要更新 Cube/Duel 的禁限资源、srvpro 和 API/Web 应用；上线前须确认无进行中对局，并保留两套数据库备份、旧 release 和资源清单，完成逐条禁限值及公网静态资源验收后再报告上线成功。
+## Aly 发布记录（2026-11-13，北京时间）
+
+用户明确授权进入维护窗口并要求先确认无活动对局、完成备份。每次切换前均确认原生宿主为 0，猜卡和你画我猜活动房间为 0。按标准资源事务先发布资源与 srvpro，再以 `--api-web-only --require-idle-guess` 发布 API/Web；第二阶段保留 srvpro 与 Nginx 的 PID/启动时间。
+
+| 项目 | 最终值 |
+| --- | --- |
+| Cube / Duel 应用 release | `20261112-banlists-2c8024e` |
+| API/Web 源提交 | `2c8024e6f7a78e600b2dc704dc0ab02199a9eb2f` |
+| srvpro 源提交 | `a9e56d3a7a2095c00506b2b910c6f798423da9fb` |
+| 成功资源事务 | `card-sync-20261112-160059-5465bfa` |
+| 资源清单 SHA-256 | `30dedc87b97319bc4079aba00a0d7ef3eae2f52e6e4b5433d24d5a10804f04ff` |
+| API/Web 上传包 SHA-256 | `ec8f182dffc72455c9f8aa96678501d8adf02a6b8fe84a8a3a1b1fe4a42d0b26` |
+| Cube Web build ID | `0Kym7cOTcf8UKz2C1Hbw_` |
+| Duel Web build ID | `cihhXW6L6JqkECXfyHBRu` |
+
+标准资源检查发现官方 Super Pre 在 11 月 12 日更新，因此同步到 176 张的当前官方列表，并重新验证最终资源。主卡库、主 Lua、名称映射与服务器基线相同；两处禁限文件更新，先行资源差量 262 个文件（包含仅在本地使用的原图输入），AVIF 更新 62 张，无删除。服务端最终保留 15,230 张 AVIF。原图未上传。Cube 与 Duel 各自的宿主二进制哈希保持原值。
+
+补充验收：Windows/Linux 各逐张验证扩展库中的 576 条非衍生物记录（包含对正式卡的更新），覆盖编号/显示名称检索、描述、卡图与隔离卡池加入；两端真实先行卡效果测试通过。
+
+首次资源事务 `card-sync-20261112-155045-2c8024e` 在逐卡搜索 HTTP 验收时出现一次 5 秒超时，事务自动将两套实例恢复原版本，七项服务重新 active。隔离服务器复现的 1,468 次检索全部通过，最慢 65 ms，未发现确定性的卡库或查询错误，暂未定位瞬时超时的具体原因。发布工具增加最多 3 次仅针对 `TimeoutError` 的有界重试，内容不匹配和持续超时仍失败；同时关闭验收中只读 SQLite 连接。Windows 23 项发布工具测试（20 通过、3 项平台条件跳过）及 Linux 23 项全通过，提交为 `5465bfa`。第二次资源事务和后续应用发布均成功。首次失败 staging、备份和 `ROLLED_BACK` 标记保留。
+
+最终线上验收：
+
+- 两实例各 210 个原生卡表索引及逐条 `limits` 完全匹配运行文件，卡号全部规范化；SC 有 110 条有效禁限记录，`3679218` 在 SC 和最新 OCG 都为 0。
+- 独立 Duel 通过公开 `/duel-api/public/duel/options` 核查；Cube 的 `web_duel.enabled` 原本为 false，其对应公开接口按设计返回 `DUEL_DISABLED`，改由既有鉴权的本机 srvpro 接口核查，未更改功能开关。
+- 两套**线上宿主二进制**在临时目录各通过 9 项禁限测试，不创建用户房间或写入生产比赛数据。
+- 真实公网浏览器在 1440 / 390 宽度显示 SC 选项及 `03679218` 的禁止标记，建房页可选择 SC；页面异常和静态资源异常均为 0。
+- `/`、`/duel`、`/duel/decks`、`/duel/bot/` 与所引用 JS/CSS 均为 200，MIME 正确；两套 API 健康正常，七个 systemd 服务全部 active，维护入口规则已移除。
+- 两侧应用备份 SQLite 的 `integrity_check=ok`、`foreign_key_check` 无错误；资源事务备份也通过完整性检查。
+
+备份目录分别为 `/opt/ygocube/backups/` 与 `/opt/ygoduel/backups/` 下的 `card-sync-20261112-160059-5465bfa/`（资源、数据库、配置与旧 current）及 `20261112-banlists-2c8024e/`（应用发布数据库、配置与旧 release）。更早原版本与首次失败备份均保留。原始日志、候选包、线上截图及 `production-verification.json` 位于 `.card-resource-sync/banlists-20261112/`。
