@@ -34,6 +34,29 @@ PACKAGE_SPEC.loader.exec_module(PACKAGE)
 
 
 class RemoteDuelResourceApplyTests(unittest.TestCase):
+    def test_catalogue_retries_transient_timeouts_but_keeps_failures_fatal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            release = Path(directory)
+            (release / 'assets').mkdir()
+            (release / 'assets/ygocdb_cards.json').write_text('{}', encoding='utf-8')
+            database = release / 'srvpro/ygopro/expansions/test-release.cdb'
+            database.parent.mkdir(parents=True)
+            with closing(sqlite3.connect(database)) as db:
+                db.executescript('CREATE TABLE datas(id INTEGER, type INTEGER); CREATE TABLE texts(id INTEGER, name TEXT); INSERT INTO datas VALUES(123,1); INSERT INTO texts VALUES(123,\'\');')
+                db.commit()
+            manifest = {'expansions': {'files': {'test-release.cdb': {'sha256': REMOTE.sha256(database)}}}}
+            cases = [([TimeoutError(), [{'code': 123}]], None, 2),
+                     ([TimeoutError(), TimeoutError(), TimeoutError()], TimeoutError, 3),
+                     ([[]], RuntimeError, 1)]
+            for responses, failure, calls in cases:
+                with self.subTest(failure=failure), patch.object(REMOTE, 'read_json', side_effect=responses) as read, patch.object(REMOTE.time, 'sleep'):
+                    if failure:
+                        with self.assertRaises(failure):
+                            REMOTE.probe_catalogue(release, manifest)
+                    else:
+                        self.assertEqual(REMOTE.probe_catalogue(release, manifest), {'expansionCardsSearchedByCodeAndName': 1})
+                    self.assertEqual(read.call_count, calls)
+
     def make_resources(self, release: Path) -> None:
         for name in ('srvpro/ygopro/cards.cdb', 'srvpro/ygopro/strings.conf', 'srvpro/ygopro/lflist.conf',
                      'srvpro/ygopro/expansions/lflist.conf', 'srvpro/ygopro/script/c123.lua',

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 from datetime import date, timedelta
 import errno
 import hashlib
@@ -491,7 +492,7 @@ def probe_catalogue(release: Path, manifest: dict) -> dict:
         database = host / "expansions" / relative
         if not database.is_file() or sha256(database) != metadata.get("sha256"):
             raise RuntimeError(f"installed expansion database hash mismatch: {relative}")
-        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as db:
+        with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as db:
             rows = db.execute(
                 "SELECT datas.id, datas.type, texts.name FROM datas JOIN texts USING(id)"
             ).fetchall()
@@ -510,7 +511,16 @@ def probe_catalogue(release: Path, manifest: dict) -> dict:
                 probes.append(value.strip())
                 break
         for query in dict.fromkeys(probes):
-            rows = read_json("http://127.0.0.1:3101/public/duel/search?q=" + quote(query, safe=""))
+            url = "http://127.0.0.1:3101/public/duel/search?q=" + quote(query, safe="")
+            for attempt in range(3):
+                try:
+                    rows = read_json(url)
+                    break
+                except TimeoutError:
+                    if attempt == 2:
+                        raise
+                    print(f"Retrying catalogue probe for card {code} after timeout ({attempt + 1}/3)", flush=True)
+                    time.sleep(1)
             if not isinstance(rows, list) or not any(int(row.get("code", 0)) == code for row in rows):
                 raise RuntimeError(f"standalone Duel search missed extension card {code}")
         found += 1
