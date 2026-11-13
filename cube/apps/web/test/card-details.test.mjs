@@ -43,3 +43,29 @@ test('SC is separate from OCG and future OCG lists are not selected by default',
  assert.equal(bans.cardLimit(lists[1],{code:Number('03679218')}),0);
  assert.equal(bans.cardLimit(lists[1],{code:3679219,alias:3679218}),0);
 });
+
+test('dropdown choices hide identical copies without renumbering native lists', () => {
+ const lists=Object.freeze([
+  Object.freeze({id:-1,name:'无限制 / Unlimited',limits:{}}),
+  Object.freeze({id:7,name:'2026.10.01 OCG',format:'OCG',effectiveDate:'2026-10-01',limits:{3679218:0,123:1}}),
+  Object.freeze({id:42,name:'2026.10.01 简体中文 / SC',format:'SC',effectiveDate:'2026-10-01',limits:{3679218:0}}),
+  Object.freeze({id:112,name:'2026.10.01 OCG',format:'OCG',effectiveDate:'2026-10-01',limits:{123:1,3679218:0}}),
+ ]);
+ const choices=bans.banlistChoices(lists);
+ assert.deepEqual(Array.from(choices,l=>l.id),[-1,7,42]);
+ assert.equal(choices[1],lists[1]);
+ assert.equal(bans.cardLimit(choices[1],{code:3679218}),0);
+ assert.deepEqual(Array.from(bans.banlistChoices(lists,112),l=>l.id),[-1,112,42]);
+ assert.equal(lists.length,4);
+});
+
+test('dropdown choices preserve distinct restrictions and formats under the same name', () => {
+ const lists=[
+  {id:4,name:'Custom',format:'OCG',limits:{123:0}},
+  {id:8,name:'Custom',format:'OCG',limits:{123:1}},
+  {id:15,name:'Custom',format:'SC',limits:{123:0}},
+  {id:23,name:'Custom',format:'OCG',effectiveDate:'2026-10-01',limits:{123:0}},
+ ];
+ assert.deepEqual(Array.from(bans.banlistChoices(lists),l=>l.id),[4,8,15,23]);
+ assert.deepEqual(Array.from(bans.banlistChoices([])),[]);
+});

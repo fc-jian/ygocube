@@ -551,7 +551,7 @@ pics: {ygopro_root: "", avif_dir: "assets/pics_avif"}
 - `GET /public/duel/search?q=...`：全卡库搜索（最多 100 字查询），排除衍生物，返回最多 100 项元数据。
 - `GET /public/duel/search/page`：卡组构筑用分页搜索，沿用猜牌的查询、结构化筛选和分页结构。
   `sort` 可为 `relevance`、`level`、`attack` 或 `name`，对完整命中集合排序后分页。
-- `GET /public/duel/options`：返回 srvpro 当前禁限卡表索引与名称。
+- `GET /public/duel/options`：返回 srvpro 当前禁限卡表索引与名称。接口保留宿主两处资源加载产生的全部原生索引；网页下拉菜单按名称、环境、生效日期和完整限制映射合并完全相同的选项，不重编号。同名但限制不同的表不能合并；若当前选中的原生索引属于重复项，菜单保留该项以维持当前规则选择。
 - `POST /public/duel/join`：`{name,password,options,deck:{main,extra,side}}`，选项字段为 `mode(0单局/1比赛),lflist,rule,duelRule,timeLimit,startLp,startHand,drawCount,mainMin,mainMax,extraMax,sideMax,noCheck,noShuffle`。密码映射同一个内部房间，首位创建者决定规则；后续加入返回已有规则。返回 `{credential,room,options}`；短期 credential 仅保存当前标签页，用于刷新重连，不能用于 Cube 身份。
 - `POST /public/duel/session {credential}`：换取现有单次 WS 票据。后续操作沿用 §8，卡组由网关上传，房主/准备状态由原生宿主决定。
 - 私有 `GET /cube/standalone-options`、`POST /cube/standalone-room {room_name,hostinfo}`：X-Cube-Api-Key 鉴权，通过同一个 srvpro Room 构造器创建普通房间，不绑定 Cube 卡组与结果。

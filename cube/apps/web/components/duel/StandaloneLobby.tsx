@@ -1,17 +1,13 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { StandaloneDuelOptions } from "@ygocube/shared";
 import { api } from "@/lib/api";
 import { LocalPicsSetting } from "@/components/IdentityWidget";
+import { banlistChoices, type Banlist } from "@/lib/banlist";
 import "./standalone.css";
 export function StandaloneLobby() {
   const [options, setOptions] = useState<StandaloneDuelOptions | null>(null),
-    [lists, setLists] = useState<
-      {
-        id: number;
-        name: string;
-      }[]
-    >([]),
+    [lists, setLists] = useState<Banlist[]>([]),
     [name, setName] = useState(""),
     [password, setPassword] = useState(""),
     [error, setError] = useState(""),
@@ -24,6 +20,7 @@ export function StandaloneLobby() {
       })
       .catch((e) => setError(e.message));
   }, []);
+  const visibleLists = useMemo(() => banlistChoices(lists, options?.lflist), [lists, options?.lflist]);
   const change = (k: keyof StandaloneDuelOptions, v: any) =>
     setOptions((o) => (o ? { ...o, [k]: v } : o));
   async function join(e: React.FormEvent) {
@@ -112,7 +109,7 @@ export function StandaloneLobby() {
                   value={options.lflist}
                   onChange={(e) => change("lflist", +e.target.value)}
                 >
-                  {lists.map((l) => (
+                  {visibleLists.map((l) => (
                     <option key={l.id} value={l.id}>
                       {l.name}
                     </option>
