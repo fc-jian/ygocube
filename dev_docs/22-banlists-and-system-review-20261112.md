@@ -121,3 +121,28 @@ bootstrap 手工创建的实例不是 Nest 注入的实例。真实 CDB 模式�
 - 两侧应用备份 SQLite 的 `integrity_check=ok`、`foreign_key_check` 无错误；资源事务备份也通过完整性检查。
 
 备份目录分别为 `/opt/ygocube/backups/` 与 `/opt/ygoduel/backups/` 下的 `card-sync-20261112-160059-5465bfa/`（资源、数据库、配置与旧 current）及 `20261112-banlists-2c8024e/`（应用发布数据库、配置与旧 release）。更早原版本与首次失败备份均保留。原始日志、候选包、线上截图及 `production-verification.json` 位于 `.card-resource-sync/banlists-20261112/`。
+
+## 禁限表下拉菜单与详情文案修复（2026-11-13）
+
+后续反馈指出 `/duel/decks` 下拉菜单有重复项。实际原因是宿主和 srvpro 都按 `expansions/lflist.conf` → `lflist.conf` 的顺序加载，而当前资源流程在两处安装同一份完整文件。原生共有 210 个索引，公开接口再加“无限制”后为 211 项；其中 105 组内容完全重复。最新 OCG 的两个索引为 0 / 105，SC 为 104 / 209。接口保留原生索引是协议要求，不能直接删掉重复索引或给列表重新编号。
+
+修复在 Web 共享 `banlistChoices()` 中按名称、格式、生效日期和完整 `limits` 合并相同选项，构筑页与建房页共同使用。合并默认保留第一个原生索引；如果当前选中的是另一个相同索引，则保留该选中项。同名但限制内容、格式或日期不同的表仍分别显示。接口契约已说明此行为。共享卡片详情 `CardMeta` 同时把“首发年份 / First release”改为“首发年份”。
+
+验证及发布结果：
+
+- Windows / Linux 各 72 项 Web 测试通过，包含新增的重复项合并、选中索引保留和不同规则不合并测试；Windows 构建及 Linux Cube/Duel 两套 standalone 构建通过。
+- 打包前逐文件对比 132 个 Web/共享包源文件，解包校验 5,962 个文件；两套包各检查 3 个页面及 16 个 JS/CSS 引用，静态目录各 57 个文件。
+- 本地与真实公网浏览器各覆盖 1440 / 390 宽度：两个下拉菜单均为 106 项（包含无限制），SC 仅一项；构筑默认仍为最新 OCG，`03679218` 在 SC 下标记禁止；详情只显示中文首发年份。额外以 209 作为建房默认值验证合并不会改变已选原生索引。页面异常和静态资源异常均为 0。
+- 发布前活动宿主为 0；沿用本会话维护授权，通过 `deploy-card-details.py --web-only` 备份并原子切换两侧 Web。API、srvpro、Nginx 的 PID/启动时间不变，API/srvpro/宿主/资源组件哈希也保持原值；七项 systemd 服务均 active。
+- 两侧 SQLite 备份均 `integrity_check=ok`，无外键错误，旧 release 和配置备份保留。公网 `/api/health`、Duel options、两侧本机 `/health` 均 200；Duel 公网 `/duel-api/health` 按既有 Nginx 路由白名单返回 404，未修改访问范围。
+
+| 项目 | 值 |
+| --- | --- |
+| Cube / Duel release | `20261113-banlist-ui-d7f0a91` |
+| Web 源提交 | `d7f0a91729f9c6780f11356d0778a939518b8f4a` |
+| Web 上传包 SHA-256 | `beec5c09c4cde9b72928a8ca870008dda153affcac993429eaeb1e1f4424caab` |
+| Cube Web build ID | `JnoZoaJtz7mqLrKhsv74S` |
+| Duel Web build ID | `2YW0tETChbtowxocciWdB` |
+| 两侧备份目录 | `/opt/{ygocube,ygoduel}/backups/20261113-banlist-ui-d7f0a91/` |
+
+日志、包清单、前后服务基线、公网截图和验收 JSON 位于 `.card-resource-sync/banlist-ui-20261113/`。完成验收后只删除远端上传用的临时压缩包，保留发布目录、备份、校验记录和本地候选包。已有未跟踪文档 `dev_docs/16-srvpro-modern-ts-rewrite.md` 未修改或提交。
