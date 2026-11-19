@@ -7,6 +7,7 @@ import { api, apiDownload, clearStoredToken, encodePathSegment, Identity, readab
 import { useTournamentStream } from '@/lib/sse';
 import { TopBar, DeckZone, DraftState, useNowTick } from '@/components/TopBar';
 import { PackZone } from '@/components/PackZone';
+import { EdisonDraftRules } from '@/components/EdisonDraftRules';
 import { TokenPrompt } from '@/components/TokenPrompt';
 import { CardSearchAll } from '@/components/CardSearchAll';
 import { closeCardPreview, setCardPreviewAction } from '@/components/CardPreview';
@@ -19,7 +20,7 @@ import { useCoalescedRefresh } from '@/lib/useCoalescedRefresh';
 import { usePlayerLogout } from '@/lib/usePlayerLogout';
 
 export default function DraftPage() {
-  const params = useParams<{ tid: string; pid: string }>();
+  const params = useParams<{ tid: string; pid: string }>()!;
   const router = useRouter();
   const tid = params.tid;
   const pid = params.pid;
@@ -294,7 +295,8 @@ export default function DraftPage() {
     onPoll: load,
   });
 
-  const pick = async (code: number, targetZone?: 'main' | 'extra' | 'side') => {
+  const handGuard = state?.pack?.draftRound ? { pack_index: state.pack.index, cards_left: state.pack.cardsLeft } : {};
+  const pick = async (code: number, targetZone?: 'main' | 'extra' | 'side', extraCard?: number) => {
     // 拖拽到指定区域时校验类型（与 ygopro 一致：主卡组不收额外卡，额外区只收额外卡）
     if (targetZone && cardMap[code]) {
       const extra = !!(cardMap[code].type & 0x4802040);
@@ -308,7 +310,7 @@ export default function DraftPage() {
       }
     }
     try {
-      await api(`/t/${tidPath}/pick`, { method: 'POST', body: { card_code: code, ...(targetZone ? { target_zone: targetZone } : {}) }, identity });
+      await api(`/t/${tidPath}/pick`, { method: 'POST', body: { card_code: code, target_zone: targetZone, extra_card_code: extraCard, ...handGuard }, identity });
       setError('');
       await load();
     } catch (e: any) {
@@ -318,9 +320,10 @@ export default function DraftPage() {
 
   const setAlternative = async (code: number) => {
     const previous = state?.pickAlternative ?? null;
-    setState((current) => current ? { ...current, pickAlternative: code } : current);
+    if (!state?.pack?.requiresPair) setState((current) => current ? { ...current, pickAlternative: code } : current);
     try {
-      await api(`/t/${tidPath}/pick/alternative`, { method: 'POST', body: { card_code: code }, identity });
+      await api(`/t/${tidPath}/pick/alternative`, { method: 'POST', body: { card_code: code, ...handGuard }, identity });
+      if (state?.pack?.requiresPair) await load();
     } catch (e: any) {
       // The card may have been passed/selected between the click and request;
       // keep the normal pick flow usable while surfacing other failures.
@@ -470,11 +473,14 @@ export default function DraftPage() {
           </div>
           <div className="order-first min-h-0 md:order-none md:flex-1">
             <PackZone
+              key={state.pack?.draftRound ? `${state.pack.index}-${state.pack.cardsLeft}` : 'standard'}
               pack={state.pack}
               cardMap={cardMap}
               droppedCards={state.droppedCards}
               alternativeCode={state.pickAlternative}
-              onAlternative={(code) => void setAlternative(code)}
+              alternativePartner={state.pickAlternativePartner}
+              onAlternative={setAlternative}
+              onPickPair={(main, extra) => pick(main, undefined, extra)}
               onPick={pick}
               sortMode={cardSortMode}
               onSortModeChange={setCardSortMode}
@@ -483,6 +489,7 @@ export default function DraftPage() {
           </div>
         </div>
       )}
+      {state.status === 'registration' && state.config.draftFormat === 'edison_e3' && <EdisonDraftRules />}
       {state.status === 'registration' && (
         <PoolPreview
           poolCodes={poolCodes}

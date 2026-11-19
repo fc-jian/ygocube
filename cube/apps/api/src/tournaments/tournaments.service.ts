@@ -1,10 +1,12 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
+import { EDISON_E3_MAX_PLAYERS, EDISON_E3_ROUNDS, type PoolDraftFormat } from '@ygocube/shared';
 import { getDb } from '../db';
 import { config, defaults } from '../config';
 import { logEvent, loadState, persistMeta, getConfig, snapshotNow, TournamentState, withEventTransaction } from '../events/events.service';
 import crypto from 'crypto';
 import { sha256 } from '../auth/auth.guard';
 import { normalizePoolName, PoolsService } from '../pools/pools.service';
+import { requiresEdisonPair } from '../draft/edison-draft';
 import {
   CreateTournamentInput,
   validateTournamentInput,
@@ -13,6 +15,20 @@ import {
 
 export type { CreateTournamentInput, DropMode } from './tournament-config';
 
+function applyPoolFormat(cfg: Record<string, any>, format?: PoolDraftFormat): void {
+  if (format !== 'edison_e3') {
+    delete cfg.draftFormat;
+    return;
+  }
+  if (cfg.maxPlayers > EDISON_E3_MAX_PLAYERS) {
+    throw Object.assign(new Error('BAD_PAYLOAD'), { details: { field: 'maxPlayers', message: 'Edison 轮抽最多支持 9 人' } });
+  }
+  Object.assign(cfg, {
+    draftFormat: format, draftMode: 'passing', reseatEachRound: false, evenPackCount: true,
+    packCount: cfg.maxPlayers * EDISON_E3_ROUNDS.length, packSize: EDISON_E3_ROUNDS[0].main,
+    extraRatioPercent: null, maxCopies: 3,
+  });
+}
 
 /** Normalize the optional per-pack extra-deck ratio used by pack generation. */
 export function normalizeExtraRatioPercent(value: unknown): number | null {
@@ -93,7 +109,7 @@ export class TournamentsService {
     // the player-count multiple whenever a full round is possible).
     const effectivePackSize = input.packSize
       ?? (input.packSizeMultiple === undefined ? defaults.packSize : input.maxPlayers * (input.packSizeMultiple ?? defaults.packSizeMultiple));
-    const poolCount = this.pools.codesByName(cardPool)?.length ?? 0;
+    const poolCount = pool.codes.length;
     const targetPackCount = Math.max(1, input.maxPlayers * 4);
     const availablePackCount = Math.max(1, Math.floor(poolCount / Math.max(1, effectivePackSize)));
     let defaultPackCount = Math.min(targetPackCount, availablePackCount);
@@ -148,6 +164,7 @@ export class TournamentsService {
       cardPoolId: pool.id,
       ...match,
     };
+    applyPoolFormat(cfg, pool.draftFormat);
     // Validate again after defaults/recommendations are materialized so a
     // partial caller override (for example only mainMin) cannot form an
     // invalid combination with a defaulted companion field.
@@ -451,13 +468,17 @@ export class TournamentsService {
       const next = { ...deck, main: [...deck.main], extra: [...deck.extra], side: [...deck.side] };
       const used = new Map<number, number>();
       for (const code of [...next.main, ...next.extra, ...next.side]) used.set(code, (used.get(code) ?? 0) + 1);
+      const playerPicks = state.picks.filter((entry) => entry.playerId === player.playerId);
+      const allowance = cfg.draftFormat === 'edison_e3'
+        ? this.pools.edisonDeckAllowance(playerPicks.map((pick) => pick.card), [...next.main, ...next.extra, ...next.side]) : null;
       let changed = false;
-      for (const pick of state.picks.filter((entry) => entry.playerId === player.playerId)) {
+      for (const pick of playerPicks) {
         const count = used.get(pick.card) ?? 0;
         if (count > 0) {
           used.set(pick.card, count - 1);
           continue;
         }
+        if (allowance && !allowance.take(pick.card)) continue;
         (this.pools.isExtraDeck(pick.card) ? next.extra : next.main).push(pick.card);
         changed = true;
       }
@@ -477,16 +498,19 @@ export class TournamentsService {
     if (state.frozen) throw new Error('FROZEN');
     if (state.status !== 'registration') throw new Error('WRONG_PHASE');
     patch = validateTournamentInput(patch, true) as unknown as Record<string, unknown>;
+    let format: PoolDraftFormat | undefined = getConfig(state).draftFormat;
     if (patch.cardPool !== undefined) {
       const cardPool = this.assertCardPool(patch.cardPool);
       const pool = this.pools.getByName(cardPool);
       if (!pool) throw new Error('POOL_NOT_FOUND');
       patch = { ...patch, cardPool, cardPoolId: pool.id };
+      format = pool.draftFormat;
     }
     if (Object.prototype.hasOwnProperty.call(patch, 'extraRatioPercent')) {
       patch = { ...patch, extraRatioPercent: normalizeExtraRatioPercent(patch.extraRatioPercent) };
     }
     const cfg = { ...getConfig(state), ...patch };
+    applyPoolFormat(cfg, format);
     validateTournamentInput({ ...cfg, name: state.name, cardPool: cfg.cardPool }, false, true);
     if (typeof cfg.maxPlayers === 'number' && cfg.maxPlayers < state.players.length) {
       throw new Error('TOURNAMENT_FULL');
@@ -576,6 +600,7 @@ export class TournamentsService {
               : undefined;
           pack = {
             index: head.index,
+            ...(head.draftRound ? { draftRound: head.draftRound, requiresPair: requiresEdisonPair(head, remaining.length) } : {}),
             cardsLeft: remaining.length,
             packsRemaining: queue.length,
             queueLength: queue.length,
@@ -656,6 +681,7 @@ export class TournamentsService {
       draftReserveMs: passing ? (state.pickReserves[playerId] ?? cfg.reserveSeconds * 1000) : undefined,
       // 仅返回本人的最后点击候选牌；其余玩家的候选牌保持私有。
       pickAlternative: state.pickAlternatives?.[playerId]?.card ?? null,
+      ...(pack?.requiresPair ? { pickAlternativePartner: state.pickAlternatives?.[playerId]?.partner ?? null } : {}),
       queueLengths,
       pause: state.pause,
       // Never disclose private initial drops through the player-facing state;
@@ -707,7 +733,7 @@ export class TournamentsService {
       }
       else if (e.entity === 'draft' && e.action === 'deadlines') summary = '选牌计时重设';
       else if (e.entity === 'draft' && e.action === 'cursor') summary = p ? `牌堆 ${p.packIndex} → ${p.playerId}` : '选牌结束';
-      else if (e.entity === 'pick' && e.action === 'pick') summary = `选牌 ${p.playerId} #${p.card}${p.auto ? '（超时自动）' : ''}`;
+      else if (e.entity === 'pick' && e.action === 'pick') summary = `选牌 ${p.playerId} #${p.card}${p.extraCard ? ` + #${p.extraCard}` : ''}${p.auto ? '（超时自动）' : ''}`;
       else if (e.entity === 'draft' && e.action === 'alternative') summary = `候选牌 ${p.playerId} #${p.card}`;
       else if (e.entity === 'draft' && e.action === 'reserve') summary = `保留时间 +${p.addedSeconds ?? Math.round(Number(p.deltaMs ?? 0) / 1000)} 秒（${p.playerId}）`;
       else if (e.entity === 'draft' && e.action === 'draft_start_requested') summary = `请求开始选牌（${p.participants?.length ?? 0} 人确认）`;
@@ -724,7 +750,7 @@ export class TournamentsService {
       if (e.entity === 'pick' && e.action === 'pick') {
         detail = [
           `玩家：${p.playerId}`,
-          `选择卡牌：${p.card}`,
+          `选择卡牌：${p.card}${p.extraCard ? ` + ${p.extraCard}` : ''}`,
           `牌堆：${p.packIndex} · 该堆第 ${Number(p.round ?? 0) + 1} 张`,
           p.auto ? '来源：超时自动选择' : '来源：玩家选择',
         ].join('\n');

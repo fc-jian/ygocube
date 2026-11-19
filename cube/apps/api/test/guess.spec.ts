@@ -11,11 +11,14 @@ import { config } from '../src/config';
 import { closeDb, getDb } from '../src/db';
 import { GuessController } from '../src/guess/guess.controller';
 import { GuessPoolsService } from '../src/guess/guess-pools.service';
+import { GuessPoolVotesService } from '../src/guess/guess-pool-votes.service';
 import { GuessService, settleOpenGuessRoomsForMaintenance } from '../src/guess/guess.service';
 import { buildOpeningHintOptions } from '../src/guess/opening-hints';
-import { original as DEFAULT_GUESS_POOL_CODES } from './pool-fixture';
-import { recent as RECENCY_GUESS_POOL_CODES } from './pool-fixture';
-import { shortlist as SHORTLIST_GUESS_POOL_CODES } from './pool-fixture';
+import {
+  original as DEFAULT_GUESS_POOL_CODES, shortlist as SHORTLIST_GUESS_POOL_CODES, recent as RECENCY_GUESS_POOL_CODES,
+  firstEdition as EXTREME_GUESS_POOL_CODES, revision as REVIEWED_EXTREME_GUESS_POOL_CODES,
+  expansion as EXPANDED_EXTREME_GUESS_POOL_CODES,
+} from './pool-fixture';
 import { useTestDb } from './helpers';
 
 describe('Guess the Card HTTP game', () => {
@@ -28,6 +31,10 @@ describe('Guess the Card HTTP game', () => {
   let outsideCode: number;
   let fieldCodes: number[];
   const fixtureField = 0x1fa;
+  const artworkBase = 10280;
+  const artworkVariant = 10281;
+  const secondArtwork = 10282;
+  const ruleAlias = 10305;
 
   beforeAll(async () => {
     useTestDb();
@@ -43,9 +50,14 @@ describe('Guess the Card HTTP game', () => {
     getDb().prepare('UPDATE cards SET type = type | ? WHERE code = ?').run(TYPE_TOKEN, tokenCode);
     const setFields = getDb().prepare('UPDATE cards SET setcodes_json = ? WHERE code = ?');
     for (const code of [...fieldCodes, tokenCode]) setFields.run(JSON.stringify([fixtureField, 0x1000 | fixtureField]), code);
+    const setNamesAndAlias = getDb().prepare('UPDATE cards SET name = ?, alias = ? WHERE code = ?');
+    setNamesAndAlias.run('测试异画 原版', 0, artworkBase);
+    setNamesAndAlias.run('测试异画 版本甲', artworkBase, artworkVariant);
+    setNamesAndAlias.run('测试异画 版本乙', artworkBase, secondArtwork);
+    setNamesAndAlias.run('测试异画 规则同名', artworkBase, ruleAlias);
     const module = await Test.createTestingModule({
       controllers: [GuessController],
-      providers: [GuessService, GuessPoolsService, { provide: CardsService, useValue: cards }, { provide: APP_GUARD, useClass: AuthGuard }],
+      providers: [GuessService, GuessPoolsService, GuessPoolVotesService, { provide: CardsService, useValue: cards }, { provide: APP_GUARD, useClass: AuthGuard }],
     }).compile();
     app = module.createNestApplication({ logger: false });
     await app.listen(0, '127.0.0.1');
@@ -104,7 +116,7 @@ describe('Guess the Card HTTP game', () => {
     }
     expect((await request('/pools', superToken, body)).status).toBe(401);
     expect((await createPool(body.name, body.codes)).isDefault).toBe(false);
-    for (const name of ['Fixture original', 'Fixture short', 'Fixture previous name', 'Fixture recent']) {
+    for (const name of ['Fixture original', 'Fixture short', 'Fixture previous name', 'Fixture recent', 'Fixture browse']) {
       expect((await request('/pools', undefined, { ...body, name }, { 'X-Admin-Token': superToken })).status).toBe(409);
     }
   });
@@ -124,6 +136,142 @@ describe('Guess the Card HTTP game', () => {
     for (const hints of options) {
       expect(hints).toContainEqual({ method: 'field-size', group: 'distinct-field-large', candidateCount: 1 });
     }
+  });
+
+  it.each([[false, false], [true, false], [false, true], [true, true]])(
+    'persists independent expert=%s and disabled-hints=%s options and enforces room search',
+    async (expertMode, disableOpeningHints) => {
+      const pool = await createPool(`Options ${expertMode} ${disableOpeningHints}`, uniformCodes);
+      const host = await request<GuessSession>('/rooms', undefined, {
+        name: 'Options room', playerId: 'Options host', poolId: pool.poolId, expertMode, disableOpeningHints,
+      });
+      expect(host.status).toBe(201);
+      const path = `/rooms/${host.body.room.roomId}`;
+      const guest = (await request<GuessSession>(`${path}/join`, undefined, { playerId: 'Options guest' })).body;
+      const started = (await action(path, host.body.token, { action: 'start', version: guest.room.version })).body;
+      const restored = (await request<GuessRoomView>(path, host.body.token)).body;
+      const publicView = (await request<GuessSpectatorView>(`${path}/spectate`)).body;
+      for (const view of [host.body.room, guest.room, started, restored, publicView]) {
+        expect(view).toMatchObject({ expertMode, disableOpeningHints });
+      }
+      const saved = getDb().prepare('SELECT state_json FROM guess_rooms WHERE room_id = ?').pluck()
+        .get(started.roomId) as string;
+      expect(JSON.parse(saved)).toMatchObject({ expertMode, disableOpeningHints });
+      if (disableOpeningHints) {
+        for (const view of [started, restored, publicView]) expect(view.players.every((seat) => seat.openingHint === null)).toBe(true);
+        expect(restored.viewerOpeningHint).toBeNull();
+        expect(restored.viewerCardKind).toBeNull();
+        expect(JSON.parse(saved).round.hintPools).toEqual({});
+      } else {
+        expect(restored.viewerOpeningHint).not.toBeNull();
+        expect(publicView.players.every((seat) => seat.openingHint !== null)).toBe(true);
+      }
+
+      const search = (query: string) => request<GuessCardPage>(`${path}/cards?${query}`, host.body.token);
+      expect((await search('q=测试卡牌')).body.totalCount).toBeGreaterThan(0);
+      const outsideName = app.get(CardsService).get(outsideCode)!.name;
+      const outside = await search(`q=${encodeURIComponent(`"${outsideName}"`)}`);
+      expect(outside.body.cards.some((card) => card.code === outsideCode)).toBe(expertMode);
+      if (expertMode) {
+        expect((await search('')).body.totalCount).toBe(0);
+        expect((await search('q=测试用效果文本')).body.totalCount).toBe(0);
+        expect((await search(`q=${uniformCodes[0]}`)).body.totalCount).toBe(0);
+        for (const query of ['q=测试卡牌&category=1', 'q=测试卡牌&subtype=monster', 'q=测试卡牌&sort=attack']) {
+          expect((await request(`${path}/cards?${query}`, host.body.token)).body.code).toBe('GUESS_FILTERS_DISABLED');
+        }
+        expect((await request<GuessCardPage>(`/pools/${pool.poolId}/cards?q=测试用效果文本`)).body.totalCount).toBe(uniformCodes.length);
+      } else {
+        expect((await search('q=测试用效果文本')).body.totalCount).toBeGreaterThan(0);
+      }
+      const tokens = new Map([['Options host', host.body.token], ['Options guest', guest.token]]);
+      const views = await Promise.all([...tokens.values()].map((token) => request<GuessRoomView>(path, token)));
+      const answers = new Map(views.flatMap(({ body }) => body.players.filter((seat) => seat.card)
+        .map(({ playerId, card }) => [playerId, card!.code])));
+      let state = restored;
+      while (state.currentPlayerId) {
+        const token = tokens.get(state.currentPlayerId)!;
+        const code = answers.get(state.currentPlayerId)!;
+        const selected = (await action(path, token, { action: 'select', version: state.version, code })).body;
+        state = (await action(path, token, { action: 'guess', version: selected.version, code })).body;
+      }
+      state = (await action(path, host.body.token, { action: 'next', version: state.version })).body;
+      expect(state).toMatchObject({ phase: 'playing', round: 2, expertMode, disableOpeningHints });
+      expect(state.viewerOpeningHint === null).toBe(disableOpeningHints);
+    },
+  );
+
+  it.each([false, true])('allows expert guesses from the full catalog with disabled hints=%s', async (disableOpeningHints) => {
+    const pool = await createPool(`Full catalog ${disableOpeningHints}`, uniformCodes);
+    const host = (await request<GuessSession>('/rooms', undefined, {
+      name: 'Full catalog room', playerId: 'Solo expert', poolId: pool.poolId, expertMode: true, disableOpeningHints,
+    })).body;
+    const path = `/rooms/${host.room.roomId}`;
+    let state = (await action(path, host.token, { action: 'start', version: host.room.version })).body;
+    expect(state.viewerOpeningHint === null).toBe(disableOpeningHints);
+    const cards = app.get(CardsService);
+    const searchName = (code: number) => request<GuessCardPage>(
+      `${path}/cards?q=${encodeURIComponent(`"${cards.get(code)!.name}"`)}`, host.token,
+    );
+    expect((await searchName(outsideCode)).body.cards.map((card) => card.code)).toContain(outsideCode);
+    expect((await searchName(tokenCode)).body.cards.map((card) => card.code)).not.toContain(tokenCode);
+    for (const code of [tokenCode, 999999999]) {
+      const result = await action<{ code: string }>(path, host.token, { action: 'select', version: state.version, code });
+      expect(result.status).toBe(400);
+      expect(result.body.code).toBe('GUESS_CARD_NOT_IN_POOL');
+    }
+    state = (await action(path, host.token, { action: 'select', version: state.version, code: outsideCode })).body;
+    expect(state.currentGuess?.code).toBe(outsideCode);
+    state = (await action(path, host.token, { action: 'guess', version: state.version, code: outsideCode })).body;
+    expect(state.lastMove).toMatchObject({ playerId: 'Solo expert', card: { code: outsideCode }, outcome: 'incorrect' });
+    expect(state.currentPlayerId).toBe('Solo expert');
+    expect(state.viewerWrongGuessCodes).toEqual([outsideCode]);
+    for (const command of ['select', 'guess'] as const) {
+      const result = await action<{ code: string }>(path, host.token, { action: command, version: state.version, code: outsideCode });
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe('GUESS_CARD_ALREADY_GUESSED');
+    }
+    const answer = getDb().prepare("SELECT json_extract(state_json, '$.round.seats[0].code') FROM guess_rooms WHERE room_id = ?")
+      .pluck().get(state.roomId) as number;
+    expect(uniformCodes).toContain(answer);
+    state = (await action(path, host.token, { action: 'guess', version: state.version, code: answer })).body;
+    expect(state.phase).toBe('between_rounds');
+    expect(state.players[0]).toMatchObject({ roundPoints: 1, score: 1 });
+    expect(getDb().prepare('SELECT guess_turns FROM guess_round_cards WHERE room_id = ?').pluck().get(state.roomId)).toBe(2);
+  });
+
+  it('rejects non-boolean room options', async () => {
+    for (const flags of [{ expertMode: 'true' }, { disableOpeningHints: 1 }, { expertMode: null }]) {
+      expect((await request('/rooms', undefined, { name: 'Invalid options', playerId: 'Host', poolId: 0, ...flags })).status).toBe(400);
+    }
+  });
+
+  it('allows the representative to solve an artwork-only deal and keeps the printed card in stats', async () => {
+    const pool = await createPool('Two artworks', [artworkVariant, secondArtwork]);
+    const host = (await request<GuessSession>('/rooms', undefined, {
+      name: 'Artwork room', playerId: 'Artwork expert', poolId: pool.poolId, expertMode: true, disableOpeningHints: true,
+    })).body;
+    expect(host.room.maxPlayers).toBe(1);
+    const path = `/rooms/${host.room.roomId}`;
+    const started = (await action(path, host.token, { action: 'start', version: host.room.version })).body;
+    const search = await request<GuessCardPage>(`${path}/cards?q=测试异画`, host.token);
+    expect(search.body).toMatchObject({ cards: [{ code: artworkBase }, { code: ruleAlias }], totalCount: 2, totalPages: 1 });
+    const wrong = (await action(path, host.token, { action: 'guess', version: started.version, code: ruleAlias })).body;
+    expect(wrong.lastMove).toMatchObject({ outcome: 'incorrect', card: { code: ruleAlias } });
+    const correct = (await action(path, host.token, { action: 'guess', version: wrong.version, code: artworkBase })).body;
+    expect(correct.lastMove).toMatchObject({ outcome: 'correct', points: 1 });
+    expect(correct.players[0].card?.code).toBe(artworkVariant);
+    expect(await stats(pool.poolId, artworkVariant)).toEqual({ appearances: 1, averageGuessTurns: 2 });
+
+    const other = (await request<GuessSession>('/rooms', undefined, {
+      name: 'Artwork repetition', playerId: 'Artwork expert', poolId: (await createPool('Other cards', codes.slice(0, 2))).poolId,
+      expertMode: true,
+    })).body;
+    const otherPath = `/rooms/${other.room.roomId}`;
+    const opened = (await action(otherPath, other.token, { action: 'start', version: other.room.version })).body;
+    const missed = (await action(otherPath, other.token, { action: 'guess', version: opened.version, code: secondArtwork })).body;
+    expect(missed.viewerWrongGuessCodes).toEqual([artworkBase]);
+    expect(await action(otherPath, other.token, { action: 'select', version: missed.version, code: artworkBase }))
+      .toEqual({ status: 409, body: { code: 'GUESS_CARD_ALREADY_GUESSED' } });
   });
 
   it('uses the same filters for public card pools and private room candidates', async () => {
@@ -176,6 +324,7 @@ describe('Guess the Card HTTP game', () => {
     const list = (await request<GuessRoomSummary[]>('/rooms')).body;
     expect(list.find((room) => room.roomId === alice.room.roomId)).toEqual({
       roomId: alice.room.roomId, name: 'Fixture table', playerCount: 3, maxPlayers: uniformCodes.length, poolId: pool.poolId, poolName: pool.name,
+      expertMode: false, disableOpeningHints: false,
     });
     expect((await action(path, bob.token, { action: 'start', version: cora.room.version })).status).toBe(403);
     const start = await action(path, alice.token, { action: 'start', version: cora.room.version });
@@ -398,6 +547,11 @@ describe('Guess the Card HTTP game', () => {
     await turn(hostId, 'next');
     expect((await read(target)).viewerGuesses).toEqual([]);
     expect((await read(target)).viewerWrongGuessCodes).toEqual([]);
+    for (const { viewerId, viewerOpeningHint } of views) {
+      const nextHint = (await read(viewerId)).viewerOpeningHint;
+      expect(nextHint).toBeTruthy();
+      expect(nextHint?.group).not.toBe(viewerOpeningHint?.group);
+    }
   });
 
   it('starts and continues a solo game while keeping its card hidden until the round ends', async () => {
@@ -761,12 +915,51 @@ describe('Guess the Card HTTP game', () => {
     expect(result).toMatchObject({ phase: 'finished', finishReason: 'maintenance', version: waiting.room.version + 1 });
   });
 
+  it('allows only pool-scoped name searches and plain pagination in the Extreme pool', async () => {
+    const pool = await createPool('Name-only pool', uniformCodes);
+    const db = getDb();
+    db.prepare('UPDATE guess_pools SET name_key = ? WHERE id = ?').run('builtin:test-browse', pool.poolId);
+    try {
+      const path = `/pools/${pool.poolId}/cards`;
+      const all = (await request<GuessCardPage>(path)).body;
+      expect(all).toMatchObject({ totalCount: 30, totalPages: 2, hasMore: true });
+      expect(all.cards.map(({ code }) => code)).toEqual(uniformCodes.slice(0, 24));
+      const next = (await request<GuessCardPage>(`${path}?page=1`)).body;
+      expect(next.cards.map(({ code }) => code)).toEqual(uniformCodes.slice(24));
+      expect(next).toMatchObject({ totalCount: 30, totalPages: 2, hasMore: false });
+      const cards = app.get(CardsService);
+      const name = cards.get(uniformCodes[0])!.name;
+      const query = `q=${encodeURIComponent(`"${name}"`)}`;
+      expect((await request<GuessCardPage>(`${path}?${query}`)).body.cards.map(({ code }) => code)).toEqual([uniformCodes[0]]);
+      for (const term of [String(uniformCodes[0]), '测试用效果文本', `"${cards.get(outsideCode)!.name}"`]) {
+        expect((await request<GuessCardPage>(`${path}?q=${encodeURIComponent(term)}`)).body.totalCount).toBe(0);
+      }
+      for (const filter of ['category=1', 'subtype=monster', 'atkMin=0', 'sort=attack']) {
+        expect(await request(`${path}?${query}&${filter}`))
+          .toEqual({ status: 400, body: { code: 'GUESS_POOL_BROWSE_ONLY' } });
+      }
+      const host = await create('Name-only host', pool.poolId);
+      const roomPath = `/rooms/${host.room.roomId}`;
+      const started = (await action(roomPath, host.token, { action: 'start', version: host.room.version })).body;
+      const answer = db.prepare("SELECT json_extract(state_json, '$.round.seats[0].code') FROM guess_rooms WHERE room_id = ?")
+        .pluck().get(host.room.roomId) as number;
+      const scored = (await action(roomPath, host.token, { action: 'guess', version: started.version, code: answer })).body;
+      await action(roomPath, host.token, { action: 'finish', version: scored.version });
+      const answerQuery = encodeURIComponent(`"${cards.get(answer)!.name}"`);
+      const result = (await request<GuessCardPage>(`${path}?q=${answerQuery}`)).body;
+      expect(result.cards.find(({ code }) => code === answer)?.stats).toEqual({ appearances: 1, averageGuessTurns: 1 });
+    } finally {
+      db.prepare('UPDATE guess_pools SET name_key = ? WHERE id = ?').run('name:name-only pool', pool.poolId);
+    }
+  });
+
   it('promotes the newest complete default while preserving older pool IDs and members', async () => {
     const service = app.get(GuessPoolsService);
     const catalog = jest.spyOn(app.get(CardsService), 'poolCodes');
     const original = [...DEFAULT_GUESS_POOL_CODES];
     const shortlist = [...SHORTLIST_GUESS_POOL_CODES];
     const recency = [...RECENCY_GUESS_POOL_CODES];
+    const expanded = EXPANDED_EXTREME_GUESS_POOL_CODES;
     try {
       catalog.mockReturnValue(original.filter((code) => code !== shortlist[0]));
       service.onModuleInit();
@@ -783,7 +976,7 @@ describe('Guess the Card HTTP game', () => {
       const [savedShortlist] = service.list();
       expect(savedShortlist).toMatchObject({ name: 'Fixture short', cardCount: shortlist.length, isDefault: true });
 
-      catalog.mockReturnValue([...new Set([...original, ...recency])]);
+      catalog.mockReturnValue([...new Set([...original, ...recency, ...expanded])]);
       service.onModuleInit();
       service.onModuleInit();
       const pools = (await request<GuessPoolSummary[]>('/pools')).body;
@@ -794,20 +987,32 @@ describe('Guess the Card HTTP game', () => {
       expect(selected.poolId).not.toBe(savedShortlist.poolId);
       expect((await request<GuessPoolSummary>(`/pools/${selected.poolId}`)).body).toEqual(selected);
       expect(service.get(selected.poolId).codes).toEqual(recency);
+      const extreme = pools.find((pool) => pool.name === 'Fixture browse')!;
+      expect(extreme).toMatchObject({ cardCount: expanded.length, isDefault: false, browseOnly: true });
+      expect((await request<GuessPoolSummary>(`/pools/${extreme.poolId}`)).body).toEqual(extreme);
+      const browse = `/pools/${extreme.poolId}/cards`;
+      expect((await request(`${browse}?page=1`)).status).toBe(200);
+      expect((await request(`${browse}?q=测试`)).status).toBe(200);
+      for (const query of ['subtype=monster', 'atkMin=0', 'sort=attack']) {
+        expect(await request(`${browse}?${query}`)).toEqual({ status: 400, body: { code: 'GUESS_POOL_BROWSE_ONLY' } });
+      }
+      expect(extreme.poolId).not.toBe(selected.poolId);
+      expect(service.get(extreme.poolId).codes).toEqual(expanded);
       expect(service.get(savedShortlist.poolId)).toEqual({
-        poolId: savedShortlist.poolId, name: savedShortlist.name, codes: shortlist, isDefault: false,
+        poolId: savedShortlist.poolId, name: savedShortlist.name, codes: shortlist, isDefault: false, browseOnly: false,
       });
-      expect(service.get(originalId)).toEqual({ poolId: originalId, name: 'Fixture original', codes: original, isDefault: false });
+      expect(service.get(originalId)).toEqual({ poolId: originalId, name: 'Fixture original', codes: original, isDefault: false, browseOnly: false });
     } finally {
       catalog.mockRestore();
     }
   });
 });
 
-it('retains the saved default pool, active round and completed-round statistics across restart', () => {
+it.each([
+  { key: 'builtin:test-recent', name: 'Fixture previous name', poolId: 4, isDefault: true, browseOnly: false },
+  { key: 'builtin:test-browse', name: 'Fixture browse', poolId: 5, isDefault: false, browseOnly: true },
+])('retains $key, its active round and completed-round statistics across restart', ({ key, name, poolId, isDefault, browseOnly }) => {
   useTestDb();
-  const legacyName = 'Fixture previous name';
-  const poolId = 4;
   const snapshot = () => ({
     pool: getDb().prepare('SELECT * FROM guess_pools WHERE id = ?').get(poolId),
     rooms: getDb().prepare('SELECT * FROM guess_rooms ORDER BY room_id').all(),
@@ -820,7 +1025,7 @@ it('retains the saved default pool, active round and completed-round statistics 
     const cards = new CardsService();
     const codes = cards.poolCodes().slice(0, 2);
     getDb().prepare('INSERT INTO guess_pools (id, name, name_key, codes_json) VALUES (?, ?, ?, ?)')
-      .run(poolId, legacyName, 'builtin:test-recent', JSON.stringify(codes));
+      .run(poolId, name, key, JSON.stringify(codes));
     const game = new GuessService(cards, new GuessPoolsService(cards));
     const { room, token } = game.create({ name: 'Saved room', playerId: 'Host', poolId });
     const authorization = `Bearer ${token}`;
@@ -829,25 +1034,94 @@ it('retains the saved default pool, active round and completed-round statistics 
       .pluck().get(room.roomId) as number;
     const scored = game.act(room.roomId, authorization, { action: 'guess', version: opened.version, code: answer })!;
     const playing = game.act(room.roomId, authorization, { action: 'next', version: scored.version })!;
-    expect(playing).toMatchObject({ phase: 'playing', round: 2, poolId, poolName: legacyName });
+    expect(playing).toMatchObject({ phase: 'playing', round: 2, poolId, poolName: name });
     const before = snapshot();
     expect(before.stats).toEqual([{ room_id: room.roomId, round_number: 1, pool_id: poolId, code: answer, guess_turns: 1 }]);
     closeDb();
 
     const restartedCards = new CardsService();
-    const eligible = [...new Set([...restartedCards.poolCodes(), ...RECENCY_GUESS_POOL_CODES])];
+    const eligible = [...new Set([...restartedCards.poolCodes(), ...RECENCY_GUESS_POOL_CODES, ...EXPANDED_EXTREME_GUESS_POOL_CODES])];
     jest.spyOn(restartedCards, 'poolCodes').mockReturnValue(eligible);
     const restartedPools = new GuessPoolsService(restartedCards);
     restartedGame = new GuessService(restartedCards, restartedPools);
     restartedPools.onModuleInit();
     restartedGame.onModuleInit();
-    expect(restartedPools.list().filter((pool) => pool.isDefault))
-      .toEqual([{ poolId, name: legacyName, cardCount: codes.length, isDefault: true }]);
+    expect(restartedPools.describe(poolId)).toEqual({ poolId, name, cardCount: codes.length, isDefault, browseOnly });
+    expect(restartedPools.list()).toContainEqual({ poolId, name, cardCount: codes.length, isDefault, browseOnly });
+    expect(restartedPools.list().find((pool) => pool.name === 'Fixture browse'))
+      .toMatchObject({ cardCount: browseOnly ? codes.length : EXPANDED_EXTREME_GUESS_POOL_CODES.length, browseOnly: true });
     expect(restartedGame.state(room.roomId, authorization)).toEqual(playing);
     expect(snapshot()).toEqual(before);
+    const nextAfterRestart = restartedGame.act(room.roomId, authorization, { action: 'next', version: playing.version })!;
+    expect(nextAfterRestart).toMatchObject({ phase: 'playing', round: 3 });
+    expect(nextAfterRestart.viewerOpeningHint).toBeTruthy();
+    expect(nextAfterRestart.viewerOpeningHint?.group).not.toBe(playing.viewerOpeningHint?.group);
     expect(getDb().pragma('foreign_key_check')).toEqual([]);
   } finally {
     restartedGame?.onModuleDestroy();
+    closeDb();
+    for (const suffix of ['', '-wal', '-shm', '.pre-auth-migration.bak']) {
+      fs.rmSync(config.server.dbPath + suffix, { force: true });
+    }
+  }
+});
+
+it.each([
+  { previous: EXTREME_GUESS_POOL_CODES, answer: EXTREME_GUESS_POOL_CODES[0] },
+  { previous: REVIEWED_EXTREME_GUESS_POOL_CODES, answer: REVIEWED_EXTREME_GUESS_POOL_CODES[0] },
+])('updates an Extreme pool in place while a hintless round still uses its original cards', ({ previous, answer }) => {
+  useTestDb();
+  const gameCards = new CardsService();
+  const extension = EXPANDED_EXTREME_GUESS_POOL_CODES;
+  const added = extension.find((code) => !previous.includes(code))!;
+  const poolId = 5;
+  let game: GuessService | undefined;
+  try {
+    gameCards.poolCodes();
+    const db = getDb();
+    const insertCard = db.prepare('INSERT INTO cards (code, name, type, search_text) VALUES (?, ?, 1, ?)');
+    db.transaction(() => {
+      for (const code of new Set([...extension, answer])) {
+        insertCard.run(code, `Card ${code}`, `card ${code}`);
+      }
+    })();
+    const catalog = jest.spyOn(gameCards, 'poolCodes').mockReturnValue([answer]);
+    db.prepare('INSERT INTO guess_pools (id, name, name_key, codes_json) VALUES (?, ?, ?, ?)')
+      .run(poolId, 'Fixture browse', 'builtin:test-browse', JSON.stringify(previous));
+    const pools = new GuessPoolsService(gameCards);
+    game = new GuessService(gameCards, pools);
+    const { room, token } = game.create({ name: 'Existing Extreme', playerId: 'Host', poolId, disableOpeningHints: true });
+    const authorization = `Bearer ${token}`;
+    const first = game.act(room.roomId, authorization, { action: 'start', version: room.version })!;
+    const scored = game.act(room.roomId, authorization, { action: 'guess', version: first.version, code: answer })!;
+    const active = game.act(room.roomId, authorization, { action: 'next', version: scored.version })!;
+    const stats = db.prepare('SELECT * FROM guess_round_cards ORDER BY room_id, round_number, code');
+    const previousStats = stats.all();
+    const history = db.prepare('SELECT * FROM guess_room_events ORDER BY room_id, version');
+    const previousHistory = history.all();
+
+    catalog.mockReturnValue([answer, ...extension.filter((code) => code !== added)]);
+    pools.onModuleInit();
+    expect(pools.get(poolId).codes).toEqual(previous);
+    catalog.mockReturnValue([...extension, answer]);
+    pools.onModuleInit();
+    pools.onModuleInit();
+    expect(pools.list().filter(({ name }) => name === 'Fixture browse'))
+      .toEqual([{ poolId, name: 'Fixture browse', cardCount: extension.length, isDefault: false, browseOnly: true }]);
+    expect(pools.get(poolId).codes).toEqual(extension);
+    expect(stats.all()).toEqual(previousStats);
+    expect(history.all()).toEqual(previousHistory);
+    expect(game.state(room.roomId, authorization)).toEqual(active);
+    const query = { query: String(answer), page: 0, filters: {}, sort: 'relevance' as const };
+    expect(game.search(room.roomId, authorization, query).cards.map(({ code }) => code)).toEqual([answer]);
+    const newQuery = { ...query, query: String(added) };
+    expect(game.search(room.roomId, authorization, newQuery).totalCount).toBe(0);
+    const resolved = game.act(room.roomId, authorization, { action: 'guess', version: active.version, code: answer })!;
+    game.act(room.roomId, authorization, { action: 'next', version: resolved.version });
+    expect(game.search(room.roomId, authorization, newQuery).cards.map(({ code }) => code)).toEqual([added]);
+    expect(db.pragma('foreign_key_check')).toEqual([]);
+  } finally {
+    game?.onModuleDestroy();
     closeDb();
     for (const suffix of ['', '-wal', '-shm', '.pre-auth-migration.bak']) {
       fs.rmSync(config.server.dbPath + suffix, { force: true });

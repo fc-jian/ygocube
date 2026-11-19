@@ -1,4 +1,5 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { EDISON_E3_ROUNDS } from '@ygocube/shared';
 import {
   afterEventCommit,
   loadState,
@@ -6,7 +7,9 @@ import {
   getConfig,
   persistMeta,
   TournamentState,
+  PackState,
   PickState,
+  pickedCards,
   DraftStartConfirmationState,
   withEventTransaction,
   freeze,
@@ -18,6 +21,18 @@ import { normalizeExtraRatioPercent, TournamentsService } from '../tournaments/t
 import { PoolsService } from '../pools/pools.service';
 import { MatchesService } from '../matches/matches.service';
 import { DecksService } from '../decks/decks.service';
+import { createEdisonPacks, requiresEdisonPair, shuffle } from './edison-draft';
+
+interface ExpectedPack { index: number; cardsLeft: number }
+
+export function expectedPackFromBody(body: Record<string, unknown>): ExpectedPack | undefined {
+  if (body.pack_index === undefined && body.cards_left === undefined) return undefined;
+  const index = body.pack_index;
+  const cardsLeft = body.cards_left;
+  if (typeof index !== 'number' || !Number.isSafeInteger(index) || index < 0 ||
+      typeof cardsLeft !== 'number' || !Number.isSafeInteger(cardsLeft) || cardsLeft < 1) throw new Error('BAD_PAYLOAD');
+  return { index, cardsLeft };
+}
 
 // Draft engine: pack generation, pick timers with server-side auto-pick,
 // administrator-controlled pause, deckbuilding deadline (dev_docs/05 §3).
@@ -336,14 +351,9 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private startDraftCommand(tid: number, actor: string): void {
-    const state = loadState(tid);
-    if (state.frozen) throw new Error('FROZEN');
-    if (state.status !== 'registration') throw new Error('WRONG_PHASE');
-    const cfg = getConfig(state);
-    const rawCfg = JSON.parse(state.configJson) as Record<string, unknown>;
+  private initialSeats(state: TournamentState, edison: boolean): Record<string, number> {
     const n = state.players.length;
-    if (n < 2) throw new Error('NOT_ENOUGH_PLAYERS');
+    if (edison) return Object.fromEntries(shuffle(state.players).map((player, seat) => [player.playerId, seat]));
     // Preserve valid administrator assignments and fill only genuinely free
     // seats in join order. Partial assignments used to be re-indexed from zero,
     // which could silently give two players the same seat.
@@ -362,8 +372,11 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     for (const player of state.players) {
       if (player.seat < 0) seatMap[player.playerId] = freeSeats[freeIndex++];
     }
+    return seatMap;
+  }
+
+  private standardPacks(cfg: Record<string, any>, rawCfg: Record<string, unknown>, n: number, poolCodes: number[]) {
     // packs: shuffled pool (card pool or full card table), pack size = n * multiple, drop last (public)
-    const poolCodes = this.pools.resolve(cfg.cardPool as string | undefined).slice();
     for (let i = poolCodes.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [poolCodes[i], poolCodes[j]] = [poolCodes[j], poolCodes[i]];
@@ -407,14 +420,6 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     // Before arranging packs, choose the drafted subset. The optional explicit
     // extra ratio is authoritative and is handled separately below; legacy
     // tournaments retain the historical proportional subset and pack strategy.
-    const shuffle = <T>(items: T[]): T[] => {
-      const out = [...items];
-      for (let i = out.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [out[i], out[j]] = [out[j], out[i]];
-      }
-      return out;
-    };
     const allMain: number[] = [];
     const allExtra: number[] = [];
     for (const code of poolCodes) {
@@ -509,7 +514,7 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     }
     const droppedCards: number[] = dropPublic ? shuffle(discardedPoolCodes) : [];
     const draftMode = (rawCfg.draftMode as string | undefined) === 'serial' ? 'serial' : 'passing';
-    const packs = [];
+    const packs: PackState[] = [];
     for (let k = 0; k < packCount; k++) {
       const orderList = codes.slice(k * packSize, Math.min((k + 1) * packSize, codes.length));
       // serial：每堆起始偏移（packSize 为人数倍数时蛇形偏移；否则每堆随机起始玩家）；passing 不使用
@@ -517,7 +522,24 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
         draftMode === 'serial' ? (packSize % n === 0 ? (n - (k % n)) % n : Math.floor(Math.random() * n)) : undefined;
       packs.push({ index: k, size: orderList.length, dropCard: null, startOffset, order: orderList });
     }
-    // leftover pool cards are already randomly sampled and shuffled above.
+    return { packs, droppedCards };
+  }
+
+  private startDraftCommand(tid: number, actor: string): void {
+    const state = loadState(tid);
+    if (state.frozen) throw new Error('FROZEN');
+    if (state.status !== 'registration') throw new Error('WRONG_PHASE');
+    const n = state.players.length;
+    if (n < 2) throw new Error('NOT_ENOUGH_PLAYERS');
+    const cfg = getConfig(state);
+    const rawCfg = JSON.parse(state.configJson);
+    const edison = cfg.draftFormat === 'edison_e3';
+    const seatMap = this.initialSeats(state, edison);
+    const poolCodes = this.pools.resolve(cfg.cardPool).slice();
+    const { packs, droppedCards } = edison
+      ? createEdisonPacks(poolCodes, n, this.cards, cfg.dropPublic === true)
+      : this.standardPacks(cfg, rawCfg, n, poolCodes);
+    const draftMode = !edison && rawCfg.draftMode === 'serial' ? 'serial' : 'passing';
     logEvent(tid, 'tournament', 'phase', { status: 'drafting', round: 0 }, actor);
     logEvent(tid, 'player', 'seat_assign', seatMap, actor);
     if (draftMode === 'serial') {
@@ -533,7 +555,7 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
         queues[p.playerId] = [];
         reserves[p.playerId] = cfg.reserveSeconds * 1000;
       }
-      const dealt = Math.min(n, packCount);
+      const dealt = Math.min(n, packs.length);
       for (let k = 0; k < dealt; k++) queues[seatsArr[k].playerId].push(k);
       // deadline = 基础选牌时间 + 保留时间（超时先扣 reserve，耗尽才自动选）
       const deadlineAt = new Date(Date.now() + (cfg.pickSeconds + cfg.reserveSeconds) * 1000).toISOString();
@@ -960,74 +982,80 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     return candidates[Math.floor(Math.random() * candidates.length)];
   }
 
-  pick(tid: number, playerId: string, card: number, targetZone?: 'main' | 'extra' | 'side'): void {
-    withEventTransaction(tid, () => this.pickCommand(tid, playerId, card, targetZone));
+  pick(tid: number, playerId: string, card: number, targetZone?: 'main' | 'extra' | 'side', extraCard?: number, expected?: ExpectedPack): void {
+    withEventTransaction(tid, () => this.pickCommand(tid, playerId, card, targetZone, extraCard, expected));
   }
 
-  private pickCommand(tid: number, playerId: string, card: number, targetZone?: 'main' | 'extra' | 'side'): void {
-    const state = loadState(tid);
+  private currentHand(state: TournamentState, playerId: string, expected?: ExpectedPack) {
     if (state.status !== 'drafting') throw new Error('WRONG_PHASE');
     if (state.frozen) throw new Error('FROZEN');
     if (state.pause?.pausedAt) throw new Error('PAUSED');
+    const index = this.isPassing(state) ? state.packQueues[playerId]?.[0]
+      : state.pickCursor?.playerId === playerId ? state.pickCursor.packIndex : undefined;
+    const pack = state.packs.find((p) => p.index === index);
+    if (!pack) throw new Error('NOT_YOUR_TURN');
+    const remaining = this.remainingInPack(state, pack.index);
+    if (expected && (pack.index !== expected.index || remaining.length !== expected.cardsLeft)) throw new Error('CARD_NOT_AVAILABLE');
+    return { pack, remaining };
+  }
+
+  private pickCommand(tid: number, playerId: string, card: number, targetZone?: 'main' | 'extra' | 'side', extraCard?: number, expected?: ExpectedPack): void {
+    const state = loadState(tid);
+    const { pack, remaining } = this.currentHand(state, playerId, expected);
+    if (!remaining.includes(card)) throw new Error('CARD_NOT_AVAILABLE');
+    if (requiresEdisonPair(pack, remaining.length)) {
+      if (extraCard === undefined || this.cards.isExtraDeck(card) || !this.cards.isExtraDeck(extraCard)) throw new Error('EDISON_PAIR_REQUIRED');
+      if (!remaining.includes(extraCard)) throw new Error('CARD_NOT_AVAILABLE');
+    } else if (extraCard !== undefined) throw new Error('BAD_PAYLOAD');
     // 拖拽目标区类型校验在落 pick 事件之前做（避免事件已记录但卡组/光标未推进的不一致）
-    if (targetZone) {
+    if (targetZone !== undefined) {
+      if (!['main', 'extra', 'side'].includes(targetZone)) throw new Error('BAD_PAYLOAD');
       const isExtra = this.cards.isExtraDeck(card);
       if (targetZone === 'main' && isExtra) throw new Error('WRONG_ZONE');
       if (targetZone === 'extra' && !isExtra) throw new Error('WRONG_ZONE');
     }
     if (this.isPassing(state)) {
-      const queue = state.packQueues[playerId] ?? [];
-      if (!queue.length) throw new Error('NOT_YOUR_TURN'); // passing：当前没有可选择的牌堆
-      const remaining = this.remainingInPack(state, queue[0]);
-      if (!remaining.includes(card)) throw new Error('CARD_NOT_AVAILABLE');
-      this.doPassPick(tid, playerId, card, false, playerId, targetZone);
+      this.doPassPick(tid, playerId, card, false, playerId, targetZone, extraCard);
       return;
     }
-    if (!state.pickCursor || state.pickCursor.playerId !== playerId) throw new Error('NOT_YOUR_TURN');
-    const remaining = this.remainingInPack(state, state.pickCursor.packIndex);
-    if (!remaining.includes(card)) throw new Error('CARD_NOT_AVAILABLE');
     this.doPick(tid, playerId, card, false, playerId, targetZone);
   }
 
   // 记录玩家最后点击的候选牌。它不会改变牌堆或卡组，只作为超时自动
   // 选择的优先候选；候选牌名称由前端状态栏显示。
-  setPickAlternative(tid: number, playerId: string, card: number, actor: string): void {
-    withEventTransaction(tid, () => this.setPickAlternativeCommand(tid, playerId, card, actor));
+  setPickAlternative(tid: number, playerId: string, card: number, actor: string, expected?: ExpectedPack): void {
+    withEventTransaction(tid, () => this.setPickAlternativeCommand(tid, playerId, card, actor, expected));
   }
 
-  private setPickAlternativeCommand(tid: number, playerId: string, card: number, actor: string): void {
+  private setPickAlternativeCommand(tid: number, playerId: string, card: number, actor: string, expected?: ExpectedPack): void {
     const state = loadState(tid);
-    if (state.status !== 'drafting') throw new Error('WRONG_PHASE');
-    if (state.frozen) throw new Error('FROZEN');
-    if (state.pause?.pausedAt) throw new Error('PAUSED');
-    let packIndex: number;
-    if (this.isPassing(state)) {
-      const queue = state.packQueues[playerId] ?? [];
-      if (!queue.length) throw new Error('NOT_YOUR_TURN');
-      packIndex = queue[0];
-    } else {
-      if (!state.pickCursor || state.pickCursor.playerId !== playerId) throw new Error('NOT_YOUR_TURN');
-      packIndex = state.pickCursor.packIndex;
-    }
-    if (!this.remainingInPack(state, packIndex).includes(card)) throw new Error('CARD_NOT_AVAILABLE');
+    const { pack, remaining } = this.currentHand(state, playerId, expected);
+    const packIndex = pack.index;
+    if (!remaining.includes(card)) throw new Error('CARD_NOT_AVAILABLE');
     const current = state.pickAlternatives?.[playerId];
     if (current?.packIndex === packIndex && current.card === card) return;
-    logEvent(tid, 'draft', 'alternative', { playerId, packIndex, card }, actor);
+    let partner: number | undefined;
+    if (current?.packIndex === packIndex && requiresEdisonPair(pack, remaining.length)) {
+      const isExtra = this.cards.isExtraDeck(card);
+      partner = [current.card, current.partner].find((c) => c !== undefined && remaining.includes(c) && this.cards.isExtraDeck(c) !== isExtra);
+    }
+    logEvent(tid, 'draft', 'alternative', { playerId, packIndex, card, partner }, actor);
     persistMeta(tid);
   }
 
   // 选中的卡立即进入左侧对应区域：拖拽目标区优先，否则按卡类型进 main/extra（dev_docs/06 §2）
-  private applyPickToDeck(tid: number, playerId: string, card: number, actor: string, targetZone?: 'main' | 'extra' | 'side'): void {
-    const state = loadState(tid);
-    const deck = state.decks[playerId] ?? { main: [], extra: [], side: [], lockedAt: null, status: 'building' as const };
+  private deckAfterPick(state: TournamentState, playerId: string, card: number, targetZone?: 'main' | 'extra' | 'side', extraCard?: number) {
+    const previous = state.decks[playerId] ?? { main: [], extra: [], side: [], lockedAt: null, status: 'building' as const };
+    const deck = { ...previous, main: [...previous.main], extra: [...previous.extra], side: [...previous.side] };
     const isExtra = this.cards.isExtraDeck(card);
     if (targetZone === 'main' && isExtra) throw new Error('WRONG_ZONE');
     if (targetZone === 'extra' && !isExtra) throw new Error('WRONG_ZONE');
-    if (targetZone === 'main' || targetZone === 'side') deck[targetZone].push(card);
-    else if (targetZone === 'extra') deck.extra.push(card);
-    else if (isExtra) deck.extra.push(card);
-    else deck.main.push(card);
-    logEvent(tid, 'deck', 'deck', { playerId, deck }, actor);
+    const picks = extraCard === undefined ? [card] : [card, extraCard];
+    const allowance = getConfig(state).draftFormat === 'edison_e3'
+      ? this.pools.edisonDeckAllowance([...pickedCards(state, playerId), ...picks], [...deck.main, ...deck.extra, ...deck.side]) : null;
+    if (!allowance || allowance.take(card)) deck[targetZone ?? (isExtra ? 'extra' : 'main')].push(card);
+    if (extraCard !== undefined && (!allowance || allowance.take(extraCard))) deck.extra.push(extraCard);
+    return deck;
   }
 
   private doPick(tid: number, playerId: string, card: number, auto: boolean, actor: string, targetZone?: 'main' | 'extra' | 'side'): void {
@@ -1040,8 +1068,9 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
       auto,
       at: new Date().toISOString(),
     };
+    const deck = this.deckAfterPick(state, playerId, card, targetZone);
     logEvent(tid, 'pick', 'pick', pick, actor);
-    this.applyPickToDeck(tid, playerId, card, actor, targetZone);
+    logEvent(tid, 'deck', 'deck', { playerId, deck }, actor);
     this.advance(tid, actor, false);
   }
 
@@ -1119,13 +1148,21 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     const remaining = this.remainingInPack(state, queue[0]);
     if (!remaining.length) return; // 队首堆已空属异常状态（正常流程空堆即消亡），不推进
     const alternative = state.pickAlternatives?.[playerId];
-    const card = alternative?.packIndex === queue[0] && remaining.includes(alternative.card)
-      ? alternative.card
-      : this.rankedTimeoutCard(state, remaining);
-    this.doPassPick(tid, playerId, card, true, 'system');
+    const preferred = alternative?.packIndex === queue[0] ? [alternative.card, alternative.partner] : [];
+    const choose = (options: number[]) => preferred.find((c): c is number => c !== undefined && options.includes(c))
+      ?? this.rankedTimeoutCard(state, options);
+    const pack = state.packs.find((p) => p.index === queue[0])!;
+    if (requiresEdisonPair(pack, remaining.length)) {
+      const main: number[] = [];
+      const extra: number[] = [];
+      for (const code of remaining) (this.cards.isExtraDeck(code) ? extra : main).push(code);
+      this.doPassPick(tid, playerId, choose(main), true, 'system', undefined, choose(extra));
+    } else {
+      this.doPassPick(tid, playerId, choose(remaining), true, 'system');
+    }
   }
 
-  private doPassPick(tid: number, playerId: string, card: number, auto: boolean, actor: string, targetZone?: 'main' | 'extra' | 'side'): void {
+  private doPassPick(tid: number, playerId: string, card: number, auto: boolean, actor: string, targetZone?: 'main' | 'extra' | 'side', extraCard?: number): void {
     const state = loadState(tid);
     const cfg = getConfig(state);
     const queue = state.packQueues[playerId] ?? [];
@@ -1152,19 +1189,26 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     }
     const deadlineFor = (pid: string) => new Date(now + cfg.pickSeconds * 1000 + (reserves[pid] ?? 0)).toISOString();
     let receiver: string | null = null;
-    if (this.remainingInPack(state, packIndex).length > 1) {
-      // 堆未空：传给顺时针下一座位玩家的队尾
+    if (pack.order.length - round > (extraCard === undefined ? 1 : 2)) {
       const seatsArr = state.players.slice().sort((a, b) => a.seat - b.seat);
       const idx = seatsArr.findIndex((p) => p.playerId === playerId);
-      receiver = seatsArr[(idx + 1) % seatsArr.length].playerId;
+      const step = pack.draftRound && EDISON_E3_ROUNDS[pack.draftRound - 1]?.direction === 'counterclockwise' ? -1 : 1;
+      receiver = seatsArr[(idx + step + seatsArr.length) % seatsArr.length].playerId;
       if (!queues[receiver]) queues[receiver] = [];
       if (queues[receiver].length === 0) deadlines[receiver] = deadlineFor(receiver); // 空队列接到堆：开始计时
       queues[receiver].push(packIndex);
     }
     // 空堆直接消亡（不移交）
     deadlines[playerId] = queues[playerId].length ? deadlineFor(playerId) : null;
-    logEvent(tid, 'pick', 'pick', { ...pick, queues, deadlines, reserves }, actor);
-    this.applyPickToDeck(tid, playerId, card, actor, targetZone);
+    const deck = this.deckAfterPick(state, playerId, card, targetZone, extraCard);
+    const hand = { ...pick, queues, deadlines, reserves };
+    if (pack.draftRound) {
+      // A revert to this exact event must restore the entire hand and its deck.
+      logEvent(tid, 'pick', 'pick', { ...hand, extraCard, deck }, actor);
+    } else {
+      logEvent(tid, 'pick', 'pick', hand, actor);
+      logEvent(tid, 'deck', 'deck', { playerId, deck }, actor);
+    }
     afterEventCommit(tid, () => {
       this.armPassTimer(tid, playerId);
       if (receiver) this.armPassTimer(tid, receiver);

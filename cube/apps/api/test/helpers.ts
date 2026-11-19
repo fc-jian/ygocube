@@ -1,18 +1,18 @@
-import { fixturePools } from './pool-fixture';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config } from '../src/config';
 import { CreateTournamentInput, TournamentsService } from '../src/tournaments/tournaments.service';
 import { CardsService } from '../src/cards/cards.service';
 import { PoolsService } from '../src/pools/pools.service';
+import { fixturePools } from './pool-fixture';
 
 // Test DB isolation: every test gets a fresh db. The temp file path is derived from
 // the pid + a module counter, but jest may load this helper once per spec file (counter
 // resets), so the file is physically deleted before opening — collisions cannot leak data.
 export function useTestDb(): void {
-  config.server.poolData = fixturePools();
   const unique = require('crypto').randomUUID();
   config.server.dbPath = join(tmpdir(), `ygocube-test-${process.pid}-${unique}.sqlite`);
+  config.server.poolData = fixturePools();
   // Unit tests exercise metadata behavior with explicit fixtures. Importing a
   // deployment-sized cards.cdb for every isolated database made the suite
   // slow and environment-dependent; force the deterministic synthetic catalog.

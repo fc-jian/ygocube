@@ -157,6 +157,38 @@
 .guess-card-results { max-height: 24rem; overflow-y: auto; }
 .guess-card-results li { padding: .375rem; }
 .guess-pool-results { max-height: none; }
+.guess-pool-results li { min-width: 0; }
+.guess-card-voting { display: grid; flex-shrink: 0; gap: .3rem; }
+.guess-card-votes { display: flex; gap: .3rem; }
+.guess-vote-button {
+  display: flex; align-items: center; justify-content: center; gap: .25rem;
+  min-width: 2.6rem; padding: .35rem; border: 1px solid #3c594b;
+  border-radius: .4rem; background: #152d22; font-size: .8rem; font-variant-numeric: tabular-nums;
+}
+.guess-vote-button:hover:enabled { border-color: #c3aa6f; }
+.guess-vote-button[aria-pressed="true"] { border-color: #c3aa6f; background: #39402b; }
+.guess-vote-like span:first-child { color: #f5a4b1; }
+.guess-vote-button:disabled { cursor: default; opacity: .6; }
+.guess-vote-button[aria-pressed="true"]:disabled { opacity: 1; }
+.guess-vote-error { max-width: 8rem; color: #ffc9b5; font-size: .75rem; }
+.guess-proposals { display: grid; gap: .6rem; padding-bottom: 1rem; border-bottom: 1px solid #315346; }
+.guess-proposals h2, .guess-proposal-dialog h2 { color: #f5eedc; font-weight: 700; }
+.guess-proposal-top { display: grid; gap: .35rem; }
+.guess-proposal-top li { display: flex; align-items: center; min-width: 0; gap: .45rem; }
+.guess-proposal-top .guess-pill, .guess-proposal-top button { flex-shrink: 0; }
+.guess-proposal-ranking { display: grid; gap: .4rem; }
+.guess-proposal-ranking li { display: flex; align-items: center; min-width: 0; gap: .45rem; padding: .35rem 0; }
+.guess-proposal-ranking .guess-pill, .guess-proposal-ranking button { flex-shrink: 0; }
+.guess-proposal-dialog {
+  width: min(44rem, calc(100vw - 1.5rem)); max-height: calc(100dvh - 2rem); overflow-y: auto;
+  padding: 1rem; border: 1px solid #8c784d; border-radius: .7rem; background: #10271d; color: #eee8d5;
+}
+.guess-proposal-dialog::backdrop { background: #000b; }
+.guess-proposal-dialog > .guess-card-picker { margin-top: .8rem; }
+.guess-proposal-confirm { display: grid; justify-items: start; gap: .5rem; margin-top: .75rem; }
+.guess-proposal-selection { display: flex; flex-wrap: wrap; gap: .4rem; min-width: 0; }
+.guess-proposal-selection li { min-width: 0; max-width: 100%; }
+.guess-proposal-selection button { max-width: 100%; overflow-wrap: anywhere; text-align: left; }
 .guess-card-stats { display: flex; flex-wrap: wrap; gap: .15rem .85rem; }
 .guess-pagination { justify-content: center; }
 .guess-actions {

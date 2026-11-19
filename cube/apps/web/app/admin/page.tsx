@@ -1,4 +1,6 @@
 'use client';
+import { EDISON_E3_MAX_PLAYERS, type PoolDraftFormat } from '@ygocube/shared';
+import { EdisonDraftRules } from '@/components/EdisonDraftRules';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiErrorCode, readableApiError } from '@/lib/api';
@@ -35,6 +37,7 @@ interface AdminState {
 }
 
 interface PoolInfo {
+  draftFormat?: PoolDraftFormat;
   id: number;
   name: string;
   count: number;
@@ -305,8 +308,8 @@ export default function AdminPage() {
       await loadRef.current();
     } catch (e: any) {
       if (apiErrorCode(e) === 'INSUFFICIENT_PACK_RATIO' && e.details) {
-        const d = e.details as { extraRatioPercent?: number; requiredMain?: number; availableMain?: number; requiredExtra?: number; availableExtra?: number };
-        showMsg(`按 ${d.extraRatioPercent ?? '?'}% 组包失败：主卡需要 ${d.requiredMain ?? '?'} 张（可用 ${d.availableMain ?? '?'}），额外卡需要 ${d.requiredExtra ?? '?'} 张（可用 ${d.availableExtra ?? '?'})`);
+        const d = e.details as { message?: string; extraRatioPercent?: number; requiredMain?: number; availableMain?: number; requiredExtra?: number; availableExtra?: number };
+        showMsg(d.message ?? `按 ${d.extraRatioPercent ?? '?'}% 组包失败：主卡需要 ${d.requiredMain ?? '?'} 张（可用 ${d.availableMain ?? '?'}），额外卡需要 ${d.requiredExtra ?? '?'} 张（可用 ${d.availableExtra ?? '?'})`);
       } else {
         showMsg(readableApiError(e));
       }
@@ -333,6 +336,7 @@ export default function AdminPage() {
           .replace(/^extra above maximum/, '额外卡组超限')
           .replace(/^side above maximum/, '副卡组超限')
           .replace(/^more than (\d+) copies of (\d+)/, '单卡 $2 超过 $1 份')
+          .replace(/^more copies of (\d+) than drafted/, '卡片 $1 超过实际抓取张数')
           .replace(/^card (\d+) not in picked pool/, '卡片 $1 不在已选卡池')
           .replace(/^extra-deck card (\d+) in main/, '额外卡 $1 位于主卡组');
         const details = (result.invalid_decks as { displayName: string; playerId: string; errors: string[] }[])
@@ -437,23 +441,20 @@ export default function AdminPage() {
         name: String(editForm.name),
         mode: String(editForm.mode === 'single' ? 'single' : 'match'),
         maxPlayers: Number(editForm.maxPlayers),
-        packSize: Number(editForm.packSize),
         cardPool: String(editForm.cardPool),
         mainMin: Number(editForm.mainMin),
         mainMax: Number(editForm.mainMax),
         extraMax: Number(editForm.extraMax),
         sideMax: Number(editForm.sideMax),
-        maxCopies: Number(editForm.maxCopies),
         timeLimit: Number(editForm.timeLimit),
         pickSeconds: Number(editForm.pickSeconds),
         reserveSeconds: Number(editForm.reserveSeconds ?? 400),
         deckbuildingSeconds: limitDeckbuilding ? Number(editForm.deckbuildingSeconds) : null,
-        packStrategy: String(editForm.packStrategy === 'random' || editForm.packStrategy === 'main_then_extra' ? editForm.packStrategy : 'stratify'),
-        extraRatioPercent: extraRatioEnabled ? extraRatioPercent : null,
-        packCount: packCount === '' ? null : Number(packCount), // null = 恢复自动（后端删除该键语义）
         dropPublic,
-        reseatEachRound,
-        evenPackCount,
+        ...(!editEdison && { packSize: Number(editForm.packSize), maxCopies: Number(editForm.maxCopies),
+          packStrategy: String(editForm.packStrategy === 'random' || editForm.packStrategy === 'main_then_extra' ? editForm.packStrategy : 'stratify'),
+          extraRatioPercent: extraRatioEnabled ? extraRatioPercent : null, packCount: packCount === '' ? null : Number(packCount),
+          reseatEachRound, evenPackCount }),
       };
       await adminFetch(`/admin/t/${state!.id}/config`, 'PUT', body);
       setMsg('参数已更新');
@@ -571,7 +572,9 @@ export default function AdminPage() {
 
   const editPlayers = Math.max(1, Number(editForm.maxPlayers) || 1);
   const editPackSize = Math.max(1, Number(editForm.packSize) || 24);
-  const editPoolCount = pools.find((p) => p.name === String(editForm.cardPool ?? ''))?.count ?? 0;
+  const editPool = pools.find((p) => p.name === editForm.cardPool);
+  const editPoolCount = editPool?.count ?? 0;
+  const editEdison = editPool?.draftFormat === 'edison_e3';
   const editRawPacks = Math.max(1, Math.floor(editPoolCount / editPackSize));
   const editAutoPacks = evenPackCount && editRawPacks >= editPlayers ? editRawPacks - (editRawPacks % editPlayers) : editRawPacks;
   const editRequestedPacks = packCount === '' ? null : Number(packCount);
@@ -586,7 +589,7 @@ export default function AdminPage() {
   const editDraftedCards = Math.min(editPoolCount, editEffectivePacks * editPackSize);
   const editCardsLow = Math.floor(editDraftedCards / editPlayers);
   const editCardsHigh = Math.ceil(editDraftedCards / editPlayers);
-  const editExtraRatioInvalid = extraRatioEnabled && (!Number.isInteger(extraRatioPercent) || extraRatioPercent < 0 || extraRatioPercent > 100);
+  const editExtraRatioInvalid = !editEdison && extraRatioEnabled && (!Number.isInteger(extraRatioPercent) || extraRatioPercent < 0 || extraRatioPercent > 100);
   const editExtraPerPack = extraRatioEnabled ? Math.round(editPackSize * extraRatioPercent / 100) : 0;
   const editMainPerPack = editPackSize - editExtraPerPack;
 
@@ -1021,54 +1024,59 @@ export default function AdminPage() {
                 名称
                 <input className="flex-1 rounded bg-felt-deep px-2 py-1" value={String(editForm.name ?? '')} onChange={(e) => setEditForm((f) => ({ ...f, name: e.target.value }))} />
               </label>
-              <label className="flex items-center gap-2">人数 <input type="number" min={2} max={64} className="w-16 rounded bg-felt-deep px-2 py-1" value={Number(editForm.maxPlayers) || 2} onChange={(e) => setEditForm((f) => ({ ...f, maxPlayers: Number(e.target.value) }))} /></label>
+              <label className="flex items-center gap-2">人数 <input type="number" min={2} max={editEdison ? EDISON_E3_MAX_PLAYERS : 32} className="w-16 rounded bg-felt-deep px-2 py-1" value={Number(editForm.maxPlayers) || 2} onChange={(e) => setEditForm((f) => ({ ...f, maxPlayers: Number(e.target.value) }))} /></label>
               <label className="flex items-center gap-2">模式
                 <select className="rounded bg-felt-deep px-2 py-1" value={String(editForm.mode ?? 'match')} onChange={(e) => setEditForm((f) => ({ ...f, mode: e.target.value }))}>
                   <option value="match">BO3 对战</option>
                   <option value="single">单局</option>
                 </select>
               </label>
-              <label className="flex items-center gap-2">每堆卡数 <input type="number" min={1} max={60} className="w-14 rounded bg-felt-deep px-2 py-1" value={Number(editForm.packSize) || 24} onChange={(e) => setEditForm((f) => ({ ...f, packSize: Number(e.target.value) }))} /></label>
-              <label className="flex items-center gap-2">牌堆总数（轮数）
-                <input type="number" min={1} className="w-14 rounded bg-felt-deep px-2 py-1" placeholder="自动" value={packCount} onChange={(e) => setPackCount(e.target.value === '' ? '' : Math.max(1, Number(e.target.value)))} />
-                {evenPackCount && packCount !== '' && Number(packCount) % (Number(editForm.maxPlayers) || 2) !== 0 && <span className="text-red-300">须为人数整数倍</span>}
-              </label>
-              <div className="col-span-full rounded border border-emerald-300/20 bg-emerald-950/30 px-3 py-2 text-xs text-emerald-100">
-                每位玩家可获得：{editCardsLow === editCardsHigh ? <b className="text-gold">{editCardsLow} 张</b> : <b className="text-amber-300">{editCardsLow}–{editCardsHigh} 张</b>}（实际使用 {editDraftedCards} 张）
-              </div>
-              <label className="flex items-center gap-2"><input type="checkbox" checked={evenPackCount} onChange={(e) => setEvenPackCount(e.target.checked)} /> 牌堆数为人数整数倍</label>
+              {!editEdison && (<>
+                <label className="flex items-center gap-2">每堆卡数 <input type="number" min={1} max={60} className="w-14 rounded bg-felt-deep px-2 py-1" value={Number(editForm.packSize) || 24} onChange={(e) => setEditForm((f) => ({ ...f, packSize: Number(e.target.value) }))} /></label>
+                <label className="flex items-center gap-2">牌堆总数（轮数）
+                  <input type="number" min={1} className="w-14 rounded bg-felt-deep px-2 py-1" placeholder="自动" value={packCount} onChange={(e) => setPackCount(e.target.value === '' ? '' : Math.max(1, Number(e.target.value)))} />
+                  {evenPackCount && packCount !== '' && Number(packCount) % (Number(editForm.maxPlayers) || 2) !== 0 && <span className="text-red-300">须为人数整数倍</span>}
+                </label>
+                <div className="col-span-full rounded border border-emerald-300/20 bg-emerald-950/30 px-3 py-2 text-xs text-emerald-100">
+                  每位玩家可获得：{editCardsLow === editCardsHigh ? <b className="text-gold">{editCardsLow} 张</b> : <b className="text-amber-300">{editCardsLow}–{editCardsHigh} 张</b>}（实际使用 {editDraftedCards} 张）
+                </div>
+                <label className="flex items-center gap-2"><input type="checkbox" checked={evenPackCount} onChange={(e) => setEvenPackCount(e.target.checked)} /> 牌堆数为人数整数倍</label>
+              </>)}
               <label className="flex items-center gap-2">保留时间（秒） <input type="number" min={0} max={3600} className="w-16 rounded bg-felt-deep px-2 py-1" value={Number(editForm.reserveSeconds) ?? 400} onChange={(e) => setEditForm((f) => ({ ...f, reserveSeconds: Math.max(0, Number(e.target.value)) }))} /></label>
               <label className="flex items-center gap-2"><input type="checkbox" checked={dropPublic} onChange={(e) => setDropPublic(e.target.checked)} /> 公开被丢弃的卡牌</label>
-              <label className="flex items-center gap-2"><input type="checkbox" checked={reseatEachRound} onChange={(e) => setReseatEachRound(e.target.checked)} /> 每轮结束后随机重排玩家座位</label>
+              {!editEdison && <label className="flex items-center gap-2"><input type="checkbox" checked={reseatEachRound} onChange={(e) => setReseatEachRound(e.target.checked)} /> 每轮结束后随机重排玩家座位</label>}
               <label className="flex items-center gap-2">卡池
                 <select className="rounded bg-felt-deep px-2 py-1" value={String(editForm.cardPool ?? '')} onChange={(e) => setEditForm((f) => ({ ...f, cardPool: e.target.value }))}>
                   {pools.map((p) => <option key={p.name} value={p.name}>{p.name} ({p.count})</option>)}
                 </select>
               </label>
+              {editEdison && <EdisonDraftRules />}
               <label className="flex items-center gap-2">主卡组 <input type="number" className="w-12 rounded bg-felt-deep px-1 py-1" value={Number(editForm.mainMin)} onChange={(e) => setEditForm((f) => ({ ...f, mainMin: Number(e.target.value) }))} />-<input type="number" className="w-12 rounded bg-felt-deep px-1 py-1" value={Number(editForm.mainMax)} onChange={(e) => setEditForm((f) => ({ ...f, mainMax: Number(e.target.value) }))} /></label>
               <label className="flex items-center gap-2">额外上限 <input type="number" className="w-14 rounded bg-felt-deep px-1 py-1" value={Number(editForm.extraMax)} onChange={(e) => setEditForm((f) => ({ ...f, extraMax: Number(e.target.value) }))} /></label>
               <label className="flex items-center gap-2">副卡组上限 <input type="number" className="w-14 rounded bg-felt-deep px-1 py-1" value={Number(editForm.sideMax)} onChange={(e) => setEditForm((f) => ({ ...f, sideMax: Number(e.target.value) }))} /></label>
-              <label className="flex items-center gap-2">单卡上限 <input type="number" min={1} max={3} className="w-14 rounded bg-felt-deep px-1 py-1" value={Number(editForm.maxCopies ?? 3)} onChange={(e) => setEditForm((f) => ({ ...f, maxCopies: Number(e.target.value) }))} /></label>
+              <label className="flex items-center gap-2">单卡上限 <input type="number" min={1} max={3} className="w-14 rounded bg-felt-deep px-1 py-1" disabled={editEdison} value={editEdison ? 3 : Number(editForm.maxCopies ?? 3)} onChange={(e) => setEditForm((f) => ({ ...f, maxCopies: Number(e.target.value) }))} /></label>
               <label className="flex items-center gap-2">回合限时 <input type="number" min={60} max={999} className="w-16 rounded bg-felt-deep px-1 py-1" value={Number(editForm.timeLimit ?? 180)} onChange={(e) => setEditForm((f) => ({ ...f, timeLimit: Number(e.target.value) }))} /></label>
               <label className="flex items-center gap-2">选牌秒数 <input type="number" className="w-16 rounded bg-felt-deep px-1 py-1" value={Number(editForm.pickSeconds)} onChange={(e) => setEditForm((f) => ({ ...f, pickSeconds: Number(e.target.value) }))} /></label>
               <label className="flex items-center gap-2"><input type="checkbox" checked={limitDeckbuilding} onChange={(e) => setLimitDeckbuilding(e.target.checked)} /> 限制构筑时间 {limitDeckbuilding ? <><input type="number" min={30} max={7200} className="w-16 rounded bg-felt-deep px-1 py-1" value={Number(editForm.deckbuildingSeconds)} onChange={(e) => setEditForm((f) => ({ ...f, deckbuildingSeconds: Number(e.target.value) }))} /> 秒</> : <span className="text-slate-400">无限</span>}</label>
-              <label className="flex items-center gap-2">卡堆组成
-                <select className="rounded bg-felt-deep px-1 py-1 disabled:cursor-not-allowed disabled:opacity-50" disabled={extraRatioEnabled} value={String(editForm.packStrategy ?? 'stratify')} onChange={(e) => setEditForm((f) => ({ ...f, packStrategy: e.target.value }))}>
-                  <option value="stratify">主卡/额外卡按比例均匀每堆</option>
-                  <option value="random">全随机</option>
-                  <option value="main_then_extra">先全主卡再全额外</option>
-                </select>
-                {extraRatioEnabled && <span className="text-xs text-amber-200">比例配置优先</span>}
-              </label>
-              <label className="col-span-full flex flex-wrap items-center gap-2">
-                <input type="checkbox" checked={extraRatioEnabled} onChange={(e) => setExtraRatioEnabled(e.target.checked)} />
-                按比例配置额外卡
-                {extraRatioEnabled && <>
-                  <input type="number" min={0} max={100} step={1} className="w-16 rounded bg-felt-deep px-2 py-1" value={extraRatioPercent} onChange={(e) => setExtraRatioPercent(e.target.value === '' ? 0 : Number(e.target.value))} />
-                  <span>%（每个完整牌堆 {editMainPerPack} 主卡 + {editExtraPerPack} 额外卡）</span>
-                </>}
-                {editExtraRatioInvalid && <span className="text-xs text-red-300">比例必须是 0–100 的整数</span>}
-              </label>
+              {!editEdison && (<>
+                <label className="flex items-center gap-2">卡堆组成
+                  <select className="rounded bg-felt-deep px-1 py-1 disabled:cursor-not-allowed disabled:opacity-50" disabled={extraRatioEnabled} value={String(editForm.packStrategy ?? 'stratify')} onChange={(e) => setEditForm((f) => ({ ...f, packStrategy: e.target.value }))}>
+                    <option value="stratify">主卡/额外卡按比例均匀每堆</option>
+                    <option value="random">全随机</option>
+                    <option value="main_then_extra">先全主卡再全额外</option>
+                  </select>
+                  {extraRatioEnabled && <span className="text-xs text-amber-200">比例配置优先</span>}
+                </label>
+                <label className="col-span-full flex flex-wrap items-center gap-2">
+                  <input type="checkbox" checked={extraRatioEnabled} onChange={(e) => setExtraRatioEnabled(e.target.checked)} />
+                  按比例配置额外卡
+                  {extraRatioEnabled && <>
+                    <input type="number" min={0} max={100} step={1} className="w-16 rounded bg-felt-deep px-2 py-1" value={extraRatioPercent} onChange={(e) => setExtraRatioPercent(e.target.value === '' ? 0 : Number(e.target.value))} />
+                    <span>%（每个完整牌堆 {editMainPerPack} 主卡 + {editExtraPerPack} 额外卡）</span>
+                  </>}
+                  {editExtraRatioInvalid && <span className="text-xs text-red-300">比例必须是 0–100 的整数</span>}
+                </label>
+              </>)}
             </div>
             <div className="mt-5 flex justify-end gap-3">
               <button onClick={() => setEditing(false)} className="rounded px-4 py-1.5 text-slate-300 hover:bg-felt-edge">取消</button>

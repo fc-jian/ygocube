@@ -1,4 +1,5 @@
 'use client';
+import { DraftCopyAllowance } from '@ygocube/shared';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { TransientNotice } from '@/components/TransientNotice';
@@ -18,7 +19,7 @@ import { useTournamentFallbackPolling } from '@/lib/sse';
 import { usePlayerLogout } from '@/lib/usePlayerLogout';
 
 export default function DeckPage() {
-  const params = useParams<{ tid: string; pid: string }>();
+  const params = useParams<{ tid: string; pid: string }>()!;
   const tid = params.tid;
   const pid = params.pid;
   const tidPath = encodePathSegment(tid);
@@ -131,24 +132,15 @@ export default function DeckPage() {
   const cfg = state?.config ?? {};
   const discard = useMemo(() => {
     if (!state) return [];
-    const used = new Map<number, number>();
-    for (const code of [...safeCardCodes(deck.main), ...safeCardCodes(deck.extra), ...safeCardCodes(deck.side)]) {
-      const key = canonicalCardCode(code, cardMap);
-      used.set(key, (used.get(key) ?? 0) + 1);
-    }
-    const maxCopies = Number(cfg.maxCopies ?? 1);
+    const picks = safeCardCodes(state.pickedCards);
+    const allowance = new DraftCopyAllowance(picks, Number(cfg.maxCopies ?? 1), cfg.draftFormat === 'edison_e3',
+      (code) => canonicalCardCode(code, cardMap), [...safeCardCodes(deck.main), ...safeCardCodes(deck.extra), ...safeCardCodes(deck.side)]);
     const available: number[] = [];
     // Keep the exact selected code in the unused area. The rules copy key is
     // only used to enforce the shared maxCopies limit across alias rows.
-    for (const code of [...new Set(safeCardCodes(state.pickedCards))]) {
-      const key = canonicalCardCode(code, cardMap);
-      while ((used.get(key) ?? 0) < maxCopies) {
-        available.push(code);
-        used.set(key, (used.get(key) ?? 0) + 1);
-      }
-    }
+    for (const code of new Set(picks)) while (allowance.take(code)) available.push(code);
     return available;
-  }, [cardMap, cfg.maxCopies, deck.extra, deck.main, deck.side, state?.pickedCards]);
+  }, [cardMap, cfg.maxCopies, cfg.draftFormat, deck.extra, deck.main, deck.side, state?.pickedCards]);
 
   const move = async (card: number, from: string, to: string, index?: number, fromIndex?: number) => {
     try {

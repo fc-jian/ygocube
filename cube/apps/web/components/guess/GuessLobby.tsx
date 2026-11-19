@@ -14,6 +14,8 @@ export function GuessLobby() {
   const [name, setName] = useState('');
   const [playerId, setPlayerId] = useState('');
   const [chosenPoolId, setChosenPoolId] = useState<number | null>(null);
+  const [expertMode, setExpertMode] = useState(false);
+  const [disableOpeningHints, setDisableOpeningHints] = useState(false);
   const [roomCode, setRoomCode] = useState('');
   const [rooms, setRooms] = useState<GuessRoomSummary[] | null>(null);
   const [busy, setBusy] = useState(false);
@@ -39,7 +41,7 @@ export function GuessLobby() {
   async function create(event: FormEvent) {
     event.preventDefault();
     setCreateError('');
-    const body: GuessCreateRequest = { name, playerId, poolId };
+    const body: GuessCreateRequest = { name, playerId, poolId, expertMode, disableOpeningHints };
     setBusy(true);
     try {
       const { token, room } = await guessRequest<GuessSession>('/rooms', { body });
@@ -82,6 +84,15 @@ export function GuessLobby() {
               </option>)}
             </select></label>
             <Link className="guess-nav-link justify-self-start" href={`${GUESS_PATH}/pools/new`}>{text.createPool}</Link>
+            <label className="!flex items-center gap-2">
+              <input type="checkbox" checked={expertMode} onChange={(event) => setExpertMode(event.target.checked)} />
+              {text.expertMode}
+            </label>
+            <p className="guess-muted">{text.expertHelp}</p>
+            <label className="!flex items-center gap-2">
+              <input type="checkbox" checked={disableOpeningHints} onChange={(event) => setDisableOpeningHints(event.target.checked)} />
+              {text.disableOpeningHints}
+            </label>
             {poolError != null && <p className="guess-error" role="alert">{guessError(poolError, text)}</p>}
             {createError && <p className="guess-error" role="alert">{createError}</p>}
             <button type="submit" className="guess-primary w-full" disabled={busy || !pools}>{text.create}</button>
@@ -110,6 +121,8 @@ export function GuessLobby() {
                     <strong className="block truncate">{room.name}</strong>
                     <span className="guess-muted"><span className="font-mono">{room.roomId}</span>
                       {' · '}{room.poolId === 0 ? text.fullPool : room.poolName}
+                      {room.expertMode && ` · ${text.expertMode}`}
+                      {room.disableOpeningHints && ` · ${text.disableOpeningHints}`}
                     </span>
                   </span>
                   <span className="guess-pill">{room.playerCount}/{room.maxPlayers}</span>

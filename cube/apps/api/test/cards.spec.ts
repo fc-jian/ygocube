@@ -87,7 +87,21 @@ describe('ygopro card metadata decoding', () => {
       expect(cards.search('简体名称').map((card) => card.code)).toEqual([900000010]);
       for (const alias of ['中文名称', '论坛名称', 'OCG 名称', 'JP 假名', 'JP 名称', 'English Name']) {
         expect(cards.search(alias).map((card) => card.code)).toEqual([900000010]);
+        const namesOnly = cards.searchCatalogNames(parseCardSearchParams({ q: alias.slice(0, -1) }));
+        expect(namesOnly.cards.some((card) => card.code === 900000010)).toBe(true);
       }
+      const namesOnly = (q: string) => cards.searchCatalogNames(parseCardSearchParams({ q }));
+      expect(namesOnly('ｅｎｇｌｉｓｈ').cards.map((card) => card.code)).toEqual([900000010]);
+      expect(namesOnly('效果').totalCount).toBe(0);
+      expect(namesOnly('900000010').totalCount).toBe(0);
+      expect(namesOnly('').totalCount).toBe(0);
+      const pool = new Set([900000010, 900000011]);
+      expect(cards.searchCatalogNames({ query: '', page: 0 }, pool)).toMatchObject({
+        cards: [{ code: 900000010 }, { code: 900000011 }], totalCount: 2, totalPages: 1, hasMore: false,
+      });
+      expect(cards.searchCatalogNames({ query: '论坛', page: 0 }, pool).cards.map(({ code }) => code)).toEqual([900000010]);
+      expect(cards.searchCatalogNames({ query: 'English Name', page: 0 }, new Set([900000011])).totalCount).toBe(0);
+      expect(cards.searchCatalogNames({ query: '效果', page: 0 }, pool).totalCount).toBe(0);
       expect(cards.search('CDB 名称 900000013').map((card) => card.code)).toEqual([900000013]);
     } finally {
       config.server.cardsCdb = originalCdb;
@@ -126,6 +140,14 @@ describe('ygopro card metadata decoding', () => {
       expect(cards.get(2000)).toMatchObject({name:'规则卡独立译名',aliasKind:'rule',aliasName:'原版译名'});
       expect(cards.get(3001)?.name).toBe('CDB-3001');
       expect(cards.search('OriginalName').map(c=>c.code).sort()).toEqual([1000,1001,1002,1019]);
+      expect(cards.searchCatalogNames({ query: 'OriginalName', page: 0 })).toMatchObject({
+        cards: [{ code: 1000 }], totalCount: 1, totalPages: 1, hasMore: false,
+      });
+      expect(cards.searchCatalogNames({ query: '异画独立译名', page: 0 }).cards.map(({ code }) => code)).toEqual([1000]);
+      expect(cards.searchCatalogNames({ query: '异画独立译名', page: 0 }, new Set([1000])).cards.map(({ code }) => code))
+        .toEqual([1000]);
+      expect(cards.searchCatalogNames({ query: '规则卡独立译名', page: 0 }).cards.map(({ code }) => code)).toEqual([2000]);
+      expect(cards.searchCatalogNames({ query: 'CDB-3001', page: 0 }).cards.map(({ code }) => code)).toEqual([3001]);
       expect(cards.search('1001').some(c=>c.code===1001)).toBe(true);
       expect(cards.canonicalCode(1001)).toBe(1000);
       expect(cards.canonicalCode(2000)).toBe(1000);
@@ -294,6 +316,34 @@ describe('ygopro card metadata decoding', () => {
       'not', 'fusion not tuner', 'fusion or not', 'not ()', 'not '.repeat(64) + 'tuner']) {
       expect(() => parseCardSearchParams({ subtype })).toThrow();
     }
+  });
+
+  it('matches card groups and combines them with other subtype tags', () => {
+    const cards = new CardsService();
+    cards.poolCodes();
+    const insert = getDb().prepare('INSERT INTO cards(code, name, type, search_text) VALUES (?, ?, ?, ?)');
+    const normal = 77000001, ritual = 77000002, mainPendulum = 77000003;
+    const fusion = 77000004, synchro = 77000005, xyzPendulum = 77000006, link = 77000007;
+    const normalSpell = 77000008, ritualSpell = 77000009, normalTrap = 77000010, continuousTrap = 77000011;
+    for (const [code, type] of [
+      [normal, 0x11], [ritual, 0xa1], [mainPendulum, 0x1000021],
+      [fusion, 0x41], [synchro, 0x2021], [xyzPendulum, 0x1800021], [link, 0x4000021],
+      [normalSpell, 0x2], [ritualSpell, 0x82], [normalTrap, 0x4], [continuousTrap, 0x20004],
+      [77000012, TYPE_TOKEN | 0x11],
+    ]) insert.run(code, String(code), type, 'cardgroupfixture');
+    const found = (subtype: string, category?: string) => cards.searchCatalog(
+      parseCardSearchParams({ q: 'cardgroupfixture', subtype, category }),
+    ).cards.map(({ code }) => code);
+
+    expect(found('main-deck-monster')).toEqual([normal, ritual, mainPendulum]);
+    expect(found('extra-deck-monster')).toEqual([fusion, synchro, xyzPendulum, link]);
+    expect(found('monster')).toEqual([normal, ritual, mainPendulum, fusion, synchro, xyzPendulum, link]);
+    expect(found('spell')).toEqual([normalSpell, ritualSpell]);
+    expect(found('trap')).toEqual([normalTrap, continuousTrap]);
+    expect(found('normal-trap')).toEqual([normalTrap]);
+    expect(found('（main-deck-monster 或 extra-deck-monster） 与 pendulum')).toEqual([mainPendulum, xyzPendulum]);
+    expect(found('(spell or trap) and not (normal-spell or normal-trap)')).toEqual([ritualSpell, continuousTrap]);
+    expect(found('not monster', '4')).toEqual([normalTrap, continuousTrap]);
   });
 
   it('counts base fields once per eligible artwork group and keeps rules-name aliases separate', () => {

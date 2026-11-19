@@ -1,4 +1,5 @@
-import { buildOpeningHintOptions, drawOpeningHints } from '../src/guess/opening-hints';
+import crypto from 'node:crypto';
+import { buildOpeningHintOptions, drawOpeningHints, type OpeningHintHistory } from '../src/guess/opening-hints';
 
 const dragon = { code: 89631139, type: 0x11, level: 8, atk: 3000, def: 2500, attribute: 0x10, setCodes: [0xdd], releaseYear: 1999 };
 const link = { code: 99999991, type: 0x4000021, level: 2, atk: 1600, def: 9000, attribute: 0x20, setCodes: [0x112], alias: 0 };
@@ -69,5 +70,32 @@ describe('Guess opening hint options', () => {
     expect(pools['defense-at-least-attack']).toEqual([guard.code]);
     expect(pools['attack-over-500']).toEqual([lead.code]);
     expect(pools['attack-slight-or-unknown']).toEqual([boundary.code, link.code, xyz.code]);
+  });
+
+  it('excludes the last visible group for each player across all hint methods', () => {
+    const fieldlessSpell = { ...spell, setCodes: [] };
+    const { hints } = drawOpeningHints([fieldlessSpell, trap], [fieldlessSpell.code, trap.code], new Map(), [
+      { lastGroup: 'spell-trap', counts: new Map([['spell-trap', 1]]) },
+      { lastGroup: 'no-field', counts: new Map([['no-field', 1]]) },
+    ]);
+    expect(hints.map(({ group }) => group)).toEqual(['no-field', 'spell-trap']);
+  });
+
+  it('gives a previously frequent group a smaller share even when its candidate count is identical', () => {
+    const random = jest.spyOn(crypto, 'randomInt');
+    const history: OpeningHintHistory = {
+      lastGroup: 'main-monster', counts: new Map([['spell-trap', 3]]),
+    };
+    function pick(history?: OpeningHintHistory) {
+      // The fixture has two visible groups of equal size. The group draw is just below 50%.
+      random.mockImplementationOnce(() => 0).mockImplementationOnce(() => 2 ** 47 - 1);
+      return drawOpeningHints([trap], [trap.code], new Map(), [history]).hints[0].group;
+    }
+    try {
+      expect(pick()).toBe('spell-trap');
+      expect(pick(history)).toBe('no-field');
+    } finally {
+      random.mockRestore();
+    }
   });
 });

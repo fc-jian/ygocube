@@ -60,6 +60,9 @@ export function getDb(): Database.Database {
       codes_json TEXT
     );
     INSERT OR IGNORE INTO guess_pools (id, name, name_key) VALUES (0, '完整卡库', 'name:完整卡库');
+    CREATE TABLE IF NOT EXISTS guess_pool_policies (
+      name_key TEXT PRIMARY KEY, default_priority INTEGER NOT NULL, browse_only INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS guess_round_cards (
       room_id TEXT NOT NULL REFERENCES guess_rooms(room_id),
       round_number INTEGER NOT NULL,
@@ -69,6 +72,59 @@ export function getDb(): Database.Database {
       PRIMARY KEY (room_id, round_number, code)
     );
     CREATE INDEX IF NOT EXISTS guess_round_cards_pool_code ON guess_round_cards(pool_id, code);
+    CREATE TABLE IF NOT EXISTS guess_pool_card_votes (
+      pool_id INTEGER NOT NULL REFERENCES guess_pools(id),
+      code INTEGER NOT NULL,
+      voter_hash TEXT NOT NULL,
+      vote TEXT NOT NULL CHECK (vote IN ('like', 'dislike')),
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (pool_id, code, voter_hash)
+    );
+    CREATE TABLE IF NOT EXISTS guess_pool_proposal_votes (
+      pool_id INTEGER NOT NULL REFERENCES guess_pools(id),
+      code INTEGER NOT NULL,
+      voter_hash TEXT NOT NULL,
+      vote_date TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (pool_id, voter_hash, vote_date)
+    );
+    CREATE INDEX IF NOT EXISTS guess_pool_proposals_code ON guess_pool_proposal_votes(pool_id, code);
+    CREATE TABLE IF NOT EXISTS guess_pool_proposal_ballots (
+      pool_id INTEGER NOT NULL REFERENCES guess_pools(id),
+      code INTEGER NOT NULL,
+      voter_hash TEXT NOT NULL,
+      vote_date TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (pool_id, voter_hash, code)
+    );
+    CREATE INDEX IF NOT EXISTS guess_pool_ballots_day ON guess_pool_proposal_ballots(pool_id, voter_hash, vote_date);
+    CREATE INDEX IF NOT EXISTS guess_pool_ballots_code ON guess_pool_proposal_ballots(pool_id, code);
+    INSERT OR IGNORE INTO guess_pool_proposal_ballots(pool_id, code, voter_hash, vote_date, created_at)
+      SELECT pool_id, code, voter_hash, vote_date, created_at FROM guess_pool_proposal_votes
+      ORDER BY vote_date, created_at;
+    CREATE TABLE IF NOT EXISTS dg_rooms (
+      room_id TEXT PRIMARY KEY,
+      phase TEXT NOT NULL,
+      deadline_at INTEGER,
+      state_json TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS dg_rooms_lobby ON dg_rooms(phase, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS dg_rooms_due ON dg_rooms(deadline_at) WHERE deadline_at IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS dg_room_events (
+      room_id TEXT NOT NULL REFERENCES dg_rooms(room_id) DEFERRABLE INITIALLY DEFERRED,
+      version INTEGER NOT NULL,
+      event_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (room_id, version)
+    );
+    CREATE TABLE IF NOT EXISTS dg_live_drawings (
+      room_id TEXT PRIMARY KEY REFERENCES dg_rooms(room_id),
+      turn INTEGER NOT NULL,
+      revision TEXT NOT NULL,
+      strokes_json TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS web_replays (
       tournament_id INTEGER NOT NULL, match_id INTEGER NOT NULL, room_name TEXT NOT NULL,
       complete INTEGER NOT NULL DEFAULT 0, frame_count INTEGER NOT NULL DEFAULT 0,
@@ -268,6 +324,32 @@ function migrate(d: Database.Database): void {
   const poolCols = d.prepare('PRAGMA table_info(card_pools)').all() as { name: string }[];
   if (!poolCols.some((c) => c.name === 'candidate_codes_json')) {
     d.exec("ALTER TABLE card_pools ADD COLUMN candidate_codes_json TEXT NOT NULL DEFAULT '[]'");
+  }
+  if (!poolCols.some((c) => c.name === 'draft_format')) {
+    d.transaction(() => {
+      if (d.prepare("SELECT 1 FROM pragma_table_info('card_pools') WHERE name='draft_format'").get()) return;
+      d.exec('ALTER TABLE card_pools ADD COLUMN draft_format TEXT');
+    }).immediate();
+  }
+  if (config.server.poolData.draft.length || config.server.poolData.guess.length) {
+    const mark = d.prepare('INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO NOTHING');
+    const install = d.prepare(`INSERT INTO card_pools (name, codes_json, created_at, draft_format)
+      VALUES (?, ?, ?, ?) ON CONFLICT(name) DO NOTHING`);
+    const policy = d.prepare(`INSERT INTO guess_pool_policies (name_key, default_priority, browse_only)
+      VALUES (?, ?, ?) ON CONFLICT(name_key) DO UPDATE SET
+        default_priority=excluded.default_priority, browse_only=excluded.browse_only
+      WHERE default_priority <> excluded.default_priority OR browse_only <> excluded.browse_only`);
+    d.transaction(() => {
+      for (const pool of config.server.poolData.draft) {
+        const now = new Date().toISOString();
+        if (mark.run('installed_draft_pool:' + pool.name, '1', now).changes) {
+          install.run(pool.name, JSON.stringify(pool.codes), now, pool.draftFormat ?? null);
+        }
+      }
+      for (const pool of config.server.poolData.guess) {
+        policy.run(pool.key, pool.defaultPriority, Number(pool.browseOnly));
+      }
+    }).immediate();
   }
   const poolRows = d.prepare('SELECT id, codes_json, candidate_codes_json FROM card_pools').all() as {
     id: number;

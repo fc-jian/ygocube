@@ -10,12 +10,13 @@ import { isExtraDeckType, sortCardCodes, sortCardSearchResults } from '@/lib/car
 // 卡池编辑页（dev_docs/06 §5.7）：左侧按 main/extra 显示当前卡池，右侧搜索全卡，
 // 拖拽/点击增删；保存需要 super admin 令牌。
 export default function PoolEditorPage() {
-  const params = useParams<{ id: string }>();
+  const params = useParams<{ id: string }>()!;
   const router = useRouter();
   const isNew = params.id === 'new';
   const [adminToken, setAdminToken] = useState('');
   const [name, setName] = useState('');
-  const [codes, setCodes] = useState<Set<number>>(new Set());
+  const [codes, setCodes] = useState<number[]>([]);
+  const [physicalCopies, setPhysicalCopies] = useState(false);
   const [cardMap, setCardMap] = useState<Record<number, CardInfo>>({});
   const [q, setQ] = useState('');
   const [results, setResults] = useState<CardInfo[]>([]);
@@ -54,7 +55,8 @@ export default function PoolEditorPage() {
         const pool = await adminFetch(`/admin/pools/${params.id}`);
         setName(pool.name);
         const list: number[] = pool.codes ?? [];
-        setCodes(new Set(list));
+        setCodes(list);
+        setPhysicalCopies(pool.draftFormat === 'edison_e3');
         setCandidateCount(Number(pool.candidateCodes?.length ?? pool.candidateCount ?? 0));
         setMetaLoading(true);
         for (let i = 0; i < list.length; i += 500) {
@@ -100,9 +102,9 @@ export default function PoolEditorPage() {
   // metadata rows already present in the editor so unsaved card additions,
   // removals and manual ordering are never overwritten.
   useEffect(() => {
-    if (!adminToken || isNew || codes.size === 0) return;
+    if (!adminToken || isNew || codes.length === 0) return;
     const refresh = async () => {
-      const list = [...codes];
+      const list = [...new Set(codes)];
       const merged: Record<number, CardInfo> = {};
       try {
         for (let i = 0; i < list.length; i += 500) {
@@ -120,19 +122,14 @@ export default function PoolEditorPage() {
   }, [adminFetch, adminToken, codes, isNew, params.id]);
 
   const addCode = (code: number) => {
-    setCodes((prev) => {
-      const next = new Set(prev);
-      next.add(code);
-      void loadMeta([...next]);
-      return next;
-    });
+    setCodes((prev) => physicalCopies || !prev.includes(code) ? [...prev, code] : prev);
+    void loadMeta([code]);
   };
 
   const removeCode = (code: number) => {
     setCodes((prev) => {
-      const next = new Set(prev);
-      next.delete(code);
-      return next;
+      const index = prev.indexOf(code);
+      return index < 0 ? prev : [...prev.slice(0, index), ...prev.slice(index + 1)];
     });
   };
 
@@ -209,7 +206,7 @@ export default function PoolEditorPage() {
           ) : (
             <b className="text-gold">{name}</b>
           )}
-          <span className="text-xs text-slate-400">{codes.size} 张卡 · 候选 {candidateCount} 张</span>
+          <span className="text-xs text-slate-400">{codes.length} 张卡 · 候选 {candidateCount} 张</span>
           {!isNew && (
             <a
               href={`/pool/${encodeURIComponent(name)}/candidate`}
@@ -221,7 +218,7 @@ export default function PoolEditorPage() {
             </a>
           )}
           <button
-            onClick={() => setCodes(new Set(sortCardCodes([...codes], cardMap, 'lv')))}
+            onClick={() => setCodes(sortCardCodes(codes, cardMap, 'lv'))}
             className="rounded bg-felt-edge px-2 py-0.5 text-xs hover:brightness-110"
             title="按 YGOPro 卡组编辑器整理顺序排列主卡与额外卡"
           >
@@ -251,9 +248,9 @@ export default function PoolEditorPage() {
                   <span className="font-mono text-gold">{list.length}</span>
                 </header>
                 <div className="card-grid">
-                  {list.map((c) => (
+                  {list.map((c, index) => (
                     <div
-                      key={c}
+                      key={`${c}-${index}`}
                       draggable
                       onDragStart={(e) => {
                         e.dataTransfer.setData('text/plain', String(c));
@@ -296,7 +293,7 @@ export default function PoolEditorPage() {
             </div>
             <ul className="mt-2 space-y-0.5">
               {results.map((c) => {
-                const inPool = codes.has(c.code);
+                const inPool = codes.includes(c.code);
                 return (
                   <li
                     key={c.code}
@@ -310,11 +307,11 @@ export default function PoolEditorPage() {
                     <CardWithTooltip code={c.code} card={c} className="h-9 w-7 shrink-0" />
                     <span className="flex-1 truncate text-xs">{c.name}</span>
                     <span className="font-mono text-[0.625rem] text-slate-500">{c.code}</span>
-                    {inPool ? (
+                    {inPool && !physicalCopies ? (
                       <span className="text-[0.625rem] text-emerald-400">已在池中</span>
                     ) : (
                       <button onClick={() => addCode(c.code)} className="rounded bg-gold px-2 py-0.5 text-[0.625rem] font-semibold text-felt-deep hover:brightness-110">
-                        加入
+                        {inPool ? `增加一张（已有 ${codes.filter((code) => code === c.code).length}）` : '加入'}
                       </button>
                     )}
                   </li>

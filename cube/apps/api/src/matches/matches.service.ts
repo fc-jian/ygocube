@@ -53,6 +53,7 @@ interface PointsRow {
 @Injectable()
 export class MatchesService implements OnModuleInit, OnModuleDestroy {
   private poller: NodeJS.Timeout | null = null;
+  private polling = false;
   private roomRetryCooldown = new Map<number, number>(); // tid -> last attempt ts
   private operationGeneration = new Map<number, number>();
   constructor(private srvpro: SrvproApi = new RealSrvproClient(config.srvpro.url, config.srvpro.apiKey)) {}
@@ -712,11 +713,15 @@ export class MatchesService implements OnModuleInit, OnModuleDestroy {
 
   // polling fallback (dev_docs/05 §6)：结果采集 + 建房失败重试
   private async pollAll(): Promise<void> {
+    if (this.polling) return;
+    this.polling = true;
     try {
       await this.doPollAll();
     } catch (e) {
       // 轮询回调异常不可冒泡（setInterval 回调抛异常会杀进程）
       console.error('pollAll failed', (e as Error).message);
+    } finally {
+      this.polling = false;
     }
   }
 
@@ -733,9 +738,22 @@ export class MatchesService implements OnModuleInit, OnModuleDestroy {
         continue; // 比赛已被删除
       }
       if (state.frozen) continue;
+      const generation = this.operationGeneration.get(r.tournament_id) ?? 0;
       for (const m of state.matches.filter((x) => x.roomName && x.resultA === null && !x.faultedAt && x.playerB !== '(bye)')) {
+        const roomName = m.roomName!;
+        // An HTTP response may arrive after a webhook, manual result, freeze
+        // or revert. Re-read authoritative state before applying either path.
+        const stillPending = () => {
+          if ((this.operationGeneration.get(r.tournament_id) ?? 0) !== generation) return false;
+          const current = loadState(r.tournament_id);
+          const match = current.matches.find((value) => value.id === m.id);
+          return !current.frozen && current.status === 'matches' && match?.roomName === roomName
+            && match.resultA === null && match.resultB === null && !match.faultedAt;
+        };
         try {
-          const st = await this.srvpro.roomStatus(m.roomName!);
+          if (!stillPending()) continue;
+          const st = await this.srvpro.roomStatus(roomName);
+          if (!stillPending()) continue;
           if (st.ok && st.finished) {
             const scores = st.scores ?? {};
             const a = scores[state.players.find((p) => p.playerId === m.playerA)?.playerId ?? ''];
@@ -757,7 +775,7 @@ export class MatchesService implements OnModuleInit, OnModuleDestroy {
           }
         } catch (e) {
           // 房间已消失（404）但无结果 = 建房后故障退出：标记故障停止轮询，由管理员手动补录结果
-          if ((e as { response?: { status?: number } }).response?.status === 404) {
+          if ((e as { response?: { status?: number } }).response?.status === 404 && stillPending()) {
             this.patchMatch(r.tournament_id, m.id, { faultedAt: new Date().toISOString() });
           }
           // 其余错误（srvpro 整体不可用等）：下次 tick 重试

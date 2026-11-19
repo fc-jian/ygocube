@@ -26,6 +26,8 @@ export interface DraftState {
   poolInfo: { name: string; count: number };
   pack: {
     index: number;
+    draftRound?: number;
+    requiresPair?: boolean;
     cardsLeft: number;
     packsRemaining: number;
     currentPicker: string;
@@ -40,6 +42,7 @@ export interface DraftState {
   draftReserveMs?: number;
   // 本人最后点击的候选牌；超时自动选牌优先使用它。
   pickAlternative?: number | null;
+  pickAlternativePartner?: number | null;
   draftStartConfirmation?: {
     pending: boolean;
     requestedAt: string;
@@ -143,7 +146,7 @@ export function TopBar({
           </button>
           {showInfo && (
             <span className="text-xs text-slate-400">
-              {String(cfg.maxPlayers ?? '-')} 人 · {formatText} · {cfg.mode === 'match' ? '三局两胜' : '单局'} · 每堆 {String(cfg.packSize ?? `${String(cfg.packSizeMultiple ?? 3)}×人数`)} 张 · 卡池 {state.poolInfo?.name ?? cfg.cardPool ?? '-'}（{String(state.poolInfo?.count ?? '-')} 张）· 主卡组 {String(cfg.mainMin)}-{String(cfg.mainMax)} · 额外 {String(cfg.extraMax)} · 副卡组 {String(cfg.sideMax)} · 选牌限时 {String(cfg.pickSeconds)} 秒
+              {String(cfg.maxPlayers ?? '-')} 人 · {formatText} · {cfg.mode === 'match' ? '三局两胜' : '单局'} · {cfg.draftFormat === 'edison_e3' ? 'Edison 三轮轮抽' : `每堆 ${cfg.packSize ?? `${cfg.packSizeMultiple ?? 3}×人数`} 张`} · 卡池 {state.poolInfo?.name ?? cfg.cardPool ?? '-'}（{String(state.poolInfo?.count ?? '-')} 张）· 主卡组 {String(cfg.mainMin)}-{String(cfg.mainMax)} · 额外 {String(cfg.extraMax)} · 副卡组 {String(cfg.sideMax)} · 选牌限时 {String(cfg.pickSeconds)} 秒
             </span>
           )}
         </div>

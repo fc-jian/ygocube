@@ -3,7 +3,7 @@ import type { CardVisibilityStatus } from '@ygocube/shared';
 import { Response } from 'express';
 import { Access, AuthGuard, AuthedRequest, Identity, Public, safeSecretEqual } from './auth/auth.guard';
 import { TournamentsService } from './tournaments/tournaments.service';
-import { DraftService } from './draft/draft.service';
+import { DraftService, expectedPackFromBody } from './draft/draft.service';
 import { DecksService } from './decks/decks.service';
 import { MatchesService } from './matches/matches.service';
 import { CardsService } from './cards/cards.service';
@@ -91,6 +91,7 @@ export class ApiController {
       id: pool.id,
       name: pool.name,
       count: pool.codes.length,
+      ...(pool.draftFormat ? { draftFormat: pool.draftFormat } : {}),
       candidateCount: pool.candidateCodes.length,
       candidateUrl: `/pool/${encodeURIComponent(pool.name)}/candidate`,
       createdAt: pool.createdAt,
@@ -326,6 +327,9 @@ export class ApiController {
     // the config check as a defence for legacy snapshots or edited settings.
     const deckbuildingGlobal = state.status === 'deckbuilding' || state.status === 'matches' || state.status === 'finished';
     const dropped = cfg.dropPublic === true ? new Set(state.droppedCards) : new Set<number>();
+    if (cfg.draftFormat === 'edison_e3' && dropped.size) {
+      for (const pack of state.packs) for (const code of pack.order) dropped.delete(code);
+    }
     const myPicks = new Set(state.picks.filter((p) => p.playerId === id.playerId).map((p) => p.card));
     const seen = cardsSeenByPlayer(state, id.playerId);
     const codesList = parseCardCodes(codes);
@@ -350,7 +354,8 @@ export class ApiController {
     const id = req.identity as Identity;
     this.assertNotFrozen(id.tournamentId);
     const zone = body.target_zone as 'main' | 'extra' | 'side' | undefined;
-    this.draft.pick(id.tournamentId, id.playerId, Number(body.card_code), zone);
+    const extraCard = body.extra_card_code === undefined ? undefined : Number(body.extra_card_code);
+    this.draft.pick(id.tournamentId, id.playerId, Number(body.card_code), zone, extraCard, expectedPackFromBody(body));
     const s = loadState(id.tournamentId);
     this.realtime.emitPack(id.tournamentId, {
       packIndex: s.pickCursor?.packIndex ?? null,
@@ -365,7 +370,7 @@ export class ApiController {
   pickAlternative(@Req() req: AuthedRequest, @Body() body: Record<string, unknown>) {
     const id = req.identity as Identity;
     this.assertNotFrozen(id.tournamentId);
-    this.draft.setPickAlternative(id.tournamentId, id.playerId, Number(body.card_code), id.playerId);
+    this.draft.setPickAlternative(id.tournamentId, id.playerId, Number(body.card_code), id.playerId, expectedPackFromBody(body));
     const s = loadState(id.tournamentId);
     this.realtime.emitPack(id.tournamentId, {
       packIndex: s.pickCursor?.packIndex ?? null,

@@ -126,6 +126,7 @@ export interface CardNameEntry {
   displayName: string;
   /** Every localized/printed name used by card search, in source order. */
   searchNames: string[];
+  localizedNames: { sc: string; nw: string; jp: string; en: string };
 }
 
 const CARD_NAME_FIELDS = [
@@ -156,7 +157,9 @@ function cardNameEntry(record: YgocdbCardRecord): CardNameEntry {
     seen.add(name);
     searchNames.push(name);
   }
-  return { displayName: selectYgocdbCardName(record), searchNames };
+  const name = (key: keyof YgocdbCardRecord) => typeof record[key] === 'string' ? (record[key] as string).trim() : '';
+  return { displayName: selectYgocdbCardName(record), searchNames,
+    localizedNames: { sc: name('sc_name'), nw: name('nwbbs_n'), jp: name('jp_name'), en: name('en_name') } };
 }
 
 /**
@@ -208,6 +211,12 @@ export function readCardNameEntries(file: string): Map<number, CardNameEntry> {
     }
     out.set(id, {
       displayName: previous.displayName || entry.displayName,
+      localizedNames: {
+        sc: previous.localizedNames.sc || entry.localizedNames.sc,
+        nw: previous.localizedNames.nw || entry.localizedNames.nw,
+        jp: previous.localizedNames.jp || entry.localizedNames.jp,
+        en: previous.localizedNames.en || entry.localizedNames.en,
+      },
       searchNames: mergedNames,
     });
   }
@@ -329,9 +338,34 @@ interface CardSearchOptions {
   filters?: CardSearchFilters;
   sort?: CardSearchSort;
   browse?: boolean;
+  codeOrder?: ReadonlyMap<number, number>;
 }
 
 type SearchCardRow = Pick<CardRow, 'code' | 'name' | 'type' | 'level' | 'atk' | 'def' | 'race' | 'attribute' | 'alias' | 'link_markers'>;
+
+const CATALOG_PAGE_SIZE = 24;
+
+function artworkRepresentatives(rows: readonly Pick<CardRow, 'code' | 'alias'>[]): ReadonlyMap<number, number> {
+  const eligible = new Set(rows.map(({ code }) => code));
+  const parents = new Map<number, number>();
+  function representative(code: number): number {
+    let parent = parents.get(code);
+    while (parent !== undefined) {
+      code = parent;
+      parent = parents.get(code);
+    }
+    return code;
+  }
+  for (const { code, alias } of rows) {
+    if (!eligible.has(alias) || cardAliasKind(code, alias) !== 'artwork') continue;
+    const a = representative(code);
+    const b = representative(alias);
+    // Linking only to a lower code keeps the minimum even across chains or cycles.
+    if (a !== b) parents.set(Math.max(a, b), Math.min(a, b));
+  }
+  for (const code of parents.keys()) parents.set(code, representative(code));
+  return parents;
+}
 
 function inRange(value: number, { min, max }: CardSearchRange): boolean {
   return (min === undefined || value >= min) && (max === undefined || value <= max);
@@ -339,12 +373,17 @@ function inRange(value: number, { min, max }: CardSearchRange): boolean {
 
 const subtypeMasks = new Map<number, number>();
 for (const [category, flag] of Object.values(CARD_SUBTYPES)) {
-  subtypeMasks.set(category, (subtypeMasks.get(category) ?? 0) | flag);
+  if (typeof flag === 'number') subtypeMasks.set(category, (subtypeMasks.get(category) ?? 0) | flag);
 }
 
-function compileSubtypeMatcher(expression: CardSubtypeExpression): (type: number) => boolean {
+export function compileSubtypeMatcher(expression: CardSubtypeExpression): (type: number) => boolean {
   if (typeof expression === 'string') {
     const [category, flag] = CARD_SUBTYPES[expression];
+    if (flag === 'any') return (type) => (type & category) !== 0;
+    if (flag === 'main-deck' || flag === 'extra-deck') {
+      const extraDeck = flag === 'extra-deck';
+      return (type) => (type & category) !== 0 && isExtraDeckType(type) === extraDeck;
+    }
     const mask = subtypeMasks.get(category) ?? 0;
     return (type) => (type & category) !== 0 && (flag ? (type & flag) !== 0 : (type & mask) === 0);
   }
@@ -384,8 +423,10 @@ function matchesFilters(card: SearchCardRow, filters: CardSearchFilters): boolea
 export class CardsService {
   private loaded = false;
   private fieldSizes?: ReadonlyMap<number, number>;
+  private artworkCodes?: ReadonlyMap<number, number>;
   private readonly canonicalCodes = new Map<number, number>();
   private readonly cardSearchNames = new Map<number, string[]>();
+  private readonly localizedCardNames = new Map<number, CardNameEntry['localizedNames']>();
   private cdbMetadataLoaded = false;
   private expansionPicDirs: string[] | null = null;
 
@@ -401,7 +442,9 @@ export class CardsService {
     // ranking can recognize localized aliases without another database read.
     const cardNameEntries = readCardNameEntries(config.server.cardNamesJson);
     this.cardSearchNames.clear();
+    this.localizedCardNames.clear();
     for (const [code, entry] of cardNameEntries) this.cardSearchNames.set(code, entry.searchNames);
+    for (const [code, entry] of cardNameEntries) this.localizedCardNames.set(code, entry.localizedNames);
     const cache = db.prepare(
       'SELECT count(*) AS c, sum(CASE WHEN metadata_version>=? THEN 1 ELSE 0 END) AS current FROM cards',
     ).get(CARD_METADATA_VERSION) as CardCacheVersionRow;
@@ -531,6 +574,17 @@ export class CardsService {
     return r ? this.toInfo(r) : null;
   }
 
+  localizedNames(code: number): CardNameEntry['localizedNames'] {
+    this.ensureLoaded();
+    const card = this.get(code);
+    const exact = this.localizedCardNames.get(code);
+    const original = card?.aliasKind === 'artwork' ? this.localizedCardNames.get(card.alias) : undefined;
+    return {
+      sc: exact?.sc || original?.sc || '', nw: exact?.nw || original?.nw || '',
+      jp: exact?.jp || original?.jp || '', en: exact?.en || original?.en || '',
+    };
+  }
+
   private toInfo(r: CardRow): CardInfo {
     return {
       code: r.code,
@@ -587,6 +641,17 @@ export class CardsService {
       .map((row) => row.code);
   }
 
+  /** Lowest eligible code in the artwork group, independent of rules-name aliases. */
+  artworkCode(code: number): number {
+    this.ensureLoaded();
+    if (!this.artworkCodes) {
+      const rows = getDb().prepare(`SELECT code, alias FROM cards WHERE (type & ${TYPE_TOKEN}) = 0`)
+        .all() as Pick<CardRow, 'code' | 'alias'>[];
+      this.artworkCodes = artworkRepresentatives(rows);
+    }
+    return this.artworkCodes.get(code) ?? code;
+  }
+
   /** Base-field membership across eligible card identities in the complete catalog. */
   poolFieldSizes(): ReadonlyMap<number, number> {
     this.ensureLoaded();
@@ -594,24 +659,7 @@ export class CardsService {
     const rows = getDb().prepare(`SELECT code, alias, setcodes_json FROM cards
       WHERE code > 0 AND code < 100000000 AND (type & ${TYPE_TOKEN}) = 0`)
       .all() as Pick<CardRow, 'code' | 'alias' | 'setcodes_json'>[];
-    const eligibleCodes = new Set(rows.map(({ code }) => code));
-    const artworkParents = new Map<number, number>();
-    function representative(code: number): number {
-      let parent = artworkParents.get(code);
-      while (parent !== undefined) {
-        code = parent;
-        parent = artworkParents.get(code);
-      }
-      return code;
-    }
-
-    for (const { code, alias } of rows) {
-      if (!eligibleCodes.has(alias) || cardAliasKind(code, alias) !== 'artwork') continue;
-      const a = representative(code);
-      const b = representative(alias);
-      // Linking only to a lower code keeps the minimum even across chains or cycles.
-      if (a !== b) artworkParents.set(Math.max(a, b), Math.min(a, b));
-    }
+    const artworkParents = artworkRepresentatives(rows);
 
     const sizes = new Map<number, number>();
     for (const { code, setcodes_json } of rows) {
@@ -648,15 +696,38 @@ export class CardsService {
     return this.searchPage(q, limit, options).cards;
   }
 
-  searchCatalog({ query, page, filters, sort }: CardSearchParams, codes?: ReadonlySet<number>): CardSearchPage {
-    const size = 24;
-    const result = this.searchPage(query, size, { codes, filters, sort, offset: page * size, browse: true });
-    const totalPages = Math.ceil(result.totalCount / size);
+  searchCatalog({ query, page, filters, sort }: CardSearchParams, codes?: ReadonlySet<number>, codeOrder?: ReadonlyMap<number, number>): CardSearchPage {
+    const result = this.searchPage(query, CATALOG_PAGE_SIZE, { codes, filters, sort, codeOrder, offset: page * CATALOG_PAGE_SIZE, browse: true });
+    const totalPages = Math.ceil(result.totalCount / CATALOG_PAGE_SIZE);
     return { ...result, totalPages, hasMore: page + 1 < totalPages };
   }
 
+  /** Search names with one result per artwork group, optionally within a pool. */
+  searchCatalogNames(
+    { query, page }: Pick<CardSearchParams, 'query' | 'page'>, codes?: ReadonlySet<number>, codeOrder?: ReadonlyMap<number, number>,
+  ): CardSearchPage {
+    this.ensureLoaded();
+    const tokens = cardQueryTokens(query);
+    if (tokens.length === 0 && !codes) return { cards: [], totalCount: 0, totalPages: 0, hasMore: false };
+    const rows = getDb().prepare(`SELECT code, name FROM cards WHERE (type & ${TYPE_TOKEN}) = 0`)
+      .all() as Pick<CardRow, 'code' | 'name'>[];
+    const matchingCodes = new Set<number>();
+    for (const row of rows) {
+      const names = this.searchNames(row);
+      const representative = this.artworkCode(row.code);
+      if ((!codes || codes.has(representative)) && tokens.every((token) => names.some((name) => name.includes(token)))) {
+        matchingCodes.add(representative);
+      }
+    }
+    const ordered = [...matchingCodes].sort((a, b) => (codeOrder ? (codeOrder.get(a) ?? 0) - (codeOrder.get(b) ?? 0) : 0) || a - b);
+    const totalCount = ordered.length;
+    const totalPages = Math.ceil(totalCount / CATALOG_PAGE_SIZE);
+    const cards = this.getMany(ordered.slice(page * CATALOG_PAGE_SIZE, (page + 1) * CATALOG_PAGE_SIZE));
+    return { cards, totalCount, totalPages, hasMore: page + 1 < totalPages };
+  }
+
   searchPage(q: string, limit?: number, {
-    codes, offset = 0, filters = {}, sort = 'relevance', browse = false,
+    codes, offset = 0, filters = {}, sort = 'relevance', browse = false, codeOrder,
   }: CardSearchOptions = {}): { cards: CardInfo[]; totalCount: number } {
     this.ensureLoaded();
     const tokens = cardQueryTokens(String(q ?? ''));
@@ -682,7 +753,9 @@ export class CardsService {
       ? offset + Math.max(0, Math.floor(limit))
       : undefined;
     let ordered: SearchCardRow[];
-    if (sort !== 'relevance') {
+    if (codeOrder) {
+      ordered = matchingRows.sort((a, b) => (codeOrder.get(a.code) ?? 0) - (codeOrder.get(b.code) ?? 0) || a.code - b.code);
+    } else if (sort !== 'relevance') {
       const compare = sort === 'name' ? (a: SearchCardRow, b: SearchCardRow) => a.name.localeCompare(b.name, 'zh')
         : sort === 'attack' ? (a: SearchCardRow, b: SearchCardRow) => b.atk - a.atk
           : (a: SearchCardRow, b: SearchCardRow) => b.level - a.level;
@@ -693,13 +766,17 @@ export class CardsService {
     return { cards: this.getMany(ordered.slice(offset, end).map(({ code }) => code)), totalCount };
   }
 
+  private searchNames(row: Pick<CardRow, 'code' | 'name'>): string[] {
+    return [...(this.cardSearchNames.get(row.code) ?? []), row.name ?? '']
+      .map((name) => name.normalize('NFKC').toLowerCase());
+  }
+
   private rankSearch(rows: SearchCardRow[], tokens: string[]): SearchCardRow[] {
     const ranked = rows.map((row) => {
       // Include the resolved display name for every row.  This is important
       // for cards whose only available name is the CDB fallback, and also
       // keeps that fallback searchable when a localized mapping exists.
-      const names = [...(this.cardSearchNames.get(row.code) ?? []), row.name ?? '']
-        .map((name) => name.normalize('NFKC').toLowerCase());
+      const names = this.searchNames(row);
       // A token counts as a name hit when it occurs in any localized name,
       // while the display name remains the localized fallback selected above.
       const nameMatches = tokens.map((token) => names.some((name) => name.includes(token)));

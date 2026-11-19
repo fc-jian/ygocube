@@ -25,7 +25,7 @@ interface MatchInfo {
 }
 
 export default function MatchesPage() {
-  const params = useParams<{ tid: string; pid: string }>();
+  const params = useParams<{ tid: string; pid: string }>()!;
   const tid = params.tid;
   const pid = params.pid;
   const tidPath = encodePathSegment(tid);

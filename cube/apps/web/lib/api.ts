@@ -135,6 +135,7 @@ const API_ERROR_MESSAGES: Record<string, string> = {
   AUTH_REQUIRED: '请先验证身份后再操作',
   FORBIDDEN: '当前凭据无权执行此操作',
   BAD_PAYLOAD: '提交的信息不完整或格式不正确',
+  EDISON_PAIR_REQUIRED: '本手需要同时选择一张主卡和一张额外卡',
   BAD_PLAYER_ID: '玩家 ID 格式不正确',
   BAD_DISPLAY_NAME: '显示名称格式不正确',
   ALREADY_JOINED: '该玩家 ID 已报名',

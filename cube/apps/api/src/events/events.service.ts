@@ -29,6 +29,7 @@ export interface DraftStartConfirmationState {
 
 export interface PackState {
   index: number;
+  draftRound?: number; // Edison round, one-based; absent on ordinary and historical packs
   size: number;
   dropCard: number | null;
   // 每堆起始玩家偏移（仅 serial 模式）：packSize 是人数倍数时用蛇形偏移；否则每堆随机。
@@ -105,6 +106,7 @@ export interface FrozenTimerState {
 export interface PickAlternative {
   packIndex: number;
   card: number;
+  partner?: number;
 }
 
 export interface TournamentState {
@@ -419,19 +421,22 @@ export function apply(state: TournamentState, action: string, payload: any): voi
       break;
     }
     case 'pick': {
-      const p: PickState = payload;
-      state.picks.push(p);
+      const { deck, queues, deadlines, reserves, extraCard, ...p } = payload;
+      state.picks.push(deck ? p : payload);
+      if (extraCard !== undefined) state.picks.push({ ...p, card: extraCard, round: p.round + 1 });
+      if (deck) state.decks[p.playerId] = clone(deck);
       // 候选牌只服务于当前一次选择，实际选中后立即清除。
       state.pickAlternatives[p.playerId] = null;
       // passing 模式：pick 事件携带选后队列/deadline/reserve 快照，回放与实时一致
-      if (payload.queues) state.packQueues = clone(payload.queues);
-      if (payload.deadlines) state.pickDeadlines = clone(payload.deadlines);
-      if (payload.reserves) state.pickReserves = clone(payload.reserves);
+      if (queues) state.packQueues = clone(queues);
+      if (deadlines) state.pickDeadlines = clone(deadlines);
+      if (reserves) state.pickReserves = clone(reserves);
       break;
     }
     case 'alternative': {
       if (payload?.playerId && payload.packIndex !== undefined && payload.card !== undefined) {
-        state.pickAlternatives[payload.playerId] = { packIndex: Number(payload.packIndex), card: Number(payload.card) };
+        state.pickAlternatives[payload.playerId] = { packIndex: Number(payload.packIndex), card: Number(payload.card),
+          ...(payload.partner === undefined ? {} : { partner: Number(payload.partner) }) };
       }
       break;
     }
@@ -830,6 +835,7 @@ export function getConfig(state: TournamentState): Record<string, any> {
   // in raw historical JSON for replay/forensics, but never expose or consume it
   // as an active tournament setting.
   delete persisted.pauseSeconds;
+  if (persisted.draftFormat === 'edison_e3' && state.packs.length) persisted.packCount = state.packs.length;
   return { ...defaults, ...persisted };
 }
 

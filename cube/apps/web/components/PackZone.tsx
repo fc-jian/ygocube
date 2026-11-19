@@ -5,14 +5,17 @@ import { CardImage, CardWithTooltip } from './CardImage';
 import { ConfirmModal } from './ConfirmModal';
 import { CardMeta } from './CardPreview';
 import { CardInfo } from '@/lib/types';
-import { matchesCardQuery, PickSortMode, safeCardCodes, sortCardCodes, sortCardCodesByPick } from '@/lib/cardInfo';
+import { isExtraDeckType, matchesCardQuery, PickSortMode, safeCardCodes, sortCardCodes, sortCardCodesByPick } from '@/lib/cardInfo';
+import { edisonText } from './EdisonDraftRules';
 import { useNowTick } from './TopBar';
 
 // 右侧牌堆区（dev_docs/06 §2）：他人回合显示卡背+数量，自己回合显示正面，
 // 背景为剩余秒数倒计时呼吸光效（每秒 tick 实时更新）。
-export function PackZone({ pack, cardMap, droppedCards, alternativeCode, onAlternative, onPick, sortMode = 'default', onSortModeChange, poolId }: {
+export function PackZone({ pack, cardMap, droppedCards, alternativeCode, alternativePartner, onAlternative, onPick, onPickPair, sortMode = 'default', onSortModeChange, poolId }: {
   pack: {
     cardsLeft: number;
+    draftRound?: number;
+    requiresPair?: boolean;
     isMyTurn: boolean;
     queueLength?: number; // passing 模式：本人牌堆队列长度
     reserveMs?: number; // passing 模式：本人剩余保留时间（ms）
@@ -23,13 +26,16 @@ export function PackZone({ pack, cardMap, droppedCards, alternativeCode, onAlter
   cardMap: Record<number, CardInfo>;
   droppedCards?: number[];
   alternativeCode?: number | null;
-  onAlternative?: (code: number) => void;
+  alternativePartner?: number | null;
+  onAlternative?: (code: number) => void | Promise<void>;
+  onPickPair?: (main: number, extra: number) => Promise<void>;
   onPick: (code: number) => void;
   sortMode?: PickSortMode;
   onSortModeChange?: (mode: PickSortMode) => void;
   poolId?: number;
 }) {
   const [pending, setPending] = useState<number | null>(null);
+  const [submitting, setSubmitting] = useState(false);
   const [showDropped, setShowDropped] = useState(false);
   const [dropFilter, setDropFilter] = useState('');
   // Sorting is presentation-only. The server's pack order remains untouched so
@@ -76,6 +82,20 @@ export function PackZone({ pack, cardMap, droppedCards, alternativeCode, onAlter
   }
 
   const pendingCard = pending !== null ? cardMap[pending] : undefined;
+  const text = edisonText.zh;
+  const selected = [alternativeCode, alternativePartner].filter((code): code is number =>
+    typeof code === 'number' && !!cardMap[code] && displayCards.includes(code));
+  const main = selected.find((code) => !isExtraDeckType(cardMap[code].type));
+  const extra = selected.find((code) => isExtraDeckType(cardMap[code].type));
+  const groups = pack.requiresPair ? [
+    { label: text.main, codes: displayCards.filter((code) => cardMap[code] && !isExtraDeckType(cardMap[code].type)) },
+    { label: text.extra, codes: displayCards.filter((code) => cardMap[code] && isExtraDeckType(cardMap[code].type)) },
+  ] : [{ label: '', codes: displayCards }];
+  const submit = async (action: () => void | Promise<void>) => {
+    if (submitting) return;
+    setSubmitting(true);
+    try { await action(); } finally { setSubmitting(false); }
+  };
 
   return (
     <aside className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-felt-edge bg-felt/60">
@@ -90,6 +110,7 @@ export function PackZone({ pack, cardMap, droppedCards, alternativeCode, onAlter
       <header className="z-10 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-3 py-2 text-xs text-slate-200">
         <span>
           {pack.isMyTurn ? '轮到你选牌' : '等待其他玩家'} · 剩余 {pack.cardsLeft} 张
+          {pack.draftRound && ` · 第 ${pack.draftRound}/3 轮 · ${pack.draftRound === 2 ? text.counterclockwise : text.clockwise}`}
           {pack.queueLength !== undefined && ` · 队列 ${pack.queueLength} 堆`}
         </span>
         <span className="flex flex-wrap items-center justify-end gap-2">
@@ -113,31 +134,50 @@ export function PackZone({ pack, cardMap, droppedCards, alternativeCode, onAlter
           )}
         </span>
       </header>
+      {pack.requiresPair && (
+        <div className="z-10 flex flex-wrap items-center gap-2 border-y border-felt-edge px-3 py-2 text-xs" aria-live="polite">
+          <span>{text.main} · {main ? cardMap[main].name : text.choose}</span>
+          <span>{text.extra} · {extra ? cardMap[extra].name : text.choose}</span>
+          <button type="button" disabled={submitting || !main || !extra}
+            className="rounded bg-gold px-3 py-1 font-semibold text-felt-deep disabled:opacity-40"
+            onClick={() => { if (main && extra) void submit(() => onPickPair?.(main, extra)); }}>{text.confirm}</button>
+        </div>
+      )}
       <div className="z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain p-2">
-        {pack.isMyTurn && pack.cards ? (
-          <div className="card-grid-pack">
-            {displayCards.map((c, i) => (
-              <div
-                key={i}
-                draggable
-                onDragStart={(e) => {
-                  e.dataTransfer.setData('text/plain', String(c));
-                  e.dataTransfer.setData('application/x-card-zone', 'pack');
-                }}
-                onClick={() => {
-                  // Clicking opens the confirmation/details modal and records
-                  // this card as the timeout fallback. The latest click wins.
-                  setPending(c);
-                  onAlternative?.(c);
-                }}
-                className={`animate-pick cursor-pointer ${alternativeCode === c ? 'rounded ring-2 ring-amber-300 ring-offset-1 ring-offset-felt' : ''}`}
-              >
-                {/* pinOnClick=false：点击只触发选牌确认，不再弹出第二个固定详情窗口 */}
-                <CardWithTooltip code={c} card={cardMap[c]} pinOnClick={false} />
-              </div>
-            ))}
-          </div>
-        ) : (
+        {pack.isMyTurn && pack.cards ? groups.map((group) => (
+          <section key={group.label}>
+            {group.label && <h3 className="mb-1 mt-2 text-xs font-semibold text-gold">{group.label} · {group.codes.length}</h3>}
+            <div className="card-grid-pack">
+              {group.codes.map((c, i) => (
+                <button type="button"
+                  key={i}
+                  disabled={pack.requiresPair && (submitting || !cardMap[c])}
+                  aria-label={cardMap[c]?.name ?? String(c)}
+                  aria-pressed={pack.requiresPair ? selected.includes(c) : undefined}
+                  draggable={!pack.requiresPair}
+                  onDragStart={(e) => {
+                    e.dataTransfer.setData('text/plain', String(c));
+                    e.dataTransfer.setData('application/x-card-zone', 'pack');
+                  }}
+                  onClick={() => {
+                    // Clicking opens the confirmation/details modal and records
+                    // this card as the timeout fallback. The latest click wins.
+                    if (pack.requiresPair) {
+                      void submit(() => onAlternative?.(c));
+                    } else {
+                      setPending(c);
+                      void onAlternative?.(c);
+                    }
+                  }}
+                  className={`animate-pick cursor-pointer ${selected.includes(c) ? 'rounded ring-2 ring-amber-300 ring-offset-1 ring-offset-felt' : ''}`}
+                >
+                  {/* pinOnClick=false：点击只触发选牌确认，不再弹出第二个固定详情窗口 */}
+                  <CardWithTooltip code={c} card={cardMap[c]} pinOnClick={false} />
+                </button>
+              ))}
+            </div>
+          </section>
+        )) : (
           <div className="card-grid-pack">
             {Array.from({ length: Math.min(pack.cardsLeft, 10) }).map((_, i) => (
               <div key={i} className="aspect-[7/10] w-full rounded-sm border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-950" />
@@ -170,8 +210,8 @@ export function PackZone({ pack, cardMap, droppedCards, alternativeCode, onAlter
           autoFocus
         />
         <div className="mt-2 max-h-80 space-y-1 overflow-y-auto">
-          {filteredDropped.map((c) => (
-            <div key={c} className="flex items-center gap-2 rounded bg-felt-deep/60 px-1.5 py-1">
+          {filteredDropped.map((c, index) => (
+            <div key={`${c}-${index}`} className="flex items-center gap-2 rounded bg-felt-deep/60 px-1.5 py-1">
               <CardWithTooltip code={c} card={cardMap[c]} className="h-12 w-8 shrink-0" />
               <span className="flex-1 truncate text-xs">{cardMap[c]?.name ?? c}</span>
               <span className="font-mono text-[0.625rem] text-slate-500">{c}</span>

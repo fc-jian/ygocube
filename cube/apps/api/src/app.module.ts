@@ -20,9 +20,12 @@ import { SmallWorldService } from './small-world/small-world.service';
 import { GuessController } from './guess/guess.controller';
 import { GuessService } from './guess/guess.service';
 import { GuessPoolsService } from './guess/guess-pools.service';
+import { GuessPoolVotesService } from './guess/guess-pool-votes.service';
+import { DgController } from './dg/dg.controller';
+import { DgService } from './dg/dg.service';
 
 @Module({
-  controllers: [DuelController, ApiController, AdminController, SmallWorldController, GuessController],
+  controllers: [DuelController, ApiController, AdminController, SmallWorldController, GuessController, DgController],
   providers: [
     DuelService,
     { provide: APP_GUARD, useClass: AuthGuard },
@@ -32,6 +35,8 @@ import { GuessPoolsService } from './guess/guess-pools.service';
     SmallWorldService,
     GuessService,
     GuessPoolsService,
+    GuessPoolVotesService,
+    DgService,
     PoolsService,
     RealtimeService,
     {

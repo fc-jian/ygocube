@@ -67,7 +67,7 @@ export function CardMeta({ card, compact = false, showPickStats = true }: { card
       {statLine(card) && <p className={labelClass + ' text-slate-300'}>{statLine(card)}</p>}
       {atkDefLine(card) && <p className={labelClass + ' font-semibold text-slate-100'}>{atkDefLine(card)}</p>}
       {linkMarkerLine(card) && <p className={labelClass + ' text-slate-300'}>{linkMarkerLine(card)}</p>}
-      <p className={labelClass + ' text-slate-300'}>首发年份 / First release {card.releaseYear ?? '—'}</p>
+      <p className={labelClass + ' text-slate-300'}>首发年份 {card.releaseYear ?? '—'}</p>
       {setNameLine(card) && <p className={'mt-1 ' + smallClass + ' text-slate-400'}>{setNameLine(card)}</p>}
       {(showPickStats ? card.pickStats ?? [] : []).map((stat) => (
         <div key={stat.poolId} className={smallClass + ' text-amber-200/90'}>

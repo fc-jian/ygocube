@@ -6,13 +6,20 @@ import { CARD_SUBTYPES, CARD_SUBTYPE_TAG_LIMIT, type CardSubtype, type CardSubty
 type Locale = 'zh' | 'en';
 type Option = { tag: CardSubtypeTag; zh: string; en: string; keywords?: string };
 
+const categoryOptions: Option[] = [];
+const subtypeOptions: Option[] = [];
+for (const [tag, [, flag, zh, en]] of Object.entries(CARD_SUBTYPES)) {
+  const list = typeof flag === 'number' ? subtypeOptions : categoryOptions;
+  list.push({ tag: tag as CardSubtype, zh, en });
+}
 const options: Option[] = [
+  ...categoryOptions,
   { tag: '(', zh: '(', en: '(', keywords: '左括号 left open' },
   { tag: ')', zh: ')', en: ')', keywords: '右括号 right close' },
   { tag: 'and', zh: '与', en: 'AND' },
   { tag: 'or', zh: '或', en: 'OR' },
   { tag: 'not', zh: '非', en: 'NOT' },
-  ...Object.entries(CARD_SUBTYPES).map(([tag, [, , zh, en]]) => ({ tag: tag as CardSubtype, zh, en })),
+  ...subtypeOptions,
 ];
 const optionByTag = new Map(options.map((option) => [option.tag, option]));
 const categoryColors = {
@@ -155,7 +162,7 @@ export function CardSubtypeEditor({ expression, onChange, invalid, locale }: {
         </div>
         {expanded && (
           <ul id={`${id}-list`} role="listbox" aria-label={text.label}
-            className="absolute inset-x-0 top-full z-20 mt-1 max-h-36 overflow-y-auto rounded border border-slate-500/60 bg-slate-900 p-1 shadow-lg">
+            className="absolute inset-x-0 top-full z-20 mt-1 max-h-44 overflow-y-auto rounded border border-slate-500/60 bg-slate-900 p-1 shadow-lg">
             {suggestions.map((option, index) => (
               <li key={option.tag} role="presentation">
                 <button id={optionId(index)} role="option" type="button" tabIndex={-1} aria-selected={index === active}
