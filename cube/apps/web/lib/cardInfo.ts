@@ -1,0 +1,280 @@
+import { CardInfo } from '@/lib/types';
+import {
+  CARD_ATTRIBUTES, CARD_LINK_DIRECTIONS, CARD_RACES, cardQueryTokens, sortCardCodesByPick as sortSharedCardCodesByPick,
+} from '@ygocube/shared';
+
+export { cardQueryTokens };
+
+// 卡牌类型/属性展示（与 ygopro 客户端信息一致，dev_docs/06 §5.1）
+const MONSTER = 0x1;
+const SPELL = 0x2;
+const TRAP = 0x4;
+/** YGOPro TYPE_TOKEN; generated token/derivative cards are not searchable. */
+export const TYPE_TOKEN = 0x4000;
+
+export function isTokenCard(card: Pick<CardInfo, 'type'> | undefined): boolean {
+  return !!card && (card.type & TYPE_TOKEN) !== 0;
+}
+
+// TYPES_EXTRA_DECK（融合 0x40 | 同调 0x2000 | XYZ 0x800000 | 连接 0x4000000）
+export function isExtraDeckType(type: number): boolean {
+  return (type & 0x4802040) !== 0;
+}
+
+const RACE_NAMES = Object.fromEntries(CARD_RACES.map(([bit, name]) => [bit, name]));
+const ATTRIBUTE_NAMES = Object.fromEntries(CARD_ATTRIBUTES.map(([bit, name]) => [bit, name]));
+
+export function typeLabel(c: CardInfo): string {
+  const t = c.type;
+  const kinds: string[] = [];
+  if (t & MONSTER) {
+    if (t & 0x80) kinds.push('仪式');
+    if (t & 0x200) kinds.push('灵魂');
+    if (t & 0x400) kinds.push('同盟');
+    if (t & 0x800) kinds.push('二重');
+    if (t & 0x400000) kinds.push('卡通');
+    if (t & 0x2000000) kinds.push('特殊召唤');
+    if (t & TYPE_TOKEN) kinds.push('衍生物');
+    if (t & 0x40) kinds.push('融合');
+    if (t & 0x2000) kinds.push('同调');
+    if (t & 0x800000) kinds.push('XYZ');
+    if (t & 0x4000000) kinds.push('连接');
+    if (t & 0x1000000) kinds.push('灵摆');
+    if (t & 0x1000) kinds.push('调整');
+    if (t & 0x200000) kinds.push('反转');
+    if (t & 0x10) kinds.push('通常');
+    if (t & 0x20) kinds.push('效果');
+    kinds.push('怪兽');
+  } else if (t & SPELL) {
+    if (t & 0x10000) kinds.push('速攻');
+    else if (t & 0x20000) kinds.push('永续');
+    else if (t & 0x40000) kinds.push('装备');
+    else if (t & 0x80000) kinds.push('场地');
+    if (t & 0x80) kinds.push('仪式');
+    kinds.push('魔法');
+  } else if (t & TRAP) {
+    if (t & 0x20000) kinds.push('永续');
+    else if (t & 0x100000) kinds.push('反击');
+    kinds.push('陷阱');
+  }
+  return kinds.join('·') || '未知';
+}
+
+export function statLine(c: CardInfo): string {
+  const t = c.type;
+  if (!(t & MONSTER)) return '';
+  const parts: string[] = [];
+  if (t & 0x4000000) {
+    parts.push(`LINK-${c.level > 0 ? c.level : '?'}`);
+  } else {
+    const lv = c.level > 0 ? c.level : 0;
+    if (t & 0x800000) parts.push(`RANK ${lv}`);
+    else if (lv) parts.push(`等级 ${lv}`);
+  }
+  if (t & 0x1000000) parts.push(`刻度 ${c.lscale ?? 0}/${c.rscale ?? 0}`);
+  return parts.join(' ');
+}
+
+export function atkDefLine(c: CardInfo): string {
+  if (!(c.type & MONSTER)) return '';
+  const atk = c.atk < 0 ? '?' : c.atk;
+  if (c.type & 0x4000000) return `攻击力 ${atk} / 守备力 -`;
+  const def = c.def < 0 ? '?' : c.def;
+  return `攻击力 ${atk} / 守备力 ${def}`;
+}
+
+export function linkMarkerLine(c: CardInfo): string {
+  if (!(c.type & 0x4000000)) return '';
+  const arrows = CARD_LINK_DIRECTIONS.filter(([bit]) => ((c.linkMarkers ?? 0) & bit) !== 0).map(([, label]) => `[${label}]`).join('');
+  return arrows ? `连接标记 ${arrows}` : '';
+}
+
+export function setNameLine(c: CardInfo): string {
+  return c.setNames?.length ? `字段：${c.setNames.join('|')}` : '';
+}
+
+export function setCodeLine(c: CardInfo): string {
+  if (!c.setCodes?.length) return '';
+  return `字段编号：${c.setCodes.map((code) => `0x${code.toString(16).toUpperCase()}`).join('、')}`;
+}
+
+function bitLabels(value: number | undefined, labels: Record<number, string>): string[] {
+  const bits = Number(value ?? 0);
+  return Object.entries(labels).filter(([bit]) => (bits & Number(bit)) !== 0).map(([, label]) => label);
+}
+
+export function raceLabel(c: CardInfo): string {
+  if (!(c.type & MONSTER)) return '';
+  return bitLabels(c.race, RACE_NAMES).join('、');
+}
+
+export function attributeLabel(c: CardInfo): string {
+  if (!(c.type & MONSTER)) return '';
+  return bitLabels(c.attribute, ATTRIBUTE_NAMES).join('、');
+}
+
+export function raceAttrLine(c: CardInfo): string {
+  const race = raceLabel(c);
+  const attr = attributeLabel(c);
+  return [race && `种族：${race}`, attr && `属性：${attr}`].filter(Boolean).join(' · ');
+}
+
+export function aliasLine(c: CardInfo): string {
+  return c.alias && c.alias !== c.code && c.aliasName ? `${c.aliasKind === 'artwork' ? '异画版本' : '规则同名'}：${c.aliasName}` : '';
+}
+
+/** Resolve a card's rules copy key without replacing the displayed code. */
+export function canonicalCardCode(code: number, cardMap: Record<number, CardInfo>): number {
+  let current = code;
+  const visited = new Set<number>();
+  while (!visited.has(current)) {
+    visited.add(current);
+    const alias = cardMap[current]?.alias ?? 0;
+    if (!alias || alias === current) return current;
+    current = alias;
+  }
+  return Math.min(...visited);
+}
+
+/** Normalize card-code arrays received from the API before any spread/iteration. */
+export function safeCardCodes(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((code): code is number => Number.isSafeInteger(code) && code > 0);
+}
+
+function searchableCardText(c: CardInfo): string {
+  return [
+    c.name, c.code, String(c.code).padStart(8, '0'), c.desc, typeLabel(c),
+    raceAttrLine(c), statLine(c), atkDefLine(c), linkMarkerLine(c), setNameLine(c), setCodeLine(c), aliasLine(c),
+  ].join(' ').normalize('NFKC').toLowerCase();
+}
+
+/** Every keyword or quoted phrase must occur in the card's searchable data. */
+export function matchesCardQuery(c: CardInfo | undefined, query: string): boolean {
+  const tokens = cardQueryTokens(query);
+  if (!c || isTokenCard(c)) return false;
+  if (!tokens.length) return true;
+  const text = searchableCardText(c);
+  return tokens.every((token) => text.includes(token));
+}
+
+/**
+ * Keep all-card search ordering consistent even when a client is pointed at
+ * an older API. Name hits are ranked by count, then by the first keyword that
+ * appears in the literal name, with the original order as the final tie-break.
+ */
+export function sortCardSearchResults(cards: CardInfo[], query: string): CardInfo[] {
+  // Keep a client-side guard for stale/older API responses. The API applies
+  // the same predicate, but token rows must not become visible if a browser
+  // cache or another endpoint returns them accidentally.
+  const searchable = cards.filter((card) => !isTokenCard(card));
+  const tokens = cardQueryTokens(query);
+  if (!tokens.length) return searchable;
+  return searchable
+    .map((card, index) => {
+      const name = card.name.normalize('NFKC').toLowerCase();
+      const nameMatches = tokens.map((token) => name.includes(token));
+      return { card, index, nameMatches, count: nameMatches.filter(Boolean).length };
+    })
+    .sort((a, b) => {
+      if (a.count !== b.count) return b.count - a.count;
+      for (let i = 0; i < tokens.length; i++) {
+        if (a.nameMatches[i] !== b.nameMatches[i]) return a.nameMatches[i] ? -1 : 1;
+      }
+      return a.index - b.index;
+    })
+    .map(({ card }) => card);
+}
+
+// ---------- 排序（与 ygopro 客户端 DataManager::deck_sort_* 完全一致，dev_docs/06 §5.1） ----------
+
+export type SortMode = 'lv' | 'atk' | 'def' | 'name' | 'id';
+
+const EXTRA_MASK = 0x48020c0; // 融合|同调|XYZ|连接（附加类型分组用）
+const EXTRA_GROUP_MASK = 0x48020c1;
+const NORMAL_EFFECT_MASK = 0x31; // 怪兽|通常|效果
+
+function typeGroup(c: CardInfo): number {
+  // (type & 0x48020c0) ? (type & 0x48020c1) : (type & 0x31) —— 与 C++ 逐位一致
+  return c.type & EXTRA_MASK ? c.type & EXTRA_GROUP_MASK : c.type & NORMAL_EFFECT_MASK;
+}
+
+// 主/额外/副区域内排序：与 ygopro 客户端一致——lv/atk/def 先按类型大类分组；
+// name/id 是纯名称/编号排序（C++ deck_sort_name/deck_sort_id 不做分组）
+export function sortCards(cards: CardInfo[], mode: SortMode): CardInfo[] {
+  const indexed = cards.map((card, index) => ({ card, index }));
+  const compare = (a: CardInfo, b: CardInfo): number => {
+    if (mode === 'name') {
+      const na = a.name ?? '';
+      const nb = b.name ?? '';
+      if (na !== nb) return na < nb ? -1 : 1;
+      return a.code - b.code;
+    }
+    if (mode === 'id') return a.code - b.code;
+    const cat = (c: CardInfo) => c.type & 0x7;
+    const ca = cat(a);
+    const cb = cat(b);
+    if (ca !== cb) return ca - cb;
+    if (ca === 1) {
+      if (mode === 'atk') {
+        if (a.atk !== b.atk) return b.atk - a.atk;
+        if (a.def !== b.def) return b.def - a.def;
+        if (a.level !== b.level) return b.level - a.level;
+        const ta = typeGroup(a);
+        const tb = typeGroup(b);
+        if (ta !== tb) return ta - tb;
+        return a.code - b.code;
+      }
+      if (mode === 'def') {
+        if (a.def !== b.def) return b.def - a.def;
+        if (a.atk !== b.atk) return b.atk - a.atk;
+        if (a.level !== b.level) return b.level - a.level;
+        const ta = typeGroup(a);
+        const tb = typeGroup(b);
+        if (ta !== tb) return ta - tb;
+        return a.code - b.code;
+      }
+      // lv（默认）：附加类型 → 等级降 → 攻降 → 守降 → 编号
+      const ta = typeGroup(a);
+      const tb = typeGroup(b);
+      if (ta !== tb) return ta - tb;
+      if (a.level !== b.level) return b.level - a.level;
+      if (a.atk !== b.atk) return b.atk - a.atk;
+      if (a.def !== b.def) return b.def - a.def;
+      return a.code - b.code;
+    }
+    // 魔法/陷阱：type&0xfffffff8 分组 → 编号（lv/atk/def 同策略）
+    if ((a.type & 0xfffffff8) !== (b.type & 0xfffffff8)) return (a.type & 0xfffffff8) - (b.type & 0xfffffff8);
+    return a.code - b.code;
+  };
+  indexed.sort((a, b) => compare(a.card, b.card) || a.index - b.index);
+  return indexed.map((x) => x.card);
+}
+
+// Metadata failures must never make a card disappear. Known cards use the ygopro comparator;
+// unknown cards remain visible after known cards and retain their original order.
+export function sortCardCodes(codes: number[], cardMap: Record<number, CardInfo>, mode: SortMode): number[] {
+  const rows = codes.map((code, index) => ({ code, index, card: cardMap[code] }));
+  const known = sortCards(rows.filter((x) => !!x.card).map((x) => x.card!), mode);
+  const rank = new Map<number, number>();
+  known.forEach((c, i) => {
+    if (!rank.has(c.code)) rank.set(c.code, i);
+  });
+  return [...rows].sort((a, b) => {
+    if (!!a.card !== !!b.card) return a.card ? -1 : 1;
+    if (!a.card || !b.card) return a.index - b.index;
+    const ai = rank.get(a.code) ?? a.index;
+    const bi = rank.get(b.code) ?? b.index;
+    return ai - bi || a.index - b.index;
+  }).map((x) => x.code);
+}
+
+export type PickSortMode = 'default' | 'pick';
+
+/**
+ * Presentation-only pick-stat ordering.  The input occurrence order is kept
+ * for equal/missing statistics, including duplicate physical card copies.
+ */
+export function sortCardCodesByPick(codes: number[], cardMap: Record<number, CardInfo>, poolId?: number): number[] {
+  return sortSharedCardCodesByPick(codes, cardMap, poolId);
+}

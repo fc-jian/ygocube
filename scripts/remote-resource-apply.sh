@@ -1,0 +1,258 @@
+#!/usr/bin/env bash
+# This file is uploaded to Aly for one release only.  It intentionally accepts
+# no credentials and performs all mutations beneath the supplied installation
+# root while the service lock is held.
+set -euo pipefail
+
+ROOT=""
+RELEASE_ID=""
+while (($#)); do
+  case "$1" in
+    --root) ROOT="$2"; shift 2 ;;
+    --id) RELEASE_ID="$2"; shift 2 ;;
+    *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
+  esac
+done
+[[ "$ROOT" =~ ^/[A-Za-z0-9._/+:-]+$ && "$ROOT" != "/" && "$RELEASE_ID" =~ ^[A-Za-z0-9._-]+$ ]] || { echo 'invalid root or release id' >&2; exit 2; }
+
+STAGE="$ROOT/.staging/card-sync-$RELEASE_ID"
+BACKUP="$ROOT/backups/card-sync-$RELEASE_ID"
+OLD_HOST="$ROOT/shared/srvpro/ygopro"
+OLD_AVIF="$ROOT/shared/assets/pics_avif"
+OLD_NAMES="$ROOT/shared/assets/ygocdb_cards.json"
+DB="$ROOT/shared/data/cube.sqlite"
+OLD_CUBE_RELEASE="$(readlink -f "$ROOT/current")"
+[[ "$OLD_CUBE_RELEASE" == "$ROOT/releases/"* ]]
+NEW_APP_RELEASE="$ROOT/releases/card-sync-$RELEASE_ID"
+mkdir -p "$BACKUP"
+exec 9>"$ROOT/.card-resource.lock"
+flock -n 9
+[[ -d "$OLD_HOST" && -d "$OLD_AVIF" && -f "$DB" && -f "$STAGE/payload.tar.gz" ]]
+systemctl is-active ygocube-api ygocube-srvpro ygocube-web nginx > "$BACKUP/services-before.txt" 2>&1 || true
+
+# Enter maintenance before touching the database. This prevents a write from
+# racing the backup and makes the checkpoint/integrity result reproducible.
+SERVICES_STOPPED=1
+DEFER_START="${YGOCUBE_DEFER_START:-0}"
+HOST_REPLACED=0
+AVIF_REPLACED=0
+HOST_PRE_MOVED=0
+AVIF_PRE_MOVED=0
+NAMES_REPLACED=0
+MANIFEST_REPLACED=0
+APP_REPLACED=0
+rollback_resource_moves() {
+  # The backup is complete before any live directory is moved.  If an
+  # unexpected filesystem error occurs during the two-directory switch,
+  # restore the old paths before bringing services back up.  Keep the failed
+  # stage and backup for forensic inspection; never touch the database here.
+  if [[ "${APP_REPLACED:-0}" == 1 ]]; then
+    ln -s "$OLD_CUBE_RELEASE" "$ROOT/current-recover-$RELEASE_ID"
+    mv -Tf "$ROOT/current-recover-$RELEASE_ID" "$ROOT/current"
+  fi
+  if [[ "${HOST_REPLACED:-0}" == 1 ]]; then
+    rm -rf "$OLD_HOST"
+    if [[ -d "$OLD_HOST.pre-$RELEASE_ID" ]]; then
+      mv "$OLD_HOST.pre-$RELEASE_ID" "$OLD_HOST" || true
+    elif [[ -d "$BACKUP/srvpro-ygopro" ]]; then
+      cp -a "$BACKUP/srvpro-ygopro" "$OLD_HOST" || true
+    fi
+  elif [[ "${HOST_PRE_MOVED:-0}" == 1 && ! -e "$OLD_HOST" && -d "$OLD_HOST.pre-$RELEASE_ID" ]]; then
+    mv "$OLD_HOST.pre-$RELEASE_ID" "$OLD_HOST" || true
+  fi
+  if [[ "${AVIF_REPLACED:-0}" == 1 ]]; then
+    rm -rf "$OLD_AVIF"
+    if [[ -d "$OLD_AVIF.pre-$RELEASE_ID" ]]; then
+      mv "$OLD_AVIF.pre-$RELEASE_ID" "$OLD_AVIF" || true
+    elif [[ -d "$BACKUP/pics_avif" ]]; then
+      cp -a "$BACKUP/pics_avif" "$OLD_AVIF" || true
+    fi
+  elif [[ "${AVIF_PRE_MOVED:-0}" == 1 && ! -e "$OLD_AVIF" && -d "$OLD_AVIF.pre-$RELEASE_ID" ]]; then
+    mv "$OLD_AVIF.pre-$RELEASE_ID" "$OLD_AVIF" || true
+  fi
+  if [[ "${NAMES_REPLACED:-0}" == 1 ]]; then
+    if [[ -f "$BACKUP/ygocdb_cards.json" ]]; then
+      cp -f "$BACKUP/ygocdb_cards.json" "$OLD_NAMES.rollback-new"
+      mv -f "$OLD_NAMES.rollback-new" "$OLD_NAMES"
+    else
+      rm -f "$OLD_NAMES"
+    fi
+  fi
+  if [[ "${MANIFEST_REPLACED:-0}" == 1 ]]; then
+    if [[ -f "$BACKUP/resource-manifest.json" ]]; then
+      cp -f "$BACKUP/resource-manifest.json" "$ROOT/shared/assets/.resource-manifest.rollback-new"
+      mv -f "$ROOT/shared/assets/.resource-manifest.rollback-new" "$ROOT/shared/assets/resource-manifest.json"
+    else
+      rm -f "$ROOT/shared/assets/resource-manifest.json"
+    fi
+  fi
+}
+recover_services() {
+  local status=$?
+  if [[ "$status" != 0 ]]; then
+    rollback_resource_moves || true
+  fi
+  # Failure recovery must never reopen ingress. The pair coordinator owns
+  # rollback, verification and the only successful service restart.
+  exit "$status"
+}
+trap recover_services EXIT
+systemctl stop ygocube-srvpro ygocube-web ygocube-api nginx
+
+# Checkpoint before copying so the backup is a consistent SQLite image. Keep
+# the sidecar files too: they are useful for forensic recovery diagnostics.
+sqlite3 "$DB" 'PRAGMA wal_checkpoint(TRUNCATE); PRAGMA integrity_check;' > "$BACKUP/db-integrity.txt"
+grep -Fxq ok "$BACKUP/db-integrity.txt"
+cp -f "$DB" "$BACKUP/cube.sqlite"
+for sidecar in "$DB-wal" "$DB-shm"; do
+  [[ -e "$sidecar" ]] && cp -f "$sidecar" "$BACKUP/$(basename "$sidecar")" || true
+done
+rm -rf "$BACKUP/srvpro-ygopro" "$BACKUP/pics_avif"
+cp -al "$OLD_HOST" "$BACKUP/srvpro-ygopro"
+cp -al "$OLD_AVIF" "$BACKUP/pics_avif"
+# Keep rollback resources compact and never retain original card images.
+rm -rf "$BACKUP/srvpro-ygopro/pics" "$BACKUP/srvpro-ygopro/expansions/pics" "$BACKUP/srvpro-ygopro/expansions/pack"
+cp -a "$ROOT/current/config.yaml" "$BACKUP/config.yaml"
+printf '%s\n' "$OLD_CUBE_RELEASE" > "$BACKUP/previous-release.txt"
+cp -f "$STAGE/apply-duel.py" "$BACKUP/apply-duel.py"
+cp -f "$STAGE/apply.sh" "$BACKUP/apply.sh"
+cp -f "$STAGE/transaction.sh" "$BACKUP/transaction.sh"
+[[ -f "$OLD_NAMES" ]] && cp -f "$OLD_NAMES" "$BACKUP/ygocdb_cards.json" || true
+[[ -f "$ROOT/shared/assets/resource-manifest.json" ]] && cp -f "$ROOT/shared/assets/resource-manifest.json" "$BACKUP/resource-manifest.json" || true
+touch "$BACKUP/RESOURCES_BACKED_UP"
+
+rm -rf "$STAGE/root"
+mkdir -p "$STAGE/root/srvpro/ygopro" "$STAGE/root/assets/pics_avif"
+cp -al "$OLD_HOST"/. "$STAGE/root/srvpro/ygopro"/
+cp -al "$OLD_AVIF"/. "$STAGE/root/assets/pics_avif"/
+rm -rf "$OLD_HOST/pics" "$OLD_HOST/expansions/pics" "$OLD_HOST/expansions/pack"
+rm -rf "$STAGE/root/srvpro/ygopro/pics" "$STAGE/root/srvpro/ygopro/expansions/pics" "$STAGE/root/srvpro/ygopro/expansions/pack"
+for tree in "$BACKUP/srvpro-ygopro" "$OLD_HOST" "$STAGE/root/srvpro/ygopro"; do
+  find "$tree" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.bmp' -o -iname '*.gif' -o -iname '*.tif' -o -iname '*.tiff' -o -iname '*.ypk' \) -delete
+  [[ ! -e "$tree/pics" && ! -e "$tree/expansions/pics" && ! -e "$tree/expansions/pack" ]]
+  [[ -z "$(find "$tree" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.bmp' -o -iname '*.gif' -o -iname '*.tif' -o -iname '*.tiff' -o -iname '*.ypk' \) -print -quit)" ]]
+done
+[[ -f "$OLD_NAMES" ]] && cp -f "$OLD_NAMES" "$STAGE/root/assets/ygocdb_cards.json" || true
+# Validate the uploaded tar before extraction.  The staging directory is
+# root-owned, but treating the archive as untrusted protects against a
+# replaced upload and prevents traversal, symlink and device-file writes.
+python3 - "$STAGE/payload.tar.gz" <<'PY'
+import posixpath
+import sys
+import tarfile
+
+archive_path = sys.argv[1]
+total = 0
+with tarfile.open(archive_path, "r:gz") as archive:
+    for member in archive.getmembers():
+        name = member.name
+        if not name or name.startswith("/") or "\\" in name:
+            raise SystemExit(f"unsafe payload path: {name!r}")
+        normalized = posixpath.normpath(name)
+        if normalized == ".." or normalized.startswith("../") or "/../" in name:
+            raise SystemExit(f"unsafe payload path: {name!r}")
+        if member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
+            raise SystemExit(f"unsupported payload entry: {name!r}")
+        total += max(0, int(member.size))
+        if total > 4_000_000_000:
+            raise SystemExit("payload is too large")
+PY
+
+tar -xzf "$STAGE/payload.tar.gz" -C "$STAGE/root" --no-same-owner --unlink-first
+
+safe_delete() {
+  local base="$1" list="$2" rel
+  [[ -f "$list" ]] || return 0
+  while IFS= read -r rel || [[ -n "$rel" ]]; do
+    [[ -z "$rel" ]] && continue
+    case "$rel" in
+      /*|*'..'*|*'\\'*) echo "unsafe delete path: $rel" >&2; return 1 ;;
+    esac
+    rm -f "$base/$rel"
+  done < "$list"
+}
+safe_delete "$STAGE/root/srvpro/ygopro/script" "$STAGE/root/deletes/scripts.txt"
+safe_delete "$STAGE/root/srvpro/ygopro/expansions" "$STAGE/root/deletes/expansions.txt"
+safe_delete "$STAGE/root/srvpro/ygopro" "$STAGE/root/deletes/banlist.txt"
+safe_delete "$STAGE/root/assets/pics_avif" "$STAGE/root/deletes/avif.txt"
+
+(cd "$STAGE/root" && sha256sum -c metadata/SHA256SUMS)
+[[ -s "$STAGE/root/srvpro/ygopro/cards.cdb" ]]
+[[ -f "$STAGE/root/metadata/resource-manifest.json" ]]
+if grep -q '"expansions"' "$STAGE/root/metadata/resource-manifest.json"; then
+  [[ -d "$STAGE/root/srvpro/ygopro/expansions" ]]
+fi
+python3 - "$STAGE/root/metadata/resource-manifest.json" "$STAGE/root/srvpro/ygopro" <<'PY'
+import hashlib, json, pathlib, sys
+manifest = json.load(open(sys.argv[1], encoding='utf-8'))
+host = pathlib.Path(sys.argv[2])
+files = manifest.get('banlist', {}).get('files', {})
+for relative, metadata in files.items():
+    path = host / relative
+    if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != metadata['sha256']:
+        raise SystemExit(f'upstream ban-list verification failed: {relative}')
+PY
+
+if [[ -f "$STAGE/root/metadata/srvpro-application.json" ]]; then
+  [[ ! -e "$NEW_APP_RELEASE" ]]
+  cp -al "$OLD_CUBE_RELEASE" "$NEW_APP_RELEASE"
+  python3 "$STAGE/apply-duel.py" --cube-root "$ROOT" --id "$RELEASE_ID" --install-application-to "$NEW_APP_RELEASE"
+  python3 - "$NEW_APP_RELEASE/release.json" "$RELEASE_ID" "$OLD_CUBE_RELEASE" <<'PYAPP'
+import json, os, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding='utf-8')) if path.is_file() else {}
+value.update(id='card-sync-' + sys.argv[2], previousRelease=pathlib.Path(sys.argv[3]).name)
+temporary = path.with_name('.release.json.app-new')
+temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+os.replace(temporary, path)
+PYAPP
+fi
+
+# The old directories remain available as .pre-$RELEASE_ID until a later
+# cleanup.  Moving complete directories on one filesystem makes the switch
+# atomic from running processes' point of view.
+mv "$OLD_HOST" "$ROOT/shared/srvpro/ygopro.pre-$RELEASE_ID"
+HOST_PRE_MOVED=1
+rm -rf "$ROOT/shared/srvpro/ygopro.pre-$RELEASE_ID/pics" "$ROOT/shared/srvpro/ygopro.pre-$RELEASE_ID/expansions/pics" "$ROOT/shared/srvpro/ygopro.pre-$RELEASE_ID/expansions/pack"
+mv "$OLD_AVIF" "$ROOT/shared/assets/pics_avif.pre-$RELEASE_ID"
+AVIF_PRE_MOVED=1
+mv "$STAGE/root/srvpro/ygopro" "$OLD_HOST"
+HOST_REPLACED=1
+mv "$STAGE/root/assets/pics_avif" "$OLD_AVIF"
+AVIF_REPLACED=1
+if [[ -f "$STAGE/root/assets/ygocdb_cards.json" ]]; then
+  cp -f "$STAGE/root/assets/ygocdb_cards.json" "$ROOT/shared/assets/.ygocdb_cards.json.new"
+  mv -f "$ROOT/shared/assets/.ygocdb_cards.json.new" "$OLD_NAMES"
+  NAMES_REPLACED=1
+fi
+cp -f "$STAGE/root/metadata/resource-manifest.json" "$ROOT/shared/assets/.resource-manifest.json.new"
+mv -f "$ROOT/shared/assets/.resource-manifest.json.new" "$ROOT/shared/assets/resource-manifest.json"
+MANIFEST_REPLACED=1
+# cards are an in-process SQLite index of cards.cdb plus the localized name
+# map.  Resource publication must invalidate it before API restart; otherwise
+# an older API process can see metadata_version=5 and incorrectly keep the
+# pre-update rows.  The database itself is backed up above, so this small
+# cache-only mutation is recoverable without restoring tournament state.
+sqlite3 "$DB" 'UPDATE cards SET metadata_version=0;' > "$BACKUP/card-cache-invalidated.txt"
+chown -R ygocube:ygocube "$OLD_HOST" "$OLD_AVIF" "$OLD_NAMES" "$ROOT/shared/assets/resource-manifest.json"
+
+if [[ -f "$STAGE/root/metadata/srvpro-application.json" ]]; then
+  ln -s "$NEW_APP_RELEASE" "$ROOT/current-app-$RELEASE_ID"
+  mv -Tf "$ROOT/current-app-$RELEASE_ID" "$ROOT/current"
+  APP_REPLACED=1
+fi
+# Keep the audited helper available after successful staging cleanup and for
+# application/Web publications. Rollback also has its own backup copy above.
+mkdir -p "$ROOT/shared/card-resource-tools"
+cp -f "$STAGE/apply-duel.py" "$ROOT/shared/card-resource-tools/.apply-duel.py.new"
+mv -f "$ROOT/shared/card-resource-tools/.apply-duel.py.new" "$ROOT/shared/card-resource-tools/apply-duel.py"
+cp -f "$STAGE/transaction.sh" "$ROOT/shared/card-resource-tools/.transaction.sh.new"
+mv -f "$ROOT/shared/card-resource-tools/.transaction.sh.new" "$ROOT/shared/card-resource-tools/transaction.sh"
+
+if [[ "$DEFER_START" != 1 ]]; then
+  systemctl start ygocube-api ygocube-srvpro ygocube-web nginx
+  systemctl is-active ygocube-api ygocube-srvpro ygocube-web nginx
+fi
+SERVICES_STOPPED=0
+trap - EXIT
+printf '%s\n' "$RELEASE_ID" > "$BACKUP/CUBE_PREPARED"

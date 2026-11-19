@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Install and verify the two Web bundles without restarting duel backends."""
+import hashlib,json,os,pathlib,shutil,subprocess,sys,tarfile,time,urllib.request,re
+import importlib.util
+import fcntl
+
+cube_root = pathlib.Path(os.environ['YGOCUBE_ALY_ROOT']).resolve(strict=True)
+duel_root = pathlib.Path(os.environ['YGODUEL_ALY_ROOT']).resolve(strict=True)
+instance_roots = {'ygocube': cube_root, 'ygoduel': duel_root}
+public_origin = os.environ['YGOCUBE_ALY_URL'].rstrip('/')
+
+resource_lock=open(str((cube_root / '.card-resource-deploy.lock')),'a')
+fcntl.flock(resource_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+P=pathlib.Path
+helper_path=(cube_root / 'shared/card-resource-tools/apply-duel.py')
+if not helper_path.is_file():raise SystemExit('Install current resource workflow before Web deployment')
+spec=importlib.util.spec_from_file_location('resource_apply',helper_path)
+resource_apply=importlib.util.module_from_spec(spec);spec.loader.exec_module(resource_apply)
+if not all(hasattr(resource_apply,name) for name in ('record_components','resource_component_files')):raise SystemExit('Update the verified resource helper before staging this Web release')
+archive=P(sys.argv[1]);assert hashlib.sha256(archive.read_bytes()).hexdigest()==sys.argv[2]
+release=sys.argv[3]
+assert re.fullmatch(r'[a-z0-9-]+',release), 'invalid release id'
+stage=(cube_root / '.staging')/release;stage.mkdir(parents=True,exist_ok=False)
+with tarfile.open(archive) as t:
+ for m in t.getmembers():assert P(m.name).parts[0] in ['ygocube','ygoduel','manifest.json'] and '..' not in P(m.name).parts
+ t.extractall(stage,filter='data')
+for name,sha in json.loads((stage/'manifest.json').read_text()).items():assert hashlib.sha256((stage/name).read_bytes()).hexdigest()==sha,name
+def run(*cmd):return subprocess.check_output(cmd,text=True).strip()
+def switch(root,target):
+ (root/'pics-next').symlink_to(target);os.replace(root/'pics-next',root/'current')
+protected=['ygocube-api','ygocube-srvpro','ygoduel-api','ygoduel-srvpro','nginx']
+baseline=run('systemctl','show',*protected,'-p','MainPID','-p','ExecMainStartTimestamp')
+olds={};news={};results={}
+for service in ['ygocube','ygoduel']:
+ root=instance_roots[service];old=(root/'current').resolve();new=root/'releases'/release
+ backup=root/'backups'/release;backup.mkdir(parents=True,exist_ok=False)
+ shutil.copytree(old,new,symlinks=True,copy_function=resource_apply.hardlink_file)
+ # Overlay hashed assets; retain previous immutable chunks for existing tabs.
+ shutil.rmtree(new/'web')
+ shutil.copytree(stage/service/'web',new/'web',symlinks=True)
+ app=new/'web'/('standalone/apps/web' if service=='ygocube' else 'apps/web')
+ assert (app/'.next/static').is_dir() and (app/'.next/BUILD_ID').is_file()
+ old_static=old/'web'/('standalone/apps/web/.next/static' if service=='ygocube' else 'apps/web/.next/static')
+ for previous in old_static.rglob('*'):
+  target=app/'.next/static'/previous.relative_to(old_static)
+  if previous.is_file() and not target.exists():
+   target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(previous,target)
+ metadata=new/'release.json'
+ if metadata.exists():
+  v=json.loads(metadata.read_text());v.update(id=release,previousRelease=old.name,webBuildId=(app/'.next/BUILD_ID').read_text().strip());resource_apply.atomic_write_text(metadata,json.dumps(v,indent=2))
+ resource_apply.record_components(new, {'web': None}, previous=old)
+ if service=='ygoduel':resource_apply.link_existing_release_resources(cube_root,new)
+ resource_apply.set_release_ownership(new,user=service)
+ (backup/'previous-release.txt').write_text(str(old))
+ olds[service]=old;news[service]=new
+try:
+ for service in news:switch(instance_roots[service],news[service])
+ run('systemctl','restart','ygocube-web','ygoduel-web')
+ for route in ['/','/duel','/duel/decks']:
+  for attempt in range(30):
+   try:
+    with urllib.request.urlopen(public_origin+route,timeout=5) as r:html=r.read().decode()
+    break
+   except Exception:
+    if attempt==29:raise
+    time.sleep(1)
+  assets=set(re.findall(r'(?:src|href)="([^" ]+\.(?:js|css)(?:\?[^" ]*)?)"',html));assert assets
+  css=[]
+  for asset in assets:
+   with urllib.request.urlopen(public_origin+asset,timeout=10) as r:
+    assert ('javascript' in r.headers.get('Content-Type','') if '.js' in asset else 'text/css' in r.headers.get('Content-Type',''))
+    if '.css' in asset:css.append(r.read().decode())
+  styles='\n'.join(css)
+  assert re.search(r'\.grid\{display:grid[;}]',styles), 'Missing generated grid utility'
+  assert re.search(r'\.p-4\{padding:1rem[;}]',styles), 'Missing spacing utility'
+  assert '.bg-felt{' in styles, 'Missing configured theme'
+  results[route]={'status':200,'assets':len(assets)}
+ assert baseline==run('systemctl','show',*protected,'-p','MainPID','-p','ExecMainStartTimestamp')
+except Exception:
+ for service in olds:switch(instance_roots[service],olds[service])
+ run('systemctl','restart','ygocube-web','ygoduel-web');raise
+result={'ok':True,'release':release,'backendsUnchanged':True,'pages':results}
+for service in news:(instance_roots[service]/'backups'/release/'verification.json').write_text(json.dumps(result,indent=2))
+print(json.dumps(result))

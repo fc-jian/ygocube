@@ -1,0 +1,838 @@
+import { getDb } from '../db';
+import { config, defaults } from '../config';
+import crypto from 'crypto';
+import { BadRequestException } from '@nestjs/common';
+
+// Append-only event log + in-memory state with snapshot/replay (dev_docs/05 §7).
+// Every mutation is: logEvent(...) then apply(state, action, payload) — the same
+// apply() is used for live mutation and for replay, so replay is exact by construction.
+
+export interface PlayerState {
+  playerId: string;
+  displayName: string;
+  seat: number;
+  eliminated: boolean;
+  withdrawn?: boolean;
+  // 报名阶段由玩家自行确认；旧事件/快照缺失时按未准备处理。
+  ready?: boolean;
+}
+
+/** Pending administrator request to begin drafting.  This is event-sourced so
+ * a restart cannot silently forget a live confirmation window. */
+export interface DraftStartConfirmationState {
+  requestedAt: string;
+  deadlineAt: string;
+  actor: string;
+  participants: string[];
+  confirmed: Record<string, boolean>;
+}
+
+export interface PackState {
+  index: number;
+  size: number;
+  dropCard: number | null;
+  // 每堆起始玩家偏移（仅 serial 模式）：packSize 是人数倍数时用蛇形偏移；否则每堆随机。
+  // 可选：旧事件/快照无此字段；passing 模式不使用。
+  startOffset?: number;
+  order: number[];
+}
+
+export interface PickState {
+  playerId: string;
+  packIndex: number;
+  round: number;
+  card: number;
+  auto: boolean;
+  at: string;
+}
+
+export interface DeckState {
+  main: number[];
+  extra: number[];
+  side: number[];
+  lockedAt: string | null;
+  status: 'building' | 'locked';
+}
+
+export interface MatchState {
+  id: number;
+  round: number;
+  playerA: string;
+  playerB: string;
+  tableNo: number;
+  roomName: string | null;
+  playerAPass: string | null;
+  playerBPass: string | null;
+  resultA: number | null;
+  resultB: number | null;
+  source: string | null;
+  faultedAt: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  stage?: 'round_robin' | 'swiss' | 'playoff' | 'winners' | 'losers' | 'grand_final' | 'grand_final_reset';
+  bracketRound?: number;
+  bracketMatchId?: string;
+}
+
+export interface CompetitionState {
+  format: 'round_robin' | 'swiss' | 'double_elimination';
+  seeds: string[];
+  roundRobinSchedule?: [string, string | null][][];
+  losses?: Record<string, number>;
+  playoffStarted?: boolean;
+}
+
+export interface PauseState {
+  /** A pause is now an explicit administrator command. */
+  pausedAt: string;
+  actor?: string;
+  // Legacy replay-only fields. New events never write these values.
+  remainingMs?: number;
+  votes?: Record<string, boolean>;
+  proposer?: string | null;
+  // passing 模式暂停时冻结的各玩家剩余选牌时间（恢复时按此重设 deadline）
+  pausedDeadlines?: Record<string, number>;
+  // serial 模式暂停时冻结的当前选牌剩余时间
+  pausedPickRemainingMs?: number;
+}
+
+export interface FrozenTimerState {
+  passing?: Record<string, number>;
+  serial?: number;
+  deckbuilding?: number;
+}
+
+export interface PickAlternative {
+  packIndex: number;
+  card: number;
+}
+
+export interface TournamentState {
+  id: number;
+  name: string;
+  createdBy?: string;
+  configJson: string;
+  status: string;
+  round: number;
+  frozen: boolean;
+  players: PlayerState[];
+  packs: PackState[];
+  droppedCards: number[];
+  picks: PickState[];
+  pickCursor: { packIndex: number; round: number; playerId: string; deadlineAt: string | null } | null;
+  // passing 模式（packs_created 事件带 queues 即启用）：每玩家 FIFO 牌堆队列 + 各自选牌 deadline
+  packQueues: Record<string, number[]>;
+  pickDeadlines: Record<string, string | null>;
+  // passing：已发堆数（按轮发堆，一轮全空才发下一轮）；旧事件无 dealt 字段时回退 packs.length
+  packsDealt: number;
+  // passing：每玩家保留时间余额（ms，不刷新；单选超时先扣 reserve，耗尽才自动选）
+  pickReserves: Record<string, number>;
+  // 每名玩家最后点击的候选牌；超时自动选牌优先使用仍在当前牌堆中的候选牌。
+  pickAlternatives?: Record<string, PickAlternative | null>;
+  pause: PauseState | null;
+  decks: Record<string, DeckState>;
+  matches: MatchState[];
+  phaseDeadline: string | null;
+  pendingPhase: string | null;
+  draftStartConfirmation: DraftStartConfirmationState | null;
+  // 管理员冻结时持久化各阶段计时器的剩余时间；解冻后原样恢复。
+  frozenTimers?: FrozenTimerState | null;
+  competition?: CompetitionState | null;
+}
+
+const STATE_CACHE_LIMIT = 64;
+const stateCache = new Map<number, TournamentState>();
+
+function cachedState(tid: number): TournamentState | undefined {
+  const state = stateCache.get(tid);
+  if (state) {
+    // Map insertion order provides a small LRU without another dependency.
+    stateCache.delete(tid);
+    stateCache.set(tid, state);
+  }
+  return state;
+}
+
+function cacheState(tid: number, state: TournamentState): void {
+  stateCache.delete(tid);
+  stateCache.set(tid, state);
+  while (stateCache.size > STATE_CACHE_LIMIT) {
+    const oldest = stateCache.keys().next().value as number | undefined;
+    if (oldest === undefined) break;
+    stateCache.delete(oldest);
+  }
+}
+
+// Test hook: drop in-memory state so a fresh DB is replayed on next load.
+export function resetStateCache(): void {
+  stateCache.clear();
+}
+
+// SSE fan-out hook, wired in AppModule (RealtimeService.emit); avoids circular deps.
+type EventHook = (tid: number, action: string, payload: any) => void;
+let eventHook: EventHook | null = null;
+export function setEventHook(hook: EventHook): void {
+  eventHook = hook;
+}
+
+interface EventTransactionContext {
+  tid: number;
+  deferred: { action: string; payload: any; seq: number }[];
+  afterCommit: (() => void)[];
+}
+
+let eventTransaction: EventTransactionContext | null = null;
+
+/** Run an external side effect only after the surrounding event transaction commits. */
+export function afterEventCommit(tid: number, operation: () => void): void {
+  if (!eventTransaction) {
+    operation();
+    return;
+  }
+  if (eventTransaction.tid !== tid) throw new Error('CROSS_TOURNAMENT_TRANSACTION');
+  eventTransaction.afterCommit.push(operation);
+}
+
+function emitEventSafely(tid: number, action: string, payload: any): void {
+  try {
+    eventHook?.(tid, action, payload);
+  } catch (error) {
+    console.error('event hook failed', tid, action, error);
+  }
+}
+
+/**
+ * Atomically execute a synchronous tournament command. Event hooks and
+ * snapshots run only after commit; an exception restores the prior cache so a
+ * failed SQL transaction cannot leak speculative state to later requests.
+ */
+export function withEventTransaction<T>(tid: number, operation: () => T): T {
+  if (eventTransaction) {
+    if (eventTransaction.tid !== tid) throw new Error('CROSS_TOURNAMENT_TRANSACTION');
+    return operation();
+  }
+  const hadCached = stateCache.has(tid);
+  const before = hadCached ? clone(stateCache.get(tid)!) : undefined;
+  const context: EventTransactionContext = { tid, deferred: [], afterCommit: [] };
+  eventTransaction = context;
+  let result: T;
+  try {
+    result = getDb().transaction(operation)();
+  } catch (error) {
+    if (before) cacheState(tid, before);
+    else stateCache.delete(tid);
+    throw error;
+  } finally {
+    eventTransaction = null;
+  }
+  for (const event of context.deferred) emitEventSafely(tid, event.action, event.payload);
+  const committedCount = eventCount(tid);
+  const crossedSnapshotBoundary = context.deferred.length > 0
+    && Math.floor((committedCount - context.deferred.length) / 100) < Math.floor(committedCount / 100);
+  if (crossedSnapshotBoundary) {
+    try {
+      // A multi-event transaction can move from 99 to 101. Requiring the final
+      // count itself to be divisible by 100 would then skip snapshots forever
+      // for commands with a fixed stride.
+      snapshotNow(tid);
+    } catch (error) {
+      console.error('post-commit snapshot failed', tid, error);
+    }
+  }
+  for (const operation of context.afterCommit) {
+    try {
+      operation();
+    } catch (error) {
+      // The database commit is authoritative. A failed timer/room scheduling
+      // side effect is retried by the owning service and must not invite the
+      // caller to repeat an already committed command.
+      console.error('post-commit operation failed', tid, error);
+    }
+  }
+  return result;
+}
+
+function emptyState(id: number, name: string, configJson: string, createdBy = 'unknown'): TournamentState {
+  return {
+    id, name, createdBy, configJson, status: 'registration', round: 0, frozen: false,
+    players: [], packs: [], droppedCards: [], picks: [], pickCursor: null, pause: null, decks: {}, matches: [],
+    packQueues: {}, pickDeadlines: {}, packsDealt: 0, pickReserves: {}, pickAlternatives: {},
+    phaseDeadline: null, pendingPhase: null, draftStartConfirmation: null, frozenTimers: null, competition: null,
+  };
+}
+
+function clone<T>(x: T): T {
+  return JSON.parse(JSON.stringify(x));
+}
+
+export function apply(state: TournamentState, action: string, payload: any): void {
+  // Snapshots created before candidate-card support do not have this field.
+  // Normalize lazily so old tournaments remain replayable.
+  state.pickAlternatives ??= {};
+  // Snapshots created before the start-confirmation handshake do not have this
+  // field either; treating them as an idle registration state preserves the
+  // existing replay semantics.
+  state.draftStartConfirmation ??= null;
+  switch (action) {
+    case 'phase': {
+      state.status = payload.status;
+      state.round = payload.round ?? state.round;
+      if (payload.deadlineAt !== undefined) state.phaseDeadline = payload.deadlineAt;
+      break;
+    }
+    case 'pending': {
+      state.pendingPhase = payload;
+      break;
+    }
+    case 'round_complete': {
+      // 对局轮次全部有结果，等待管理员确认推进（无状态变化，仅通知）
+      break;
+    }
+    case 'config': {
+      state.configJson = JSON.stringify(payload);
+      break;
+    }
+    case 'tournament_name': {
+      if (typeof payload === 'string') state.name = payload;
+      break;
+    }
+    case 'player_join': {
+      const p: PlayerState = payload;
+      p.ready ??= false;
+      state.players.push(p);
+      state.decks[p.playerId] = { main: [], extra: [], side: [], lockedAt: null, status: 'building' };
+      break;
+    }
+    case 'draft_start_requested': {
+      if (!payload || typeof payload !== 'object') throw new Error('INVALID_DRAFT_START_EVENT');
+      const participants = Array.isArray(payload.participants)
+        ? payload.participants.filter((id: unknown): id is string => typeof id === 'string')
+        : [];
+      const confirmed: Record<string, boolean> = {};
+      if (payload.confirmed && typeof payload.confirmed === 'object') {
+        for (const [id, value] of Object.entries(payload.confirmed as Record<string, unknown>)) {
+          if (typeof value === 'boolean') confirmed[id] = value;
+        }
+      }
+      state.draftStartConfirmation = {
+        requestedAt: String(payload.requestedAt ?? ''),
+        deadlineAt: String(payload.deadlineAt ?? ''),
+        actor: String(payload.actor ?? 'admin'),
+        participants,
+        confirmed,
+      };
+      break;
+    }
+    case 'draft_start_confirmed': {
+      const confirmation = state.draftStartConfirmation;
+      const playerId = payload?.playerId;
+      if (confirmation && typeof playerId === 'string' && confirmation.participants.includes(playerId)) {
+        confirmation.confirmed[playerId] = true;
+      }
+      break;
+    }
+    case 'draft_start_cancelled':
+    case 'draft_start_approved': {
+      state.draftStartConfirmation = null;
+      break;
+    }
+    case 'player_ready': {
+      const player = state.players.find((p) => p.playerId === payload?.playerId);
+      if (player && typeof payload?.ready === 'boolean') player.ready = payload.ready;
+      break;
+    }
+    case 'player_rename': {
+      const player = state.players.find((p) => p.playerId === payload?.playerId);
+      if (player && typeof payload?.displayName === 'string') player.displayName = payload.displayName;
+      break;
+    }
+    case 'seat_assign': {
+      const map: Record<string, number> = payload;
+      for (const pl of state.players) if (map[pl.playerId] !== undefined) pl.seat = map[pl.playerId];
+      break;
+    }
+    case 'player_remove': {
+      const playerId: string = payload;
+      state.players = state.players.filter((p) => p.playerId !== playerId);
+      state.picks = state.picks.filter((p) => p.playerId !== playerId);
+      delete state.decks[playerId];
+      delete state.packQueues[playerId];
+      delete state.pickDeadlines[playerId];
+      delete state.pickReserves[playerId];
+      delete state.pickAlternatives[playerId];
+      break;
+    }
+    case 'player_dsq': {
+      const playerId: string = payload.playerId ?? payload;
+      const player = state.players.find((p) => p.playerId === playerId);
+      if (player) player.eliminated = true;
+      break;
+    }
+    case 'player_withdraw': {
+      const player = state.players.find((p) => p.playerId === (payload.playerId ?? payload));
+      if (player) player.withdrawn = true;
+      break;
+    }
+    case 'player_restore': {
+      const player = state.players.find((p) => p.playerId === (payload.playerId ?? payload));
+      if (player) player.withdrawn = false;
+      break;
+    }
+    case 'competition': {
+      state.competition = clone(payload);
+      break;
+    }
+    case 'packs_created': {
+      // The first Cube releases stored this event as the pack array itself;
+      // current releases wrap it with metadata (`{ packs, droppedCards, ... }`).
+      // Keep the old representation replayable so a restored database can be
+      // started without losing a tournament whose draft predates the wrapper.
+      const legacyPacks = Array.isArray(payload);
+      const packs = (legacyPacks ? payload : payload?.packs) as PackState[] | undefined;
+      if (!Array.isArray(packs)) throw new Error('INVALID_PACKS_CREATED_EVENT');
+      state.packs = packs.map(clone);
+      if (Array.isArray(payload?.droppedCards)) {
+        state.droppedCards = payload.droppedCards;
+      } else if (legacyPacks) {
+        // Legacy events kept a private/public initial discard on each pack.
+        // Reconstruct the aggregate so old public-discard views remain exact.
+        state.droppedCards = packs
+          .map((pack) => pack?.dropCard)
+          .filter((code): code is number => code !== null && Number.isSafeInteger(code) && code > 0);
+      }
+      // passing 模式：初始队列与各玩家 deadline 随事件下发（无 queues 字段 = 旧串行模式）
+      if (!legacyPacks && payload.queues) {
+        state.packQueues = clone(payload.queues);
+        // 旧 passing 事件无 dealt 字段（全部堆一次入队）：回退为 packs.length，回放行为不变
+        state.packsDealt = payload.dealt ?? state.packs.length;
+      }
+      if (!legacyPacks && payload.deadlines) state.pickDeadlines = clone(payload.deadlines);
+      if (!legacyPacks && payload.reserves) state.pickReserves = clone(payload.reserves);
+      break;
+    }
+    case 'deal': {
+      // passing 模式：一轮全部选空后发下一轮（payload 为发堆后的全量快照）
+      if (payload.queues) state.packQueues = clone(payload.queues);
+      if (payload.deadlines) state.pickDeadlines = clone(payload.deadlines);
+      if (payload.reserves) state.pickReserves = clone(payload.reserves);
+      if (payload.dealt !== undefined) state.packsDealt = payload.dealt;
+      break;
+    }
+    case 'pick': {
+      const p: PickState = payload;
+      state.picks.push(p);
+      // 候选牌只服务于当前一次选择，实际选中后立即清除。
+      state.pickAlternatives[p.playerId] = null;
+      // passing 模式：pick 事件携带选后队列/deadline/reserve 快照，回放与实时一致
+      if (payload.queues) state.packQueues = clone(payload.queues);
+      if (payload.deadlines) state.pickDeadlines = clone(payload.deadlines);
+      if (payload.reserves) state.pickReserves = clone(payload.reserves);
+      break;
+    }
+    case 'alternative': {
+      if (payload?.playerId && payload.packIndex !== undefined && payload.card !== undefined) {
+        state.pickAlternatives[payload.playerId] = { packIndex: Number(payload.packIndex), card: Number(payload.card) };
+      }
+      break;
+    }
+    case 'deadlines': {
+      // passing 模式：全量重设各玩家 deadline（暂停/恢复/冻结/解冻）。
+      // payload 两种形态：{deadlines, reserves?}（新）或直接是 deadline map（旧）
+      if (payload && payload.deadlines) {
+        state.pickDeadlines = clone(payload.deadlines);
+        if (payload.reserves) state.pickReserves = clone(payload.reserves);
+      } else {
+        state.pickDeadlines = payload ? clone(payload) : {};
+      }
+      break;
+    }
+    case 'reserve': {
+      // passing 模式管理员临时增加保留时间。事件携带全量快照，保证
+      // 重启、回放和硬回溯都恢复同一份余额与 deadline。
+      if (payload?.reserves) state.pickReserves = clone(payload.reserves);
+      if (payload?.deadlines) state.pickDeadlines = clone(payload.deadlines);
+      if (payload?.pausedDeadlines && state.pause?.pausedAt) {
+        state.pause.pausedDeadlines = clone(payload.pausedDeadlines);
+      }
+      break;
+    }
+    case 'cursor': {
+      state.pickCursor = payload ? clone(payload) : null;
+      break;
+    }
+    case 'pause': {
+      if (!payload) {
+        state.pause = null;
+      } else if (payload.pausedAt) {
+        // Normalize old vote-based snapshots/events to the administrator pause
+        // shape while retaining enough optional fields for historical replay.
+        state.pause = {
+          pausedAt: String(payload.pausedAt),
+          actor: payload.actor ? String(payload.actor) : undefined,
+          remainingMs: typeof payload.remainingMs === 'number' ? payload.remainingMs : undefined,
+          pausedDeadlines: payload.pausedDeadlines ? clone(payload.pausedDeadlines) : undefined,
+          pausedPickRemainingMs: typeof payload.pausedPickRemainingMs === 'number' ? payload.pausedPickRemainingMs : undefined,
+        };
+      } else {
+        // A pending legacy vote is no longer actionable. Treat it as absent so
+        // old replay data cannot re-enable a player-controlled pause.
+        state.pause = null;
+      }
+      break;
+    }
+    case 'deck': {
+      state.decks[payload.playerId] = clone(payload.deck);
+      break;
+    }
+    case 'match': {
+      const m: MatchState = payload;
+      const i = state.matches.findIndex((x) => x.id === m.id);
+      if (i >= 0) state.matches[i] = m;
+      else state.matches.push(m);
+      break;
+    }
+    case 'frozen': {
+      state.frozen = payload;
+      break;
+    }
+    case 'timer_freeze': {
+      state.frozenTimers = payload ? clone(payload) : null;
+      break;
+    }
+    default:
+      throw new Error(`unknown event action: ${action}`);
+  }
+}
+
+export function logEvent(tid: number, entity: string, action: string, payload: any, actor: string): number {
+  const row = getDb()
+    .prepare('INSERT INTO events (tournament_id, entity, action, payload_json, created_at, actor) VALUES (?,?,?,?,?,?)')
+    .run(tid, entity, action, JSON.stringify(payload), new Date().toISOString(), actor);
+  const seq = Number(row.lastInsertRowid);
+  const state = cachedState(tid);
+  if (state) apply(state, action, payload);
+  if (eventTransaction?.tid === tid) {
+    eventTransaction.deferred.push({ action, payload, seq });
+  } else {
+    emitEventSafely(tid, action, payload);
+    try {
+      maybeSnapshot(tid, seq);
+    } catch (error) {
+      // The event itself is already committed. Snapshot failure must not make
+      // clients retry and duplicate the command.
+      console.error('snapshot failed', tid, seq, error);
+    }
+  }
+  return seq;
+}
+
+export function loadState(tid: number): TournamentState {
+  const cached = cachedState(tid);
+  if (cached) return cached;
+  const row = tournamentRow(tid);
+  const state = emptyState(row.id, row.name, row.config_json, row.created_by ?? 'unknown');
+  state.status = row.status;
+  state.round = row.round;
+  state.frozen = (row as TournamentRow & { frozen?: number }).frozen === 1;
+  // replay from snapshot if present, else from scratch
+  const snap = getDb()
+    .prepare('SELECT seq, event_seq, state_json FROM tournament_snapshots WHERE tournament_id=? AND event_seq IS NOT NULL ORDER BY event_seq DESC LIMIT 1')
+    .get(tid) as SnapRow | undefined;
+  let startSeq = 0;
+  if (snap) {
+    const snapState = JSON.parse(snap.state_json) as TournamentState;
+    Object.assign(state, snapState);
+    startSeq = snap.event_seq as number;
+  }
+  state.pickAlternatives ??= {};
+  state.draftStartConfirmation ??= null;
+  const rows = getDb()
+    .prepare('SELECT seq, tournament_id, entity, action, payload_json, created_at, actor FROM events WHERE tournament_id=? AND seq>? ORDER BY seq')
+    .all(tid, startSeq) as EventRow[];
+  for (const e of rows) apply(state, e.action, JSON.parse(e.payload_json));
+  // Snapshots created by the old player-vote implementation may contain a
+  // pending vote object even when no later event exists. Do not expose or
+  // honor that stale state as an administrator pause.
+  if (state.pause && !state.pause.pausedAt) state.pause = null;
+  cacheState(tid, state);
+  return state;
+}
+
+export function persistMeta(tid: number): void {
+  const s = cachedState(tid);
+  if (!s) return;
+  getDb().prepare('UPDATE tournaments SET status=?, round=?, updated_at=? WHERE id=?').run(s.status, s.round, new Date().toISOString(), tid);
+}
+
+interface CountRow {
+  c: number;
+}
+
+interface TournamentRow {
+  id: number;
+  name: string;
+  config_json: string;
+  created_by?: string;
+  card_pool_id?: number | null;
+  status: string;
+  round: number;
+  frozen?: number;
+}
+
+interface EventRow {
+  seq: number;
+  tournament_id: number;
+  entity: string;
+  action: string;
+  payload_json: string;
+  created_at: string;
+  actor: string;
+}
+
+interface SnapRow {
+  seq: number;
+  event_seq: number | null;
+  state_json: string;
+}
+
+function tournamentRow(tid: number): TournamentRow {
+  const row = getDb().prepare('SELECT * FROM tournaments WHERE id=?').get(tid) as TournamentRow | undefined;
+  if (!row) throw new Error('TOURNAMENT_NOT_FOUND');
+  return row;
+}
+
+function eventCount(tid: number): number {
+  return (getDb().prepare('SELECT count(*) AS c FROM events WHERE tournament_id=?').get(tid) as CountRow).c;
+}
+
+function maybeSnapshot(tid: number, globalSeq: number): void {
+  const count = eventCount(tid);
+  if (count % 100 === 0) {
+    const s = cachedState(tid) ?? loadState(tid);
+    getDb()
+      .prepare('INSERT INTO tournament_snapshots (tournament_id, seq, event_seq, state_json, created_at) VALUES (?,?,?,?,?)')
+      .run(tid, count, globalSeq, JSON.stringify(s), new Date().toISOString());
+  }
+}
+
+export function snapshotNow(tid: number): void {
+  const s = cachedState(tid) ?? loadState(tid);
+  const count = eventCount(tid);
+  const last = getDb().prepare('SELECT MAX(seq) m FROM events WHERE tournament_id=?').get(tid) as { m: number | null };
+  getDb()
+    .prepare('INSERT INTO tournament_snapshots (tournament_id, seq, event_seq, state_json, created_at) VALUES (?,?,?,?,?)')
+    .run(tid, count, last.m ?? count, JSON.stringify(s), new Date().toISOString());
+}
+
+function stateAt(tid: number, seq: number): TournamentState {
+  const row = tournamentRow(tid);
+  const target = getDb().prepare('SELECT seq FROM events WHERE tournament_id=? AND seq=?').get(tid, seq);
+  if (!target) throw new Error('REVERT_EVENT_NOT_FOUND');
+  // Token auth starts enabled. A previous revert may have put a later auth
+  // toggle into config_json; only snapshots/events at the requested point can
+  // establish a historical override, never that current projection.
+  const initialConfig = JSON.parse(row.config_json) as Record<string, unknown>;
+  delete initialConfig.authRequired;
+  const state = emptyState(row.id, row.name, JSON.stringify(initialConfig), row.created_by ?? 'unknown');
+  const snap = getDb()
+    .prepare('SELECT seq, event_seq, state_json FROM tournament_snapshots WHERE tournament_id=? AND event_seq IS NOT NULL AND event_seq<=? ORDER BY event_seq DESC LIMIT 1')
+    .get(tid, seq) as SnapRow | undefined;
+  if (!snap
+    && getDb().prepare("SELECT 1 FROM admin_actions WHERE tournament_id=? AND action='hard_revert' LIMIT 1").get(tid)
+    && !getDb().prepare("SELECT 1 FROM events WHERE tournament_id=? AND action='config' AND seq<=? LIMIT 1").get(tid, seq)) {
+    // Older versions overwrote the only initial config and deleted all earlier
+    // snapshots. The current projection cannot establish that lost history.
+    throw new BadRequestException({ code: 'REVERT_BASELINE_UNAVAILABLE' });
+  }
+  let startSeq = 0;
+  if (snap) {
+    Object.assign(state, JSON.parse(snap.state_json) as TournamentState);
+    startSeq = snap.event_seq as number;
+  }
+  state.pickAlternatives ??= {};
+  state.draftStartConfirmation ??= null;
+  const rows = getDb()
+    .prepare('SELECT seq, tournament_id, entity, action, payload_json, created_at, actor FROM events WHERE tournament_id=? AND seq>? AND seq<=? ORDER BY seq')
+    .all(tid, startSeq, seq) as EventRow[];
+  for (const e of rows) apply(state, e.action, JSON.parse(e.payload_json));
+  return state;
+}
+
+export interface RevertPreview {
+  seq: number;
+  tournamentName: string;
+  targetStatus: string;
+  targetRound: number;
+  deleteEvents: number;
+  deletePicks: number;
+  deleteMatches: number;
+  closeRooms: string[];
+}
+
+export function previewRevert(tid: number, seq: number): RevertPreview {
+  if (!Number.isInteger(seq) || seq <= 0) throw new Error('BAD_PAYLOAD');
+  const state = stateAt(tid, seq);
+  const row = tournamentRow(tid);
+  const future = getDb().prepare('SELECT count(*) AS c FROM events WHERE tournament_id=? AND seq>?').get(tid, seq) as CountRow;
+  const current = loadState(tid);
+  const closeRooms = [...new Set(current.matches
+    .filter((m) => m.roomName && m.resultA === null && m.playerB !== '(bye)')
+    .map((m) => m.roomName!))];
+  return {
+    seq,
+    tournamentName: row.name,
+    targetStatus: state.status,
+    targetRound: state.round,
+    deleteEvents: future.c,
+    deletePicks: Math.max(0, current.picks.length - state.picks.length),
+    deleteMatches: Math.max(0, current.matches.length - state.matches.length),
+    closeRooms,
+  };
+}
+
+export interface HardRevertResult {
+  state: TournamentState;
+  deletedEvents: number;
+  replacementTokens: Record<string, string>;
+}
+
+// Destructive admin time travel: discard the future event branch and rebuild every
+// queryable projection from the target state.  The tournament remains frozen until
+// an explicit unfreeze, so no timer/webhook can mutate the newly restored branch.
+export function hardRevertTo(tid: number, seq: number, actor: string): HardRevertResult {
+  const preview = previewRevert(tid, seq);
+  const state = stateAt(tid, seq);
+  state.frozen = true;
+  // Rooms are external resources and cannot be resurrected. Completed matches keep
+  // their historical room label; unresolved matches are recreated after unfreeze.
+  for (const match of state.matches) {
+    if (match.resultA === null) {
+      match.roomName = null;
+      match.playerAPass = null;
+      match.playerBPass = null;
+      match.source = 'revert';
+      match.faultedAt = null;
+      match.startedAt = null;
+      match.finishedAt = null;
+    }
+  }
+
+  const db = getDb();
+  // Legacy tournaments without an initial snapshot still have their original
+  // config_json until the first hard revert. Preserve it before overwriting it.
+  // A previous hard revert makes that seed untrustworthy; stateAt then requires
+  // a historical snapshot or a complete config event instead.
+  const row = tournamentRow(tid);
+  const firstEvent = db.prepare('SELECT MIN(seq) AS seq FROM events WHERE tournament_id=?').get(tid) as { seq: number };
+  const preserveInitial = !db.prepare("SELECT 1 FROM admin_actions WHERE tournament_id=? AND action='hard_revert' LIMIT 1").get(tid)
+    && !db.prepare('SELECT 1 FROM tournament_snapshots WHERE tournament_id=? AND event_seq<=? LIMIT 1').get(tid, firstEvent.seq);
+  const initialState = preserveInitial ? emptyState(row.id, row.name, row.config_json, row.created_by ?? 'unknown') : null;
+  const replacementTokens: Record<string, string> = {};
+  const now = new Date().toISOString();
+  let restoredCardPoolId: number | null = null;
+  let restoredAuthRequired = true;
+  try {
+    const restoredConfig = JSON.parse(state.configJson) as Record<string, unknown>;
+    restoredAuthRequired = restoredConfig.authRequired !== false;
+    restoredCardPoolId = typeof restoredConfig.cardPoolId === 'number' && Number.isInteger(restoredConfig.cardPoolId)
+      ? restoredConfig.cardPoolId
+      : null;
+  } catch {
+    // A malformed historical config is already handled by replay; leave the
+    // restored pool identity unset so it cannot accidentally inherit a newer
+    // same-name pool's statistics.
+  }
+  db.transaction(() => {
+    db.prepare('DELETE FROM events WHERE tournament_id=? AND seq>?').run(tid, seq);
+    db.prepare('DELETE FROM tournament_snapshots WHERE tournament_id=? AND (event_seq IS NULL OR event_seq>=?)').run(tid, seq);
+    if (initialState) {
+      db.prepare('INSERT INTO tournament_snapshots (tournament_id, seq, event_seq, state_json, created_at) VALUES (?,?,?,?,?)')
+        .run(tid, 0, 0, JSON.stringify(initialState), now);
+    }
+    db.prepare('UPDATE tournaments SET name=?, config_json=?, card_pool_id=?, auth_required=?, status=?, round=?, frozen=1, updated_at=? WHERE id=?')
+      .run(state.name, state.configJson, restoredCardPoolId, restoredAuthRequired ? 1 : 0, state.status, state.round, now, tid);
+
+    db.prepare('UPDATE tournament_players SET active=0 WHERE tournament_id=?').run(tid);
+    const findPlayer = db.prepare('SELECT id FROM tournament_players WHERE tournament_id=? AND player_id=?');
+    const updatePlayer = db.prepare('UPDATE tournament_players SET display_name=?, seat=?, eliminated=?, withdrawn=?, active=1 WHERE tournament_id=? AND player_id=?');
+    const insertPlayer = db.prepare('INSERT INTO tournament_players (tournament_id, player_id, display_name, token_hash, seat, joined_at, eliminated, withdrawn, active) VALUES (?,?,?,?,?,?,?,?,1)');
+    for (const player of state.players) {
+      if (findPlayer.get(tid, player.playerId)) {
+        updatePlayer.run(player.displayName, player.seat, player.eliminated ? 1 : 0, player.withdrawn ? 1 : 0, tid, player.playerId);
+      } else {
+        const token = crypto.randomBytes(24).toString('base64url');
+        replacementTokens[player.playerId] = token;
+        const hash = crypto.createHash('sha256').update(token).digest('hex');
+        insertPlayer.run(tid, player.playerId, player.displayName, hash, player.seat, now, player.eliminated ? 1 : 0, player.withdrawn ? 1 : 0);
+      }
+    }
+
+    db.prepare('DELETE FROM packs WHERE tournament_id=?').run(tid);
+    const insertPack = db.prepare('INSERT INTO packs (tournament_id, "index", size, drop_card_code, order_json) VALUES (?,?,?,?,?)');
+    for (const pack of state.packs) insertPack.run(tid, pack.index, pack.size, pack.dropCard, JSON.stringify(pack.order));
+
+    db.prepare('DELETE FROM picks WHERE tournament_id=?').run(tid);
+    const insertPick = db.prepare('INSERT INTO picks (tournament_id, player_id, pack_index, pick_round, card_code, auto_picked, picked_at) VALUES (?,?,?,?,?,?,?)');
+    for (const pick of state.picks) insertPick.run(tid, pick.playerId, pick.packIndex, pick.round, pick.card, pick.auto ? 1 : 0, pick.at);
+
+    db.prepare('DELETE FROM decks WHERE tournament_id=?').run(tid);
+    const insertDeck = db.prepare('INSERT INTO decks (tournament_id, player_id, main_json, extra_json, side_json, locked_at, status) VALUES (?,?,?,?,?,?,?)');
+    for (const [playerId, deck] of Object.entries(state.decks)) {
+      insertDeck.run(tid, playerId, JSON.stringify(deck.main), JSON.stringify(deck.extra), JSON.stringify(deck.side), deck.lockedAt, deck.status);
+    }
+
+    db.prepare('DELETE FROM matches WHERE tournament_id=?').run(tid);
+    const insertMatch = db.prepare('INSERT INTO matches (id, tournament_id, round, player_a, player_b, table_no, room_name, player_a_pass, player_b_pass, result_a, result_b, source, faulted_at, started_at, finished_at, stage, bracket_round, bracket_match_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+    for (const match of state.matches) {
+      insertMatch.run(match.id, tid, match.round, match.playerA, match.playerB, match.tableNo, match.roomName, match.playerAPass, match.playerBPass, match.resultA, match.resultB, match.source, match.faultedAt, match.startedAt, match.finishedAt, match.stage ?? null, match.bracketRound ?? null, match.bracketMatchId ?? null);
+    }
+
+    const count = eventCount(tid);
+    db.prepare('INSERT INTO tournament_snapshots (tournament_id, seq, event_seq, state_json, created_at) VALUES (?,?,?,?,?)')
+      .run(tid, count, seq, JSON.stringify(state), now);
+    db.prepare('INSERT INTO admin_actions (tournament_id, actor, action, detail_json, created_at) VALUES (?,?,?,?,?)')
+      .run(tid, actor, 'hard_revert', JSON.stringify({ seq, deletedEvents: preview.deleteEvents }), now);
+  })();
+  cacheState(tid, state);
+  return { state, deletedEvents: preview.deleteEvents, replacementTokens };
+}
+
+// Kept for callers/tests compiled against the old helper. New controller code uses
+// hardRevertTo directly so the actor is never a credential.
+export function revertTo(tid: number, seq: number): TournamentState {
+  return hardRevertTo(tid, seq, 'admin').state;
+}
+
+// 删除 tournament 的进程内状态（配合管理台删除）
+export function dropState(tid: number): void {
+  stateCache.delete(tid);
+}
+
+export function unfreeze(tid: number, actor = 'admin'): void {
+  loadState(tid);
+  withEventTransaction(tid, () => {
+    logEvent(tid, 'tournament', 'frozen', false, actor);
+    getDb().prepare('UPDATE tournaments SET frozen=0, updated_at=? WHERE id=?').run(new Date().toISOString(), tid);
+  });
+}
+
+export function freeze(tid: number, actor: string): void {
+  loadState(tid);
+  withEventTransaction(tid, () => {
+    logEvent(tid, 'tournament', 'frozen', true, actor);
+    getDb().prepare('UPDATE tournaments SET frozen=1, updated_at=? WHERE id=?').run(new Date().toISOString(), tid);
+  });
+}
+
+export function getConfig(state: TournamentState): Record<string, any> {
+  const persisted = JSON.parse(state.configJson) as Record<string, unknown>;
+  // pauseSeconds belonged to the removed player-vote implementation. Keep it
+  // in raw historical JSON for replay/forensics, but never expose or consume it
+  // as an active tournament setting.
+  delete persisted.pauseSeconds;
+  return { ...defaults, ...persisted };
+}
+
+export function pickedCards(state: TournamentState, playerId: string): number[] {
+  return state.picks.filter((p) => p.playerId === playerId).map((p) => p.card);
+}

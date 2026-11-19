@@ -1,0 +1,58 @@
+import { BadRequestException, Body, Controller, Post } from '@nestjs/common';
+import type { SmallWorldCalculateRequest, SmallWorldCalculationResponse } from '@ygocube/shared';
+import { Public } from '../auth/auth.guard';
+import { SmallWorldService } from './small-world.service';
+import { CardPickStatsService } from '../cards/card-pick-stats.service';
+
+const MAX_CODES_PER_ZONE = 500;
+
+function badInput(field: keyof SmallWorldCalculateRequest, reason: string): never {
+  throw new BadRequestException({
+    code: 'BAD_SMALL_WORLD_INPUT',
+    details: { field, reason },
+  });
+}
+
+function parseCodes(body: unknown, field: keyof SmallWorldCalculateRequest, optional = false): number[] {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    badInput(field, 'expected a JSON object');
+  }
+  const value = (body as Record<string, unknown>)[field];
+  if (value === undefined && optional) return [];
+  if (!Array.isArray(value) || value.length > MAX_CODES_PER_ZONE) {
+    badInput(field, `expected an array of at most ${MAX_CODES_PER_ZONE} codes`);
+  }
+  if (value.some((code) => typeof code !== 'number' || !Number.isSafeInteger(code) || code <= 0)) {
+    badInput(field, 'codes must be positive safe integers');
+  }
+  return value as number[];
+}
+
+function parseBoolean(body: unknown, field: keyof SmallWorldCalculateRequest, fallback = false): boolean {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    badInput(field, 'expected a JSON object');
+  }
+  const value = (body as Record<string, unknown>)[field];
+  if (value === undefined) return fallback;
+  if (typeof value !== 'boolean') badInput(field, 'expected a boolean');
+  return value;
+}
+
+@Controller('tools/small-world')
+export class SmallWorldController {
+  constructor(private smallWorld: SmallWorldService, private cardStats?: CardPickStatsService) {}
+
+  @Public()
+  @Post('calculate')
+  calculate(@Body() body: unknown): SmallWorldCalculationResponse {
+    const deckCodes = parseCodes(body, 'deckCodes');
+    const handCodes = parseCodes(body, 'handCodes', true);
+    const allowSameHandTarget = parseBoolean(body, 'allowSameHandTarget');
+    const result = this.smallWorld.calculate(deckCodes, handCodes, { allowSameHandTarget });
+    const stats = this.cardStats?.forAllPools(new Set(result.cards.map((card) => card.code))) ?? new Map();
+    return {
+      ...result,
+      cards: result.cards.map((card) => ({ ...card, pickStats: stats.get(card.code) ?? [] })),
+    };
+  }
+}

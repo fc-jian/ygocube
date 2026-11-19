@@ -1,0 +1,4 @@
+interface:
+  display_name: "YGOPro 资源更新"
+  short_description: "安全同步 YGOPro 卡片资源、构建并验证 Aly 发布"
+  default_prompt: "使用 $update 按标准流程同步 YGOPro 卡片资源并验收 Aly 部署。"

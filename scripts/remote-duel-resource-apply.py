@@ -1,0 +1,1210 @@
+#!/usr/bin/env python3
+"""Install the verified Cube card resources into Aly's independent Duel release."""
+
+from __future__ import annotations
+
+import argparse
+from contextlib import closing
+from datetime import date, timedelta
+import errno
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import shutil
+import signal
+import tarfile
+import sqlite3
+import subprocess
+import time
+from urllib.parse import quote
+from urllib.request import urlopen
+
+
+TOKEN_TYPE = 0x4000
+RAW_CARD_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
+
+
+def run(*args: str) -> str:
+    return subprocess.check_output(args, text=True).strip()
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def read_json(url: str) -> object:
+    with urlopen(url, timeout=5) as response:
+        if response.status != 200:
+            raise RuntimeError(f"API returned HTTP {response.status}: {url}")
+        return json.loads(response.read())
+
+
+def banlist_api_name(header: str) -> str:
+    match = re.fullmatch(r"\s*(\d{4})\.(\d{1,2})(?:\.(\d{1,2}))?(?:\s+(?:OCG|TCG|SC))?\s*", header)
+    if not match:
+        return header.strip()
+    year, month, day = (int(value) if value is not None else None for value in match.groups())
+    public_date = date(year, month, day or 1)
+    suffix = "简体中文 / SC" if re.search(r"\bSC\b", header) else "TCG" if "TCG" in header else "OCG"
+    return f"{public_date:%Y.%m.%d} {suffix}"
+
+
+def banlist_api_names(headers: list[str]) -> list[str]:
+    return [banlist_api_name(header) for header in headers]
+
+
+def verify_public_banlists(options: dict, banlist_path: Path) -> None:
+    expected, current = [], None
+    for line in banlist_path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("!"):
+            current = {"name": banlist_api_name(line[1:]), "limits": {}}
+            expected.append(current)
+        elif current is not None:
+            match = re.match(r"^(\d+) +([012])(?:\s|$)", line)
+            if match and int(match[1]) <= 0xffffffff:
+                current["limits"][str(int(match[1]))] = int(match[2])
+    actual = options.get("lists", [])
+    for item in expected:
+        matches = [value for value in actual if value.get("name") == item["name"]]
+        if not matches or not all(value.get("limits") == item["limits"] for value in matches):
+            raise RuntimeError(f"Public ban-list entries differ from native resource: {item['name']}")
+
+
+def wait_healthy(banlist_path: Path | None = None, *, allow_legacy_dates: bool = False, include_cube: bool = False) -> None:
+    last_error: Exception | None = None
+    for _ in range(40):
+        try:
+            if include_cube and read_json("http://127.0.0.1:3001/health") is None:
+                raise RuntimeError('Cube API is not ready')
+            if read_json("http://127.0.0.1:3101/health") is None:
+                time.sleep(1)
+                continue
+            options = read_json("http://127.0.0.1:3101/public/duel/options")
+            names = {str(item.get("name", "")) for item in options.get("lists", [])}
+            if banlist_path is not None:
+                headers = [line[1:].strip() for line in banlist_path.read_text(encoding="utf-8").splitlines() if line.startswith("!")]
+                expected = banlist_api_names(headers)
+                if allow_legacy_dates and any(name not in names for name in expected):
+                    # Only a rollback to a pre-calendar-fix application may use
+                    # its former display names. Normal publication is strict.
+                    expected = [
+                        f"{date.fromisoformat(name[:10].replace('.', '-')) - timedelta(days=1):%Y.%m.%d} {name[11:]}"
+                        for name in expected
+                    ]
+                missing = [name for name in expected if name not in names]
+                if missing:
+                    raise RuntimeError(f"the standalone Duel API did not load upstream ban-lists: {missing[:5]}")
+                if not allow_legacy_dates:
+                    verify_public_banlists(options, banlist_path)
+            return
+        except Exception as exc:
+            last_error = exc
+            time.sleep(1)
+    raise RuntimeError(f"standalone Duel API health check failed: {last_error}")
+
+
+def hardlink_file(source: str, destination: str) -> str:
+    try:
+        os.link(source, destination)
+    except OSError as exc:
+        if exc.errno == errno.EXDEV:
+            raise RuntimeError("resource trees must share a filesystem; refusing a duplicate copy") from exc
+        raise
+    return destination
+
+
+def link_resource_file(source: Path, destination: Path) -> None:
+    if not source.is_file() or source.is_symlink():
+        raise RuntimeError(f"missing regular resource file: {source}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_symlink():
+        destination.unlink()
+    elif destination.exists():
+        if not destination.is_file():
+            raise RuntimeError(f"resource destination is not a regular file: {destination}")
+        source_stat = source.stat()
+        destination_stat = destination.stat()
+        if source_stat.st_dev == destination_stat.st_dev and source_stat.st_ino == destination_stat.st_ino:
+            return
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.link")
+    if temporary.is_symlink() or temporary.is_file():
+        temporary.unlink()
+    elif temporary.exists():
+        raise RuntimeError(f"resource link staging path is not a regular file: {temporary}")
+    try:
+        os.link(source, temporary)
+    except OSError as exc:
+        if exc.errno == errno.EXDEV:
+            raise RuntimeError(
+                f"Cube and Duel resources must share a filesystem; refusing to copy {source}"
+            ) from exc
+        raise
+    os.replace(temporary, destination)
+
+
+def hardlink_manifest_files(source_root: Path, destination_root: Path, files: dict, label: str) -> None:
+    for relative in files:
+        rel = PurePosixPath(relative)
+        if rel.is_absolute() or ".." in rel.parts or "\\" in relative:
+            raise RuntimeError(f"unsafe {label} manifest path: {relative!r}")
+        link_resource_file(source_root.joinpath(*rel.parts), destination_root.joinpath(*rel.parts))
+
+
+def verify_hardlink(source: Path, destination: Path, label: str) -> None:
+    source_stat = source.stat()
+    destination_stat = destination.stat()
+    if source_stat.st_dev != destination_stat.st_dev or source_stat.st_ino != destination_stat.st_ino:
+        raise RuntimeError(f"Cube and Duel {label} are separate files: {destination}")
+
+
+def verify_resource_hardlinks(
+    source_host: Path,
+    target_host: Path,
+    source_assets: Path,
+    target_assets: Path,
+    manifest: dict,
+) -> int:
+    linked = 0
+    for source_relative, target_relative in (
+        ("cards.cdb", "cards.cdb"),
+        ("strings.conf", "strings.conf"),
+        ("lflist.conf", "lflist.conf"),
+        ("expansions/lflist.conf", "expansions/lflist.conf"),
+    ):
+        verify_hardlink(source_host / source_relative, target_host / target_relative, target_relative)
+        linked += 1
+    for subdirectory, key, label in (("expansions", "expansions", "Super Pre"),):
+        files = manifest.get(key, {}).get("files", {})
+        for relative in files:
+            rel = PurePosixPath(relative)
+            verify_hardlink(
+                (source_host / subdirectory).joinpath(*rel.parts),
+                (target_host / subdirectory).joinpath(*rel.parts),
+                f"{label} resource {relative}",
+            )
+            linked += 1
+    for path in (source_host / "script").rglob("*.lua"):
+        if path.is_file() and not path.is_symlink():
+            relative = path.relative_to(source_host / "script")
+            verify_hardlink(path, target_host / "script" / relative, f"YGOPro script {relative}")
+            linked += 1
+    verify_hardlink(
+        source_assets / "ygocdb_cards.json",
+        target_assets / "ygocdb_cards.json",
+        "YGOCDB mapping",
+    )
+    linked += 1
+    for relative in manifest.get("avif", {}).get("files", {}):
+        rel = PurePosixPath(relative)
+        verify_hardlink(
+            (source_assets / "pics_avif").joinpath(*rel.parts),
+            (target_assets / "pics_avif").joinpath(*rel.parts),
+            f"AVIF image {relative}",
+        )
+        linked += 1
+    return linked
+
+
+def managed_resource_sets_match(
+    source_host: Path,
+    target_host: Path,
+    source_assets: Path,
+    target_assets: Path,
+    manifest: dict,
+) -> bool:
+    try:
+        for relative in ("cards.cdb", "strings.conf", "lflist.conf", "expansions/lflist.conf"):
+            source = source_host / relative
+            target = target_host / relative
+            if not source.is_file() or not target.is_file() or sha256(source) != sha256(target):
+                return False
+        for subdirectory, key, label in (
+            ("script", "scripts", "YGOPro script"),
+            ("expansions", "expansions", "Super Pre"),
+        ):
+            files = manifest.get(key, {}).get("files", {})
+            verify_file_manifest(target_host / subdirectory, files, label)
+            verify_file_manifest(source_host / subdirectory, files, f"Cube {label}")
+        if cdb_hashes(source_host) != cdb_hashes(target_host):
+            return False
+        source_scripts = {
+            path.relative_to(source_host / "script").as_posix(): sha256(path)
+            for path in (source_host / "script").rglob("*.lua")
+            if path.is_file() and not path.is_symlink()
+        }
+        target_scripts = {
+            path.relative_to(target_host / "script").as_posix(): sha256(path)
+            for path in (target_host / "script").rglob("*.lua")
+            if path.is_file() and not path.is_symlink()
+        }
+        if source_scripts != target_scripts:
+            return False
+        source_names = source_assets / "ygocdb_cards.json"
+        target_names = target_assets / "ygocdb_cards.json"
+        if not source_names.is_file() or not target_names.is_file() or sha256(source_names) != sha256(target_names):
+            return False
+        if directory_fingerprint(source_assets / "pics_avif") != directory_fingerprint(target_assets / "pics_avif"):
+            return False
+    except (OSError, RuntimeError):
+        return False
+    return True
+
+
+def hardlink_resource_set(
+    source_host: Path,
+    target_host: Path,
+    source_assets: Path,
+    target_assets: Path,
+    manifest: dict,
+) -> int:
+    for source_relative, target_relative in (
+        ("cards.cdb", "cards.cdb"),
+        ("strings.conf", "strings.conf"),
+        ("lflist.conf", "lflist.conf"),
+        ("expansions/lflist.conf", "expansions/lflist.conf"),
+    ):
+        link_resource_file(source_host / source_relative, target_host / target_relative)
+    for lua in (source_host / "script").rglob("*.lua"):
+        relative = lua.relative_to(source_host / "script")
+        link_resource_file(lua, target_host / "script" / relative)
+    hardlink_manifest_files(
+        source_host / "expansions",
+        target_host / "expansions",
+        manifest.get("expansions", {}).get("files", {}),
+        "Super Pre",
+    )
+    replace_directory(source_assets / "pics_avif", target_assets / "pics_avif")
+    link_resource_file(source_assets / "ygocdb_cards.json", target_assets / "ygocdb_cards.json")
+    return verify_resource_hardlinks(source_host, target_host, source_assets, target_assets, manifest)
+
+
+def replace_directory(source: Path, destination: Path, *, ignore=None) -> None:
+    if destination.is_symlink():
+        destination.unlink()
+    elif destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(source, destination, ignore=ignore, symlinks=False, copy_function=hardlink_file)
+
+
+def atomic_write_text(path: Path, value: str) -> None:
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(value, encoding="utf-8")
+    temporary.chmod(mode)
+    os.replace(temporary, path)
+
+
+def set_release_ownership(release: Path, user: str = "ygoduel") -> None:
+    for directory, _subdirectories, filenames in os.walk(release, followlinks=False):
+        directory_path = Path(directory)
+        shutil.chown(directory_path, user=user, group=user)
+        for name in filenames:
+            path = directory_path / name
+            if path.is_symlink():
+                continue
+            # Unchanged files are hard links to the previous immutable release;
+            # they already have the correct owner and must not be chowned here.
+            if path.stat().st_nlink == 1:
+                shutil.chown(path, user=user, group=user)
+
+
+def extract_application_archive(archive_path: Path, release: Path) -> None:
+    """Replace archive files without writing through a previous release link."""
+    root = release.resolve(strict=True)
+    with tarfile.open(archive_path) as archive:
+        members = archive.getmembers()
+        for member in members:
+            relative = PurePosixPath(member.name)
+            if relative.is_absolute() or ".." in relative.parts or "\\" in member.name:
+                raise RuntimeError(f"unsafe application archive path: {member.name}")
+            # Next standalone bundles may contain relative dependency links.
+            # Python's data filter rejects links escaping this release.
+            tarfile.data_filter(member, str(release))
+            if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
+                raise RuntimeError(f"application archive contains a special file: {member.name}")
+            destination = release.joinpath(*relative.parts)
+            if not destination.resolve().is_relative_to(root):
+                raise RuntimeError(f"application archive resolves outside release: {member.name}")
+        for member in members:
+            destination = release.joinpath(*PurePosixPath(member.name).parts)
+            if not member.isdir() and (destination.is_file() or destination.is_symlink()):
+                destination.unlink()
+        archive.extractall(release, members=members, filter="data")
+
+
+def safe_remove_list(root: Path, list_path: Path) -> None:
+    if not list_path.is_file():
+        return
+    for raw in list_path.read_text(encoding="utf-8").splitlines():
+        if not raw:
+            continue
+        relative = PurePosixPath(raw)
+        if relative.is_absolute() or ".." in relative.parts or "\\" in raw:
+            raise RuntimeError(f"unsafe managed-resource delete path: {raw!r}")
+        target = root.joinpath(*relative.parts)
+        if target.is_symlink():
+            raise RuntimeError(f"refusing to delete a symlinked managed resource: {raw!r}")
+        if target.is_file():
+            target.unlink()
+
+
+def verify_file_manifest(root: Path, files: dict, label: str) -> None:
+    for relative, metadata in files.items():
+        rel = PurePosixPath(relative)
+        if rel.is_absolute() or ".." in rel.parts or "\\" in relative:
+            raise RuntimeError(f"unsafe {label} manifest path: {relative!r}")
+        path = root.joinpath(*rel.parts)
+        if not path.is_file() or path.is_symlink():
+            raise RuntimeError(f"missing regular {label} resource: {relative}")
+        if path.stat().st_size != metadata.get("size") or sha256(path) != metadata.get("sha256"):
+            raise RuntimeError(f"{label} resource does not match manifest: {relative}")
+
+
+def manifest_tree_fingerprint(files: dict) -> dict:
+    digest = hashlib.sha256()
+    for relative, metadata in sorted(files.items()):
+        digest.update(relative.encode("utf-8") + b"\0")
+        digest.update(bytes.fromhex(metadata["sha256"]))
+        digest.update(b"\0" + str(int(metadata["size"])).encode("ascii") + b"\n")
+    return {"fileCount": len(files), "sha256": digest.hexdigest()}
+
+
+def directory_fingerprint(root: Path) -> dict:
+    digest = hashlib.sha256()
+    files = sorted(root.rglob("*"))
+    count = 0
+    for path in files:
+        if path.is_symlink():
+            raise RuntimeError(f"refusing symlink in card-image tree: {path.relative_to(root)}")
+        if not path.is_file():
+            continue
+        relative = path.relative_to(root).as_posix()
+        digest.update(relative.encode("utf-8") + b"\0")
+        digest.update(bytes.fromhex(sha256(path)))
+        digest.update(b"\0" + str(path.stat().st_size).encode("ascii") + b"\n")
+        count += 1
+    return {"fileCount": count, "sha256": digest.hexdigest()}
+
+
+def cdb_hashes(host: Path) -> dict[str, str]:
+    paths = [host / "cards.cdb", *sorted((host / "expansions").rglob("*.cdb"))]
+    return {
+        path.relative_to(host).as_posix(): sha256(path)
+        for path in paths
+        if path.is_file() and not path.is_symlink()
+    }
+
+
+def remove_unmanaged_suffix(source: Path, target: Path, suffix: str) -> None:
+    expected = {
+        path.relative_to(source).as_posix()
+        for path in source.rglob(f"*{suffix}")
+        if path.is_file() and not path.is_symlink()
+    }
+    for path in target.rglob(f"*{suffix}"):
+        if path.is_symlink():
+            raise RuntimeError(f"refusing symlinked Duel resource: {path.name}")
+        if path.is_file() and path.relative_to(target).as_posix() not in expected:
+            path.unlink()
+
+
+def remove_raw_card_images(host: Path) -> None:
+    for path in (host / "pics", host / "expansions" / "pics", host / "expansions" / "pack"):
+        if path.is_symlink():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+        elif path.exists():
+            path.unlink()
+    for path in host.rglob("*.ypk"):
+        if path.is_symlink():
+            path.unlink()
+        elif path.is_file():
+            path.unlink()
+
+
+def verify_compressed_card_art(host: Path, avif_root: Path) -> None:
+    for path in host.rglob("*"):
+        if path.is_dir() and path.name.lower() in {"pics", "pack"}:
+            raise RuntimeError(f"uncompressed card-image directory remains: {path.relative_to(host)}")
+        if path.is_file() and path.suffix.lower() in RAW_CARD_IMAGE_SUFFIXES:
+            raise RuntimeError(f"uncompressed card image remains: {path.relative_to(host)}")
+    for path in avif_root.rglob("*"):
+        if path.is_file() and path.suffix.lower() != ".avif":
+            raise RuntimeError(f"non-AVIF file in compressed card-image tree: {path.relative_to(avif_root)}")
+        if path.is_file() and path.stat().st_size > 64 * 1024:
+            raise RuntimeError(f"AVIF card image exceeds the compressed-size limit: {path.relative_to(avif_root)}")
+
+
+def verify_cube_resources(cube_root: Path, manifest: dict) -> dict:
+    host = cube_root / "shared" / "srvpro" / "ygopro"
+    assets = cube_root / "shared" / "assets"
+    card = host / "cards.cdb"
+    cards_meta = manifest.get("cards", {})
+    if not card.is_file() or card.stat().st_size != cards_meta.get("size") or sha256(card) != cards_meta.get("sha256"):
+        raise RuntimeError("staged main cards.cdb does not match its manifest")
+    names_meta = manifest.get("cardNames", {})
+    names = assets / "ygocdb_cards.json"
+    if not names.is_file() or names.stat().st_size != names_meta.get("size") or sha256(names) != names_meta.get("sha256"):
+        raise RuntimeError("staged YGOCDB mapping does not match its manifest")
+    installed_manifest = assets / "resource-manifest.json"
+    if not installed_manifest.is_file() or json.loads(installed_manifest.read_text(encoding="utf-8")) != manifest:
+        raise RuntimeError("Cube resource manifest differs from the verified deployment manifest")
+    for relative, metadata in manifest.get("banlist", {}).get("files", {}).items():
+        path = host / relative
+        if not path.is_file() or path.stat().st_size != metadata.get("size") or sha256(path) != metadata.get("sha256"):
+            raise RuntimeError(f"staged upstream ban-list does not match its manifest: {relative}")
+    verify_file_manifest(host / "script", manifest.get("scripts", {}).get("files", {}), "YGOPro script")
+    verify_file_manifest(host / "expansions", manifest.get("expansions", {}).get("files", {}), "Super Pre")
+    avif_files = manifest.get("avif", {}).get("files", {})
+    verify_file_manifest(assets / "pics_avif", avif_files, "AVIF")
+    avif_fingerprint = directory_fingerprint(assets / "pics_avif")
+    if avif_fingerprint != manifest_tree_fingerprint(avif_files):
+        raise RuntimeError("Cube AVIF directory has extra or missing files")
+    verify_compressed_card_art(host, assets / "pics_avif")
+    return {
+        "resourceManifestSha256": sha256(installed_manifest),
+        "picsAvif": avif_fingerprint,
+    }
+
+
+def probe_catalogue(release: Path, manifest: dict) -> dict:
+    host = release / "srvpro" / "ygopro"
+    mapping_raw = json.loads((release / "assets" / "ygocdb_cards.json").read_text(encoding="utf-8"))
+    mapping_values = mapping_raw if isinstance(mapping_raw, list) else mapping_raw.values() if isinstance(mapping_raw, dict) else []
+    mapping = {}
+    for record in mapping_values:
+        if isinstance(record, dict):
+            try:
+                mapping[int(record.get("id"))] = record
+            except (TypeError, ValueError):
+                pass
+    expected: dict[int, str] = {}
+    for relative, metadata in manifest.get("expansions", {}).get("files", {}).items():
+        if not relative.lower().endswith(".cdb"):
+            continue
+        database = host / "expansions" / relative
+        if not database.is_file() or sha256(database) != metadata.get("sha256"):
+            raise RuntimeError(f"installed expansion database hash mismatch: {relative}")
+        with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+            rows = db.execute(
+                "SELECT datas.id, datas.type, texts.name FROM datas JOIN texts USING(id)"
+            ).fetchall()
+        for code, card_type, name in rows:
+            if not (int(card_type or 0) & TOKEN_TYPE):
+                expected[int(code)] = str(name or "").strip()
+    found = 0
+    for code, cdb_name in sorted(expected.items()):
+        probes = [str(code)]
+        if cdb_name:
+            probes.append(cdb_name)
+        mapped = mapping.get(code, {})
+        for field in ("sc_name", "md_name", "jp_name", "cn_name", "en_name"):
+            value = mapped.get(field)
+            if isinstance(value, str) and value.strip():
+                probes.append(value.strip())
+                break
+        for query in dict.fromkeys(probes):
+            url = "http://127.0.0.1:3101/public/duel/search?q=" + quote(query, safe="")
+            for attempt in range(3):
+                try:
+                    rows = read_json(url)
+                    break
+                except TimeoutError:
+                    if attempt == 2:
+                        raise
+                    print(f"Retrying catalogue probe for card {code} after timeout ({attempt + 1}/3)", flush=True)
+                    time.sleep(1)
+            if not isinstance(rows, list) or not any(int(row.get("code", 0)) == code for row in rows):
+                raise RuntimeError(f"standalone Duel search missed extension card {code}")
+        found += 1
+    return {"expansionCardsSearchedByCodeAndName": found}
+
+
+def parse_config(api_modules: Path, config_file: Path) -> dict:
+    raw = run(
+        "/usr/bin/node",
+        "-e",
+        "process.stdout.write(JSON.stringify(require(process.argv[1]).parse(require('fs').readFileSync(process.argv[2],'utf8'))))",
+        str(api_modules / "yaml"),
+        str(config_file),
+    )
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise RuntimeError("independent Duel config is not a mapping")
+    return value
+
+
+def resource_component_files(release: Path) -> dict[str, str]:
+    """Hash the actual configured resources, including shared Cube paths."""
+    release = release.resolve(strict=True)
+    installation = release.parent.parent if release.parent.name == 'releases' else None
+    config_file = release / 'config.yaml'
+    if not config_file.is_file() and installation:
+        config_file = installation / 'shared/config.yaml'
+    config = parse_config(release / 'api/node_modules', config_file) if config_file.is_file() else {}
+
+    def configured(section: str, key: str, fallback: Path) -> Path:
+        value = config.get(section, {}).get(key)
+        if not value:
+            return fallback
+        path = Path(value)
+        if not path.is_absolute():
+            path = config_file.resolve().parent / path
+        # A staged release is audited before current switches. Stable current
+        # references must describe the candidate, not the previous release.
+        if installation and path.is_relative_to(installation / 'current'):
+            path = release / path.relative_to(installation / 'current')
+        return path
+
+    card = configured('server', 'cards_cdb', release / 'srvpro/ygopro/cards.cdb')
+    host = card.parent
+    names = configured('server', 'card_names_json', release / 'assets/ygocdb_cards.json')
+    avif = configured('pics', 'avif_dir', release / 'assets/pics_avif')
+    required = {
+        'cards.cdb': card,
+        'strings.conf': configured('server', 'strings_conf', host / 'strings.conf'),
+        'lflist.conf': host / 'lflist.conf',
+        'expansions/lflist.conf': host / 'expansions/lflist.conf',
+        'ygocdb_cards.json': names,
+    }
+    files = {}
+    for label, path in required.items():
+        if not path.is_file() or path.stat().st_size == 0:
+            raise RuntimeError(f'resource inventory is missing required file: {label}')
+        files[label] = sha256(path)
+    for label, directory, suffixes, required_tree in (
+        ('script', host / 'script', {'.lua'}, True),
+        ('expansions', host / 'expansions', {'.lua', '.cdb', '.conf'}, False),
+        ('pics_avif', avif, {'.avif'}, True),
+    ):
+        selected = sorted(path for path in directory.rglob('*') if path.is_file() and path.suffix.lower() in suffixes)
+        if required_tree and not selected:
+            raise RuntimeError(f'resource inventory is missing required files: {label}')
+        for path in selected:
+            files[f'{label}/{path.relative_to(directory).as_posix()}'] = sha256(path)
+    return files
+
+
+def describe_components(release: Path) -> dict:
+    metadata_path = release / 'release.json'
+    metadata = json.loads(metadata_path.read_text(encoding='utf-8')) if metadata_path.is_file() else {}
+    previous = metadata.get('components', {})
+    groups = {
+        'api': [release / 'api/dist', release / 'api/node_modules/@ygocube'],
+        'web': [release / 'web'],
+        'srvpro': [release / 'srvpro/ygopro-server.js', release / 'srvpro/cube.js', release / 'srvpro/cube-banlists.js'],
+        'host': [release / 'srvpro/ygopro/ygopro'],
+        'resources': [],
+    }
+    result = {}
+    for name, roots in groups.items():
+        files = resource_component_files(release) if name == 'resources' else {}
+        for root in roots:
+            candidates = [root] if root.is_file() else sorted(root.rglob('*')) if root.is_dir() else []
+            for file in candidates:
+                if not file.is_file():
+                    continue
+                relative = file.relative_to(release).as_posix()
+                if name == 'web' and ('node_modules' in file.parts or 'cache' in file.parts or '.next' not in file.parts):
+                    continue
+                files[relative] = sha256(file)
+        source = previous.get(name, {}).get('sourceCommit')
+        if name not in previous:
+            if name in ('api', 'web'):
+                source = metadata.get('sourceCommit')
+            elif name == 'srvpro':
+                source = metadata.get('srvproApplication', {}).get('sourceCommit') or metadata.get('srvproCommit')
+        result[name] = {'sourceCommit': source, 'sourceEvidence': previous.get(name, {}).get('sourceEvidence', 'legacy-release-metadata' if source else 'unknown'),
+                        'sha256': hashlib.sha256(json.dumps(files, sort_keys=True, separators=(',', ':')).encode()).hexdigest(), 'fileCount': len(files)}
+    return result
+
+
+def record_components(release: Path, sources: dict | None = None, previous: Path | None = None) -> None:
+    path = release / 'release.json'
+    if not path.is_file():
+        return
+    value = json.loads(path.read_text(encoding='utf-8'))
+    components = describe_components(release)
+    if previous:
+        old = describe_components(previous)
+        for name in components:
+            components[name].update(sourceCommit=old[name]['sourceCommit'], sourceEvidence=old[name]['sourceEvidence'])
+    for name, commit in (sources or {}).items():
+        components[name].update(sourceCommit=commit, sourceEvidence='component-payload' if commit else 'unknown')
+    value['components'] = components
+    if components['srvpro']['sourceCommit']:
+        value['srvproCommit'] = components['srvpro']['sourceCommit']
+    atomic_write_text(path, json.dumps(value, ensure_ascii=False, indent=2) + '\n')
+
+
+def install_srvpro_application(stage_root: Path, release: Path) -> None:
+    metadata_path = stage_root / "metadata" / "srvpro-application.json"
+    if not metadata_path.is_file():
+        return
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    files = metadata.get("files", {})
+    allowed = {"ygopro-server.js", "cube.js", "cube-banlists.js"}
+    if set(files) != allowed:
+        raise RuntimeError("srvpro application payload must contain its server, Cube API and ban-list module")
+    source = stage_root / "application" / "srvpro"
+    verify_file_manifest(source, files, "srvpro application")
+    for name in sorted(files):
+        run("/usr/bin/node", "--check", str(source / name))
+        link_resource_file(source / name, release / "srvpro" / name)
+    release_metadata = release / "release.json"
+    if release_metadata.is_file():
+        value = json.loads(release_metadata.read_text(encoding="utf-8"))
+        value["srvproApplication"] = metadata
+        atomic_write_text(release_metadata, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+        record_components(release, {'srvpro': metadata.get('sourceCommit')})
+
+
+def link_existing_release_resources(cube_root: Path, release: Path) -> int:
+    """Application/Web publications retain the installed resource generation."""
+    manifest = json.loads((cube_root / "shared/assets/resource-manifest.json").read_text(encoding="utf-8"))
+    verify_cube_resources(cube_root, manifest)
+    source_host = cube_root / "shared/srvpro/ygopro"
+    source_assets = cube_root / "shared/assets"
+    target_host = release / "srvpro/ygopro"
+    target_assets = release / "assets"
+    if not managed_resource_sets_match(source_host, target_host, source_assets, target_assets, manifest):
+        raise RuntimeError("application payload changes card resources; publish them through the resource workflow first")
+    return hardlink_resource_set(source_host, target_host, source_assets, target_assets, manifest)
+
+
+def verify_current_resources(cube_root: Path, duel_root: Path) -> dict:
+    manifest = json.loads((cube_root / "shared/assets/resource-manifest.json").read_text(encoding="utf-8"))
+    state = verify_cube_resources(cube_root, manifest)
+    linked = verify_resource_hardlinks(
+        cube_root / "shared/srvpro/ygopro", duel_root / "current/srvpro/ygopro",
+        cube_root / "shared/assets", duel_root / "current/assets", manifest,
+    )
+    if not managed_resource_sets_match(
+        cube_root / "shared/srvpro/ygopro", duel_root / "current/srvpro/ygopro",
+        cube_root / "shared/assets", duel_root / "current/assets", manifest,
+    ):
+        raise RuntimeError("live Cube and Duel resource generations differ")
+    return {"ok": True, "managedResourceHardlinks": linked, **state}
+
+
+def atomic_current(duel_root: Path, target: Path, suffix: str) -> None:
+    current = duel_root / "current"
+    next_link = duel_root / f"current-{suffix}"
+    if next_link.exists() or next_link.is_symlink():
+        raise RuntimeError(f"refusing to overwrite existing switch path: {next_link.name}")
+    next_link.symlink_to(target, target_is_directory=True)
+    os.replace(next_link, current)
+
+
+def active_standalone_host() -> bool:
+    result = subprocess.run(
+        ["pgrep", "-u", "ygoduel", "-x", "ygopro"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
+
+def maintenance_ingress(cube_root: Path, duel_root: Path, *, close: bool,
+                        stacks: tuple[str, ...] = ('ygocube', 'ygoduel')) -> dict:
+    """Gate public native/API/Web ports while keeping loopback probes usable."""
+    ledger = cube_root / 'shared/card-maintenance-ingress.json'
+    if close:
+        if not stacks or any(name not in ('ygocube', 'ygoduel') for name in stacks):
+            raise RuntimeError('invalid maintenance stack selection')
+        selected = {'ygocube': (cube_root, 3000), 'ygoduel': (duel_root, 3100)}
+        ports = {selected[name][1] for name in stacks}
+        for root, _ in (selected[name] for name in stacks):
+            config_file = root / 'current/config.yaml'
+            if not config_file.is_file():
+                config_file = root / 'shared/config.yaml'
+            config = parse_config(root / 'current/api/node_modules', config_file)
+            ports.add(int(config.get('srvpro', {}).get('game_port', 7911)))
+            ports.add(int(config.get('server', {}).get('port', 3001)))
+        if any(port < 1 or port > 65535 for port in ports):
+            raise RuntimeError('invalid maintenance ingress port')
+        value = {'ports': sorted(ports)}
+        if ledger.is_file() and json.loads(ledger.read_text()) != value:
+            raise RuntimeError('existing maintenance ingress ledger differs; retain the closed gate for inspection')
+    else:
+        if not ledger.is_file():
+            return {'ok': True, 'ingressAlreadyOpen': True}
+        value = json.loads(ledger.read_text())
+    rules = []
+    for tool, loopback in [('iptables', '127.0.0.1/32'), ('ip6tables', '::1/128')]:
+        if not shutil.which(tool):
+            raise RuntimeError(f'{tool} is required to keep native ingress closed during verification')
+        rule = ['-p', 'tcp', '!', '-s', loopback, '-m', 'multiport', '--dports', ','.join(map(str, value['ports'])), '-m', 'comment', '--comment', 'ygocube-card-maintenance', '-j', 'REJECT']
+        rules.append((tool, rule))
+    added = []
+    try:
+        for tool, rule in rules:
+            exists = subprocess.run([tool, '-w', '5', '-C', 'INPUT', *rule], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+            if close and not exists:
+                run(tool, '-w', '5', '-I', 'INPUT', '1', *rule)
+                added.append((tool, rule))
+            elif not close and exists:
+                run(tool, '-w', '5', '-D', 'INPUT', *rule)
+        if close:
+            atomic_write_text(ledger, json.dumps(value) + '\n')
+        else:
+            ledger.unlink()
+    except Exception:
+        if close:
+            for tool, rule in reversed(added):
+                subprocess.run([tool, '-w', '5', '-D', 'INPUT', *rule], check=False)
+        raise
+    return {'ok': True, 'ingressClosed': close}
+
+
+class ApplicationMaintenance:
+    """Guard application activation and rollback without killing raced games.
+
+    Nginx may proxy a new game during public verification after API startup.
+    Every destructive stop therefore pauses both creators and checks hosts
+    again; a new game cancels rollback and keeps the current release running.
+    The caller owns the existing deployment lock and must call finish only
+    after successful activation or a verified restoration.
+    """
+
+    def __init__(self, cube_root: Path, duel_root: Path, services: list[str]):
+        self.cube_root, self.duel_root = cube_root, duel_root
+        self.services = services
+        self.stacks = tuple(sorted({service.split('-', 1)[0] for service in services}))
+        if not self.stacks or any(name not in ('ygocube', 'ygoduel') for name in self.stacks):
+            raise ValueError('invalid application services')
+        self.gated = False
+
+    def occupied(self) -> bool:
+        for user in self.stacks:
+            result = subprocess.run(['pgrep', '-u', user, '-x', 'ygopro'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if result.returncode == 0:
+                return True
+            if result.returncode != 1:
+                raise RuntimeError(f'cannot inspect active hosts for {user}')
+        return False
+
+    def begin(self) -> None:
+        if self.occupied():
+            raise RuntimeError('an active duel host prevents application maintenance')
+        if (self.cube_root / 'shared/card-maintenance-ingress.json').exists():
+            raise RuntimeError('an earlier maintenance gate is still closed; inspect it before application deployment')
+        maintenance_ingress(self.cube_root, self.duel_root, close=True, stacks=self.stacks)
+        self.gated = True
+
+    def finish(self) -> None:
+        if self.gated:
+            maintenance_ingress(self.cube_root, self.duel_root, close=False)
+            self.gated = False
+
+    def stop_services(self) -> None:
+        paused: list[tuple[str, int]] = []
+        try:
+            for stack in self.stacks:
+                for component in ('api', 'srvpro'):
+                    service = f'{stack}-{component}'
+                    pid = int(run('systemctl', 'show', service, '-p', 'MainPID', '--value') or '0')
+                    if pid:
+                        try:
+                            os.kill(pid, signal.SIGSTOP)
+                            paused.append((service, pid))
+                        except ProcessLookupError:
+                            pass
+            if self.occupied():
+                # No service has been stopped and no current pointer changed.
+                # Reopen the native gate so the detected game can continue.
+                self.finish()
+                raise RuntimeError('a duel host appeared; current release retained and automatic rollback refused')
+            run('systemctl', 'stop', *self.services)
+        finally:
+            for _, pid in reversed(paused):
+                try:
+                    os.kill(pid, signal.SIGCONT)
+                except ProcessLookupError:
+                    pass
+
+
+def enter_maintenance() -> dict:
+    """Close both Web and native room creation before preparing resources."""
+    if active_standalone_host():
+        raise RuntimeError("an independent Duel host is active; maintenance was not started")
+    pid = 0
+    paused = False
+    try:
+        run("systemctl", "stop", "ygoduel-api")
+        pid = int(run("systemctl", "show", "ygoduel-srvpro", "-p", "MainPID", "--value") or "0")
+        if pid:
+            # Pause the acceptor before the final host check. Existing child
+            # hosts remain running, so a raced room is detected and preserved.
+            os.kill(pid, signal.SIGSTOP)
+            paused = True
+        if active_standalone_host():
+            raise RuntimeError("a Duel host appeared; maintenance was cancelled")
+        # systemd sends SIGCONT after SIGTERM, including to paused services.
+        run("systemctl", "stop", "ygoduel-srvpro")
+        paused = False
+    except Exception:
+        if paused:
+            try:
+                os.kill(pid, signal.SIGCONT)
+            except ProcessLookupError:
+                pass
+        run("systemctl", "start", "ygoduel-api")
+        raise
+    return {"ok": True, "maintenanceEntered": True}
+
+
+def rollback(duel_root: Path, release_id: str, *, defer_start: bool = False) -> dict:
+    backup = duel_root / "backups" / f"card-sync-{release_id}"
+    previous_text = backup / "previous-release.txt"
+    config_backup = backup / "config.yaml"
+    if not previous_text.is_file() or not config_backup.is_file():
+        return {"skipped": True, "reason": "no independent Duel release backup for this ID"}
+    previous = Path(previous_text.read_text(encoding="utf-8").strip()).resolve(strict=True)
+    current = (duel_root / "current").resolve(strict=True)
+    if not previous.is_relative_to((duel_root / "releases").resolve(strict=True)):
+        raise RuntimeError("rollback target resolves outside Duel releases")
+    enter_maintenance()
+    try:
+        atomic_current(duel_root, previous, f"rollback-{release_id}")
+        config_file = duel_root / "shared" / "config.yaml"
+        shutil.copy2(config_backup, config_file)
+        # Restoring files does not replace the derived card catalogue in the
+        # live database. Rebuild it without reverting any player/match state.
+        with sqlite3.connect(duel_root / "shared/data/duel.sqlite") as database:
+            database.execute("UPDATE cards SET metadata_version=0")
+            database.commit()
+        if not defer_start:
+            run("systemctl", "start", "ygoduel-api", "ygoduel-srvpro")
+            wait_healthy(previous / "srvpro" / "ygopro" / "lflist.conf", allow_legacy_dates=True)
+    except Exception:
+        if (duel_root / "current").resolve() != current:
+            atomic_current(duel_root, current, f"recover-{release_id}")
+        raise
+    return {"rolledBack": True, "previousRelease": previous.name}
+
+
+def relink_current_to_cube(cube_root: Path, duel_root: Path, *, defer_start: bool = False) -> dict:
+    manifest_path = cube_root / "shared" / "assets" / "resource-manifest.json"
+    if not manifest_path.is_file():
+        return {"ok": True, "relinked": False, "reason": "Cube resource manifest is missing"}
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    verify_cube_resources(cube_root, manifest)
+    current = (duel_root / "current").resolve(strict=True)
+    if not current.is_relative_to((duel_root / "releases").resolve(strict=True)):
+        raise RuntimeError("independent Duel current link resolves outside its releases directory")
+    source_host = cube_root / "shared" / "srvpro" / "ygopro"
+    source_assets = cube_root / "shared" / "assets"
+    target_host = current / "srvpro" / "ygopro"
+    target_assets = current / "assets"
+    if not managed_resource_sets_match(source_host, target_host, source_assets, target_assets, manifest):
+        return {
+            "ok": True,
+            "relinked": False,
+            "release": current.name,
+            "reason": "rollback release contains a different resource generation",
+        }
+    enter_maintenance()
+    try:
+        linked = hardlink_resource_set(source_host, target_host, source_assets, target_assets, manifest)
+        if not defer_start:
+            run("systemctl", "start", "ygoduel-api", "ygoduel-srvpro")
+            wait_healthy(target_host / "lflist.conf", allow_legacy_dates=True)
+    except Exception:
+        # Keep ingress closed until the coordinator verifies both stacks.
+        raise
+    return {"ok": True, "relinked": True, "release": current.name, "managedResourceHardlinks": linked}
+
+
+def deploy(cube_root: Path, duel_root: Path, release_id: str, *, defer_start: bool = False) -> dict:
+    stage = cube_root / ".staging" / f"card-sync-{release_id}"
+    stage_root = stage / "root"
+    manifest_path = stage_root / "metadata" / "resource-manifest.json"
+    if not manifest_path.is_file():
+        raise RuntimeError("verified Cube resource staging directory is missing")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    # The Cube apply step atomically moves the payload's complete host and AVIF
+    # tree into shared/. Read the now-live, hash-verified resources from there;
+    # only the manifest and delete lists remain in the staging directory.
+    cube_resource_state = verify_cube_resources(cube_root, manifest)
+    current_link = duel_root / "current"
+    old = current_link.resolve(strict=True)
+    releases = duel_root / "releases"
+    if not old.is_relative_to(releases.resolve(strict=True)):
+        raise RuntimeError("independent Duel current link resolves outside its releases directory")
+    release_name = f"card-sync-{release_id}"
+    new = releases / release_name
+    if new.exists():
+        raise RuntimeError(f"release already exists: {release_name}")
+    source_host = cube_root / "shared" / "srvpro" / "ygopro"
+    source_assets = cube_root / "shared" / "assets"
+    image_source = source_assets / "pics_avif"
+    names_source = source_assets / "ygocdb_cards.json"
+    old_host = old / "srvpro" / "ygopro"
+    old_assets = old / "assets"
+    previous_resources_match = managed_resource_sets_match(
+        source_host, old_host, source_assets, old_assets, manifest
+    )
+    backup = duel_root / "backups" / release_name
+    backup.mkdir(parents=True, exist_ok=False)
+    (backup / "previous-release.txt").write_text(str(old) + "\n", encoding="utf-8")
+
+    new.mkdir(parents=True)
+    try:
+        # The pair transaction enters maintenance before the Cube apply. A
+        # direct invocation repeats the guard inside its recovery scope.
+        enter_maintenance()
+        # Releases share unchanged immutable files to avoid duplicating the
+        # independent application's large node_modules tree and exhausting
+        # Aly's inode quota. Updated files are unlinked before they are copied.
+        shutil.copytree(old, new, dirs_exist_ok=True, symlinks=True, copy_function=hardlink_file)
+        install_srvpro_application(stage_root, new)
+        release_metadata = new / "release.json"
+        if release_metadata.is_file():
+            metadata = json.loads(release_metadata.read_text(encoding="utf-8"))
+            metadata.update(id=release_name, previousRelease=old.name, resourceManifestSha256=sha256(manifest_path))
+            atomic_write_text(release_metadata, json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
+        target_host = new / "srvpro" / "ygopro"
+        remove_raw_card_images(target_host)
+        for name in ("cards.cdb", "strings.conf", "lflist.conf"):
+            link_resource_file(source_host / name, target_host / name)
+        for directory in (target_host / "script", target_host / "expansions"):
+            if directory.is_symlink():
+                directory.unlink()
+            directory.mkdir(parents=True, exist_ok=True)
+
+        # Delete only resources the last successful Cube resource manifest owned.
+        delete_root = stage_root / "deletes"
+        safe_remove_list(target_host / "script", delete_root / "scripts.txt")
+        safe_remove_list(target_host / "expansions", delete_root / "expansions.txt")
+        # A ban-list used to be recorded as an expansion file. The upstream list
+        # is reinstalled below, even when migrating that old manifest format.
+        safe_remove_list(target_host, delete_root / "banlist.txt")
+
+        for lua in (source_host / "script").rglob("*.lua"):
+            relative = lua.relative_to(source_host / "script")
+            link_resource_file(lua, target_host / "script" / relative)
+        source_expansions = source_host / "expansions"
+        for source in source_expansions.rglob("*"):
+            if source.is_symlink():
+                raise RuntimeError(f"refusing symlinked expansion resource: {source.name}")
+            if not source.is_file():
+                continue
+            relative = source.relative_to(source_expansions)
+            if any(part in {"pics", "pack"} for part in relative.parts):
+                continue
+            if source.name == "corres_srv.ini" or source.suffix.lower() == ".ypk":
+                continue
+            link_resource_file(source, target_host / "expansions" / relative)
+        # Keep the upstream lflist at both srvpro lookup paths. It is tracked as
+        # a separate resource so --skip-expansion cannot freeze ban-list dates.
+        link_resource_file(
+            source_host / "expansions" / "lflist.conf",
+            target_host / "expansions" / "lflist.conf",
+        )
+        remove_unmanaged_suffix(source_host / "script", target_host / "script", ".lua")
+        remove_unmanaged_suffix(source_expansions, target_host / "expansions", ".cdb")
+        verify_file_manifest(target_host / "script", manifest.get("scripts", {}).get("files", {}), "Duel YGOPro script")
+        verify_file_manifest(target_host / "expansions", manifest.get("expansions", {}).get("files", {}), "Duel Super Pre")
+        if cdb_hashes(source_host) != cdb_hashes(target_host):
+            raise RuntimeError("Cube and Duel card database sets differ")
+
+        if not image_source.is_dir():
+            raise RuntimeError("staged AVIF directory is missing")
+        replace_directory(image_source, new / "assets" / "pics_avif")
+        duel_avif_fingerprint = directory_fingerprint(new / "assets" / "pics_avif")
+        if duel_avif_fingerprint != cube_resource_state["picsAvif"]:
+            raise RuntimeError("Cube and Duel AVIF image trees differ")
+        verify_compressed_card_art(target_host, new / "assets" / "pics_avif")
+        link_resource_file(names_source, new / "assets" / "ygocdb_cards.json")
+        hardlink_count = verify_resource_hardlinks(
+            source_host,
+            target_host,
+            source_assets,
+            new / "assets",
+            manifest,
+        )
+
+        resources_path = new / "resources.json"
+        resources = json.loads(resources_path.read_text(encoding="utf-8")) if resources_path.is_file() else {}
+        for name in ("ygopro", "cards.cdb", "strings.conf", "lflist.conf"):
+            resource = target_host / name
+            if resource.is_file():
+                resources[name] = sha256(resource)
+        resources["cardNames"] = sha256(new / "assets" / "ygocdb_cards.json")
+        resources["resourceManifest"] = cube_resource_state["resourceManifestSha256"]
+        resources["picsAvif"] = duel_avif_fingerprint
+        atomic_write_text(resources_path, json.dumps(resources, ensure_ascii=False, indent=2) + "\n")
+        atomic_write_text(
+            new / "resource-sync.json",
+            json.dumps(
+                {
+                    "id": release_id,
+                    "upstream": manifest.get("upstream"),
+                    "banlistSource": manifest.get("banlistSource"),
+                    "cardsSha256": manifest.get("cards", {}).get("sha256"),
+                    "cardNamesSha256": resources["cardNames"],
+                    "resourceManifestSha256": resources["resourceManifest"],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+        set_release_ownership(new)
+
+        config_file = duel_root / "shared" / "config.yaml"
+        config = parse_config(old / "api" / "node_modules", config_file)
+        config.setdefault("server", {}).update(
+            cards_cdb=str(duel_root / "current/srvpro/ygopro/cards.cdb"),
+            strings_conf=str(duel_root / "current/srvpro/ygopro/strings.conf"),
+            card_names_json=str(duel_root / "current/assets/ygocdb_cards.json"),
+        )
+        config.setdefault("pics", {})["avif_dir"] = str(duel_root / "current/assets/pics_avif")
+        config_temp = backup / ".config.yaml.new"
+        config_temp.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        config_temp.chmod(0o600)
+
+        run("systemctl", "stop", "ygoduel-api", "ygoduel-srvpro")
+        remove_raw_card_images(old / "srvpro" / "ygopro")
+        shutil.copy2(config_file, backup / "config.yaml")
+        database = duel_root / "shared" / "data" / "duel.sqlite"
+        with sqlite3.connect(database) as source, sqlite3.connect(backup / "duel.sqlite") as target:
+            if source.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise RuntimeError("independent Duel database integrity check failed")
+            source.backup(target)
+        (backup / "db-integrity.txt").write_text("ok\n", encoding="utf-8")
+        shutil.copy2(config_temp, config_file)
+        if previous_resources_match:
+            # The old release is the rollback target. When its complete managed
+            # resource set is byte-for-byte identical, point it at the same
+            # immutable inodes too; otherwise preserve its older generation.
+            hardlink_resource_set(source_host, old_host, source_assets, old_assets, manifest)
+        atomic_current(duel_root, new, release_id)
+        with sqlite3.connect(database) as db:
+            db.execute("UPDATE cards SET metadata_version=0")
+            db.commit()
+        search_result = {}
+        if not defer_start:
+            run("systemctl", "start", "ygoduel-api", "ygoduel-srvpro")
+            wait_healthy(target_host / "lflist.conf")
+            search_result = probe_catalogue(new, manifest)
+        live_duel_avif = directory_fingerprint(duel_root / "current" / "assets" / "pics_avif")
+        live_cube_avif = directory_fingerprint(cube_root / "shared" / "assets" / "pics_avif")
+        if live_cube_avif != cube_resource_state["picsAvif"] or live_duel_avif != live_cube_avif:
+            raise RuntimeError("live Cube and Duel AVIF image trees differ")
+        if (duel_root / "current" / "resource-sync.json").is_file() is False:
+            raise RuntimeError("Duel current release is missing its resource-sync manifest")
+        if new.joinpath("srvpro/ygopro/ygopro").is_file() and "not found" in run("ldd", str(new / "srvpro/ygopro/ygopro")):
+            raise RuntimeError("standalone Duel host has unresolved shared libraries")
+        (backup / ("prepared.json" if defer_start else "deployment.json")).write_text(
+            json.dumps(
+                {
+                    "ok": True,
+                    "release": release_name,
+                    "previousRelease": old.name,
+                    "previousReleaseResourcesLinkedToCube": previous_resources_match,
+                    "search": search_result,
+                    "resourceManifestSha256": resources["resourceManifest"],
+                    "cardDatabaseFilesMatched": len(cdb_hashes(source_host)),
+                    "picsAvif": live_duel_avif,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return {
+            "ok": True,
+            "release": release_name,
+            "backup": str(backup),
+            "previousReleaseResourcesLinkedToCube": previous_resources_match,
+            "managedResourceHardlinks": hardlink_count,
+            "cardDatabaseFilesMatched": len(cdb_hashes(source_host)),
+            "picsAvif": live_duel_avif,
+            **search_result,
+        }
+    except Exception:
+        # The release remains on disk for inspection. Restore the old pointer
+        # and configuration before starting the former services again.
+        config_file = duel_root / "shared" / "config.yaml"
+        if (backup / "config.yaml").is_file():
+            shutil.copy2(backup / "config.yaml", config_file)
+        if (current_link.resolve() != old):
+            atomic_current(duel_root, old, f"recover-{release_id}")
+        raise
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cube-root", type=Path, default=os.environ.get("YGOCUBE_ALY_ROOT"), required=not os.environ.get("YGOCUBE_ALY_ROOT"))
+    parser.add_argument("--duel-root", type=Path, default=os.environ.get("YGODUEL_ALY_ROOT"), required=not os.environ.get("YGODUEL_ALY_ROOT"))
+    parser.add_argument("--id", required=True)
+    parser.add_argument("--rollback", action="store_true")
+    parser.add_argument("--relink-current-to-cube", action="store_true")
+    parser.add_argument("--enter-maintenance", action="store_true")
+    parser.add_argument("--defer-start", action="store_true")
+    parser.add_argument("--verify-current", action="store_true")
+    parser.add_argument("--verify-live", action="store_true")
+    parser.add_argument("--allow-legacy-dates", action="store_true")
+    parser.add_argument("--record-components", type=Path)
+    parser.add_argument("--audit-components", type=Path)
+    parser.add_argument("--close-ingress", action="store_true")
+    parser.add_argument("--open-ingress", action="store_true")
+    parser.add_argument("--install-application-to", type=Path)
+    args = parser.parse_args()
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", args.id):
+        raise SystemExit("invalid resource release ID")
+    for path in (args.cube_root, args.duel_root):
+        if not path.is_absolute() or path == Path("/"):
+            raise SystemExit("invalid installation root")
+    try:
+        if args.close_ingress or args.open_ingress:
+            result = maintenance_ingress(args.cube_root, args.duel_root, close=args.close_ingress)
+        elif args.record_components:
+            record_components(args.record_components)
+            result = {'ok': True}
+        elif args.audit_components:
+            actual = describe_components(args.audit_components)
+            declared = json.loads((args.audit_components / 'release.json').read_text(encoding='utf-8')).get('components', {})
+            mismatches = [name for name in actual if declared.get(name, {}).get('sha256') != actual[name]['sha256']]
+            result = {'ok': not mismatches, 'components': actual, 'mismatches': mismatches}
+            if mismatches:
+                print(json.dumps(result, ensure_ascii=False))
+                raise RuntimeError('component inventory is missing or differs from the release')
+        elif args.install_application_to:
+            release = args.install_application_to.resolve(strict=True)
+            if not release.is_relative_to(args.cube_root.resolve() / "releases"):
+                raise RuntimeError("application release resolves outside Cube releases")
+            install_srvpro_application(args.cube_root / ".staging" / f"card-sync-{args.id}" / "root", release)
+            result = {"ok": True, "applicationInstalled": release.name}
+        elif args.enter_maintenance:
+            result = enter_maintenance()
+        elif args.verify_current:
+            result = verify_current_resources(args.cube_root.resolve(), args.duel_root.resolve())
+        elif args.verify_live:
+            manifest = json.loads((args.cube_root / "shared/assets/resource-manifest.json").read_text(encoding="utf-8"))
+            wait_healthy(args.duel_root / "current/srvpro/ygopro/lflist.conf", allow_legacy_dates=args.allow_legacy_dates, include_cube=True)
+            result = probe_catalogue(args.duel_root / "current", manifest)
+        elif args.rollback:
+            result = rollback(args.duel_root.resolve(), args.id, defer_start=args.defer_start)
+        elif args.relink_current_to_cube:
+            result = relink_current_to_cube(args.cube_root.resolve(), args.duel_root.resolve(), defer_start=args.defer_start)
+        else:
+            result = deploy(args.cube_root.resolve(), args.duel_root.resolve(), args.id, defer_start=args.defer_start)
+    except Exception as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+        raise
+    print(json.dumps(result, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

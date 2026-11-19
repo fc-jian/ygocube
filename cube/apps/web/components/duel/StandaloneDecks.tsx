@@ -1,0 +1,645 @@
+"use client";
+import { importYdk } from "./import-ydk";
+
+import { useEffect, useRef, useState } from "react";
+import { api } from "@/lib/api";
+import { CardImage } from "@/components/CardImage";
+import { CardSearchFields, cardSearchFiltersValid, cardSearchQuery, hasCardSearchFilters } from "@/components/CardSearchFields";
+import {
+  readDecks,
+  saveDeck,
+  deleteDeck,
+  ydk,
+  SavedDeck,
+} from "./deck-storage";
+import type { BrowserDeck, CardCategory, CardSearchPage, CardSearchParams, CardSearchSort } from "@ygocube/shared";
+import { CardMeta } from "@/components/CardPreview";
+import type { CardInfo } from "@/lib/types";
+import { typeLabel, raceAttrLine, statLine, atkDefLine } from "@/lib/cardInfo";
+import { latestOcg, cardLimit, type Banlist } from "@/lib/banlist";
+import { LocalPicsSetting } from "@/components/IdentityWidget";
+import {
+  insertDeckCard,
+  isExtraType,
+  type DeckDrag,
+  type DeckZone,
+} from "./deck-edit";
+import "./standalone.css";
+type Info = CardInfo;
+const unknownCard = (code: number): Info => ({ code, name: String(code), desc: "", type: 0, atk: -1, def: -1, level: 0, race: 0, attribute: 0, lscale: 0, rscale: 0, linkMarkers: 0, setCodes: [], setNames: [] });
+const blank = (): BrowserDeck => ({
+  name: "新卡组",
+  main: [],
+  extra: [],
+  side: [],
+});
+const isExtra = (c: Info) => isExtraType(c.type);
+export function StandaloneDecks() {
+  const [saved, setSaved] = useState<SavedDeck[]>([]),
+    [deck, setDeck] = useState<BrowserDeck>(blank),
+    [id, setId] = useState<string | undefined>(),
+    [dirty, setDirty] = useState(false),
+    [search, setSearch] = useState<CardSearchParams>({ query: "", page: 0, sort: "relevance", filters: {} }),
+    [results, setResults] = useState<CardSearchPage | null>(null),
+    [infos, setInfos] = useState<Record<number, Info>>({}),
+    [detail, setDetail] = useState<Info | null>(null),
+    [target, setTarget] = useState<"main" | "side">("main"),
+    [notice, setNotice] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [lists, setLists] = useState<Banlist[]>([]);
+  const [listId, setListId] = useState(-1);
+  useEffect(() => {
+    let active = true;
+    api<{ lists: Banlist[] }>("/public/duel/options", { identity: null }).then(r => {
+      if (active) { setLists(r.lists); setListId(latestOcg(r.lists)); }
+    }).catch(e => active && setNotice(e.message));
+    return () => { active = false; };
+  }, []);
+  const badge = (card: { code: number; alias?: number }) => {
+    const count = cardLimit(lists.find(l => l.id === listId), card);
+    return count < 3 ? <span className={`deck-limit deck-limit-${count}`} aria-label={['禁止', '限制', '准限制'][count]}>{count}</span> : null;
+  };
+  const [selectedCard, setSelectedCard] = useState<string | null>(null);
+  const [drag, setDrag] = useState<DeckDrag | null>(null);
+  const [enlarged, setEnlarged] = useState<Info | null>(null);
+  const largeCard = useRef<HTMLDialogElement>(null);
+  const saving = useRef(false);
+  const latestDeck = useRef(deck);
+  latestDeck.current = deck;
+  const [dropAt, setDropAt] = useState<string | null>(null);
+  useEffect(() => {
+    if (enlarged) largeCard.current?.showModal();
+    else largeCard.current?.close();
+  }, [enlarged]);
+  const searchActive = !!search.query.trim() || hasCardSearchFilters(search.filters);
+  useEffect(() => {
+    void readDecks().then(setSaved).catch(error => setNotice(error.message));
+  }, []);
+  useEffect(() => {
+    const f = (e: BeforeUnloadEvent) => {
+      if (dirty) {
+        e.preventDefault();
+        e.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", f);
+    return () => window.removeEventListener("beforeunload", f);
+  }, [dirty]);
+  useEffect(() => {
+    setResults(null);
+    const ready = searchActive && cardSearchFiltersValid(search.filters);
+    setSearching(ready);
+    if (!ready) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      api<CardSearchPage>(`/public/duel/search/page?${cardSearchQuery(search)}`, {
+        identity: null, signal: controller.signal,
+      })
+        .then((r) => {
+          if (!controller.signal.aborted) {
+            setResults(r);
+            setInfos((v) => ({
+              ...v,
+              ...Object.fromEntries(r.cards.map((c) => [c.code, c])),
+            }));
+          }
+        })
+        .catch((e) => { if (!controller.signal.aborted) setNotice(e.message); })
+        .finally(() => { if (!controller.signal.aborted) setSearching(false); });
+    }, 250);
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
+  }, [search, searchActive]);
+  useEffect(() => {
+    let active = true;
+    const missing = [
+      ...new Set([...deck.main, ...deck.extra, ...deck.side]),
+    ].filter((c) => !infos[c]);
+    if (!missing.length) return;
+    Promise.all(
+      Array.from({ length: Math.ceil(missing.length / 256) }, (_, i) =>
+        api<Info[]>("/public/duel/cards", {
+          method: "POST",
+          identity: null,
+          body: { codes: missing.slice(i * 256, (i + 1) * 256) },
+        }),
+      ),
+    )
+      .then((rows) => {
+        if (active)
+          setInfos((v) => ({
+            ...v,
+            ...Object.fromEntries(rows.flat().map((c) => [c.code, c])),
+          }));
+      })
+      .catch((e) => active && setNotice(e.message));
+    return () => {
+      active = false;
+    };
+  }, [deck]);
+  const edit = (d: BrowserDeck) => {
+    setSelectedCard(null);
+    setDeck(d);
+    setDirty(true);
+    setNotice("");
+  };
+  const replace = () => !dirty || window.confirm("放弃未保存修改？");
+  const persist = async (asNew = false) => {
+    if (saving.current) return;
+    saving.current = true;
+    const snapshot = deck;
+    setNotice('保存中… / Saving…');
+    try {
+      const savedId = await saveDeck(snapshot, asNew ? undefined : id);
+      const unchanged = latestDeck.current === snapshot;
+      if (unchanged) { setId(savedId); setDirty(false); }
+      setSaved(await readDecks());
+      setNotice(unchanged ? '已保存 / Saved' : '已保存先前版本，当前修改尚未保存 / Earlier version saved; current edits are unsaved');
+    } catch (e) {
+      setNotice((e as Error).message);
+    } finally {
+      saving.current = false;
+    }
+  };
+  function add(c: Info) {
+    const z = target === "side" ? "side" : isExtra(c) ? "extra" : "main";
+    if (deck[z].length >= 200) {
+      setNotice("区域已满");
+      return;
+    }
+    edit({ ...deck, [z]: [...deck[z], c.code] });
+  }
+  function move(z: "main" | "extra" | "side", i: number) {
+    const code = deck[z][i],
+      c = infos[code];
+    if (!c) return;
+    const to = z === "side" ? (isExtra(c) ? "extra" : "main") : "side";
+    if (deck[to].length >= 200) return;
+    edit({
+      ...deck,
+      [z]: deck[z].filter((_, n) => n !== i),
+      [to]: [...deck[to], code],
+    });
+  }
+
+  const preview = detail && (infos[detail.code] ?? detail);
+  const enlargedCard = enlarged && (infos[enlarged.code] ?? enlarged);
+  const show = (code: number) =>
+    setDetail(infos[code] ?? unknownCard(code));
+  const summary = (c: Info) => [typeLabel(c), raceAttrLine(c), statLine(c)].filter(Boolean).join(" / ");
+  const drop = (zone: DeckZone, index?: number) => {
+    if (!drag) return;
+    const c = infos[drag.code];
+    if (!c) return;
+    if (zone === "extra" && !isExtra(c)) {
+      setNotice("这张卡不能加入额外卡组");
+      setDrag(null);
+      return;
+    }
+    const to = zone === "main" && isExtra(c) ? "extra" : zone;
+    if (to !== drag.zone && deck[to].length >= 200) {
+      setNotice("区域已满");
+      setDrag(null);
+      return;
+    }
+    const next = insertDeckCard(deck, drag, zone, c.type, index);
+    setDropAt(null);
+    edit(next);
+    setDrag(null);
+    setSelectedCard(null);
+  };
+  return (
+    <main className="standalone builder deck-editor">
+      <header className="deck-editor-header">
+        <a href="/duel">← 对战大厅</a>
+        <h1>卡组构筑</h1>
+        <details className="deck-image-settings">
+          <summary>卡图设置</summary>
+          <LocalPicsSetting />
+        </details>
+      </header>
+      <section className="deck-management" aria-label="卡组管理">
+        <select
+          aria-label="已保存卡组"
+          value={id ?? ""}
+          onChange={(e) => {
+            if (!replace()) return;
+            const d = saved.find((d) => d.id === e.target.value);
+            if (d) {
+              setDeck(d);
+              setId(d.id);
+              setDirty(false);
+              setSelectedCard(null);
+            }
+          }}
+        >
+          <option value="">选择卡组</option>
+          {saved.map((d) => (
+            <option key={d.id} value={d.id}>
+              {d.name} ({d.main.length}/{d.extra.length}/{d.side.length})
+            </option>
+          ))}
+        </select>
+        <input
+          aria-label="卡组名称"
+          maxLength={60}
+          value={deck.name}
+          onChange={(e) => edit({ ...deck, name: e.target.value })}
+        />
+        <button className="primary" onClick={() => persist()}>
+          保存{dirty ? "*" : ""}
+        </button>
+        <button onClick={() => persist(true)}>另存</button>
+        <button
+          onClick={() => {
+            if (replace()) {
+              setDeck(blank());
+              setId(undefined);
+              setDirty(false);
+              setSelectedCard(null);
+            }
+          }}
+        >
+          新建
+        </button>
+        <label className="deck-import">
+          导入
+          <input
+            type="file"
+            accept=".ydk,.txt"
+            onChange={async (e) => {
+              if (saving.current) { e.target.value = ""; return; }
+              const snapshot = deck;
+              saving.current = true;
+              try {
+                const f = e.target.files?.[0];
+                if (!f || !replace()) return;
+                if (f.size > 65536) throw Error("文件过大");
+                const d = await importYdk(
+                    await f.text(),
+                    f.name.replace(/\.ydk$/i, ""),
+                  ),
+                  newId = await saveDeck(d);
+                const unchanged = latestDeck.current === snapshot;
+                if (unchanged) { setDeck(d); setId(newId); setDirty(false); }
+                setSaved(await readDecks());
+                if (unchanged) setSelectedCard(null);
+                setNotice(unchanged ? "已导入并保存 / Imported and saved" : "已导入到卡组列表，当前编辑已保留 / Imported; current edits kept");
+              } catch (e) {
+                setNotice((e as Error).message);
+              } finally {
+                saving.current = false;
+                e.target.value = "";
+              }
+            }}
+          />
+        </label>
+        <button
+          onClick={() => {
+            const url = URL.createObjectURL(
+                new Blob([ydk(deck)], { type: "text/plain" }),
+              ),
+              a = document.createElement("a");
+            a.href = url;
+            a.download = deck.name + ".ydk";
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+          }}
+        >
+          导出
+        </button>
+        <button
+          disabled={!id}
+          onClick={async () => {
+            if (saving.current) return;
+            if (id && window.confirm("删除这副已保存卡组？")) {
+              saving.current = true;
+              const snapshot = deck;
+              try {
+                await deleteDeck(id);
+                setSaved(await readDecks());
+                if (latestDeck.current === snapshot) { setId(undefined); setDirty(true); }
+              } catch (error) { setNotice((error as Error).message); }
+              finally { saving.current = false; }
+            }
+          }}
+        >
+          删除
+        </button>
+        <button
+          onClick={() =>
+            edit({
+              ...deck,
+              ...Object.fromEntries(
+                (["main", "extra", "side"] as const).map((z) => [
+                  z,
+                  [...deck[z]].sort(
+                    (a, b) =>
+                      (infos[a]?.type ?? 0) - (infos[b]?.type ?? 0) ||
+                      (infos[b]?.level ?? 0) - (infos[a]?.level ?? 0) ||
+                      a - b,
+                  ),
+                ]),
+              ),
+            })
+          }
+        >
+          排序
+        </button>
+        <button
+          onClick={() => {
+            if (window.confirm("清空当前卡组？"))
+              edit({ ...deck, main: [], extra: [], side: [] });
+          }}
+        >
+          清空
+        </button>
+      <label className="deck-banlist">禁限卡表
+        <select aria-label="禁限卡表" value={listId} onChange={e => setListId(Number(e.target.value))} disabled={!lists.length}>
+          {!lists.length && <option value={-1}>加载中…</option>}
+          {lists.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+        </select>
+      </label>
+      </section>
+      <div className="deck-workspace">
+        <aside className="deck-inspector" aria-label="卡片详情">
+          {preview ? (
+            <>
+              <CardImage
+                code={preview.code}
+                name={preview.name}
+                className="deck-inspector-image"
+              />
+              <div className="deck-inspector-copy">
+                <h2>{preview.name}</h2>
+                <small>{preview.code}</small>
+                <CardMeta card={preview} showPickStats={false} />
+                <p className="deck-effect-text">{preview.desc}</p>
+              </div>
+            </>
+          ) : (
+            <div className="deck-empty-preview">卡片详情</div>
+          )}
+        </aside>
+        <section className="deck-zones" aria-label="当前卡组">
+          <nav className="deck-zone-tabs" aria-label="卡组区域">
+            {(["main", "extra", "side"] as const).map((z) => (
+              <button
+                key={z}
+                onClick={() =>
+                  document
+                    .getElementById(`editor-zone-${z}`)
+                    ?.scrollIntoView({ block: "start", behavior: "smooth" })
+                }
+              >
+                {{ main: "主", extra: "额外", side: "副" }[z]} {deck[z].length}
+              </button>
+            ))}
+          </nav>
+          {(["main", "extra", "side"] as const).map((z) => (
+            <section
+              className={`deck-region deck-region-${z} ${drag ? "drop-ready" : ""}`}
+              id={`editor-zone-${z}`}
+              data-deck-zone={z}
+              key={z}
+              onDragOver={(e) => {
+                if (drag) e.preventDefault();
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                drop(z);
+              }}
+            >
+              <h2>
+                {{ main: "主卡组", extra: "额外卡组", side: "副卡组" }[z]}{" "}
+                <b>{deck[z].length}</b>
+              </h2>
+              <div className="builder-zone">
+                {deck[z].map((code, i) => (
+                  <article
+                    key={`${code}-${i}`}
+                    className={`${selectedCard === `${z}:${i}` ? "selected" : ""} ${dropAt === `${z}:${i}` ? "deck-insert-before" : ""}`}
+                    onDragOver={(e) => {
+                      if (drag) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setDropAt(`${z}:${i}`);
+                      }
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      drop(z, i);
+                    }}
+                    onMouseEnter={() => show(code)}
+                    draggable={!!infos[code]}
+                    onDragStart={(e) => {
+                      setDrag({ code, zone: z, index: i });
+                      e.dataTransfer.setData("text/plain", String(code));
+                      e.dataTransfer.effectAllowed = "move";
+                    }}
+                    onDragEnd={() => {
+                      setDrag(null);
+                      setDropAt(null);
+                    }}
+                  >
+                    <button
+                      className="card-preview"
+                      aria-label={infos[code]?.name ?? String(code)}
+                      aria-pressed={selectedCard === `${z}:${i}`}
+                      onFocus={() => show(code)}
+                      onClick={() => {
+                        show(code);
+                        setSelectedCard(`${z}:${i}`);
+                      }}
+                      onDoubleClick={() =>
+                        setEnlarged(
+                          infos[code] ?? unknownCard(code),
+                        )
+                      }
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        edit({
+                          ...deck,
+                          [z]: deck[z].filter((_, n) => n !== i),
+                        });
+                        setSelectedCard(null);
+                      }}
+                    >
+                      <CardImage
+                        code={code}
+                        name={infos[code]?.name ?? String(code)}
+                      />
+                      {badge(infos[code] ?? { code })}
+                    </button>
+                    <div className="deck-card-controls">
+                      <button
+                        aria-label={`移到 ${z === "side" ? "主卡组／额外卡组" : "备选卡组"} ${i + 1}`}
+                        onClick={() => {
+                          move(z, i);
+                          setSelectedCard(null);
+                        }}
+                      >
+                        {z === "side" ? "移回卡组" : "移到副卡组"}
+                      </button>
+                      <button
+                        aria-label={`删除 ${z} ${i + 1}`}
+                        onClick={() => {
+                          edit({
+                            ...deck,
+                            [z]: deck[z].filter((_, n) => n !== i),
+                          });
+                          setSelectedCard(null);
+                        }}
+                      >
+                        移除
+                      </button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </section>
+          ))}
+        </section>
+        <section className="deck-search" aria-label="卡片搜索与结果">
+          <input
+            aria-label="搜索卡片"
+            placeholder={'卡名、效果、卡号，如 "RANK 4"'}
+            maxLength={100}
+            value={search.query}
+            onChange={(e) => setSearch({ ...search, query: e.target.value, page: 0 })}
+          />
+          <div className="deck-search-options">
+            <select
+              aria-label="筛选搜索结果"
+              value={search.filters.category ?? 0}
+              onChange={(e) => {
+                const category = (Number(e.target.value) || undefined) as CardCategory | undefined;
+                setSearch({ ...search, page: 0, filters: { ...search.filters, category } });
+              }}
+            >
+              <option value={0}>全部种类</option>
+              <option value={1}>怪兽</option>
+              <option value={2}>魔法</option>
+              <option value={4}>陷阱</option>
+            </select>
+            <select
+              aria-label="结果排序"
+              value={search.sort}
+              onChange={(e) => setSearch({ ...search, sort: e.target.value as CardSearchSort, page: 0 })}
+            >
+              <option value="relevance">相关度</option>
+              <option value="level">星数 ↓</option>
+              <option value="attack">攻击力 ↓</option>
+              <option value="name">卡名</option>
+            </select>
+          </div>
+          <CardSearchFields value={search.filters} onChange={(filters) => setSearch({ ...search, filters, page: 0 })} />
+          <label className="deck-search-target">
+            添加到
+            <select
+              value={target}
+              onChange={(e) => setTarget(e.target.value as "main" | "side")}
+            >
+              <option value="main">主卡组／额外卡组</option>
+              <option value="side">副卡组</option>
+            </select>
+          </label>
+          <h2>
+            搜索结果 <b>{results?.totalCount ?? 0}</b>
+            {!!results?.totalPages && <small>（第 {search.page + 1} / {results.totalPages} 页）</small>}
+          </h2>
+          <div className="builder-results">
+            {results?.cards.map((c) => (
+              <article
+                key={c.code}
+                onMouseEnter={() => setDetail(c)}
+                draggable
+                onDragStart={(e) => {
+                  setDrag({ code: c.code });
+                  e.dataTransfer.setData("text/plain", String(c.code));
+                  e.dataTransfer.effectAllowed = "copy";
+                }}
+                onDragEnd={() => {
+                  setDrag(null);
+                  setDropAt(null);
+                }}
+              >
+                <button
+                  className="card-preview"
+                  onFocus={() => setDetail(c)}
+                  onClick={() => setDetail(c)}
+                  onDoubleClick={() => setEnlarged(c)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    add(c);
+                  }}
+                >
+                  <CardImage code={c.code} name={c.name} />
+                  {badge(c)}
+                </button>
+                <div className="deck-result-copy">
+                  <strong>{c.name}</strong>
+                  <small>{summary(c)}</small>
+                  {!!(c.type & 1) && (
+                    <span>
+                      {atkDefLine(c)}
+                    </span>
+                  )}
+                  <button aria-label={`添加 ${c.name}`} onClick={() => add(c)}>
+                    ＋{" "}
+                    {target === "side"
+                      ? "副卡组"
+                      : isExtra(c)
+                        ? "额外卡组"
+                        : "主卡组"}
+                  </button>
+                </div>
+              </article>
+            ))}
+            {searching && <p role="status">搜索中…</p>}
+            {results?.totalCount === 0 && <p>没有匹配的卡片</p>}
+          </div>
+          {(search.page > 0 || results?.hasMore) && <div className="deck-search-options">
+            <button type="button" disabled={searching || search.page === 0}
+              onClick={() => setSearch({ ...search, page: search.page - 1 })}>上一页</button>
+            <button type="button" disabled={searching || !results?.hasMore}
+              onClick={() => setSearch({ ...search, page: search.page + 1 })}>下一页</button>
+          </div>}
+        </section>
+      </div>
+      <footer className="deck-editor-footer">
+        <span role="status">{notice || (dirty ? "有未保存修改" : "")}{notice && <button aria-label="关闭提示" onClick={() => setNotice("")}>×</button>}</span>
+        <span>右键加卡／移除 · 双击放大 · 拖动排序</span>
+      </footer>
+      <dialog
+        ref={largeCard}
+        className="deck-large-card"
+        aria-label="卡片大图"
+        onCancel={() => setEnlarged(null)}
+        onClose={() => setEnlarged(null)}
+        onClick={(e) => {
+          if (e.target === e.currentTarget) setEnlarged(null);
+        }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setEnlarged(null);
+        }}
+      >
+        {enlargedCard && (
+          <>
+            <button autoFocus onClick={() => setEnlarged(null)}>
+              关闭
+            </button>
+            <CardImage code={enlargedCard.code} name={enlargedCard.name} />
+            <h2>{enlargedCard.name}</h2>
+            <CardMeta card={enlargedCard} showPickStats={false} />
+            <p className="deck-effect-text">{enlargedCard.desc}</p>
+          </>
+        )}
+      </dialog>
+    </main>
+  );
+}

@@ -1,0 +1,249 @@
+'use client';
+
+import { useEffect, useState } from 'react';
+import { clearIdentityCookies, encodePathSegment, logoutPlayer, readableApiError } from '@/lib/api';
+import { getDirHandle, removeDirHandle, saveDirHandle, requestDirPermission } from '@/lib/pics';
+
+
+
+export function IdentityWidget({
+  tid,
+  pid,
+  token,
+  displayName,
+  canEditDisplayName = false,
+  onDisplayNameChange,
+}: {
+  tid?: string;
+  pid?: string;
+  token?: string;
+  displayName?: string;
+  canEditDisplayName?: boolean;
+  onDisplayNameChange?: (displayName: string) => Promise<void>;
+}) {
+  const [showToken, setShowToken] = useState(false);
+  const [tokenCopied, setTokenCopied] = useState(false);
+  const [loggedOut, setLoggedOut] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState(displayName ?? '');
+  const [nameError, setNameError] = useState('');
+  const [savingName, setSavingName] = useState(false);
+
+  useEffect(() => {
+    if (!editingName) setNameDraft(displayName ?? '');
+  }, [displayName, editingName]);
+
+  const logout = () => {
+    if (tid && pid) logoutPlayer(tid, pid);
+    else if (tid) clearIdentityCookies(tid);
+    else clearIdentityCookies();
+    setLoggedOut(true);
+  };
+
+  const saveName = async () => {
+    const next = nameDraft.trim();
+    if (!next) {
+      setNameError('显示名称不能为空');
+      return;
+    }
+    if ([...next].length > 64) {
+      setNameError('显示名称不能超过 64 个字符');
+      return;
+    }
+    if (!onDisplayNameChange) return;
+    setSavingName(true);
+    setNameError('');
+    try {
+      await onDisplayNameChange(next);
+      setEditingName(false);
+    } catch (e: any) {
+      const code = e?.code;
+      setNameError(code === 'WRONG_PHASE' ? '选牌已开始，无法再修改显示名称' : code === 'AUTH_REQUIRED' ? '身份已失效，请重新输入令牌' : code === 'BAD_DISPLAY_NAME' ? '显示名称格式不合法' : readableApiError(e, '名称修改失败'));
+    } finally {
+      setSavingName(false);
+    }
+  };
+
+  const copyToken = async () => {
+    if (!token || token === '(已关闭鉴权)') return;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(token);
+      } else {
+        const input = document.createElement('textarea');
+        input.value = token;
+        input.style.position = 'fixed';
+        input.style.opacity = '0';
+        document.body.appendChild(input);
+        input.focus();
+        input.select();
+        document.execCommand('copy');
+        input.remove();
+      }
+      setTokenCopied(true);
+      window.setTimeout(() => setTokenCopied(false), 1500);
+    } catch {
+      setTokenCopied(false);
+    }
+  };
+
+  if (loggedOut) {
+    return (
+      <span className="text-xs text-slate-400">
+        已退出 — <a href={tid ? `/t/${encodePathSegment(tid)}` : '/'} className="text-gold underline">重新输入令牌</a>
+      </span>
+    );
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-300">
+      <span>
+        玩家：<span className="font-mono text-slate-100">{pid ?? '-'}</span>
+      </span>
+      {canEditDisplayName && onDisplayNameChange && (
+        editingName ? (
+          <form
+            className="flex flex-wrap items-center gap-1"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void saveName();
+            }}
+          >
+            <label className="sr-only" htmlFor="yc-display-name">显示名称</label>
+            <input
+              id="yc-display-name"
+              className="w-32 rounded bg-felt-deep px-2 py-1 text-xs text-slate-100 outline-none ring-gold/50 focus:ring-2"
+              value={nameDraft}
+              maxLength={64}
+              autoFocus
+              onChange={(e) => setNameDraft(e.target.value)}
+              disabled={savingName}
+            />
+            <button type="submit" className="rounded bg-gold px-2 py-1 font-semibold text-felt-deep hover:brightness-110 disabled:opacity-50" disabled={savingName}>
+              {savingName ? '保存中…' : '保存'}
+            </button>
+            <button
+              type="button"
+              className="rounded bg-felt-edge px-2 py-1 hover:brightness-110 disabled:opacity-50"
+              onClick={() => {
+                setEditingName(false);
+                setNameError('');
+              }}
+              disabled={savingName}
+            >
+              取消
+            </button>
+            {nameError && <span className="basis-full text-red-300">{nameError}</span>}
+          </form>
+        ) : (
+          <button
+            type="button"
+            className="rounded bg-felt-edge px-2 py-1 hover:brightness-110"
+            title="选牌开始前可修改显示名称"
+            onClick={() => {
+              setNameDraft(displayName ?? '');
+              setNameError('');
+              setEditingName(true);
+            }}
+          >
+            名称：<span className="text-slate-100">{displayName || pid || '-'}</span> <span className="text-gold">✎</span>
+          </button>
+        )
+      )}
+      {token ? (
+        <button
+          onClick={() => {
+            if (!showToken) {
+              setShowToken(true);
+              setTokenCopied(false);
+            } else {
+              void copyToken();
+            }
+          }}
+          className="rounded bg-felt px-2 py-1 hover:bg-felt-edge"
+          title={showToken ? '再次点击复制令牌' : '点击显示令牌'}
+        >
+          令牌：<span className="font-mono">{showToken ? token : '••••••••'}</span>
+          {showToken && token !== '(已关闭鉴权)' && <span className="ml-1 text-gold">{tokenCopied ? '已复制' : '点击复制'}</span>}
+        </button>
+      ) : (
+        <span className="text-slate-500">无身份信息</span>
+      )}
+      <span className="text-slate-500">比赛 {tid ?? '-'}</span>
+      <button onClick={logout} className="rounded bg-felt-edge px-2 py-1 hover:bg-red-900 hover:text-red-100" title="退出当前玩家">
+        退出登录
+      </button>
+    </div>
+  );
+}
+
+export function LocalPicsSetting() {
+  const [bound, setBound] = useState<string | null>(null);
+  const [bindError, setBindError] = useState('');
+  const [boundHandle, setBoundHandle] = useState<FileSystemDirectoryHandle | null>(null);
+
+  useEffect(() => {
+    const refresh = () => getDirHandle().then((h) => { setBound(h ? h.name : null); setBoundHandle(h); }).catch(() => { setBound(null); setBoundHandle(null); });
+    refresh();
+    window.addEventListener('yc-pics-changed', refresh);
+    return () => window.removeEventListener('yc-pics-changed', refresh);
+  }, []);
+
+  const bind = async () => {
+    try {
+      const w = window as any;
+      if (!w.showDirectoryPicker) {
+        setBindError('当前浏览器不支持目录授权，请使用 Chrome/Edge 或手动填写路径');
+        return;
+      }
+      const handle = await w.showDirectoryPicker();
+      await saveDirHandle(handle);
+      window.dispatchEvent(new Event("yc-pics-changed"));
+      setBound(handle.name);
+      setBindError('');
+    } catch (e: any) {
+      if (e?.name !== 'AbortError') setBindError('绑定失败，请重试');
+    }
+  };
+
+  const reread = async () => {
+    if (!boundHandle) return;
+    try {
+      if (!await requestDirPermission(boundHandle, true)) {
+        setBindError('请允许读取本地目录，或重新选择 YGOPro 根目录');
+        return;
+      }
+      await saveDirHandle(boundHandle);
+      window.dispatchEvent(new Event('yc-pics-changed'));
+      setBindError('');
+    } catch {
+      setBindError('目录不可读取，请重新选择 YGOPro 根目录');
+    }
+  };
+
+  const unbind = async () => {
+    await removeDirHandle();
+    window.dispatchEvent(new Event("yc-pics-changed"));
+    setBound(null);
+  };
+
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      {bound ? (
+        <span className="text-emerald-300">
+          已绑定：{bound}
+          <button onClick={reread} className="ml-2 rounded bg-felt-edge px-2 py-0.5">重新读取卡图</button>
+          <button onClick={bind} className="ml-2 rounded bg-felt-edge px-2 py-0.5">更换目录</button>
+          <button onClick={unbind} className="ml-2 rounded bg-felt-edge px-2 py-0.5 hover:bg-red-900 hover:text-red-100">
+            解绑
+          </button>
+        </span>
+      ) : (
+        <button onClick={bind} className="rounded bg-gold px-2 py-0.5 font-semibold text-felt-deep hover:brightness-110">
+          绑定本地图像目录
+        </button>
+      )}
+      {bindError && <span className="text-red-300">{bindError}</span>}
+    </div>
+  );
+}

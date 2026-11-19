@@ -1,0 +1,319 @@
+#!/usr/bin/env python3
+"""Stage or activate a checksummed Cube/Duel application release."""
+import argparse, hashlib, json, os, pathlib, re, shutil, sqlite3, subprocess, tarfile, time, urllib.request
+from contextlib import closing
+import importlib.util
+import fcntl
+
+cube_root = pathlib.Path(os.environ['YGOCUBE_ALY_ROOT']).resolve(strict=True)
+duel_root = pathlib.Path(os.environ['YGODUEL_ALY_ROOT']).resolve(strict=True)
+instance_roots = {'ygocube': cube_root, 'ygoduel': duel_root}
+public_origin = os.environ['YGOCUBE_ALY_URL'].rstrip('/')
+
+resource_lock=open(str((cube_root / '.card-resource-deploy.lock')),'a')
+fcntl.flock(resource_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+P = pathlib.Path
+helper_path=(cube_root / 'shared/card-resource-tools/apply-duel.py')
+if not helper_path.is_file():raise SystemExit('Install current resource workflow before application deployment')
+spec=importlib.util.spec_from_file_location('resource_apply',helper_path)
+resource_apply=importlib.util.module_from_spec(spec);spec.loader.exec_module(resource_apply)
+if not all(hasattr(resource_apply,name) for name in ('record_components','ApplicationMaintenance')):raise SystemExit('Update the verified resource helper before staging this application release')
+ap = argparse.ArgumentParser()
+ap.add_argument('archive', type=P)
+ap.add_argument('sha256')
+ap.add_argument('release')
+ap.add_argument('--activate', action='store_true')
+ap.add_argument('--web-only', action='store_true', help='Preserve API/srvpro and restart only Web services')
+ap.add_argument('--cube-only', action='store_true', help='Activate only Cube API/Web, preserving both duel servers')
+ap.add_argument('--api-web-only', action='store_true', help='Activate both API/Web pairs while preserving the duel servers')
+guess_action = ap.add_mutually_exclusive_group()
+guess_action.add_argument('--require-idle-guess', action='store_true', help='Defer Cube activation or rollback while Guess the Card or Draw & Guess is active')
+guess_action.add_argument('--settle-open-guess', action='store_true', help='Finalize open Guess rooms after the Cube database backup and before switching releases')
+guess_action.add_argument('--settle-started-guess', action='store_true', help='Finalize Guess rooms that have started and keep waiting rooms open')
+ap.add_argument('--preserve-dg-reveal', metavar='ROOM_ID', help='Allow a named untimed Draw & Guess reveal to resume after a Cube API/Web update')
+ap.add_argument('--preserve-guess-room', metavar='ROOM_ID:VERSION', action='append', default=[], help='Allow a reviewed Guess room at its saved version to resume after a compatible Cube update; may be repeated')
+ap.add_argument('--check-page', action='append', default=[], help='Additional public page to verify with its static assets')
+ap.add_argument('--windbot-root', type=P, help='Enable the verified WindBot runtime only on independent Duel')
+a = ap.parse_args()
+if a.api_web_only and (a.cube_only or a.web_only or a.windbot_root):
+    ap.error('--api-web-only requires both application targets and no srvpro update')
+application_only = a.cube_only or a.api_web_only
+settle_guess = a.settle_open_guess or a.settle_started_guess
+if (a.require_idle_guess or settle_guess) and (not application_only or a.web_only):
+    ap.error('Guess maintenance flags require a Cube API/Web update')
+if a.preserve_dg_reveal is not None and (not application_only or not a.require_idle_guess or not re.fullmatch(r'[0-9A-F]{8}', a.preserve_dg_reveal)):
+    ap.error('--preserve-dg-reveal requires an API/Web release with --require-idle-guess and an uppercase eight-digit room ID')
+if a.preserve_guess_room and (not application_only or not a.require_idle_guess or any(not re.fullmatch(r'[0-9A-F]{8}:[1-9][0-9]{0,14}', entry) for entry in a.preserve_guess_room)):
+    ap.error('--preserve-guess-room requires an API/Web release with --require-idle-guess and a room ID with its positive version')
+if len({entry.split(':')[0] for entry in a.preserve_guess_room}) != len(a.preserve_guess_room):
+    ap.error('--preserve-guess-room requires distinct room IDs')
+if any(not re.fullmatch(r'/[A-Za-z0-9._/-]*', path) or path.startswith('//') for path in a.check_page):
+    ap.error('--check-page requires a site-relative path')
+if a.windbot_root:
+    assert not a.web_only and not a.cube_only
+    assert a.windbot_root.resolve().is_relative_to((duel_root / 'windbot'))
+    assert all((a.windbot_root/f).is_file() for f in ['run-windbot','WindBot.exe','cards.cdb'])
+assert re.fullmatch(r'[a-z0-9-]+', a.release)
+roots = instance_roots
+targets = {'ygocube': roots['ygocube']} if a.cube_only else roots
+stage = roots['ygocube']/'.staging'/a.release
+
+def run(*args): return subprocess.check_output(args, text=True).strip()
+def sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
+def switch(root, target):
+    link = root/(a.release+'-next')
+    link.symlink_to(target)
+    os.replace(link, root/'current')
+def occupied():
+    status = subprocess.run(['pgrep', '-x', 'ygopro'], stdout=subprocess.DEVNULL).returncode
+    if status not in (0, 1):
+        raise RuntimeError('Cannot inspect active duel hosts')
+    return status == 0
+
+
+class GuessMaintenance(resource_apply.ApplicationMaintenance):
+    check_guess = True
+    preserve_dg_reveal = ''
+    preserve_guess_rooms = ()
+
+    def occupied(self):
+        if super().occupied():
+            return True
+        try:
+            dbfile = self.cube_root / 'shared/data/cube.sqlite'
+            with closing(sqlite3.connect(dbfile.as_uri() + '?mode=ro', uri=True)) as db:
+                checks = [('dg_rooms', ('drawing', 'guessing', 'reveal', 'relay', 'relay_reveal'), 'Draw & Guess')]
+                if self.check_guess:
+                    checks.append(('guess_rooms', ('playing', 'between_rounds'), 'Guess the Card'))
+                for table, phases, game in checks:
+                    exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+                    placeholders = ', '.join('?' for _ in phases)
+                    where = f'phase IN ({placeholders})'
+                    params = phases
+                    if table == 'dg_rooms' and self.preserve_dg_reveal:
+                        where += " AND (room_id != ? OR phase != 'reveal' OR deadline_at IS NOT NULL)"
+                        params = (*phases, self.preserve_dg_reveal)
+                    if table == 'guess_rooms':
+                        for saved in self.preserve_guess_rooms:
+                            where += " AND (room_id != ? OR json_extract(state_json, '$.version') IS NOT ?)"
+                            params = (*params, *saved)
+                    if exists and db.execute(f'SELECT 1 FROM {table} WHERE {where} LIMIT 1', params).fetchone():
+                        print(f'An active {game} room prevents Cube maintenance', flush=True)
+                        return True
+        except sqlite3.Error:
+            print('Cannot verify card game rooms; deferring Cube maintenance', flush=True)
+            return True
+        return False
+
+
+def settle_guess_rooms(root, release, expected, include_lobby):
+    config_file = root/'current/config.yaml'
+    if not config_file.is_file():
+        config_file = root/'shared/config.yaml'
+    program = """
+        const { realpathSync } = require('node:fs');
+        const app = process.argv[1];
+        const { config } = require(app + '/config.js');
+        if (realpathSync(config.server.dbPath) !== process.argv[2]) {
+          throw new Error('Guess settlement database differs from the verified backup source');
+        }
+        const { closeDb } = require(app + '/db.js');
+        const { settleOpenGuessRoomsForMaintenance } = require(app + '/guess/guess.service.js');
+        try {
+          process.stdout.write(JSON.stringify(settleOpenGuessRoomsForMaintenance(process.argv[3] === 'true')));
+        } finally {
+          closeDb();
+        }
+    """
+    database = (root/'shared/data/cube.sqlite').resolve(strict=True)
+    result = subprocess.check_output(
+        ['runuser', '-u', 'ygocube', '--', 'env', f'CONFIG_FILE={config_file}', '/usr/bin/node',
+         '-e', program, str(release/'api/dist'), str(database), 'true' if include_lobby else 'false'],
+        cwd=release, text=True,
+    )
+    count = json.loads(result)
+    if type(count) is not int or count != expected:
+        raise RuntimeError(f'Guess settlement count differs from database backup: {count} instead of {expected}')
+    return count
+
+
+def health():
+    for _ in range(40):
+        try:
+            for port in [3001, 3101]:
+                with urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=3) as r: assert r.status == 200
+            with urllib.request.urlopen('http://127.0.0.1:3101/public/duel/options', timeout=5) as r: lists = json.load(r)['lists']
+            assert any(l.get('limits') for l in lists), 'Missing banlist contents'
+            return
+        except Exception: time.sleep(1)
+    raise RuntimeError('API health failed')
+
+assert sha(a.archive) == a.sha256
+if not stage.exists():
+    stage.mkdir(parents=True)
+    with tarfile.open(a.archive) as t:
+        for m in t.getmembers():
+            assert not P(m.name).is_absolute() and '..' not in P(m.name).parts
+        t.extractall(stage, filter='data')
+manifest = json.loads((stage/'manifest.json').read_text())
+for f, h in manifest['files'].items(): assert sha(stage/f) == h, f
+if application_only:
+    assert not any(f.startswith('srvpro/') for f in manifest['files']), 'API/Web update cannot include srvpro'
+olds = {n:(root/'current').resolve() for n,root in targets.items()}
+news = {n:root/'releases'/a.release for n,root in targets.items()}
+for n,new in news.items():
+    if new.exists():
+        assert (new/'COMMIT').read_text().strip() == manifest['sourceCommit']
+        continue
+    shutil.copytree(olds[n], new, symlinks=True, copy_function=resource_apply.hardlink_file)
+    shutil.rmtree(new/'web')
+    shutil.copytree(stage/n/'web', new/'web', symlinks=True)
+    if not a.web_only:
+        shutil.rmtree(new/'api/dist')
+        shutil.copytree(stage/'api/dist', new/'api/dist')
+        def replace_file(src, dst):
+            target=P(dst)
+            assert target.resolve().is_relative_to(new.resolve()), 'Application overlay touches shared runtime'
+            if target.is_file() or target.is_symlink():target.unlink()
+            return shutil.copy2(src,dst)
+        shutil.copytree(stage/'api/node_modules', new/'api/node_modules', dirs_exist_ok=True, copy_function=replace_file)
+        if not application_only:
+            shutil.copytree(stage/'srvpro', new/'srvpro', dirs_exist_ok=True, copy_function=replace_file)
+    app = new/'web'/('standalone/apps/web' if n == 'ygocube' else 'apps/web')
+    assert (app/'.next/static').is_dir() and (app/'.next/BUILD_ID').is_file()
+    old_static = olds[n]/'web'/('standalone/apps/web/.next/static' if n == 'ygocube' else 'apps/web/.next/static')
+    for src in old_static.rglob('*'):
+        target = app/'.next/static'/src.relative_to(old_static)
+        if src.is_file() and not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src, target)
+    metadata = dict(id=a.release, sourceCommit=manifest['sourceCommit'], sourceBranch=manifest.get('sourceBranch','unknown'), workingTreeChanges=False,
+                    previousRelease=olds[n].name, webBuildId=(app/'.next/BUILD_ID').read_text().strip(),
+                    artifactSha256=a.sha256, srvproCommit=manifest['srvproCommit'])
+    resource_apply.atomic_write_text(new/'release.json',json.dumps(metadata, indent=2))
+    sources = {'web': manifest['sourceCommit']}
+    if not a.web_only:
+        sources['api'] = manifest['sourceCommit']
+        if any(f.startswith('srvpro/') for f in manifest['files']):
+            sources['srvpro'] = manifest['srvproCommit']
+    resource_apply.record_components(new, sources, previous=olds[n])
+    resource_apply.atomic_write_text(new/'COMMIT',manifest['sourceCommit']+'\n')
+    resource_apply.atomic_write_text(new/'RELEASE_ID',a.release+'\n')
+    if n=='ygoduel':resource_apply.link_existing_release_resources(roots['ygocube'],new)
+    resource_apply.set_release_ownership(new,user=n)
+    run('/usr/bin/node','-e',"require(process.argv[1]+'/node_modules/ws'); require(process.argv[1]+'/node_modules/@ygocube/duel-protocol')",str(new/'api'))
+if not a.activate:
+    print(json.dumps({'prepared':True,'release':a.release,'sourceCommit':manifest['sourceCommit']}))
+    raise SystemExit()
+# Parse both JSON-style and block YAML before stopping any service.
+windbot_config = None
+if a.windbot_root:
+    cfg = roots['ygoduel']/'shared/config.yaml'
+    windbot_config = json.loads(run('/usr/bin/node','-e',
+        "const fs=require('fs'),yaml=require(process.argv[1]);process.stdout.write(JSON.stringify(yaml.parse(fs.readFileSync(process.argv[2],'utf8'))))",
+        str(olds['ygoduel']/'api/node_modules/yaml'),str(cfg)))
+    assert isinstance(windbot_config, dict) and 'windbot' not in windbot_config, 'WindBot already configured'
+    windbot_config['windbot'] = dict(enabled=True, executable=str(a.windbot_root/'run-windbot'), cwd=str(a.windbot_root), database=str(a.windbot_root/'cards.cdb'), max_processes=4)
+assert a.web_only or not occupied(), 'Active duel host; deployment deferred'
+components = ['web'] if a.web_only else ['api','web'] if application_only else ['api','srvpro','web']
+services = [n+'-'+s for n in targets for s in components]
+unchanged = [n+'-'+s for n in roots for s in ['api','srvpro','web'] if n+'-'+s not in services]
+unchanged_state = {s: run('systemctl','show',s,'-p','MainPID','-p','ExecMainStartTimestamp') for s in unchanged}
+nginx = run('systemctl','show','nginx','-p','MainPID','-p','ExecMainStartTimestamp')
+for n,root in targets.items():
+    backup=root/'backups'/a.release
+    backup.mkdir(parents=True,exist_ok=False)
+    (backup/'previous-release.txt').write_text(str(olds[n]))
+    config_file = root/'current/config.yaml'
+    if not config_file.exists(): config_file = root/'shared/config.yaml'
+    shutil.copy2(config_file,backup/'config.yaml')
+guard_guess = a.require_idle_guess or settle_guess
+maintenance_type = GuessMaintenance if guard_guess else resource_apply.ApplicationMaintenance
+maintenance = None if a.web_only else maintenance_type(roots['ygocube'], roots['ygoduel'], services)
+if maintenance:
+    if a.require_idle_guess and a.preserve_dg_reveal:
+        maintenance.preserve_dg_reveal = a.preserve_dg_reveal
+    if a.require_idle_guess and a.preserve_guess_room:
+        maintenance.preserve_guess_rooms = tuple(
+            (room_id, int(version)) for room_id, version in (entry.split(':') for entry in a.preserve_guess_room)
+        )
+    if settle_guess:
+        maintenance.check_guess = False
+    maintenance.begin()
+candidate_started = False
+settled_guess_rooms = None
+try:
+    if maintenance:
+        maintenance.stop_services()
+    else:
+        run('systemctl','stop',*services)
+    if settle_guess:
+        maintenance.check_guess = True
+    if a.windbot_root:
+        (roots['ygoduel']/'shared/config.yaml').write_text(json.dumps(windbot_config, indent=2)+'\n')
+    for n,root in targets.items():
+        dbfile=root/'shared/data'/('cube.sqlite' if n=='ygocube' else 'duel.sqlite')
+        with closing(sqlite3.connect(dbfile.as_uri() + '?mode=ro', uri=True)) as db, \
+                closing(sqlite3.connect(root/'backups'/a.release/dbfile.name)) as out:
+            db.backup(out)
+            assert out.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
+            assert out.execute('PRAGMA foreign_key_check').fetchone() is None
+            if settle_guess and n == 'ygocube':
+                phases = ('lobby', 'playing', 'between_rounds') if a.settle_open_guess else ('playing', 'between_rounds')
+                placeholders = ', '.join('?' for _ in phases)
+                expected_guess_rooms = out.execute(
+                    f'SELECT COUNT(*) FROM guess_rooms WHERE phase IN ({placeholders})', phases,
+                ).fetchone()[0]
+    if settle_guess:
+        cube_root = roots['ygocube']
+        settled_guess_rooms = settle_guess_rooms(cube_root, news['ygocube'], expected_guess_rooms, a.settle_open_guess)
+        receipt = {'settledGuessRooms': settled_guess_rooms}
+        (cube_root/'backups'/a.release/'guess-settlement.json').write_text(json.dumps(receipt) + '\n')
+        print(json.dumps(receipt), flush=True)
+    for n,root in targets.items():
+        switch(root,news[n])
+    candidate_started = True
+    run('systemctl','start',*services)
+    health()
+    results={}
+    for route in dict.fromkeys(['/','/duel','/duel/decks','/duel/bot/', *a.check_page]):
+        for attempt in range(30):
+            try:
+                with urllib.request.urlopen(public_origin+route,timeout=10) as r: html=r.read().decode()
+                break
+            except Exception:
+                if attempt==29: raise
+                time.sleep(1)
+        assets=set(re.findall(r'(?:src|href)="([^" ]+\.(?:js|css)(?:\?[^" ]*)?)"',html)); assert assets
+        for asset in assets:
+            with urllib.request.urlopen(public_origin+asset,timeout=10) as r:
+                assert r.status==200
+                assert ('javascript' in r.headers.get('Content-Type','') if '.js' in asset else 'text/css' in r.headers.get('Content-Type',''))
+        results[route]={'status':200,'assets':len(assets)}
+    assert all(s=='active' for s in run('systemctl','is-active',*services,*unchanged,'nginx').splitlines())
+    assert all(unchanged_state[s] == run('systemctl','show',s,'-p','MainPID','-p','ExecMainStartTimestamp') for s in unchanged)
+    assert nginx==run('systemctl','show','nginx','-p','MainPID','-p','ExecMainStartTimestamp')
+except Exception:
+    if maintenance and candidate_started:
+        maintenance.stop_services()
+    if a.windbot_root:
+        shutil.copy2(roots['ygoduel']/'backups'/a.release/'config.yaml', roots['ygoduel']/'shared/config.yaml')
+    for n,root in targets.items():
+        if (root/'current').resolve()!=olds[n]: switch(root,olds[n])
+    run('systemctl', 'start' if maintenance else 'restart', *services)
+    health()
+    if maintenance:
+        maintenance.finish()
+    raise
+if maintenance:
+    maintenance.finish()
+result={'ok':True,'release':a.release,'commit':manifest['sourceCommit'],'pages':results,'services':services+unchanged+['nginx'],'webOnly':a.web_only,'cubeOnly':a.cube_only,'apiWebOnly':application_only and not a.web_only}
+if a.preserve_dg_reveal:
+    result['allowedUntimedDgReveal'] = a.preserve_dg_reveal
+if a.preserve_guess_room:
+    result['allowedGuessRooms'] = a.preserve_guess_room
+    if len(a.preserve_guess_room) == 1:
+        result['allowedGuessRoom'] = a.preserve_guess_room[0]
+if settled_guess_rooms is not None:
+    result['settledGuessRooms'] = settled_guess_rooms
+for n,root in targets.items(): (root/'backups'/a.release/'verification.json').write_text(json.dumps(result,indent=2))
+print(json.dumps(result))

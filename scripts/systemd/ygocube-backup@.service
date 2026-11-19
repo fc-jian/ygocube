@@ -1,0 +1,10 @@
+[Unit]
+Description=Verified SQLite backup for %i
+
+[Service]
+Type=oneshot
+UMask=0077
+EnvironmentFile=/etc/ygocube-backup-%i.conf
+ExecStart=/bin/bash -ec 'exec /usr/bin/python3 "$${BACKUP_SCRIPT}" --db "$${DATABASE}" --destination "$${BACKUP_DIRECTORY}/%i-$$(date -u +%%Y%%m%%dT%%H%%M%%S)-$$$$.sqlite" --mirror-dir "$${MIRROR_DIRECTORY}"'
+NoNewPrivileges=true
+PrivateTmp=true
