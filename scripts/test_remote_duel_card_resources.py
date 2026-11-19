@@ -271,6 +271,16 @@ class RemoteDuelResourceApplyTests(unittest.TestCase):
                 db.execute("UPDATE guess_rooms SET state_json = '{\"version\":11}' WHERE room_id = '11223344'")
                 db.commit()
                 self.assertTrue(guard.occupied())
+                db.execute("DELETE FROM guess_rooms")
+                db.commit()
+                paired = env['GuessMaintenance'](root, root, ['ygocube-api', 'ygoduel-api'])
+                paired.preserve_dg_reveal = guard.preserve_dg_reveal
+                with closing(sqlite3.connect(dbfile.with_name('duel.sqlite'))) as duel:
+                    duel.executescript("CREATE TABLE tournaments (status TEXT); INSERT INTO tournaments VALUES ('drafting');")
+                    self.assertTrue(paired.occupied())
+                    duel.execute("UPDATE tournaments SET status='registration'")
+                    duel.commit()
+                    self.assertFalse(paired.occupied())
 
     def test_banlist_api_names_keep_upstream_calendar_dates(self) -> None:
         self.assertEqual(REMOTE.banlist_api_name("2026.10"), "2026.10.01 OCG")

@@ -80,29 +80,36 @@ class GuessMaintenance(resource_apply.ApplicationMaintenance):
         if super().occupied():
             return True
         try:
-            dbfile = self.cube_root / 'shared/data/cube.sqlite'
-            with closing(sqlite3.connect(dbfile.as_uri() + '?mode=ro', uri=True)) as db:
-                checks = [('dg_rooms', ('drawing', 'guessing', 'reveal', 'relay', 'relay_reveal'), 'Draw & Guess')]
-                if self.check_guess:
-                    checks.append(('guess_rooms', ('playing', 'between_rounds'), 'Guess the Card'))
-                for table, phases, game in checks:
-                    exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
-                    placeholders = ', '.join('?' for _ in phases)
-                    where = f'phase IN ({placeholders})'
-                    params = phases
-                    if table == 'dg_rooms' and self.preserve_dg_reveal:
-                        where += " AND (room_id != ? OR phase != 'reveal' OR deadline_at IS NOT NULL)"
-                        params = (*phases, self.preserve_dg_reveal)
-                    if table == 'guess_rooms':
-                        for saved in self.preserve_guess_rooms:
-                            where += " AND (room_id != ? OR json_extract(state_json, '$.version') IS NOT ?)"
-                            params = (*params, *saved)
-                    if exists and db.execute(f'SELECT 1 FROM {table} WHERE {where} LIMIT 1', params).fetchone():
-                        print(f'An active {game} room prevents Cube maintenance', flush=True)
-                        return True
+            if self.games_active(self.cube_root/'shared/data/cube.sqlite', cube=True):
+                return True
+            if 'ygoduel' in self.stacks and self.games_active(self.duel_root/'shared/data/duel.sqlite', cube=False):
+                return True
         except sqlite3.Error:
             print('Cannot verify card game rooms; deferring Cube maintenance', flush=True)
             return True
+        return False
+
+    def games_active(self, dbfile, *, cube):
+        with closing(sqlite3.connect(dbfile.as_uri() + '?mode=ro', uri=True)) as db:
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if 'tournaments' in tables and db.execute("SELECT 1 FROM tournaments WHERE status='drafting' LIMIT 1").fetchone():
+                return True
+            checks = [('dg_rooms', ('drawing', 'guessing', 'reveal', 'relay', 'relay_reveal'), 'Draw & Guess')]
+            if self.check_guess or not cube:
+                checks.append(('guess_rooms', ('playing', 'between_rounds'), 'Guess the Card'))
+            for table, phases, game in checks:
+                where = 'phase IN (' + ','.join('?' for _ in phases) + ')'
+                params = phases
+                if cube and table == 'dg_rooms' and self.preserve_dg_reveal:
+                    where += " AND (room_id != ? OR phase != 'reveal' OR deadline_at IS NOT NULL)"
+                    params = (*params, self.preserve_dg_reveal)
+                if cube and table == 'guess_rooms':
+                    for saved in self.preserve_guess_rooms:
+                        where += " AND (room_id != ? OR json_extract(state_json, '$.version') IS NOT ?)"
+                        params = (*params, *saved)
+                if table in tables and db.execute(f'SELECT 1 FROM {table} WHERE {where} LIMIT 1', params).fetchone():
+                    print(f'An active {game} room prevents maintenance', flush=True)
+                    return True
         return False
 
 

@@ -139,7 +139,8 @@ describe('Guess pool votes and CSV HTTP', () => {
     const count = getDb().prepare('SELECT COUNT(*) FROM guess_pool_card_votes WHERE pool_id = ?').pluck().get(id) as number;
     expect(count).toBeGreaterThanOrEqual(1);
     expect(count).toBeLessThanOrEqual(2);
-    const votes = (await request<GuessCardPage>(`/pools/${id}/cards`, '192.0.2.2')).body.cards[0].votes!;
+    const page = (await request<GuessCardPage>(`/pools/${id}/cards`, '192.0.2.2')).body;
+    const votes = page.cards.find(({ code }) => code === members[0])!.votes!;
     expect(votes.mine).toBe('like');
     expect(votes.likes + votes.dislikes).toBe(count);
   });
