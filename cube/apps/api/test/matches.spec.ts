@@ -1,5 +1,5 @@
 import { useTestDb, makeTournaments, TEST_POOL } from './helpers';
-import { loadState } from '../src/events/events.service';
+import { loadState, logEvent } from '../src/events/events.service';
 import { MatchesService } from '../src/matches/matches.service';
 import { DecksService } from '../src/decks/decks.service';
 import { CardsService } from '../src/cards/cards.service';
@@ -471,6 +471,39 @@ describe('manual results & fault detection', () => {
     // 再次轮询：faulted 对局被排除，不会重复标记（时间戳不变）
     await poll();
     expect(loadState(tid).matches.find((x) => x.id === m.id)!.faultedAt).toBe(faultedAt);
+  });
+
+  it.each(['admin', 'webhook', 'freeze', 'invalidate', 'late404'])('ignores a pending poll after %s changes the match', async (change) => {
+    const { matches, tid, fake } = setupMatches(2);
+    matches.startRound(tid, 1, 'test');
+    await waitRooms();
+    const m = loadState(tid).matches[0];
+    let resolve!: (value: any) => void;
+    let reject!: (error: any) => void;
+    fake.roomStatus = jest.fn(() => new Promise<any>((yes, no) => { resolve = yes; reject = no; }));
+    const pending = (matches as any).pollAll();
+    if (change === 'admin' || change === 'late404') matches.setMatchResult(tid, 1, m.tableNo, 0, 2);
+    if (change === 'webhook') matches.onWebhook({ room_name: m.roomName, players: [{ player_id: m.playerA, score: 0 }, { player_id: m.playerB, score: 2 }] });
+    if (change === 'freeze') logEvent(tid, 'tournament', 'frozen', true, 'test');
+    if (change === 'invalidate') matches.invalidateTournament(tid);
+    const before = { ...loadState(tid).matches[0] };
+    if (change === 'late404') reject(Object.assign(new Error('gone'), { response: { status: 404 } }));
+    else resolve({ ok: true, finished: true, scores: { [m.playerA]: 2, [m.playerB]: 0 } });
+    await pending;
+    expect(loadState(tid).matches[0]).toEqual(before);
+  });
+
+  it('does not start overlapping poll sweeps when srvpro responds slowly', async () => {
+    const { matches, tid, fake } = setupMatches(2);
+    matches.startRound(tid, 1, 'test');
+    await waitRooms();
+    let resolve!: (value: any) => void;
+    fake.roomStatus = jest.fn(() => new Promise<any>(yes => { resolve = yes; }));
+    const pending = (matches as any).pollAll();
+    void (matches as any).pollAll();
+    expect(fake.roomStatus).toHaveBeenCalledTimes(1);
+    resolve({ ok: true, finished: false });
+    await pending;
   });
 });
 

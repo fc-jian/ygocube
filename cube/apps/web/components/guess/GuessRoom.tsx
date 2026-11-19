@@ -298,6 +298,10 @@ export function GuessRoom({ roomId }: { roomId: string }) {
         <div className="min-w-0">
           <p className="guess-kicker">{text.roomCode} <span>{roomId}</span></p>
           <h1>{room?.name ?? spectator?.name ?? text.join}</h1>
+          <div className="flex flex-wrap gap-2">
+            {(room ?? spectator)?.expertMode && <span className="guess-pill">{text.expertMode}</span>}
+            {(room ?? spectator)?.disableOpeningHints && <span className="guess-pill">{text.disableOpeningHints}</span>}
+          </div>
         </div>
         <button type="button" className="guess-secondary" onClick={() => void copyLink()}>
           {copied ? text.copied : text.copy}
@@ -343,7 +347,9 @@ export function GuessRoom({ roomId }: { roomId: string }) {
           <section className="guess-panel guess-play">
             <PreviousSurrender room={room} text={text} />
             {playing && <>
-              <h2>{text.pool} <span className="guess-muted">({room.poolCount.toLocaleString(language)})</span></h2>
+              <h2>{room.expertMode ? text.nameSearchLabel : text.pool}<span className="guess-muted">
+                {room.expertMode ? ` · ${text.fullPool}` : ` (${room.poolCount.toLocaleString(language)})`}
+              </span></h2>
               {openingHint && <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1" data-guess-opening-hint>
                 <span className="guess-muted">{text.hintMethods[openingHint.method]}</span>
                 <GuessHintButton hint={openingHint} text={text} />
@@ -394,6 +400,7 @@ export function GuessRoom({ roomId }: { roomId: string }) {
             {room.finishReason && <p className="guess-muted">{text.finishReasons[room.finishReason]}</p>}
             {room.round > 0 && <GuessHistory guesses={room.viewerGuesses} text={text} />}
             {playing && <GuessCards key={room.round} text={text} language={language} path={`${roomPath}/cards`} token={token} mode="select"
+              searchMode={room.expertMode ? 'name' : 'full'}
               selected={new Set(selected ? [selected.code] : [])} enabled={canGuess && !busy}
               wrongGuesses={new Set(room.viewerWrongGuessCodes ?? [])}
               choose={(card) => void act({ action: 'select', version: room.version, code: card.code })} />}

@@ -2,9 +2,11 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import { API_BASE } from '@/lib/api';
 import { FormEvent, useState } from 'react';
 import type { GuessPoolCreateRequest, GuessPoolSummary } from '@ygocube/shared';
 import { GuessCards } from './GuessCards';
+import { GuessPoolCardVote, GuessPoolProposalsPanel } from './GuessPoolVotes';
 import { GuessFrame, useGuessLanguage } from './GuessFrame';
 import { GUESS_PATH, guessError, guessRequest, useGuessResource } from './guess-client';
 import { fillText } from './guess-text';
@@ -101,13 +103,17 @@ export function GuessPoolDetail({ poolId }: { poolId: number }) {
     <GuessFrame language={language} changeLanguage={changeLanguage}>
       <header className="guess-room-head">
         <h1>{data ? data.poolId === 0 ? text.fullPool : data.name : text.pools}</h1>
-        {data && <span className="guess-pill">{fillText(text.cardCount, { count: data.cardCount.toLocaleString(language) })}</span>}
+        {data && <div className="guess-inline">
+          <span className="guess-pill">{fillText(text.cardCount, { count: data.cardCount.toLocaleString(language) })}</span>
+          <a className="guess-secondary" href={`${API_BASE}${GUESS_PATH}${path}/export.csv`} title={text.downloadPoolCsvHelp} download>{text.downloadPoolCsv}</a>
+        </div>}
       </header>
       {error != null && <p className="guess-error" role="alert">{guessError(error, text)}</p>}
       {!data && error == null && <p className="guess-muted" role="status">{text.loading}</p>}
       {data && <section className="guess-panel max-w-3xl">
-        <p className="guess-muted">{text.statsHelp}</p>
-        <GuessCards text={text} language={language} path={`${path}/cards`} mode="browse" />
+        <GuessPoolProposalsPanel key={poolId} poolId={poolId} text={text} language={language} />
+        <GuessCards text={text} language={language} path={`${path}/cards`} mode="browse" helpOnHover voteSorting searchMode={data.browseOnly ? 'name' : 'full'}
+          renderCardActions={(card, refresh) => <GuessPoolCardVote key={`${poolId}:${card.code}`} poolId={poolId} card={card} text={text} onChanged={refresh} />} />
       </section>}
     </GuessFrame>
   );

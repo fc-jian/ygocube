@@ -6,6 +6,16 @@ type OpeningCard = Pick<CardInfo, 'code' | 'type' | 'level' | 'attribute' | 'atk
 type CardGroups = Record<GuessOpeningHintMethod, GuessOpeningHintGroup | undefined>;
 type HintPools = Partial<Record<GuessOpeningHintGroup, number[]>>;
 
+export interface OpeningHintHistory {
+  lastGroup: GuessOpeningHintGroup;
+  counts: ReadonlyMap<GuessOpeningHintGroup, number>;
+}
+
+interface WeightedChoice<T> {
+  value: T;
+  weight: number;
+}
+
 const MONSTER = 0x1;
 const RITUAL = 0x80;
 const XYZ = 0x800000;
@@ -14,8 +24,22 @@ const LINK = 0x4000000;
 const LIGHT = 0x10;
 const DARK = 0x20;
 const WIND = 0x8;
-const PROPOSALS = 24;
-const REFERENCE_POOL_SIZE = 2378;
+const RANDOM_RANGE = 2 ** 48 - 1;
+
+// Older rounds used the same visible field-size labels with different group IDs.
+const LEGACY_FIELD_GROUPS: Partial<Record<GuessOpeningHintGroup, GuessOpeningHintGroup>> = {
+  'small-field': 'distinct-field-small',
+  'medium-field': 'distinct-field-medium',
+  'large-field': 'distinct-field-large',
+  'catalog-field-small': 'distinct-field-small',
+  'catalog-field-medium': 'distinct-field-medium',
+  'catalog-field-large': 'distinct-field-large',
+};
+
+export function openingHintHistoryGroup(group: GuessOpeningHintGroup): GuessOpeningHintGroup {
+  return LEGACY_FIELD_GROUPS[group] ?? group;
+}
+
 function groups(card: OpeningCard, largestField: number | null): CardGroups {
   const year = card.releaseYear;
   const releaseEra = year === undefined ? undefined : year <= 2014 ? 'through-2014'
@@ -89,27 +113,49 @@ export function buildOpeningHintOptions(
   return { options, pools };
 }
 
+function weightedChoice<T>(choices: readonly WeightedChoice<T>[], fraction: number): T {
+  let cursor = fraction * choices.reduce((total, choice) => total + choice.weight, 0);
+  for (const choice of choices) {
+    cursor -= choice.weight;
+    if (cursor < 0) return choice.value;
+  }
+  return choices[choices.length - 1].value;
+}
+
+function drawHint(choices: readonly GuessOpeningHint[], history: OpeningHintHistory | undefined, percentile: number) {
+  const byGroup = new Map<GuessOpeningHintGroup, GuessOpeningHint[]>();
+  for (const hint of choices) {
+    if (hint.group === history?.lastGroup) continue;
+    const methods = byGroup.get(hint.group);
+    if (methods) methods.push(hint);
+    else byGroup.set(hint.group, [hint]);
+  }
+
+  const bySize = new Map<number, WeightedChoice<GuessOpeningHint[]>[]>();
+  for (const [group, methods] of byGroup) {
+    const size = methods[0].candidateCount;
+    const choice = { value: methods, weight: 1 / (1 + (history?.counts.get(group) ?? 0)) };
+    const sizeChoices = bySize.get(size);
+    if (sizeChoices) sizeChoices.push(choice);
+    else bySize.set(size, [choice]);
+  }
+
+  const sizes = [...bySize.entries()].sort(([a], [b]) => a - b).map(([, choices]) => ({
+    value: choices,
+    weight: choices.reduce((total, choice) => total + choice.weight, 0),
+  }));
+  const sizeChoices = weightedChoice(sizes, percentile);
+  const methods = weightedChoice(sizeChoices, randomInt(RANDOM_RANGE) / RANDOM_RANGE);
+  return methods[randomInt(methods.length)];
+}
+
 export function drawOpeningHints(
   cards: readonly OpeningCard[], answers: readonly number[], fieldSizes: ReadonlyMap<number, number>,
+  histories: readonly (OpeningHintHistory | undefined)[] = [],
 ): { hints: GuessOpeningHint[]; pools: HintPools } {
   const { options, pools } = buildOpeningHintOptions(cards, answers, fieldSizes);
-  const tolerance = 150 * cards.length / REFERENCE_POOL_SIZE;
-  const halfLife = 40 * cards.length / REFERENCE_POOL_SIZE;
-  const proposals = Array.from({ length: PROPOSALS }, () => {
-    const hints = options.map((choices) => choices[randomInt(choices.length)]);
-    const counts = hints.map((hint) => hint.candidateCount);
-    const spread = Math.max(...counts) - Math.min(...counts);
-    return { hints, weight: 2 ** (-Math.max(0, spread - tolerance) / halfLife) };
-  });
-  const randomRange = 2 ** 48 - 1;
-  let cursor = randomInt(randomRange) / randomRange * proposals.reduce((total, p) => total + p.weight, 0);
-  let chosen = proposals[proposals.length - 1];
-  for (const proposal of proposals) {
-    cursor -= proposal.weight;
-    if (cursor < 0) {
-      chosen = proposal;
-      break;
-    }
-  }
-  return { hints: chosen.hints, pools: Object.fromEntries(chosen.hints.map(({ group }) => [group, pools[group]!])) };
+  // Share the rank within each player's candidate sizes, while drawing independently within a size.
+  const percentile = randomInt(RANDOM_RANGE) / RANDOM_RANGE;
+  const hints = options.map((choices, i) => drawHint(choices, histories[i], percentile));
+  return { hints, pools: Object.fromEntries(hints.map(({ group }) => [group, pools[group]!])) };
 }

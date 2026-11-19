@@ -11,8 +11,9 @@ import type {
 import { safeHashEqual, sha256 } from '../auth/auth.guard';
 import { CardsService, TYPE_TOKEN } from '../cards/cards.service';
 import { getDb } from '../db';
+import { randomSample } from '../games/random-sample';
 import { GuessPoolsService } from './guess-pools.service';
-import { drawOpeningHints } from './opening-hints';
+import { drawOpeningHints, openingHintHistoryGroup } from './opening-hints';
 
 const ROOM_IDLE_MS = 24 * 60 * 60 * 1000;
 const EXPIRY_INTERVAL_MS = 60 * 1000;
@@ -48,6 +49,7 @@ interface Round {
   lastMove: GuessMove | null;
   selectedCode?: number;
   hintPools?: Partial<Record<GuessOpeningHintGroup, number[]>>;
+  poolCodes?: number[];
   previousSurrender?: PreviousSurrender;
 }
 
@@ -57,6 +59,8 @@ interface Room {
   poolId: number;
   poolName: string;
   poolCount: number;
+  expertMode?: boolean;
+  disableOpeningHints?: boolean;
   phase: GuessRoomView['phase'];
   finishReason?: SystemFinishReason;
   players: Player[];
@@ -86,15 +90,6 @@ interface SubmittedGuessRow {
   outcome: 'correct' | 'incorrect';
 }
 
-function sample<T>(values: readonly T[], count: number): T[] {
-  const items = [...values];
-  for (let index = 0; index < count; index++) {
-    const other = randomInt(index, items.length);
-    [items[index], items[other]] = [items[other], items[index]];
-  }
-  return items.slice(0, count);
-}
-
 function newPlayer(playerId: string) {
   const token = randomBytes(32).toString('hex');
   return { player: { playerId, tokenHash: sha256(token), score: 0 }, token };
@@ -112,6 +107,8 @@ function summary(room: Room): GuessRoomSummary {
     maxPlayers: room.poolCount,
     poolId: room.poolId,
     poolName: room.poolName,
+    expertMode: room.expertMode === true,
+    disableOpeningHints: room.disableOpeningHints === true,
   };
 }
 
@@ -256,7 +253,7 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
     const db = getDb();
     return db.transaction(() => {
       const pool = this.pools.get(input.poolId);
-      const poolCount = this.pools.availableCodes(pool.codes).length;
+      const poolCount = this.pools.availableCodes(pool.codes, input.expertMode).length;
       if (poolCount === 0) throw new BadRequestException({ code: 'GUESS_INVALID_POOL' });
       const exists = db.prepare('SELECT 1 FROM guess_rooms WHERE room_id = ?');
       let roomId = randomBytes(4).toString('hex').toUpperCase();
@@ -268,6 +265,8 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
         poolId: pool.poolId,
         poolName: pool.name,
         poolCount,
+        expertMode: input.expertMode === true,
+        disableOpeningHints: input.disableOpeningHints === true,
         phase: 'lobby',
         players: [player],
         version: 0,
@@ -311,7 +310,13 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
   search(roomId: string, authorization: string | undefined, params: CardSearchParams): GuessCardPage {
     const room = this.load(roomId);
     const { playerId } = this.authenticate(room, authorization);
-    const codes = this.openingCandidates(room.round, playerId) ?? this.pools.get(room.poolId).codes;
+    if (room.expertMode) {
+      if (Object.values(params.filters).some((value) => value !== undefined) || params.sort !== 'relevance') {
+        throw new BadRequestException({ code: 'GUESS_FILTERS_DISABLED' });
+      }
+      return this.cards.searchCatalogNames(params);
+    }
+    const codes = this.openingCandidates(room.round, playerId) ?? this.roundPoolCodes(room);
     return this.pools.search(params, codes);
   }
 
@@ -403,11 +408,18 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
     const participants = activePlayers(room);
     const count = participants.length;
     if (count === 0) throw new ConflictException({ code: 'GUESS_NEED_PLAYERS' });
-    const codes = this.pools.availableCodes(this.pools.get(room.poolId).codes);
+    const codes = this.pools.availableCodes(this.pools.get(room.poolId).codes, room.expertMode);
     if (codes.length < count) throw new ConflictException({ code: 'GUESS_POOL_TOO_SMALL' });
-    const answers = sample(codes, count);
-    const { hints, pools: hintPools } = drawOpeningHints(this.cards.getMany(codes), answers, this.cards.poolFieldSizes());
-    const seats = sample(participants, count).map((player, index) => ({
+    const answers = randomSample(codes, count);
+    const seating = randomSample(participants, count);
+    const history = room.disableOpeningHints ? undefined : this.openingHintHistory(room);
+    const { hints, pools: hintPools } = room.disableOpeningHints
+      ? { hints: [], pools: {} }
+      : drawOpeningHints(
+        this.cards.getMany(codes), answers, this.cards.poolFieldSizes(),
+        seating.map(({ playerId }) => history?.get(playerId)),
+      );
+    const seats = seating.map((player, index) => ({
       playerId: player.playerId, code: answers[index], points: null, attempts: 0, openingHint: hints[index],
     }));
     room.round = {
@@ -421,6 +433,37 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
     room.phase = 'playing';
   }
 
+  private openingHintHistory(room: Room) {
+    const history = new Map<string, {
+      lastGroup: GuessOpeningHintGroup;
+      counts: Map<GuessOpeningHintGroup, number>;
+    }>();
+    if (!room.round) return history;
+
+    const rows = getDb().prepare(`
+      SELECT json_extract(seat.value, '$.playerId') AS playerId,
+        json_extract(seat.value, '$.openingHint.group') AS groupId, COUNT(*) AS count
+      FROM guess_room_events AS event CROSS JOIN json_each(event.event_json, '$.round.seats') AS seat
+      WHERE event.room_id = @roomId AND event.version <= @version
+        AND json_extract(event.event_json, '$.action') IN ('start', 'next')
+        AND json_type(seat.value, '$.openingHint.group') = 'text'
+      GROUP BY playerId, groupId
+      ORDER BY MAX(event.version)
+    `).all({ roomId: room.roomId, version: room.version }) as {
+      playerId: string;
+      groupId: GuessOpeningHintGroup;
+      count: number;
+    }[];
+    for (const { playerId, groupId, count } of rows) {
+      const group = openingHintHistoryGroup(groupId);
+      const entry = history.get(playerId) ?? { lastGroup: group, counts: new Map<GuessOpeningHintGroup, number>() };
+      entry.counts.set(group, (entry.counts.get(group) ?? 0) + count);
+      entry.lastGroup = group;
+      history.set(playerId, entry);
+    }
+    return history;
+  }
+
   private openingCandidates(round: Round | null, playerId: string): number[] | undefined {
     const seat = round?.seats.find((entry) => entry.playerId === playerId);
     if (!round || !seat?.openingHint) return undefined;
@@ -428,17 +471,28 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
     return (round.hintPools?.[seat.openingHint.group] ?? []).filter((code) => !visibleCodes.has(code));
   }
 
+  private roundPoolCodes(room: Room): number[] | null {
+    return room.round?.poolCodes ?? this.pools.get(room.poolId).codes;
+  }
+
+  private guessIdentity(room: Room, code: number): number {
+    return room.expertMode ? this.cards.artworkCode(code) : code;
+  }
+
   private guessCard(room: Room, playerId: string, code: number) {
     const card = this.cards.get(code);
     if (!card || (card.type & TYPE_TOKEN)) {
       throw new BadRequestException({ code: 'GUESS_CARD_NOT_IN_POOL' });
     }
-    const candidates = this.openingCandidates(room.round, playerId);
-    const allowed = candidates ?? this.pools.get(room.poolId).codes;
-    if (allowed && !allowed.includes(code)) {
-      throw new BadRequestException({ code: candidates ? 'GUESS_CARD_OUTSIDE_HINT' : 'GUESS_CARD_NOT_IN_POOL' });
+    if (!room.expertMode) {
+      const candidates = this.openingCandidates(room.round, playerId);
+      const allowed = candidates ?? this.roundPoolCodes(room);
+      if (allowed && !allowed.includes(code)) {
+        throw new BadRequestException({ code: candidates ? 'GUESS_CARD_OUTSIDE_HINT' : 'GUESS_CARD_NOT_IN_POOL' });
+      }
     }
-    if (this.submittedGuesses(room, playerId).some((guess) => guess.code === code && guess.outcome === 'incorrect')) {
+    const identity = this.guessIdentity(room, code);
+    if (this.submittedGuesses(room, playerId).some((guess) => guess.outcome === 'incorrect' && this.guessIdentity(room, guess.code) === identity)) {
       throw new ConflictException({ code: 'GUESS_CARD_ALREADY_GUESSED' });
     }
     return card;
@@ -476,7 +530,7 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
     } else if (command.action === 'guess') {
       const card = this.guessCard(room, player.playerId, command.code);
       move.card = cardRef(card);
-      if (card.code === seat.code) {
+      if (this.guessIdentity(room, card.code) === this.guessIdentity(room, seat.code)) {
         move.points = remaining;
         move.outcome = 'correct';
         player.score += remaining;
@@ -568,9 +622,9 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
       ...publicView,
       viewerId,
       viewerOpeningHint: ownSeat?.openingHint ?? null,
-      viewerCardKind: ownSeat?.openingHint ? null : cardKind(ownSeat && cards.get(ownSeat.code)?.type),
+      viewerCardKind: room.disableOpeningHints || ownSeat?.openingHint ? null : cardKind(ownSeat && cards.get(ownSeat.code)?.type),
       viewerGuesses: guesses.map(({ code }) => reference(code)),
-      viewerWrongGuessCodes: guesses.filter(({ outcome }) => outcome === 'incorrect').map(({ code }) => code),
+      viewerWrongGuessCodes: [...new Set(guesses.filter(({ outcome }) => outcome === 'incorrect').map(({ code }) => this.guessIdentity(room, code)))],
     };
   }
 }

@@ -25,9 +25,11 @@ const nextConfig = {
     ];
   },
   async rewrites() {
-    return [
+    // Let the server-side pool API route replace untrusted client IP headers
+    // before the remaining API paths use the generic upstream rewrite.
+    return { fallback: [
       { source: '/api/:path*', destination: `${process.env.CUBE_API_URL || 'http://127.0.0.1:3001'}/:path*` },
-    ];
+    ] };
   },
 };
 

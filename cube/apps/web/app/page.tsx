@@ -14,6 +14,7 @@ export default function HomePage() {
           <a href="/duel" className="yc-primary px-5 py-2.5 text-sm font-bold">网页对战</a>
           <a href="/duel/decks" className="yc-secondary px-5 py-2.5 text-sm font-semibold">卡组构筑</a>
           <a href="/games/guess" className="yc-secondary px-5 py-2.5 text-sm font-semibold">Guess the Card</a>
+          <a href="/games/dg/" className="yc-secondary px-5 py-2.5 text-sm font-semibold">Draw &amp; Guess</a>
           <a href="/create-tournament" className="yc-primary px-5 py-2.5 text-sm font-bold">创建比赛</a>
           <a href="/admin" className="yc-secondary px-5 py-2.5 text-sm font-semibold">管理控制台</a>
         </nav>

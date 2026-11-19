@@ -3,11 +3,14 @@
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { ConfirmModal } from '@/components/ConfirmModal';
+import { EdisonDraftRules } from '@/components/EdisonDraftRules';
+import { EDISON_E3_MAX_PLAYERS, type PoolDraftFormat } from '@ygocube/shared';
 
 interface PoolInfo {
   id: number;
   name: string;
   count: number;
+  draftFormat?: PoolDraftFormat;
   isDefault?: boolean;
   url?: string | null;
 }
@@ -90,7 +93,9 @@ export default function CreateTournamentPage() {
 
   // 默认牌堆总数为四轮（4 × 玩家数）；卡池不足时按可用完整牌堆减少轮数。
   // 用户手动编辑后保留其值，超过卡池上限时沿用后端的 use-all/取整规则。
-  const poolCount = pools.find((p) => p.name === cardPool)?.count ?? 0;
+  const selectedPool = pools.find((p) => p.name === cardPool);
+  const edison = selectedPool?.draftFormat === 'edison_e3';
+  const poolCount = selectedPool?.count ?? 0;
   const rawMaxPacks = Math.max(1, Math.floor(poolCount / Math.max(1, packSize)));
   const roundedMax = rawMaxPacks - (rawMaxPacks % maxPlayers);
   const maxPacks = evenPackCount ? (roundedMax >= maxPlayers ? roundedMax : rawMaxPacks) : rawMaxPacks;
@@ -113,12 +118,12 @@ export default function CreateTournamentPage() {
   const cardsPerPlayerLow = Math.floor(draftedCards / Math.max(1, maxPlayers));
   const cardsPerPlayerHigh = Math.ceil(draftedCards / Math.max(1, maxPlayers));
   const overLimitDrop = Math.max(0, poolCount - overLimitEffective * packSize);
-  const packCountInvalid = packCount !== '' && evenPackCount && Number(packCount) % maxPlayers !== 0;
-  const extraRatioInvalid = extraRatioEnabled && (!Number.isInteger(extraRatioPercent) || extraRatioPercent < 0 || extraRatioPercent > 100);
+  const packCountInvalid = !edison && packCount !== '' && evenPackCount && Number(packCount) % maxPlayers !== 0;
+  const extraRatioInvalid = !edison && extraRatioEnabled && (!Number.isInteger(extraRatioPercent) || extraRatioPercent < 0 || extraRatioPercent > 100);
   const extraPerPack = extraRatioEnabled ? Math.round(packSize * extraRatioPercent / 100) : 0;
   const mainPerPack = packSize - extraPerPack;
   // passing 模式公平性只取决于牌堆总数是否为人数倍数；每堆张数可以任意。
-  const unfair = effectivePacks % maxPlayers !== 0;
+  const unfair = !edison && effectivePacks % maxPlayers !== 0;
 
   const doCreate = async () => {
     const validationError = validateForm();
@@ -129,7 +134,12 @@ export default function CreateTournamentPage() {
     try {
       const r = await api<{ tid: number; url: string; created_by: string }>('/tournaments', {
         method: 'POST',
-        body: { name, maxPlayers, mode, packSize, cardPool, mainMin, mainMax, extraMax, sideMax, maxCopies, timeLimit, pickSeconds, deckbuildingSeconds: limitDeckbuilding ? deckbuildingSeconds : null, packStrategy, extraRatioPercent: extraRatioEnabled ? extraRatioPercent : null, packCount: packCount === '' ? undefined : Number(packCount), dropPublic, evenPackCount, reserveSeconds, reseatEachRound, matchFormat, swissRoundCount: matchFormat === 'swiss' ? swissRoundCount : undefined, playoffSize: matchFormat === 'swiss' ? playoffSize : 0 },
+        body: { name, maxPlayers, mode, cardPool, mainMin, mainMax, extraMax, sideMax, timeLimit, pickSeconds,
+          deckbuildingSeconds: limitDeckbuilding ? deckbuildingSeconds : null, dropPublic, reserveSeconds, matchFormat,
+          swissRoundCount: matchFormat === 'swiss' ? swissRoundCount : undefined, playoffSize: matchFormat === 'swiss' ? playoffSize : 0,
+          ...(!edison && { packSize, maxCopies, packStrategy, extraRatioPercent: extraRatioEnabled ? extraRatioPercent : null,
+            packCount: packCount === '' ? undefined : Number(packCount), evenPackCount, reseatEachRound }),
+        },
         createUsername: createUsername.trim() || undefined,
         createToken,
       });
@@ -144,8 +154,9 @@ export default function CreateTournamentPage() {
     if (!name.trim()) return '请输入比赛名称';
     if (!Number.isInteger(maxPlayers) || maxPlayers < 2 || maxPlayers > 32) return '人数必须是 2–32 的整数';
     if (!cardPool.trim()) return '请选择卡池';
-    if (!Number.isInteger(packSize) || packSize < 1 || packSize > 1000) return '每堆卡数必须是 1–1000 的整数';
-    if (packCount !== '' && (!Number.isInteger(Number(packCount)) || Number(packCount) < 1 || Number(packCount) > 10_000)) return '牌堆总数必须是 1–10000 的整数';
+    if (edison && maxPlayers > EDISON_E3_MAX_PLAYERS) return 'Edison 轮抽最多支持 9 人';
+    if (!edison && (!Number.isInteger(packSize) || packSize < 1 || packSize > 1000)) return '每堆卡数必须是 1–1000 的整数';
+    if (!edison && packCount !== '' && (!Number.isInteger(Number(packCount)) || Number(packCount) < 1 || Number(packCount) > 10_000)) return '牌堆总数必须是 1–10000 的整数';
     if (packCountInvalid) return `牌堆总数必须是人数（${maxPlayers}）的整数倍`;
     if (!Number.isInteger(mainMin) || mainMin < 0 || mainMin > 250) return '主卡组最小值必须是 0–250 的整数';
     if (!Number.isInteger(mainMax) || mainMax < 1 || mainMax > 250) return '主卡组最大值必须是 1–250 的整数';
@@ -209,7 +220,7 @@ export default function CreateTournamentPage() {
               <input
                 type="number"
                 min={2}
-                max={64}
+                max={edison ? EDISON_E3_MAX_PLAYERS : 32}
                 className="w-16 rounded bg-felt-deep px-2 py-1"
                 value={maxPlayers}
                 onChange={(e) => {
@@ -226,7 +237,7 @@ export default function CreateTournamentPage() {
                 <option value="single">单局（BO1）</option>
               </select>
             </label>
-            <label className="flex items-center gap-2">
+            <label className={edison ? 'hidden' : 'flex items-center gap-2'}>
               每堆卡数
               <input
                 type="number"
@@ -249,6 +260,7 @@ export default function CreateTournamentPage() {
               </select>
               {pools.length === 0 && <span className="text-xs text-red-300">暂无可用卡池，请先由管理员创建</span>}
             </label>
+            {edison && <EdisonDraftRules />}
           </div>
           <section className="rounded-lg border border-gold/25 bg-felt-deep/45 p-4">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -290,7 +302,7 @@ export default function CreateTournamentPage() {
             </label>
             <label className="flex items-center gap-2">
               单卡上限
-              <input type="number" min={1} max={3} className="w-14 rounded bg-felt-deep px-2 py-1" value={maxCopies} onChange={(e) => setMaxCopies(Math.min(3, Math.max(1, Number(e.target.value))))} />
+              <input type="number" min={1} max={3} className="w-14 rounded bg-felt-deep px-2 py-1" disabled={edison} value={edison ? 3 : maxCopies} onChange={(e) => setMaxCopies(Math.min(3, Math.max(1, Number(e.target.value))))} />
             </label>
             <label className="flex items-center gap-2">
               回合限时（秒）
@@ -311,85 +323,89 @@ export default function CreateTournamentPage() {
               保留时间（秒）
               <input type="number" min={0} max={3600} className="w-16 rounded bg-felt-deep px-2 py-1" value={reserveSeconds} onChange={(e) => setReserveSeconds(Math.max(0, Number(e.target.value)))} />
             </label>
-            <label className="flex items-center gap-2">
-              牌堆总数（轮数）
-              <input
-                type="number"
-                min={1}
-                className="w-16 rounded bg-felt-deep px-2 py-1"
-                placeholder="自动"
-                value={packCount}
-                onChange={(e) => {
-                  setPackCountTouched(true);
-                  setPackCount(e.target.value === '' ? '' : Math.max(1, Number(e.target.value)));
-                }}
-              />
-              <span className="text-xs text-slate-400">默认 {defaultPackCount} 堆（{Math.max(1, Math.ceil(defaultPackCount / Math.max(1, maxPlayers)))} 轮）</span>
-              {cardPool ? (
-                overLimit && !evenPackCount ? (
-                  <span className="text-xs text-amber-300">
-                    超过整除上限（{rawMaxPacks} 堆）：将使用全部 {poolCount} 张卡牌，不丢弃（最后一堆可能不满）
-                  </span>
-                ) : overLimit && evenPackCount ? (
-                  <span className="text-xs text-amber-300">
-                    超过整除上限（{rawMaxPacks} 堆）：将取整到 {effectivePacks} 堆（{maxPlayers} 的倍数）
-                    {overLimitDrop > 0 ? `，必然丢弃 ${overLimitDrop} 张卡牌` : '，恰好用尽卡池不丢弃'}
-                  </span>
+            {!edison && (<>
+              <label className="flex items-center gap-2">
+                牌堆总数（轮数）
+                <input
+                  type="number"
+                  min={1}
+                  className="w-16 rounded bg-felt-deep px-2 py-1"
+                  placeholder="自动"
+                  value={packCount}
+                  onChange={(e) => {
+                    setPackCountTouched(true);
+                    setPackCount(e.target.value === '' ? '' : Math.max(1, Number(e.target.value)));
+                  }}
+                />
+                <span className="text-xs text-slate-400">默认 {defaultPackCount} 堆（{Math.max(1, Math.ceil(defaultPackCount / Math.max(1, maxPlayers)))} 轮）</span>
+                {cardPool ? (
+                  overLimit && !evenPackCount ? (
+                    <span className="text-xs text-amber-300">
+                      超过整除上限（{rawMaxPacks} 堆）：将使用全部 {poolCount} 张卡牌，不丢弃（最后一堆可能不满）
+                    </span>
+                  ) : overLimit && evenPackCount ? (
+                    <span className="text-xs text-amber-300">
+                      超过整除上限（{rawMaxPacks} 堆）：将取整到 {effectivePacks} 堆（{maxPlayers} 的倍数）
+                      {overLimitDrop > 0 ? `，必然丢弃 ${overLimitDrop} 张卡牌` : '，恰好用尽卡池不丢弃'}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-slate-400">
+                      上限 {maxPacks} 堆{evenPackCount ? `（${maxPlayers} 的倍数）` : ''} · 使用 {effectivePacks * packSize} 张 · 剩余{' '}
+                      {Math.max(0, poolCount - effectivePacks * packSize)} 张随机丢弃
+                    </span>
+                  )
                 ) : (
-                  <span className="text-xs text-slate-400">
-                    上限 {maxPacks} 堆{evenPackCount ? `（${maxPlayers} 的倍数）` : ''} · 使用 {effectivePacks * packSize} 张 · 剩余{' '}
-                    {Math.max(0, poolCount - effectivePacks * packSize)} 张随机丢弃
-                  </span>
-                )
-              ) : (
-                <span className="text-xs text-slate-500">请先选择卡池</span>
-              )}
-              {packCountInvalid && <span className="text-xs text-red-300">牌堆总数必须是人数（{maxPlayers}）的整数倍</span>}
-            </label>
-            <div className="flex items-center rounded border border-emerald-300/20 bg-emerald-950/30 px-3 py-1.5 text-xs text-emerald-100">
-              每位玩家可获得：{cardsPerPlayerLow === cardsPerPlayerHigh ? <b className="ml-1 text-gold">{cardsPerPlayerLow} 张</b> : <b className="ml-1 text-amber-300">{cardsPerPlayerLow}–{cardsPerPlayerHigh} 张</b>}
-              <span className="ml-2 text-slate-400">（按实际使用 {draftedCards} 张计算）</span>
-            </div>
-            <label className="flex items-center gap-2">
-              <input type="checkbox" checked={evenPackCount} onChange={(e) => setEvenPackCount(e.target.checked)} />
-              牌堆数为人数整数倍
-            </label>
+                  <span className="text-xs text-slate-500">请先选择卡池</span>
+                )}
+                {packCountInvalid && <span className="text-xs text-red-300">牌堆总数必须是人数（{maxPlayers}）的整数倍</span>}
+              </label>
+              <div className="flex items-center rounded border border-emerald-300/20 bg-emerald-950/30 px-3 py-1.5 text-xs text-emerald-100">
+                每位玩家可获得：{cardsPerPlayerLow === cardsPerPlayerHigh ? <b className="ml-1 text-gold">{cardsPerPlayerLow} 张</b> : <b className="ml-1 text-amber-300">{cardsPerPlayerLow}–{cardsPerPlayerHigh} 张</b>}
+                <span className="ml-2 text-slate-400">（按实际使用 {draftedCards} 张计算）</span>
+              </div>
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={evenPackCount} onChange={(e) => setEvenPackCount(e.target.checked)} />
+                牌堆数为人数整数倍
+              </label>
+            </>)}
             <label className="flex items-center gap-2">
               <input type="checkbox" checked={dropPublic} onChange={(e) => setDropPublic(e.target.checked)} />
               公开被丢弃的卡牌
             </label>
-            <label className="flex items-center gap-2">
-              <input type="checkbox" checked={reseatEachRound} onChange={(e) => setReseatEachRound(e.target.checked)} />
-              每轮结束后随机重排玩家座位
-            </label>
-            <label className="flex items-center gap-2">
-              <input type="checkbox" checked={extraRatioEnabled} onChange={(e) => setExtraRatioEnabled(e.target.checked)} />
-              按比例配置额外卡
-              {extraRatioEnabled && (
-                <>
-                  <input
-                    type="number"
-                    min={0}
-                    max={100}
-                    step={1}
-                    className="w-16 rounded bg-felt-deep px-2 py-1"
-                    value={extraRatioPercent}
-                    onChange={(e) => setExtraRatioPercent(e.target.value === '' ? 0 : Number(e.target.value))}
-                  />
-                  <span>%（每个完整牌堆 {mainPerPack} 主卡 + {extraPerPack} 额外卡）</span>
-                </>
-              )}
-              {extraRatioInvalid && <span className="text-xs text-red-300">比例必须是 0–100 的整数</span>}
-            </label>
-            <label className="flex items-center gap-2">
-              卡堆组成
-              <select className="rounded bg-felt-deep px-2 py-1 disabled:cursor-not-allowed disabled:opacity-50" disabled={extraRatioEnabled} value={packStrategy} onChange={(e) => setPackStrategy(e.target.value)}>
-                <option value="stratify">主卡/额外卡按比例均匀每堆</option>
-                <option value="random">全随机</option>
-                <option value="main_then_extra">先全主卡再全额外</option>
-              </select>
-              {extraRatioEnabled && <span className="text-xs text-amber-200">比例配置优先</span>}
-            </label>
+            {!edison && (<>
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={reseatEachRound} onChange={(e) => setReseatEachRound(e.target.checked)} />
+                每轮结束后随机重排玩家座位
+              </label>
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={extraRatioEnabled} onChange={(e) => setExtraRatioEnabled(e.target.checked)} />
+                按比例配置额外卡
+                {extraRatioEnabled && (
+                  <>
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      step={1}
+                      className="w-16 rounded bg-felt-deep px-2 py-1"
+                      value={extraRatioPercent}
+                      onChange={(e) => setExtraRatioPercent(e.target.value === '' ? 0 : Number(e.target.value))}
+                    />
+                    <span>%（每个完整牌堆 {mainPerPack} 主卡 + {extraPerPack} 额外卡）</span>
+                  </>
+                )}
+                {extraRatioInvalid && <span className="text-xs text-red-300">比例必须是 0–100 的整数</span>}
+              </label>
+              <label className="flex items-center gap-2">
+                卡堆组成
+                <select className="rounded bg-felt-deep px-2 py-1 disabled:cursor-not-allowed disabled:opacity-50" disabled={extraRatioEnabled} value={packStrategy} onChange={(e) => setPackStrategy(e.target.value)}>
+                  <option value="stratify">主卡/额外卡按比例均匀每堆</option>
+                  <option value="random">全随机</option>
+                  <option value="main_then_extra">先全主卡再全额外</option>
+                </select>
+                {extraRatioEnabled && <span className="text-xs text-amber-200">比例配置优先</span>}
+              </label>
+            </>)}
           </div>
           <div className="grid gap-2 sm:grid-cols-2">
             <input

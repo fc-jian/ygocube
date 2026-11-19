@@ -1,7 +1,7 @@
 "use client";
 import { importYdk } from "./import-ydk";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { CardImage } from "@/components/CardImage";
 import { CardSearchFields, cardSearchFiltersValid, cardSearchQuery, hasCardSearchFilters } from "@/components/CardSearchFields";
@@ -16,7 +16,7 @@ import type { BrowserDeck, CardCategory, CardSearchPage, CardSearchParams, CardS
 import { CardMeta } from "@/components/CardPreview";
 import type { CardInfo } from "@/lib/types";
 import { typeLabel, raceAttrLine, statLine, atkDefLine } from "@/lib/cardInfo";
-import { latestOcg, cardLimit, type Banlist } from "@/lib/banlist";
+import { banlistChoices, latestOcg, cardLimit, type Banlist } from "@/lib/banlist";
 import { LocalPicsSetting } from "@/components/IdentityWidget";
 import {
   insertDeckCard,
@@ -48,6 +48,7 @@ export function StandaloneDecks() {
   const [searching, setSearching] = useState(false);
   const [lists, setLists] = useState<Banlist[]>([]);
   const [listId, setListId] = useState(-1);
+  const visibleLists = useMemo(() => banlistChoices(lists, listId), [lists, listId]);
   useEffect(() => {
     let active = true;
     api<{ lists: Banlist[] }>("/public/duel/options", { identity: null }).then(r => {
@@ -359,7 +360,7 @@ export function StandaloneDecks() {
       <label className="deck-banlist">禁限卡表
         <select aria-label="禁限卡表" value={listId} onChange={e => setListId(Number(e.target.value))} disabled={!lists.length}>
           {!lists.length && <option value={-1}>加载中…</option>}
-          {lists.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+          {visibleLists.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
         </select>
       </label>
       </section>

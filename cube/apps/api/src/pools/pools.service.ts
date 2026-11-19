@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { DraftCopyAllowance, type PoolDraftFormat } from '@ygocube/shared';
 import { getDb } from '../db';
 import { CardsService, TYPE_TOKEN } from '../cards/cards.service';
 
@@ -10,6 +11,7 @@ export interface CardPool {
   id: number;
   name: string;
   codes: number[];
+  draftFormat?: PoolDraftFormat;
   /** Append-only suggestions bound to this main pool. */
   candidateCodes: number[];
   createdAt: string;
@@ -59,6 +61,7 @@ interface PoolRow {
   codes_json: string;
   created_at: string;
   candidate_codes_json: string | null;
+  draft_format: PoolDraftFormat | null;
 }
 
 export interface CandidatePoolInfo {
@@ -81,12 +84,12 @@ export interface CandidatePoolAddResult extends CandidatePoolInfo {
 export class PoolsService {
   constructor(private cards: CardsService) {}
 
-  private parseCodes(raw: string | null | undefined): number[] {
+  private parseCodes(raw: string | null | undefined, preserveCopies = false): number[] {
     try {
       const value = JSON.parse(raw ?? '[]');
-      return Array.isArray(value)
-        ? [...new Set(value.filter((code): code is number => Number.isSafeInteger(code) && code > 0))]
-        : [];
+      if (!Array.isArray(value)) return [];
+      const valid = value.filter((code): code is number => Number.isSafeInteger(code) && code > 0);
+      return preserveCopies ? valid : [...new Set(valid)];
     } catch {
       return [];
     }
@@ -96,7 +99,8 @@ export class PoolsService {
     return {
       id: row.id,
       name: row.name,
-      codes: this.parseCodes(row.codes_json),
+      codes: this.parseCodes(row.codes_json, row.draft_format === 'edison_e3'),
+      ...(row.draft_format ? { draftFormat: row.draft_format } : {}),
       candidateCodes: this.parseCodes(row.candidate_codes_json),
       createdAt: row.created_at,
     };
@@ -112,14 +116,15 @@ export class PoolsService {
     };
   }
 
-  list(): { id: number; name: string; count: number; candidateCount: number; createdAt: string; isDefault: boolean; url: string | null; candidateUrl: string | null }[] {
+  list() {
     const setting = getDb().prepare("SELECT value FROM app_settings WHERE key='default_pool_id'").get() as { value: string } | undefined;
     const defaultId = setting ? Number(setting.value) : null;
-    return (getDb().prepare('SELECT id, name, codes_json, candidate_codes_json, created_at FROM card_pools ORDER BY name').all() as PoolRow[]).map(
+    return (getDb().prepare('SELECT * FROM card_pools ORDER BY name').all() as PoolRow[]).map(
       (r) => ({
         id: r.id,
         name: r.name,
-        count: this.parseCodes(r.codes_json).length,
+        count: this.parseCodes(r.codes_json, r.draft_format === 'edison_e3').length,
+        ...(r.draft_format ? { draftFormat: r.draft_format } : {}),
         candidateCount: this.parseCodes(r.candidate_codes_json).length,
         createdAt: r.created_at,
         isDefault: r.id === defaultId,
@@ -286,12 +291,12 @@ export class PoolsService {
   }
 
   get(id: number): CardPool | null {
-    const row = getDb().prepare('SELECT id, name, codes_json, candidate_codes_json, created_at FROM card_pools WHERE id=?').get(id) as PoolRow | undefined;
+    const row = getDb().prepare('SELECT * FROM card_pools WHERE id=?').get(id) as PoolRow | undefined;
     return row ? this.toPool(row) : null;
   }
 
   getByName(name: string): CardPool | null {
-    const row = getDb().prepare('SELECT id, name, codes_json, candidate_codes_json, created_at FROM card_pools WHERE name=?').get(name) as PoolRow | undefined;
+    const row = getDb().prepare('SELECT * FROM card_pools WHERE name=?').get(name) as PoolRow | undefined;
     return row ? this.toPool(row) : null;
   }
 
@@ -302,7 +307,7 @@ export class PoolsService {
   }
 
   update(id: number, codes: number[]): { pool: CardPool; candidateRemovedCodes: number[] } & PoolImportReport {
-    const row = getDb().prepare('SELECT id, name, codes_json, candidate_codes_json, created_at FROM card_pools WHERE id=?').get(id) as PoolRow | undefined;
+    const row = getDb().prepare('SELECT * FROM card_pools WHERE id=?').get(id) as PoolRow | undefined;
     if (!row) throw new Error('POOL_NOT_FOUND');
     if (!Array.isArray(codes) || codes.length > MAX_POOL_CODES) throw new Error('BAD_PAYLOAD');
     const { unique, filtered, missingCodes, entryWarnings } = this.filterCodes(codes);
@@ -310,16 +315,17 @@ export class PoolsService {
       throw Object.assign(new Error('BAD_POOL_IMPORT'), { details: { missingCodes, entryWarnings } });
     }
     const result = getDb().transaction(() => {
-      const current = getDb().prepare('SELECT id, name, codes_json, candidate_codes_json, created_at FROM card_pools WHERE id=?').get(id) as PoolRow | undefined;
+      const current = getDb().prepare('SELECT * FROM card_pools WHERE id=?').get(id) as PoolRow | undefined;
       if (!current) throw new Error('POOL_NOT_FOUND');
       const currentCandidates = this.parseCodes(current.candidate_codes_json);
       const mainSet = new Set(unique);
+      const inventory = current.draft_format === 'edison_e3' ? codes.filter((code) => mainSet.has(code)) : unique;
       const candidateRemovedCodes = currentCandidates.filter((code) => mainSet.has(code));
       const remainingCandidates = currentCandidates.filter((code) => !mainSet.has(code));
       getDb().prepare('UPDATE card_pools SET codes_json=?, candidate_codes_json=? WHERE id=?')
-        .run(JSON.stringify(unique), JSON.stringify(remainingCandidates), id);
+        .run(JSON.stringify(inventory), JSON.stringify(remainingCandidates), id);
       return {
-        pool: { id, name: current.name, codes: unique, candidateCodes: remainingCandidates, createdAt: current.created_at },
+        pool: { ...this.toPool(current), codes: inventory, candidateCodes: remainingCandidates },
         candidateRemovedCodes,
       };
     })();
@@ -340,7 +346,7 @@ export class PoolsService {
     const { unique, filtered, missingCodes } = this.filterCodes(requested);
     const db = getDb();
     return db.transaction(() => {
-      const row = db.prepare('SELECT id, name, codes_json, candidate_codes_json, created_at FROM card_pools WHERE name=?').get(name) as PoolRow | undefined;
+      const row = db.prepare('SELECT * FROM card_pools WHERE name=?').get(name) as PoolRow | undefined;
       if (!row) throw new Error('POOL_NOT_FOUND');
       const pool = this.toPool(row);
       const mainSet = new Set(pool.codes);
@@ -416,5 +422,9 @@ export class PoolsService {
 
   isExtraDeck(code: number): boolean {
     return this.cards.isExtraDeck(code);
+  }
+
+  edisonDeckAllowance(picks: number[], used: number[]): DraftCopyAllowance {
+    return new DraftCopyAllowance(picks, 3, true, (code) => this.cards.canonicalCode(code), used);
   }
 }

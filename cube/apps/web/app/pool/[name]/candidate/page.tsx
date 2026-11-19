@@ -30,7 +30,7 @@ function statusLabel(status: CandidateCard['poolStatus']): string {
 }
 
 export default function CandidatePoolPage() {
-  const params = useParams<{ name: string }>();
+  const params = useParams<{ name: string }>()!;
   const name = params.name ?? '';
   const encodedName = useMemo(() => encodeURIComponent(name), [name]);
   const [pool, setPool] = useState<CandidatePool | null>(null);

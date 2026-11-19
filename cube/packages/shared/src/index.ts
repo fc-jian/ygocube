@@ -2,6 +2,7 @@
 // Also the reference for the srvpro cube HTTP contract.
 
 export * from './card-search';
+export * from './draw-and-guess';
 
 export type TournamentPhase = 'registration' | 'drafting' | 'deckbuilding' | 'matches' | 'finished';
 export type DuelStage = 'begin' | 'dueling' | 'siding' | 'end';
@@ -60,12 +61,16 @@ export interface GuessRoomSummary {
   maxPlayers: number;
   poolId: number;
   poolName: string;
+  expertMode: boolean;
+  disableOpeningHints: boolean;
 }
 
 export interface GuessCreateRequest {
   name: string;
   playerId: string;
   poolId: number;
+  expertMode?: boolean;
+  disableOpeningHints?: boolean;
 }
 
 export interface GuessPoolCreateRequest {
@@ -78,6 +83,8 @@ export interface GuessPoolSummary {
   name: string;
   cardCount: number;
   isDefault: boolean;
+  /** Only name search and unfiltered browsing are available for this pool. */
+  browseOnly: boolean;
 }
 
 export type GuessActionRequest =
@@ -176,8 +183,45 @@ export interface CardSearchPage {
 }
 
 export interface GuessCardPage extends CardSearchPage {
-  cards: (CardInfo & { stats?: GuessCardStats })[];
+  cards: (CardInfo & { stats?: GuessCardStats; votes?: GuessPoolCardVotes; proposedByViewer?: boolean })[];
 }
+
+export type GuessPoolVote = 'like' | 'dislike';
+
+export interface GuessPoolCardVoteRequest {
+  vote: GuessPoolVote | null;
+}
+
+export interface GuessPoolCardVotes {
+  likes: number;
+  dislikes: number;
+  mine: GuessPoolVote | null;
+}
+
+export type GuessPoolProposalRequest = { code: number; codes?: never } | { codes: number[]; code?: never };
+
+export interface GuessPoolProposals {
+  top: { card: CardInfo; votes: number; voted: boolean }[];
+  voteDate: string;
+  nextVoteAt: string;
+  votedCode: number | null;
+  votedCodes: number[];
+  dailyLimit: number;
+  remainingVotes: number;
+  hasCandidates: boolean;
+  canVote: boolean;
+}
+
+export interface GuessPoolProposalPage extends Omit<GuessPoolProposals, 'top'> {
+  proposals: { card: CardInfo; votes: number; rank: number; voted: boolean }[];
+  totalCount: number;
+  totalPages: number;
+  hasMore: boolean;
+}
+
+export const DEFAULT_GUESS_POOL_VOTE_SORT = 'net-dislikes-desc';
+export const GUESS_POOL_VOTE_SORTS = [DEFAULT_GUESS_POOL_VOTE_SORT, 'likes-desc', 'likes-asc', 'dislikes-desc', 'dislikes-asc', 'relevance'] as const;
+export type GuessPoolVoteSort = typeof GUESS_POOL_VOTE_SORTS[number];
 
 export interface GuessCardStats {
   appearances: number;
@@ -242,6 +286,16 @@ export interface SmallWorldCalculationResponse {
   };
 }
 
+export type PoolDraftFormat = 'edison_e3';
+export { DraftCopyAllowance } from './draft-copies';
+export const EDISON_E3_MAX_PLAYERS = 9;
+
+export const EDISON_E3_ROUNDS = [
+  { main: 20, extra: 0, direction: 'clockwise' },
+  { main: 20, extra: 15, direction: 'counterclockwise' },
+  { main: 20, extra: 0, direction: 'clockwise' },
+] as const;
+
 export interface TournamentConfig {
   maxPlayers: number;
   mode: 'single' | 'match'; // BO1 / BO3 with side
@@ -263,6 +317,7 @@ export interface TournamentConfig {
   maxCopies?: number; // picked code may be used this many times across main/extra/side
   cardPool: string; // must be an existing card_pools name ('full' is rejected on write paths; legacy configs may still contain it)
   cardPoolId?: number; // immutable pool identity used by historical statistics
+  draftFormat?: PoolDraftFormat; // assigned by the selected pool
   timeLimit?: number; // per-turn seconds for the duel host (default 180; 999 ≈ unlimited)
   draftMode?: 'passing' | 'serial'; // default 'passing' (per-player pack queues); 'serial' = legacy one-pack-at-a-time
   evenPackCount?: boolean; // default true: pack count must be a multiple of player count (explicit packCount rejected otherwise; computed counts round down)
@@ -363,6 +418,13 @@ export interface StandaloneDuelOptions {
   timeLimit: number; startLp: number; startHand: number; drawCount: number;
   mainMin: number; mainMax: number; extraMax: number; sideMax: number;
   noCheck: boolean; noShuffle: boolean;
+}
+export interface DuelBanlist {
+  id: number;
+  name: string;
+  limits: Record<number, number>;
+  format?: 'OCG' | 'TCG' | 'SC';
+  effectiveDate?: string;
 }
 export interface BrowserDeck { name: string; main: number[]; extra: number[]; side: number[]; }
 

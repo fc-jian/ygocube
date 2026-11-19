@@ -32,6 +32,7 @@ interface StatisticalPick {
   packIndex: number;
   round: number;
   card: number;
+  pairedPosition?: number;
 }
 
 interface Aggregate {
@@ -91,7 +92,7 @@ export class CardPickStatsService {
       for (const pick of draft.picks) {
         const pack = packByIndex.get(pick.packIndex);
         if (!pack || pack.order.length <= 0) continue;
-        const position = Number(pick.round) + 1;
+        const position = pick.pairedPosition ?? Number(pick.round) + 1;
         const current = totals.get(pick.card) ?? {
           positionSum: 0,
           percentageSum: 0,
@@ -192,6 +193,10 @@ export class CardPickStatsService {
           if (!payload || typeof payload !== 'object') return null;
           const pick = payload as Record<string, unknown>;
           picks.push({ packIndex: Number(pick.packIndex), round: Number(pick.round), card: Number(pick.card) });
+          if (pick.extraCard !== undefined) {
+            picks.push({ packIndex: Number(pick.packIndex), round: Number(pick.round) + 1, card: Number(pick.extraCard),
+              pairedPosition: Number(pick.round) + 1 });
+          }
         }
       }
     } catch {

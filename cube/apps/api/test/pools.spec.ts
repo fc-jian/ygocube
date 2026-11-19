@@ -76,11 +76,10 @@ describe('card pools', () => {
     const cards = new CardsService();
     const pools = new PoolsService(cards);
     const codes = cards.poolCodes();
-    pools.create('dup', codes.slice(0, 3));
+    const { pool } = pools.create('dup', codes.slice(0, 3));
     expect(() => pools.create('dup', codes.slice(3, 4))).toThrow('POOL_EXISTS');
-    const id = pools.list()[0].id;
-    pools.remove(id);
-    expect(pools.list().length).toBe(0);
+    pools.remove(pool.id);
+    expect(pools.getByName('dup')).toBeNull();
   });
 
   it('accepts URL-safe pool names and rejects spaces/path/query/control characters', () => {

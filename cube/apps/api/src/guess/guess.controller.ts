@@ -1,36 +1,13 @@
-import { BadRequestException, Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query, Req, Res } from '@nestjs/common';
+import type { Request, Response } from 'express';
+import { GUESS_POOL_VOTE_SORTS, type GuessPoolVoteSort } from '@ygocube/shared';
 import { Access, Public } from '../auth/auth.guard';
 import { parseCardSearchParams } from '../cards/search-params';
+import { badPayload, integer, payload, playerId, text } from '../games/room-input';
 import { GuessPoolsService } from './guess-pools.service';
+import { GuessPoolVotesService } from './guess-pool-votes.service';
+import { voterIp } from './voter-ip';
 import { GuessService } from './guess.service';
-
-function badPayload(): never {
-  throw new BadRequestException({ code: 'BAD_PAYLOAD' });
-}
-
-function payload(body: unknown, keys: string[]): Record<string, unknown> {
-  if (body === null || typeof body !== 'object' || Array.isArray(body)) badPayload();
-  if (Object.keys(body).some((key) => !keys.includes(key))) badPayload();
-  return body as Record<string, unknown>;
-}
-
-function text(value: unknown, limit: number): string {
-  if (typeof value !== 'string') badPayload();
-  const normalized = value.normalize('NFKC').trim();
-  if (!normalized || normalized.length > limit || /[\p{Cc}\p{Cf}]/u.test(normalized)) badPayload();
-  return normalized;
-}
-
-function playerId(value: unknown): string {
-  const id = text(value, 24);
-  if (!/^[\p{L}\p{N}_. -]+$/u.test(id)) badPayload();
-  return id;
-}
-
-function integer(value: unknown, min: number, max: number): number {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) badPayload();
-  return value;
-}
 
 function poolCodes(value: unknown): number[] {
   if (!Array.isArray(value) || value.length < 2 || value.length > 20_000) badPayload();
@@ -46,7 +23,11 @@ function decimalId(value: string, min = 0): number {
 
 @Controller('games/guess')
 export class GuessController {
-  constructor(private readonly guess: GuessService, private readonly pools: GuessPoolsService) {}
+  constructor(
+    private readonly guess: GuessService,
+    private readonly pools: GuessPoolsService,
+    private readonly votes: GuessPoolVotesService,
+  ) {}
 
   @Public()
   @Get('rooms')
@@ -89,19 +70,78 @@ export class GuessController {
   }
 
   @Public()
+  @Get('pools/:poolId/export.csv')
+  exportPool(@Param('poolId') id: string, @Res() response: Response) {
+    const poolId = decimalId(id);
+    const csv = this.pools.exportCsv(poolId);
+    response.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    response.setHeader('Content-Disposition', `attachment; filename="guess-pool-${poolId}.csv"`);
+    response.setHeader('Cache-Control', 'no-store');
+    response.send(csv);
+  }
+
+  @Public()
   @Get('pools/:poolId/cards')
-  poolCards(@Param('poolId') id: string, @Query() params: Record<string, unknown>) {
-    return this.pools.browse(decimalId(id), parseCardSearchParams(params));
+  poolCards(@Param('poolId') id: string, @Query() params: Record<string, unknown>, @Req() request: Request) {
+    const voteSort = params.voteSort;
+    if (voteSort !== undefined && !GUESS_POOL_VOTE_SORTS.includes(voteSort as GuessPoolVoteSort)) badPayload();
+    return this.votes.browse(decimalId(id), parseCardSearchParams(params), voterIp(request), voteSort as GuessPoolVoteSort | undefined);
+  }
+
+  @Public()
+  @Post('pools/:poolId/cards/:code/vote')
+  @HttpCode(200)
+  voteCard(@Param('poolId') id: string, @Param('code') code: string, @Body() body: unknown, @Req() request: Request) {
+    const { vote } = payload(body, ['vote']);
+    if (vote !== null && vote !== 'like' && vote !== 'dislike') badPayload();
+    return this.votes.vote(decimalId(id), decimalId(code, 1), vote, voterIp(request));
+  }
+
+  @Public()
+  @Get('pools/:poolId/proposals')
+  proposals(@Param('poolId') id: string, @Req() request: Request) {
+    return this.votes.proposals(decimalId(id), voterIp(request));
+  }
+
+  @Public()
+  @Get('pools/:poolId/proposals/ranking')
+  proposalRanking(@Param('poolId') id: string, @Query() params: Record<string, unknown>, @Req() request: Request) {
+    return this.votes.ranking(decimalId(id), parseCardSearchParams(params), voterIp(request));
+  }
+
+  @Public()
+  @Get('pools/:poolId/proposals/cards')
+  proposalCards(@Param('poolId') id: string, @Query() params: Record<string, unknown>, @Req() request: Request) {
+    return this.votes.searchProposals(decimalId(id), parseCardSearchParams(params), voterIp(request));
+  }
+
+  @Public()
+  @Post('pools/:poolId/proposals')
+  @HttpCode(200)
+  proposeCard(@Param('poolId') id: string, @Body() body: unknown, @Req() request: Request) {
+    const input = payload(body, ['code', 'codes']);
+    if (Object.hasOwn(input, 'code') === Object.hasOwn(input, 'codes')) badPayload();
+    if (Object.hasOwn(input, 'code')) {
+      return this.votes.propose(decimalId(id), integer(input.code, 1, Number.MAX_SAFE_INTEGER), voterIp(request));
+    }
+    if (!Array.isArray(input.codes) || input.codes.length < 1 || input.codes.length > 10) badPayload();
+    const codes = input.codes.map((code) => integer(code, 1, Number.MAX_SAFE_INTEGER));
+    return this.votes.proposeMany(decimalId(id), codes, voterIp(request));
   }
 
   @Public()
   @Post('rooms')
   create(@Body() body: unknown) {
-    const input = payload(body, ['name', 'playerId', 'poolId']);
+    const input = payload(body, ['name', 'playerId', 'poolId', 'expertMode', 'disableOpeningHints']);
+    for (const key of ['expertMode', 'disableOpeningHints']) {
+      if (input[key] !== undefined && typeof input[key] !== 'boolean') badPayload();
+    }
     return this.guess.create({
       name: text(input.name, 48),
       playerId: playerId(input.playerId),
       poolId: integer(input.poolId, 0, Number.MAX_SAFE_INTEGER),
+      expertMode: input.expertMode === true,
+      disableOpeningHints: input.disableOpeningHints === true,
     });
   }
 

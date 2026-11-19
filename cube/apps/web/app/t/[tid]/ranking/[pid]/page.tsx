@@ -24,7 +24,7 @@ interface RankRow {
 
 // 实时积分榜单（dev_docs/07 §2.4）：胜 3 分 / 平 1 分 / 负 0 分，OMW% 破同分
 export default function RankingPage() {
-  const params = useParams<{ tid: string; pid: string }>();
+  const params = useParams<{ tid: string; pid: string }>()!;
   const tid = params.tid;
   const pid = params.pid;
   const tidPath = encodePathSegment(tid);

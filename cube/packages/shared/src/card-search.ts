@@ -23,6 +23,11 @@ export const CARD_LINK_DIRECTIONS = [
 ] as const;
 
 export const CARD_SUBTYPES = {
+  'main-deck-monster': [1, 'main-deck', '主卡怪兽', 'Main Deck Monster'],
+  monster: [1, 'any', '怪兽', 'Monster'],
+  'extra-deck-monster': [1, 'extra-deck', '额外怪兽', 'Extra Deck Monster'],
+  spell: [2, 'any', '魔法卡', 'Spell Card'],
+  trap: [4, 'any', '陷阱卡', 'Trap Card'],
   'normal-monster': [1, 0x10, '通常怪兽', 'Normal Monster'],
   'effect-monster': [1, 0x20, '效果怪兽', 'Effect Monster'],
   'ritual-monster': [1, 0x80, '仪式怪兽', 'Ritual Monster'],

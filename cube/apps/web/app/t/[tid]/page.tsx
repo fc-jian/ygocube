@@ -5,7 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { api, encodePathSegment, readableApiError, storeToken, readIdentity } from '@/lib/api';
 
 export default function 报名参加Page() {
-  const params = useParams<{ tid: string }>();
+  const params = useParams<{ tid: string }>()!;
   const router = useRouter();
   const tid = params.tid;
   const tidPath = encodePathSegment(tid);

@@ -3,20 +3,18 @@ import type { CardSearchParams, GuessCardPage, GuessCardStats, GuessPoolCreateRe
 import { CardsService, TYPE_TOKEN } from '../cards/cards.service';
 import { getDb } from '../db';
 import { config } from '../config';
+import { guessPoolCsv } from './pool-csv';
 
-const DEFAULT_POOL_ID = `COALESCE((SELECT guess_pools.id FROM guess_pools JOIN json_each(?) p
-  ON guess_pools.name_key = json_extract(p.value, '$.key')
-  WHERE json_extract(p.value, '$.defaultPriority') > 0
-  ORDER BY json_extract(p.value, '$.defaultPriority') DESC, guess_pools.id LIMIT 1), -1)`;
-function priorities(): string {
-  return JSON.stringify(config.server.poolData.guess.map(({ key, defaultPriority }) => ({ key, defaultPriority })));
-}
+const BROWSE_ONLY_POOL = 'EXISTS (SELECT 1 FROM guess_pool_policies p WHERE p.name_key=guess_pools.name_key AND p.browse_only=1)';
+const DEFAULT_POOL_ID = `COALESCE((SELECT id FROM guess_pools JOIN guess_pool_policies USING (name_key)
+  WHERE default_priority > 0 ORDER BY default_priority DESC, id LIMIT 1), -1)`;
 
 interface Pool {
   poolId: number;
   name: string;
   codes: number[] | null;
   isDefault: boolean;
+  browseOnly: boolean;
 }
 
 @Injectable()
@@ -25,18 +23,35 @@ export class GuessPoolsService implements OnModuleInit {
 
   onModuleInit(): void {
     const db = getDb();
-    const exists = db.prepare('SELECT 1 FROM guess_pools WHERE name_key = ?');
-    const pending = config.server.poolData.guess.filter((pool) => pool.defaultPriority > 0 && !exists.get(pool.key));
+    const saved = db.prepare('SELECT codes_json FROM guess_pools WHERE name_key = ?').pluck();
+    const pending = config.server.poolData.guess.map((pool) => ({
+      ...pool, savedCodes: saved.get(pool.key) as string | null | undefined,
+    })).filter(({ previousCodes, savedCodes }) =>
+      savedCodes === undefined || previousCodes.some((codes) => JSON.stringify(codes) === savedCodes),
+    );
     if (!pending.length) return;
     const eligible = new Set(this.cards.poolCodes());
-    const insert = db.prepare(`
+    const save = db.prepare(`
       INSERT INTO guess_pools (name, name_key, codes_json) VALUES (?, ?, ?)
-      ON CONFLICT (name_key) DO NOTHING
+      ON CONFLICT (name_key) DO UPDATE SET codes_json = excluded.codes_json
+      WHERE guess_pools.codes_json = ? AND guess_pools.codes_json <> excluded.codes_json
     `);
     db.transaction(() => {
       for (const pool of pending) {
-        if (pool.codes.every((code) => eligible.has(code))) {
-          insert.run(pool.name, pool.key, JSON.stringify(pool.codes));
+        if (!pool.codes.every((code) => eligible.has(code))) continue;
+        const result = save.run(pool.name, pool.key, JSON.stringify(pool.codes), pool.savedCodes ?? null);
+        if (result.changes && pool.savedCodes !== undefined) {
+          // A hintless round used the live pool. Keep its old candidates until the next deal.
+          db.prepare(`
+            UPDATE guess_rooms SET state_json = json_set(state_json, '$.round.poolCodes', json(?))
+            WHERE phase = 'playing'
+              AND json_extract(state_json, '$.poolId') = (SELECT id FROM guess_pools WHERE name_key = ?)
+              AND NOT COALESCE(json_extract(state_json, '$.expertMode'), 0)
+              AND json_type(state_json, '$.round.poolCodes') IS NULL
+              AND EXISTS (
+                SELECT 1 FROM json_each(state_json, '$.round.seats') WHERE json_extract(value, '$.openingHint') IS NULL
+              )
+          `).run(pool.savedCodes, pool.key);
         }
       }
     }).immediate();
@@ -45,36 +60,47 @@ export class GuessPoolsService implements OnModuleInit {
   list(): GuessPoolSummary[] {
     const rows = getDb().prepare(`
       SELECT id AS poolId, name, COALESCE(json_array_length(codes_json), ?) AS cardCount,
-        id = ${DEFAULT_POOL_ID} AS isDefault
+        id = ${DEFAULT_POOL_ID} AS isDefault, ${BROWSE_ONLY_POOL} AS browseOnly
       FROM guess_pools ORDER BY isDefault DESC, id
-    `).all(this.cards.poolCodes().length, priorities()) as (Omit<GuessPoolSummary, 'isDefault'> & { isDefault: number })[];
-    return rows.map((row) => ({ ...row, isDefault: row.isDefault === 1 }));
+    `).all(this.cards.poolCodes().length) as (Omit<GuessPoolSummary, 'isDefault' | 'browseOnly'> & {
+      isDefault: number;
+      browseOnly: number;
+    })[];
+    return rows.map((row) => ({ ...row, isDefault: row.isDefault === 1, browseOnly: row.browseOnly === 1 }));
   }
 
   get(poolId: number): Pool {
     const row = getDb().prepare(`
-      SELECT name, codes_json, id = ${DEFAULT_POOL_ID} AS isDefault FROM guess_pools WHERE id = ?
-    `).get(priorities(), poolId) as { name: string; codes_json: string | null; isDefault: number } | undefined;
+      SELECT name, codes_json, id = ${DEFAULT_POOL_ID} AS isDefault, ${BROWSE_ONLY_POOL} AS browseOnly
+      FROM guess_pools WHERE id = ?
+    `).get(poolId) as { name: string; codes_json: string | null; isDefault: number; browseOnly: number } | undefined;
     if (!row) throw new NotFoundException({ code: 'GUESS_POOL_NOT_FOUND' });
     return {
       poolId, name: row.name, isDefault: row.isDefault === 1,
+      browseOnly: row.browseOnly === 1,
       codes: row.codes_json === null ? null : JSON.parse(row.codes_json) as number[],
     };
   }
 
   describe(poolId: number): GuessPoolSummary {
-    const { name, codes, isDefault } = this.get(poolId);
-    return { poolId, name, isDefault, cardCount: codes?.length ?? this.cards.poolCodes().length };
+    const { name, codes, isDefault, browseOnly } = this.get(poolId);
+    return { poolId, name, isDefault, browseOnly, cardCount: codes?.length ?? this.cards.poolCodes().length };
+  }
+
+  exportCsv(poolId: number): string {
+    return guessPoolCsv(this.cards, this.availableCodes(this.get(poolId).codes));
   }
 
   create({ name, codes }: GuessPoolCreateRequest): GuessPoolSummary {
-    // Older databases retain the previous built-in name.
-    if (config.server.poolData.guess.some((pool) => pool.name === name || pool.aliases.includes(name))) {
+    const nameKey = name.normalize('NFKC').toLowerCase();
+    if (config.server.poolData.guess.some((p) =>
+      [p.name, ...p.aliases].some((name) => name.normalize('NFKC').toLowerCase() === nameKey))
+      || getDb().prepare('SELECT 1 FROM guess_pools WHERE name = ? COLLATE NOCASE').get(name)) {
       throw new ConflictException({ code: 'GUESS_POOL_EXISTS' });
     }
     const eligible = new Set(this.cards.poolCodes());
     if (codes.some((code) => !eligible.has(code))) throw new BadRequestException({ code: 'GUESS_INVALID_POOL' });
-    return this.insert(name, `name:${name.toLowerCase()}`, codes);
+    return this.insert(name, `name:${nameKey}`, codes);
   }
 
   importLegacy(roomId: string, name: string, codes: number[]): GuessPoolSummary {
@@ -87,14 +113,21 @@ export class GuessPoolsService implements OnModuleInit {
       ON CONFLICT (name_key) DO NOTHING
     `).run(name, nameKey, JSON.stringify([...codes].sort((a, b) => a - b)));
     if (!result.changes) throw new ConflictException({ code: 'GUESS_POOL_EXISTS' });
-    return { poolId: Number(result.lastInsertRowid), name, cardCount: codes.length, isDefault: false };
+    return { poolId: Number(result.lastInsertRowid), name, cardCount: codes.length, isDefault: false, browseOnly: false };
   }
 
-  availableCodes(codes: readonly number[] | null): number[] {
+  availableCodes(codes: readonly number[] | null, distinctArtworks = false): number[] {
     const eligible = this.cards.poolCodes();
-    if (codes === null) return eligible;
-    const allowed = new Set(codes);
-    return eligible.filter((code) => allowed.has(code));
+    const allowed = codes === null ? null : new Set(codes);
+    const available = allowed ? eligible.filter((code) => allowed.has(code)) : eligible;
+    if (!distinctArtworks) return available;
+    const seen = new Set<number>();
+    return available.filter((code) => {
+      const representative = this.cards.artworkCode(code);
+      if (seen.has(representative)) return false;
+      seen.add(representative);
+      return true;
+    });
   }
 
   cardDetails(codes: number[]) {
@@ -105,8 +138,14 @@ export class GuessPoolsService implements OnModuleInit {
     return this.cards.searchCatalog(params, codes === null ? undefined : new Set(codes));
   }
 
-  browse(poolId: number, params: CardSearchParams): GuessCardPage {
-    const result = this.search(params, this.get(poolId).codes);
+  browse(poolId: number, params: CardSearchParams, codeOrder?: ReadonlyMap<number, number>): GuessCardPage {
+    const pool = this.get(poolId);
+    if (pool.browseOnly && (params.sort !== 'relevance' || Object.values(params.filters).some((value) => value !== undefined))) {
+      throw new BadRequestException({ code: 'GUESS_POOL_BROWSE_ONLY' });
+    }
+    const result = pool.browseOnly
+      ? this.cards.searchCatalogNames(params, new Set(pool.codes ?? []), codeOrder)
+      : this.cards.searchCatalog(params, pool.codes === null ? undefined : new Set(pool.codes), codeOrder);
     if (!result.cards.length) return result;
     const codes = result.cards.map((card) => card.code);
     const rows = getDb().prepare(`

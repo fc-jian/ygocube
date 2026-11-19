@@ -7,12 +7,15 @@ import { CardInfo } from '@/lib/types';
 import { safeCardCodes, sortCardSearchResults } from '@/lib/cardInfo';
 import { buildPoolCsv } from '@/lib/poolCsv';
 import { PoolPreview } from '@/components/PoolPreview';
+import { EdisonDraftRules } from '@/components/EdisonDraftRules';
+import type { PoolDraftFormat } from '@ygocube/shared';
 import { LocalPicsSetting } from '@/components/IdentityWidget';
 
 interface PublicPool {
   id: number;
   name: string;
   count: number;
+  draftFormat?: PoolDraftFormat;
   candidateCount?: number;
   candidateUrl?: string | null;
   createdAt: string;
@@ -22,7 +25,7 @@ interface PublicPool {
 type PickSort = 'default' | 'pick_asc' | 'pick_desc';
 
 export default function PublicPoolPage() {
-  const params = useParams<{ name: string }>();
+  const params = useParams<{ name: string }>()!;
   const name = params.name ?? '';
   const encodedName = useMemo(() => encodeURIComponent(name), [name]);
   const [pool, setPool] = useState<PublicPool | null>(null);
@@ -45,7 +48,7 @@ export default function PublicPoolPage() {
       // Stats are derived data and may change after a completed tournament;
       // use the latest exact code list on every refresh so pool edits also
       // become visible without replacing the user's search state.
-      const codes = normalized.codes;
+      const codes = [...new Set(normalized.codes)];
       if (withCards) {
         const merged: Record<number, CardInfo> = {};
         for (let i = 0; i < codes.length; i += 400) {
@@ -176,6 +179,7 @@ export default function PublicPoolPage() {
           <a href="/create-tournament" className="rounded bg-felt-edge px-3 py-1.5 text-xs text-slate-200 hover:brightness-110">创建比赛</a>
         </div>
       </header>
+      {pool.draftFormat === 'edison_e3' && <EdisonDraftRules />}
       <PoolPreview
         poolCodes={orderedCodes}
         cardMap={cardMap}
