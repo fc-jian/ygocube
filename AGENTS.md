@@ -15,6 +15,8 @@ ygocube/
 
 新增或维护网页小游戏时，使用仓库内的 [ygocube-games 技能](.codex/skills/ygocube-games/SKILL.md)。
 
+开发分支、子模块推送顺序、双平台 CI、merge commit、实例私有数据及 Aly 发布标签的操作步骤见[项目维护与实例数据](dev_docs/11-branch-release-plan.md)。
+
 ## 架构要点（必须先读）
 
 - srvpro 每房间 spawn 一个 ygopro 无头宿主进程（传统参数 12 位；Cube 追加 `--cube-deck-limits` + 4 个限制，端口从 stdout 读），srvpro 代理玩家流量并追踪比分/卡组。
