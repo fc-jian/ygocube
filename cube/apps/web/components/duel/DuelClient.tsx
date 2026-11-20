@@ -22,7 +22,7 @@ import {
   shouldSubmitSelection,
   toggleSelection,
 } from "./interaction";
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   applyFrame,
   initialState,
@@ -37,7 +37,7 @@ import {
 } from "@ygocube/duel-protocol";
 import { CardImage } from "@/components/CardImage";
 import { TokenPrompt } from "@/components/TokenPrompt";
-import { API_BASE, api, Identity, resolvePlayerIdentity } from "@/lib/api";
+import { API_BASE, api, ApiError, clearStoredToken, Identity, resolvePlayerIdentity } from "@/lib/api";
 import { usePlayerLogout } from "@/lib/usePlayerLogout";
 import { duelText, DuelLanguage, races, attributes } from "./duel-text";
 import { LocalPicsSetting } from "@/components/IdentityWidget";
@@ -276,6 +276,15 @@ export function DuelClient({
     [playing, setPlaying] = useState(false),
     [speed, setSpeed] = useState(1),
     [cursor, setCursor] = useState(0);
+  const gameStarts = useMemo(() => {
+    const starts: number[] = [];
+    recording?.frames.forEach(({ frame }, index) => {
+      // The message kind and opcode fit in the first six decoded bytes.
+      const header = atob(frame.slice(0, 8));
+      if (header.charCodeAt(2) === 1 && header.charCodeAt(3) === 4) starts.push(index);
+    });
+    return starts;
+  }, [recording]);
   const cursorRef = useRef(0),
     timeRef = useRef(0);
   const repaint = useCallback(
@@ -364,11 +373,22 @@ export function DuelClient({
       retries = 0,
       ws: WebSocket | undefined;
     let latestPromptRevision = -1;
+    let retriedRevocation = false;
     const timeline = new DuelTimeline();
     const visibility = () => {
       if (document.hidden) timeline.flush();
     };
     document.addEventListener("visibilitychange", visibility);
+    const requestPlayerToken = () => {
+      if (mode !== "player" || credential || !identity || !pid) return false;
+      clearStoredToken(tid, pid);
+      setIdentity(null);
+      setNeedToken(true);
+      setError("");
+      model.current = initialState();
+      repaint();
+      return true;
+    };
     const connect = async () => {
       try {
         setStatus("connect");
@@ -382,6 +402,7 @@ export function DuelClient({
               resultB: number | null;
             }[]
           >(`/t/${tid}/matches`, { identity });
+          if (disposed) return;
           matchId = String(
             matches.find((m) => m.resultA === null && m.resultB === null)?.id ??
               "",
@@ -602,6 +623,13 @@ export function DuelClient({
             setStatus("ended");
             return;
           }
+          // A revoked ticket can mean a frozen or finished match as well as a
+          // rotated player token. Only the authenticated HTTP response can tell.
+          if (e.code === 4003 && e.reason === "SESSION_REVOKED" && mode === "player" && !credential && !retriedRevocation) {
+            retriedRevocation = true;
+            void connect();
+            return;
+          }
           setStatus(e.code === 4009 ? "takeover" : "connect");
           if ([4009, 4010, 4003].includes(e.code)) {
             setError(e.reason);
@@ -612,6 +640,7 @@ export function DuelClient({
         ws.onerror = () => setError(duelText[lang].error);
       } catch (e: any) {
         if (!disposed) {
+          if (e instanceof ApiError && e.status === 401 && requestPlayerToken()) return;
           setError(e.code ?? e.message);
           setStatus("error");
         }
@@ -796,9 +825,11 @@ export function DuelClient({
             break;
           }
         }
-        cursorRef.current = i;
-        setCursor(i);
-        repaint();
+        if (i !== cursorRef.current) {
+          cursorRef.current = i;
+          setCursor(i);
+          repaint();
+        }
         if (i === recording.frames.length) setPlaying(false);
       } catch (e) {
         setPlaying(false);
@@ -2190,17 +2221,11 @@ export function DuelClient({
                 {cursor} / {recording.frames.length}
               </p>
               <div className="duel-actions">
-                {recording.frames
-                  .map((f, i) => ({ f, i }))
-                  .filter(({ f }) => {
-                    const b = decode(f.frame);
-                    return b[2] === 1 && b[3] === 4;
-                  })
-                  .map(({ i }, n) => (
-                    <button key={i} onClick={() => seek(i + 1)}>
-                      Game {n + 1}
-                    </button>
-                  ))}
+                {gameStarts.map((i, n) => (
+                  <button key={i} onClick={() => seek(i + 1)}>
+                    Game {n + 1}
+                  </button>
+                ))}
               </div>
             </section>
           )}

@@ -37,7 +37,7 @@ describe('draft engine', () => {
     expect(loadState(tid).status).toBe('registration');
     expect(() => draft.startDraft(tid, 'legacy-helper')).toThrow('DRAFT_START_PENDING');
     expect(loadState(tid).status).toBe('registration');
-    expect(tournaments.stateForPlayer(tid, 'p0').draftStartConfirmation).toMatchObject({ pending: true, confirmed: false, total: 2 });
+    expect(tournaments.stateForPlayer(tid, 'p0').draftStartConfirmation).toMatchObject({ pending: true, confirmed: false, total: 2, serverNow: expect.any(Number) });
 
     const first = draft.confirmDraftStart(tid, 'p0');
     expect(first.pending).toBe(true);

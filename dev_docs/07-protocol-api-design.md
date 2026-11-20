@@ -109,7 +109,7 @@ swissRoundCount, playoffSize
 | `GET /health` | 公共健康检查 |
 | `GET /tournaments` | 公共比赛简表 |
 | `GET /pools` | 公共卡池名称/数量/`isDefault` 和合法池的 `url`，不含 code |
-| `GET /pools/:name` | 公共卡池元数据与 exact code 列表，并返回 `candidateCount/candidateUrl`；name 必须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` |
+| `GET /pools/:name` | 公共卡池元数据与有序 exact code 列表，保留实体副本，包含 `candidateCount/candidateUrl`。`cardRevision` 是卡牌资料及该池抓位统计的不透明版本。版本相同时只需补取新出现的编号，版本变化时重新取卡牌详情。旧服务未返回版本时仍可完整刷新。name 必须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` |
 | `GET /pools/:name/cards?q=&codes=` | 公共卡牌元数据、卡池内状态和该池 exact-code 抓位统计 |
 | `GET /pools/:name/candidate` | 公开读取绑定候选池的 exact code 列表与数量 |
 | `GET /pools/:name/candidate/cards?q=&codes=` | 候选池卡牌元数据；`poolStatus` 为 `not_in_pool/in_pool/in_candidate` |
@@ -121,7 +121,7 @@ swissRoundCount, playoffSize
 | `POST /t/:tid/player/ready` | 报名阶段由本人设置 `{ready:true|false}`；记录 `player_ready` 事件，准备状态对所有报名玩家公开 |
 | `POST /t/:tid/player/draft-confirm`（`/confirm-draft`、`/start-draft-confirm` 兼容别名） | 管理员发起开始选牌后，由本人在 60 秒内确认；最后一名玩家确认时原子生成牌堆并进入 drafting，超时则取消且不产生牌堆 |
 | `POST /t/:tid/player/withdraw`（`/player/leave` 兼容别名） | 仅报名阶段由本人退出；记录 `player_remove` 事件、释放名额并清除本人报名投影；选牌开始后返回 `WRONG_PHASE` |
-| `GET /t/:tid/state` | 当前玩家视角完整状态（牌堆、队列、reserve、构筑、当前对局） |
+| `GET /t/:tid/state` | 当前玩家视角完整状态（牌堆、队列、reserve、构筑、当前对局）。开始选牌确认窗口的 `draftStartConfirmation.serverNow` 为响应时的服务端 Unix 毫秒，供玩家页和管理台按单调时钟显示倒计时，由服务器判定确认是否逾期 |
 | `GET /t/:tid/pool` | 当前比赛 drop 前卡池（需玩家鉴权） |
 | `GET /t/:tid/cards?q=` / `?codes=` | 卡牌元数据/效果文本搜索或批量读取；`q` 按空白拆分为 AND 关键字，无隐含 30/50 条上限，结果按卡名命中数量及关键字顺序优先 |
 | `GET /t/:tid/cards/status?codes=` | drafting 按玩家视角返回 `not_in_pool/dropped/picked/seen/unknown`；deckbuilding 及之后返回全局 `not_in_pool/dropped/picked/other_picked`；返回 exact 请求 code |
@@ -297,7 +297,7 @@ deadline 和冻结剩余值。
   前一轮号、投降玩家 ID 和所持牌的编号与名称。
 - `lobby → playing → between_rounds → playing … → finished`。等候或轮间允许退出，房主退出时由最早
   加入的在场玩家接任。轮间退出者的积分与 ID 留在排名中，原凭证失效。全部玩家在轮间退出时结算。
-  房主在轮间可用 `remove` 移除其他在场玩家，被移除者按退出处理。轮间名单由各视角的
+  房主在等候或轮间可用 `{action:"remove",playerId,version}` 移除任一其他在场玩家。等候时移除会立即释放席位和 ID，原凭证失效，玩家可重新加入并领取新凭证。轮间移除按轮间退出处理，保留积分。房主本人使用 `leave`。轮间名单由各视角的
   `standings` 在场成员随房间状态刷新，圆桌继续显示上一轮座位。
   每轮发牌只使用在场玩家，至少需要一人，发牌时的可用卡数须覆盖在场人数。服务端每次写入递增 `version`，拒绝旧版本操作。
 - 等候、游戏中和轮间房间自上次成功写入房间状态起满 24 小时自动结算。查看、轮询和搜索不刷新活动时间。
@@ -364,7 +364,9 @@ deadline 和冻结剩余值。
 | `POST /rooms/:roomId/drawing/:turn/live` | 仅当前画手可在绘画时更新，传 `{baseRevision,revision,strokeIndex,pointIndex,strokes}`，返回 `{revision}`。两种版本号均使用 UUID，`baseRevision` 可为 `null` |
 | `GET /rooms/:roomId/drawing/:turn/stream` | 公开订阅经典模式的画面 SSE。连接和重连时发送 `snapshot`（画面快照），随后发送 `drawing`（画面更新）。画面定格时发送 `closed`，流中仅含画面数据 |
 | `GET /rooms/:roomId/cards?q=&page=` | 玩家凭证必需。在房间卡池内沿用 §2.6 的精确编号、结构化筛选、排序与分页 |
-| `POST /rooms/:roomId/action` | 房主 `start`，等候玩家 `leave`，经典模式猜测者 `guess` 另传 `{turn,code}`。经典模式揭晓后，房主以 `next` 开下一轮或 `finish` 结束游戏，两者均另传 `{turn}`。接龙操作见下文。返回本人房间状态，退出返回 `null` |
+| `POST /rooms/:roomId/action` | 房主 `start`，等候玩家 `leave`。经典和接龙等候阶段的房主均可用 `{action:"remove",playerId,version}` 移除任一其他在场玩家。经典模式猜测者 `guess` 另传 `{turn,code}`。经典模式揭晓后，房主以 `next` 开下一轮或 `finish` 结束游戏，两者均另传 `{turn}`。接龙操作见下文。返回本人房间状态，退出返回 `null` |
+
+- 等候房移除操作在同一事务中校验房主身份、等候阶段和名单版本，写入 `remove` 事件并释放席位和 ID。旧凭证立即失效，玩家可重新加入。普通玩家返回 403，旧版本或已经开局返回 409，目标缺席返回 404。房主本人使用 `leave` 退出。
 
 - 经典模式为 `lobby → drawing → reveal → drawing … → finished`。每轮 `drawing` 内实时绘画与猜测共用一个倒计时。
   开局随机排列画手顺序，保存后按该顺序循环，每圈每人画一次。旧房间完成当前一圈后随机排定后续顺序。

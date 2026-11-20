@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { CardInfo } from '@/lib/types';
 import { apiErrorCode, readableApiError } from '@/lib/api';
@@ -11,9 +11,19 @@ import { isExtraDeckType, sortCardCodes, sortCardSearchResults } from '@/lib/car
 // 拖拽/点击增删；保存需要 super admin 令牌。
 export default function PoolEditorPage() {
   const params = useParams<{ id: string }>()!;
+  const [adminToken, setAdminToken] = useState<string | null>(null);
+  useEffect(() => {
+    try { setAdminToken(sessionStorage.getItem('yc_super_token') ?? ''); }
+    catch { setAdminToken(''); }
+  }, []);
+  if (adminToken === null) return <main className="p-8 text-slate-400">加载中…</main>;
+  if (!adminToken) return <main className="p-8">需要超级管理员令牌。<a className="text-gold underline" href="/admin">返回管理台</a></main>;
+  return <PoolEditor key={params.id} id={params.id} adminToken={adminToken} />;
+}
+
+function PoolEditor({ id, adminToken }: { id: string; adminToken: string }) {
   const router = useRouter();
-  const isNew = params.id === 'new';
-  const [adminToken, setAdminToken] = useState('');
+  const isNew = id === 'new';
   const [name, setName] = useState('');
   const [codes, setCodes] = useState<number[]>([]);
   const [physicalCopies, setPhysicalCopies] = useState(false);
@@ -23,17 +33,20 @@ export default function PoolEditorPage() {
   const [msg, setMsg] = useState('');
   const [saveReport, setSaveReport] = useState<{ filtered: number; missingCodes: number[]; candidateRemovedCodes: number[] } | null>(null);
   const [candidateCount, setCandidateCount] = useState(0);
-  const [loading, setLoading] = useState(true);
+  const [ready, setReady] = useState(isNew);
+  const [loadError, setLoadError] = useState('');
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [metaAttempt, setMetaAttempt] = useState(0);
+  const refreshAll = useRef(false);
+  const [metaError, setMetaError] = useState('');
+  const [saving, setSaving] = useState(false);
+  const knownCards = useRef<Record<number, CardInfo>>({});
   const [metaLoading, setMetaLoading] = useState(false);
 
-  useEffect(() => {
-    setAdminToken(sessionStorage.getItem('yc_super_token') ?? '');
-  }, []);
-
   const adminFetch = useCallback(
-    async (path: string, method = 'GET', body?: unknown) => {
+    async (path: string, method = 'GET', body?: unknown, signal?: AbortSignal) => {
       const res = await fetch(`/api${path}`, {
-        method,
+        method, signal,
         headers: { ...(adminToken ? { 'X-Admin-Token': encodeURIComponent(adminToken) } : {}), 'Content-Type': 'application/json' },
         body: body !== undefined ? JSON.stringify(body) : undefined,
       });
@@ -44,86 +57,78 @@ export default function PoolEditorPage() {
     [adminToken],
   );
 
-  // 加载已有卡池 + 卡牌元数据
   useEffect(() => {
-    if (!adminToken || isNew) {
-      setLoading(false);
-      return;
-    }
-    (async () => {
+    if (isNew) return;
+    const controller = new AbortController();
+    setLoadError('');
+    void (async () => {
       try {
-        const pool = await adminFetch(`/admin/pools/${params.id}`);
+        const pool = await adminFetch(`/admin/pools/${id}`, 'GET', undefined, controller.signal);
+        if (controller.signal.aborted) return;
+        if (pool.id !== Number(id) || !Array.isArray(pool.codes) || !pool.codes.every(Number.isSafeInteger)) {
+          throw new Error('INVALID_POOL_RESPONSE');
+        }
         setName(pool.name);
-        const list: number[] = pool.codes ?? [];
-        setCodes(list);
+        setCodes(pool.codes);
         setPhysicalCopies(pool.draftFormat === 'edison_e3');
         setCandidateCount(Number(pool.candidateCodes?.length ?? pool.candidateCount ?? 0));
-        setMetaLoading(true);
-        for (let i = 0; i < list.length; i += 500) {
-          const chunk = list.slice(i, i + 500);
-          const meta = await adminFetch(`/admin/cards?pool_id=${encodeURIComponent(params.id)}&codes=${chunk.join(',')}`);
-          const map: Record<number, CardInfo> = {};
-          for (const c of meta) map[c.code] = c;
-          setCardMap((m) => ({ ...m, ...map }));
-        }
-        setMetaLoading(false);
-      } catch (e: any) {
-        setMsg(apiErrorCode(e) === 'AUTH_REQUIRED' ? '需要超级管理员令牌' : readableApiError(e, '卡池加载失败'));
-      } finally {
-        setLoading(false);
+        setReady(true);
+      } catch (e) {
+        if (!controller.signal.aborted) setLoadError(apiErrorCode(e) === 'AUTH_REQUIRED'
+          ? '需要超级管理员令牌' : readableApiError(e, '卡池加载失败'));
       }
     })();
-  }, [adminToken, isNew, params.id, adminFetch]);
+    return () => controller.abort();
+  }, [adminFetch, id, isNew, loadAttempt]);
 
-  const loadMeta = useCallback(
-    async (list: number[]) => {
-      const missing = list.filter((c) => !cardMap[c]);
-      if (!missing.length) return;
-      setMetaLoading(true);
-      try {
-        for (let i = 0; i < missing.length; i += 500) {
-          const chunk = missing.slice(i, i + 500);
-          const meta = await adminFetch(`/admin/cards?pool_id=${encodeURIComponent(params.id)}&codes=${chunk.join(',')}`);
-          const map: Record<number, CardInfo> = {};
-          for (const c of meta) map[c.code] = c;
-          setCardMap((m) => ({ ...m, ...map }));
-        }
-      } catch {
-        // ignore metadata load errors
-      } finally {
-        setMetaLoading(false);
-      }
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [adminFetch],
-  );
+  const mergeCards = useCallback((rows: CardInfo[]) => {
+    const next = { ...knownCards.current };
+    for (const card of rows) next[card.code] = card;
+    knownCards.current = next;
+    setCardMap(next);
+  }, []);
 
-  // Pick statistics are derived from completed tournaments. Refresh only the
-  // metadata rows already present in the editor so unsaved card additions,
-  // removals and manual ordering are never overwritten.
   useEffect(() => {
-    if (!adminToken || isNew || codes.length === 0) return;
-    const refresh = async () => {
-      const list = [...new Set(codes)];
-      const merged: Record<number, CardInfo> = {};
+    if (!ready) return;
+    const controller = new AbortController();
+    let busy = false;
+    const refresh = async (all: boolean) => {
+      if (busy) return;
+      const list = [...new Set(codes)].filter((code) => all || !knownCards.current[code]);
+      if (!list.length) {
+        setMetaError('');
+        setMetaLoading(false);
+        return;
+      }
+      busy = true;
+      setMetaLoading(true);
       try {
         for (let i = 0; i < list.length; i += 500) {
           const chunk = list.slice(i, i + 500);
-          const meta = await adminFetch(`/admin/cards?pool_id=${encodeURIComponent(params.id)}&codes=${chunk.join(',')}`);
-          for (const c of meta) merged[c.code] = c;
+          const rows = await adminFetch(`/admin/cards?pool_id=${encodeURIComponent(id)}&codes=${chunk.join(',')}`, 'GET', undefined, controller.signal);
+          if (controller.signal.aborted) return;
+          mergeCards(rows);
         }
-        setCardMap((current) => ({ ...current, ...merged }));
-      } catch {
-        // A transient admin/API failure should not interrupt editing.
+        setMetaError('');
+      } catch (e) {
+        if (!controller.signal.aborted) setMetaError(readableApiError(e, '卡牌资料加载失败'));
+      } finally {
+        busy = false;
+        if (!controller.signal.aborted) setMetaLoading(false);
       }
     };
-    const timer = window.setInterval(() => void refresh(), 30000);
-    return () => window.clearInterval(timer);
-  }, [adminFetch, adminToken, codes, isNew, params.id]);
+    void refresh(refreshAll.current);
+    refreshAll.current = false;
+    const timer = window.setInterval(() => {
+      if (!isNew && !document.hidden) void refresh(true);
+    }, 30000);
+    return () => { controller.abort(); window.clearInterval(timer); };
+  }, [adminFetch, codes, id, isNew, mergeCards, metaAttempt, ready]);
 
   const addCode = (code: number) => {
+    const card = results.find((row) => row.code === code);
+    if (card) mergeCards([card]);
     setCodes((prev) => physicalCopies || !prev.includes(code) ? [...prev, code] : prev);
-    void loadMeta([code]);
   };
 
   const removeCode = (code: number) => {
@@ -139,17 +144,19 @@ export default function PoolEditorPage() {
       return;
     }
     try {
-      setResults(sortCardSearchResults(await adminFetch(`/admin/cards?pool_id=${encodeURIComponent(params.id)}&q=${encodeURIComponent(q.trim())}`), q));
+      setResults(sortCardSearchResults(await adminFetch(`/admin/cards?pool_id=${encodeURIComponent(id)}&q=${encodeURIComponent(q.trim())}`), q));
     } catch {
       setResults([]);
     }
   };
 
   const save = async () => {
+    if (!ready || saving) return;
+    setSaving(true);
     const list = [...codes];
     try {
       const body = { codes: list };
-      const d = isNew ? await adminFetch('/admin/pools', 'POST', { name: name.trim() || '未命名卡池', ...body }) : await adminFetch(`/admin/pools/${params.id}`, 'PUT', body);
+      const d = isNew ? await adminFetch('/admin/pools', 'POST', { name: name.trim() || '未命名卡池', ...body }) : await adminFetch(`/admin/pools/${id}`, 'PUT', body);
       const report = {
         filtered: Number(d.filtered ?? 0),
         missingCodes: d.missingCodes ?? [],
@@ -165,10 +172,12 @@ export default function PoolEditorPage() {
       if (isNew) router.replace(`/admin/pool/${d.id}`);
     } catch (e: any) {
       setMsg(apiErrorCode(e) === 'POOL_EXISTS' ? '卡池名称已存在' : readableApiError(e, '保存卡池失败'));
+    } finally {
+      setSaving(false);
     }
   };
 
-  const metaMissing = [...codes].filter((c) => !cardMap[c]).length;
+  const unresolved = codes.filter((code) => !cardMap[code]);
   const main = [...codes].filter((c) => cardMap[c] && !isExtraDeckType(cardMap[c].type));
   const extra = [...codes].filter((c) => cardMap[c] && isExtraDeckType(cardMap[c].type));
 
@@ -180,14 +189,13 @@ export default function PoolEditorPage() {
     if (kind === 'search') addCode(code);
   };
 
-  if (loading) return <main className="p-8 text-slate-400">加载中…</main>;
-  if (metaLoading || metaMissing > 0) {
-    return (
-      <main className="flex min-h-screen items-center justify-center text-slate-400">
-        加载卡牌信息中（{metaMissing} 张待解析）…
-      </main>
-    );
-  }
+  if (!ready) return (
+    <main className="space-y-3 p-8 text-slate-300">
+      <a href="/admin" className="text-gold underline">返回管理台</a>
+      {loadError ? <div role="alert">{loadError} <button className="underline" onClick={() => setLoadAttempt((n) => n + 1)}>重试</button></div>
+        : <p role="status">加载卡池中…</p>}
+    </main>
+  );
 
   return (
     <main className="flex min-h-screen flex-col md:h-screen">
@@ -227,13 +235,22 @@ export default function PoolEditorPage() {
         </span>
         <span className="flex items-center gap-2">
           {msg && <span className="text-xs text-amber-300">{msg}</span>}
-          <button onClick={save} className="rounded bg-gold px-4 py-1.5 text-sm font-semibold text-felt-deep hover:brightness-110">
-            保存
+          <button onClick={save} disabled={saving} className="rounded bg-gold px-4 py-1.5 text-sm font-semibold text-felt-deep hover:brightness-110">
+            {saving ? '保存中…' : '保存'}
           </button>
         </span>
       </header>
       <div className="flex flex-1 flex-col gap-3 p-3 md:flex-row md:overflow-hidden">
         <div className="flex w-full flex-col gap-2 md:w-3/5 md:overflow-y-auto md:pr-1">
+          {(unresolved.length > 0 || metaError) && (
+            <section className="rounded border border-amber-900 p-2 text-xs text-amber-200">
+              <span role="status">{metaError || (metaLoading ? '正在加载卡牌资料' : '暂无卡牌资料')} · {unresolved.length} 张待解析</span>
+              <button disabled={metaLoading} onClick={() => { refreshAll.current = unresolved.length === 0; setMetaAttempt((n) => n + 1); }} className="ml-2 underline">重试</button>
+              {unresolved.length > 0 && !metaLoading && <ul className="mt-1 flex flex-wrap gap-2">
+                {unresolved.map((code, index) => <li key={`${code}-${index}`}>{code} <button className="underline" onClick={() => removeCode(code)}>移除</button></li>)}
+              </ul>}
+            </section>
+          )}
           {(['main', 'extra'] as const).map((zone) => {
             const list = zone === 'main' ? main : extra;
             return (

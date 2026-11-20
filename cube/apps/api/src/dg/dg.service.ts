@@ -288,12 +288,25 @@ export class DgService implements OnModuleInit, OnModuleDestroy {
           break;
         }
         case 'leave':
+        case 'remove': {
+          let target = player;
           this.requirePhase(room, 'lobby', now);
-          room.players = room.players.filter((member) => member !== player);
+          if (command.action === 'remove') {
+            this.requireHost(room, player);
+            if (command.version !== room.version) throw new ConflictException({ code: 'DG_STALE_VERSION' });
+            const member = room.players.find((candidate) => candidate.playerId === command.playerId);
+            if (!member) throw new NotFoundException({ code: 'DG_PLAYER_NOT_IN_ROOM' });
+            if (member === player) throw new BadRequestException({ code: 'DG_REMOVE_SELF' });
+            target = member;
+            event = { action: 'remove', playerId, targetPlayerId: target.playerId };
+          } else {
+            event = { action: 'leave', playerId };
+          }
+          room.players = room.players.filter((member) => member !== target);
           if (room.players.length === 0) this.finish(room);
           else room.deadlineAt = now + ROOM_IDLE_MS;
-          event = { action: 'leave', playerId };
           break;
+        }
         case 'guess':
           this.requirePhase(room, room.phase === 'drawing' ? 'drawing' : 'guessing', now);
           event = this.guess(room, this.requireTurn(room, command.turn), player, command.code, now);

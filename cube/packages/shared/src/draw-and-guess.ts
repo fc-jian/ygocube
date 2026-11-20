@@ -1,4 +1,4 @@
-import type { CardInfo, GuessCardRef, GuessOpeningHint, GuessRoomSummary } from './index';
+import type { CardInfo, GuessCardRef, GuessOpeningHint, GuessRoomSummary, RemoveRoomPlayerRequest } from './index';
 
 export const DG_DEFAULT_SECONDS = 120;
 export const DG_DEFAULT_ROUND_SECONDS = 180;
@@ -79,6 +79,7 @@ export function applyDgDrawingPatch(drawing: DgDrawing, patch: DgDrawingPatch): 
 export type DgActionRequest =
   | { action: 'start' }
   | { action: 'leave' }
+  | RemoveRoomPlayerRequest
   | { action: 'guess'; turn: number; code: number }
   | { action: 'next' | 'finish'; turn: number }
   | ({ action: 'relay-submit'; round: number; step: number } & (

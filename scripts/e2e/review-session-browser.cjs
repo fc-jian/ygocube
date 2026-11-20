@@ -13,6 +13,7 @@ async function until(predicate) {
 (async () => {
   const streams = new Set(), streamRequests = [], stateRequests = [], errors = [];
   let withPack = false, holdNext = false, releaseOld;
+  let resultRound = 1, holdResult = false, releaseResult;
   const players = ['A', 'B', 'C'].map((playerId, seat) => ({ playerId, displayName: playerId, seat }));
   const state = pid => ({
     id: 1, name: 'Session regression', status: 'drafting', round: 0, frozen: false,
@@ -43,6 +44,14 @@ async function until(predicate) {
       res.flushHeaders(); res.write(': connected\n\n');
       res.on('close', () => streams.delete(record)); return;
     }
+    if (/^\/api\/t\/3\/(state|matches|ranking)$/.test(url.pathname)) {
+      if (url.pathname.endsWith('/matches')) return json([]);
+      const value = url.pathname.endsWith('/state') ? { ...state(pid), status: 'matches', round: resultRound }
+        : [{ playerId: pid, displayName: 'Round ' + resultRound, points: resultRound, rank: 1, omw: 0 }];
+      if (holdResult) { holdResult = false; releaseResult = () => json(value); return; }
+      return json(value);
+    }
+    if (url.pathname === '/api/meta') return json({ srvpro: { host: 'localhost', gamePort: 7911 } });
     if (url.pathname.endsWith('/state')) {
       stateRequests.push(pid); const snapshot = state(pid);
       if (pid === 'A' && holdNext) { holdNext = false; releaseOld = () => json(snapshot); return; }
@@ -106,8 +115,35 @@ async function until(predicate) {
     await until(() => ![...streams].some(s => s.pid === 'C'));
     assert([...streams].some(s => s.pid === 'B'));
     assert(!(await context.cookies()).some(cookie => cookie.name === 'yc_pid_2'));
+    for (const view of ['matches', 'ranking']) {
+      resultRound = 1;
+      releaseResult = null;
+      const results = await page();
+      await results.goto(base + '/t/3/' + view + '/A');
+      await results.getByRole('heading', { name: '请输入令牌' }).waitFor();
+      await results.getByPlaceholder('令牌', { exact: true }).fill('fixture-results');
+      await results.getByRole('button', { name: '进入', exact: true }).click();
+      const displayed = (round) => view === 'matches'
+        ? results.getByRole('heading', { name: new RegExp('第 ' + round) })
+        : results.getByRole('cell', { name: 'Round ' + round });
+      await displayed(1).waitFor();
+      const stream = [...streams].find(s => s.url === '/api/t/3/stream');
+      assert.ok(stream);
+      holdResult = true;
+      stream.res.write('event: match\ndata: {}\n\n');
+      await until(() => !!releaseResult);
+      resultRound = 2;
+      stream.res.write('event: match\ndata: {}\n\n');
+      await delay(100);
+      releaseResult();
+      await displayed(2).waitFor();
+      await results.close();
+      await until(() => !streams.has(stream));
+      await context.clearCookies();
+      await a.evaluate(() => localStorage.removeItem('yc_token_3_A'));
+    }
     assert.deepEqual(errors, []);
-    console.log(JSON.stringify({ perTabStreamIdentity: true, noTokenInUrl: true, cookieRenewal: true, noTokenStream: true, slowStateEventRecovered: true, logoutClosesMatchingTabsOnly: true, logoutSurvivesReload: true, blockedStorageLogout: true, pageErrors: errors }));
+    console.log(JSON.stringify({ perTabStreamIdentity: true, noTokenInUrl: true, cookieRenewal: true, noTokenStream: true, slowStateEventRecovered: true, matchesAndRankingRefreshed: true, logoutClosesMatchingTabsOnly: true, logoutSurvivesReload: true, blockedStorageLogout: true, pageErrors: errors }));
   } finally {
     await browser.close(); for (const stream of streams) stream.res.end();
     fixture.closeAllConnections(); await new Promise(resolve => fixture.close(resolve));

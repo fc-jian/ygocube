@@ -1,5 +1,7 @@
 'use client';
 
+import { readGameValue, writeGameValue } from '@/lib/gameStorage';
+
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { FormEvent, useCallback, useEffect, useState } from 'react';
@@ -7,6 +9,7 @@ import type { GuessActionRequest, GuessCardRef, GuessPublicRoomView, GuessRoomVi
 import { CardWithTooltip } from '@/components/CardImage';
 import { closeCardPreview } from '@/components/CardPreview';
 import { ConfirmModal } from '@/components/ConfirmModal';
+import { RoomRoster } from '@/components/RoomRoster';
 import { ApiError } from '@/lib/api';
 import { GuessCardName } from './GuessCardName';
 import { GuessCards } from './GuessCards';
@@ -100,28 +103,6 @@ function GuessWithCard({ template, player, card, text }: { template: string; pla
   return <>{before}<GuessCardName key={card.code} card={card} text={text} />{after}</>;
 }
 
-function GuessRoster({ room, text, viewerId, busy, remove }: {
-  room: GuessPublicRoomView;
-  text: GuessText;
-  viewerId?: string;
-  busy?: boolean;
-  remove?: (playerId: string) => void;
-}) {
-  return (
-    <ul className="guess-roster" aria-label={text.activeRoster} aria-live="polite">
-      {room.standings.filter((player) => !player.departed).map(({ playerId }) => (
-        <li key={playerId}>
-          <strong>{playerId}</strong>
-          {playerId === room.hostId && <span className="guess-pill">{text.host}</span>}
-          {playerId === viewerId && <span className="guess-muted">{text.you}</span>}
-          {remove && playerId !== viewerId && <button type="button" className="guess-secondary" disabled={busy}
-            aria-label={fillText(text.removePlayer, { player: playerId })} onClick={() => remove(playerId)}>{text.remove}</button>}
-        </li>
-      ))}
-    </ul>
-  );
-}
-
 function PreviousSurrender({ room, text }: { room: GuessPublicRoomView; text: GuessText }) {
   const previous = room.previousSurrender;
   return previous && <p className="guess-muted" role="status">
@@ -140,7 +121,7 @@ function SpectatorGame({ room, text }: { room: GuessSpectatorView; text: GuessTe
         <PreviousSurrender room={room} text={text} />
         {room.phase === 'between_rounds' && <>
           <h3>{text.activeRoster}</h3>
-          <GuessRoster room={room} text={text} />
+          <RoomRoster room={room} players={room.standings} text={text} />
         </>}
         {room.currentGuess && room.currentPlayerId && <p className="guess-live-guess" role="status">
           <GuessWithCard template={text.liveGuess} player={room.currentPlayerId} card={room.currentGuess} text={text} />
@@ -181,6 +162,7 @@ export function GuessRoom({ roomId }: { roomId: string }) {
   const { text, language, changeLanguage } = useGuessLanguage();
   const roomPath = `/rooms/${roomId}`;
   const [token, setToken] = useState<string | null | undefined>(undefined);
+  const [seatEnded, setSeatEnded] = useState(false);
   const [room, setRoom] = useState<GuessRoomView | null>(null);
   const [watched, setWatched] = useState<GuessSpectatorView | null>(null);
   const [playerId, setPlayerId] = useState('');
@@ -188,12 +170,13 @@ export function GuessRoom({ roomId }: { roomId: string }) {
   const [connectionError, setConnectionError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [confirm, setConfirm] = useState<{ action: 'surrender' | 'finish' } | { action: 'remove'; playerId: string } | null>(null);
+  const [confirm, setConfirm] = useState<{ action: 'surrender' | 'finish' } | null>(null);
 
   useEffect(() => {
     setRoom(null);
     setWatched(null);
-    setToken(localStorage.getItem(sessionKey(roomId)));
+    setSeatEnded(false);
+    setToken(readGameValue(sessionKey(roomId)));
   }, [roomId]);
   const refresh = useCallback(async (signal: AbortSignal) => {
     if (!token) return;
@@ -206,10 +189,16 @@ export function GuessRoom({ roomId }: { roomId: string }) {
     } catch (err) {
       if (signal.aborted) return;
       if (err instanceof ApiError && (err.status === 401 || err.status === 404)) {
-        localStorage.removeItem(sessionKey(roomId));
+        writeGameValue(sessionKey(roomId), null);
         setToken(null);
         setRoom(null);
-        if (err.status === 401) return;
+        setWatched(null);
+        if (err.status === 401) {
+          setSeatEnded(true);
+          setError(null);
+          setConnectionError(null);
+          return;
+        }
       }
       setConnectionError(err);
     }
@@ -238,7 +227,8 @@ export function GuessRoom({ roomId }: { roomId: string }) {
     setConnectionError(null);
     try {
       const session = await guessRequest<GuessSession>(`${roomPath}/join`, { body: { playerId } });
-      localStorage.setItem(sessionKey(roomId), session.token);
+      writeGameValue(sessionKey(roomId), session.token);
+      setSeatEnded(false);
       setRoom(session.room);
       setToken(session.token);
     } catch (err) {
@@ -255,7 +245,7 @@ export function GuessRoom({ roomId }: { roomId: string }) {
     try {
       const state = await guessRequest<GuessRoomView | null>(`${roomPath}/action`, { token, body });
       if (body.action === 'leave') {
-        localStorage.removeItem(sessionKey(roomId));
+        writeGameValue(sessionKey(roomId), null);
         setToken(null);
         setRoom(null);
         router.replace(GUESS_PATH);
@@ -288,8 +278,6 @@ export function GuessRoom({ roomId }: { roomId: string }) {
   const lastRemaining = playing && room.players.filter((player) => player.roundPoints === null).length === 1;
   const canSurrender = canGuess && lastRemaining;
   const canFinish = host && room?.phase === 'between_rounds';
-  const removeTarget = confirm?.action === 'remove' ? confirm.playerId : undefined;
-  const canRemove = canFinish && room.standings.some((player) => player.playerId === removeTarget && !player.departed);
   const spectator = token === null ? watched : null;
   const canJoin = spectator?.phase === 'lobby' || spectator?.phase === 'between_rounds';
   return (
@@ -307,6 +295,7 @@ export function GuessRoom({ roomId }: { roomId: string }) {
           {copied ? text.copied : text.copy}
         </button>
       </header>
+      {token === null && seatEnded && <p className="guess-muted" role="status">{text.seatEnded}</p>}
       {error != null && <p className="guess-error" role="alert">{guessError(error, text)}</p>}
       {connectionError != null && <p className="guess-error" role="alert">{guessError(connectionError, text)}</p>}
       {connectionError == null && (token === undefined || (token ? !room : !spectator))
@@ -332,7 +321,7 @@ export function GuessRoom({ roomId }: { roomId: string }) {
             </Link>
             {' · '}{fillText(text.cardCount, { count: room.poolCount.toLocaleString(language) })}
           </p>
-          <GuessRoster room={room} text={text} viewerId={room.viewerId} />
+          <RoomRoster room={room} players={room.standings} text={text} viewerId={room.viewerId} busy={busy} onRemove={act} />
           <div className="flex flex-wrap gap-2">
             {host && <button type="button" className="guess-primary" disabled={busy}
               onClick={() => void act({ action: 'start', version: room.version })}>{text.start}</button>}
@@ -383,8 +372,7 @@ export function GuessRoom({ roomId }: { roomId: string }) {
             {room.phase === 'between_rounds' && <>
               <h2>{text.roundOver}</h2>
               <h3>{text.activeRoster}</h3>
-              <GuessRoster room={room} text={text} viewerId={room.viewerId} busy={busy}
-                remove={host ? (playerId) => setConfirm({ action: 'remove', playerId }) : undefined} />
+              <RoomRoster room={room} players={room.standings} text={text} viewerId={room.viewerId} busy={busy} onRemove={act} />
               <div className="flex flex-wrap gap-2">
                 {host && <>
                   <button type="button" className="guess-primary" disabled={busy}
@@ -406,13 +394,12 @@ export function GuessRoom({ roomId }: { roomId: string }) {
               choose={(card) => void act({ action: 'select', version: room.version, code: card.code })} />}
           </section>
           <GuessScores room={room} text={text} viewerId={room.viewerId} />
-          <ConfirmModal open={confirm?.action === 'surrender' && canSurrender || confirm?.action === 'finish' && canFinish
-            || confirm?.action === 'remove' && canRemove}
-            title={removeTarget ? fillText(text.removePlayer, { player: removeTarget }) : confirm?.action === 'finish' ? text.finish : text.surrender}
-            confirmText={removeTarget ? text.remove : confirm?.action === 'finish' ? text.confirmFinish : text.confirm}
+          <ConfirmModal open={confirm?.action === 'surrender' && canSurrender || confirm?.action === 'finish' && canFinish}
+            title={confirm?.action === 'finish' ? text.finish : text.surrender}
+            confirmText={confirm?.action === 'finish' ? text.confirmFinish : text.confirm}
             cancelText={text.cancel} onCancel={() => setConfirm(null)}
             onConfirm={() => { setConfirm(null); if (confirm) void act({ ...confirm, version: room.version }); }}>
-            <p>{removeTarget ? text.removeHelp : confirm?.action === 'finish' ? text.finishHelp : text.surrenderConfirm}</p>
+            <p>{confirm?.action === 'finish' ? text.finishHelp : text.surrenderConfirm}</p>
           </ConfirmModal>
         </div>
       )}

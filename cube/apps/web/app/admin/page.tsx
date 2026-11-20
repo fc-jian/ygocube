@@ -2,7 +2,9 @@
 import { EDISON_E3_MAX_PLAYERS, type PoolDraftFormat } from '@ygocube/shared';
 import { EdisonDraftRules } from '@/components/EdisonDraftRules';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCoalescedRefresh } from '@/lib/useCoalescedRefresh';
+import { useConfirmationSeconds } from '@/lib/useConfirmationSeconds';
 import { apiErrorCode, readableApiError } from '@/lib/api';
 
 interface AdminState {
@@ -27,6 +29,7 @@ interface AdminState {
     requestedAt: string;
     deadlineAt: string;
     confirmedByPlayer: Record<string, boolean>;
+    serverNow?: number;
     confirmedCount: number;
     total: number;
   } | null;
@@ -73,14 +76,91 @@ interface TournamentBrief {
   created_by?: string;
 }
 
+const useCommitEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
+
+interface AdminScope {
+  adminToken: string;
+  createUsername: string;
+  createToken: string;
+  tid: string;
+}
+
 export default function AdminPage() {
-  // Super token is global; creator credentials are scoped by the server to
-  // tournaments owned by that username. Never put either credential in URLs.
-  const [adminToken, setAdminToken] = useState('');
-  const [createUsername, setCreateUsername] = useState('');
-  const [createToken, setCreateToken] = useState('');
-  const [tid, setTid] = useState('');
-  const [state, setState] = useState<AdminState | null>(null);
+  const [scope, setScope] = useState({ adminToken: '', createUsername: '', createToken: '', tid: '', credentialVersion: 0 });
+  const [reload, setReload] = useState(0);
+  const { adminToken, createUsername, createToken, tid, credentialVersion } = scope;
+  const update = (patch: Partial<AdminScope>) => setScope((current) => ({
+    ...current, ...patch, credentialVersion: patch.tid === undefined ? current.credentialVersion + 1 : current.credentialVersion,
+  }));
+
+  useEffect(() => {
+    try {
+      update({
+        adminToken: sessionStorage.getItem('yc_super_token') ?? '',
+        createUsername: sessionStorage.getItem('yc_create_username') ?? '',
+        createToken: sessionStorage.getItem('yc_create_token') ?? '',
+      });
+    } catch { update({}); }
+  }, []);
+  const initialized = credentialVersion > 0;
+  useEffect(() => {
+    if (!initialized) return;
+    try {
+      for (const [key, value] of [['yc_super_token', adminToken], ['yc_create_username', createUsername], ['yc_create_token', createToken]]) {
+        if (value) sessionStorage.setItem(key, value);
+        else sessionStorage.removeItem(key);
+      }
+      localStorage.removeItem('yc_admin_token');
+    } catch { /* The active tab can still use the entered credentials. */ }
+  }, [adminToken, createUsername, createToken, initialized]);
+
+  return (
+    <main className="mx-auto max-w-5xl p-4 sm:p-6">
+      <div className="mb-5">
+        <p className="yc-kicker mb-1">Tournament operations</p>
+        <h1 className="yc-title text-2xl font-bold">管理控制台</h1>
+      </div>
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <input
+          className="w-full rounded bg-felt px-3 py-1.5 font-mono text-xs outline-none sm:w-72"
+          placeholder="超级管理员 token（或填写下方创建者凭据）"
+          type="password"
+          value={adminToken}
+          onChange={(e) => {
+            update({ adminToken: e.target.value, ...(e.target.value ? { createUsername: '', createToken: '' } : {}) });
+          }}
+        />
+        <input
+          className="w-40 rounded bg-felt px-3 py-1.5 text-xs outline-none"
+          placeholder="创建用户名"
+          value={createUsername}
+          onChange={(e) => {
+            update({ createUsername: e.target.value, ...(e.target.value ? { adminToken: '' } : {}) });
+          }}
+        />
+        <input
+          className="w-full rounded bg-felt px-3 py-1.5 font-mono text-xs outline-none sm:w-64"
+          placeholder="创建 token"
+          type="password"
+          value={createToken}
+          onChange={(e) => {
+            update({ createToken: e.target.value, ...(e.target.value ? { adminToken: '' } : {}) });
+          }}
+        />
+        <input className="w-24 rounded bg-felt px-3 py-1.5 outline-none" placeholder="比赛 ID" value={tid} onChange={(e) => update({ tid: e.target.value })} />
+        <button onClick={() => setReload((n) => n + 1)} className="rounded bg-felt-edge px-4 py-1.5 hover:brightness-110">
+          加载
+        </button>
+      </div>
+      {initialized && <AdminDashboard key={credentialVersion} {...scope} reload={reload} setTid={(value) => update({ tid: value })} />}
+    </main>
+  );
+}
+
+function AdminDashboard({ tid, adminToken, createUsername, createToken, reload, setTid }:
+  AdminScope & { reload: number; setTid: (tid: string) => void }) {
+  const [loadedState, setState] = useState<AdminState | null>(null);
+  const state = tid && loadedState?.id === Number(tid) ? loadedState : null;
   const [pools, setPools] = useState<PoolInfo[]>([]);
   const [canEditPools, setCanEditPools] = useState(false);
   const [poolName, setPoolName] = useState('');
@@ -88,7 +168,11 @@ export default function AdminPage() {
   const [poolSize, setPoolSize] = useState(1000);
   const [poolReport, setPoolReport] = useState<PoolImportReport | null>(null);
   const [deletingPoolId, setDeletingPoolId] = useState<number | null>(null);
-  const [msg, setMsg] = useState('');
+  const [msg, updateMsg] = useState('');
+  const selection = useRef<{ tid: string; controller: AbortController } | null>(null);
+  const setMsg = (message: string) => {
+    if (selection.current?.tid === tid) updateMsg(message);
+  };
   const [msgKey, setMsgKey] = useState(0);
   const msgHideKey = useRef(0);
   // 右上角操作反馈：显示 8 秒后自动消失（不再被 5 秒轮询的 load() 清掉）
@@ -103,7 +187,6 @@ export default function AdminPage() {
   const [tournaments, setTournaments] = useState<TournamentBrief[]>([]);
   const [editing, setEditing] = useState(false);
   const [editForm, setEditForm] = useState<Record<string, string | number | boolean>>({});
-  const loadSeq = useRef(0);
   const [addPid, setAddPid] = useState('');
   const [shownToken, setShownToken] = useState<{ pid: string; token: string } | null>(null);
   const [matchInputs, setMatchInputs] = useState<Record<number, { a: string; b: string }>>({});
@@ -123,8 +206,31 @@ export default function AdminPage() {
   const [createUsersLoaded, setCreateUsersLoaded] = useState(false);
   const [newCreateUsername, setNewCreateUsername] = useState('');
   const [issuedCreateToken, setIssuedCreateToken] = useState<{ username: string; token: string } | null>(null);
-  const [confirmationNow, setConfirmationNow] = useState(() => Date.now());
-  const loadBusy = useRef(false);
+  const confirmationSecondsLeft = useConfirmationSeconds(state?.draftStartConfirmation);
+  const scope = useRef<AbortController | null>(null);
+  useCommitEffect(() => {
+    const controller = new AbortController();
+    scope.current = controller;
+    return () => controller.abort();
+  }, []);
+
+  useCommitEffect(() => {
+    const controller = new AbortController();
+    selection.current = { tid, controller };
+    setState(null);
+    setEditing(false);
+    setReserveInputs({});
+    setMatchInputs({});
+    setAddPid('');
+    setShownToken(null);
+    setSelectedSeq(null);
+    setHoveredEvent(null);
+    setEvents([]);
+    setCanEditPools(false);
+    setPools([]);
+    updateMsg('');
+    return () => { controller.abort(); selection.current = null; };
+  }, [tid]);
 
   useEffect(() => {
     if (!state) return;
@@ -135,28 +241,12 @@ export default function AdminPage() {
     });
   }, [state?.id, state?.config.matchFormat, state?.config.swissRoundCount, state?.config.playoffSize]);
 
-  useEffect(() => {
-    setAdminToken(sessionStorage.getItem('yc_super_token') ?? '');
-    setCreateUsername(sessionStorage.getItem('yc_create_username') ?? '');
-    setCreateToken(sessionStorage.getItem('yc_create_token') ?? '');
-  }, []);
-
-  const saveCredentials = () => {
-    if (adminToken) sessionStorage.setItem('yc_super_token', adminToken);
-    else sessionStorage.removeItem('yc_super_token');
-    if (createUsername) sessionStorage.setItem('yc_create_username', createUsername);
-    else sessionStorage.removeItem('yc_create_username');
-    if (createToken) sessionStorage.setItem('yc_create_token', createToken);
-    else sessionStorage.removeItem('yc_create_token');
-    // Do not retain the revoked per-tournament token from older builds.
-    localStorage.removeItem('yc_admin_token');
-  };
-
   const isSuperSession = adminToken.trim().length > 0;
 
-  const adminFetch = useCallback(async (path: string, method = 'GET', body?: unknown) => {
+  const adminFetch = useCallback(async (path: string, method = 'GET', body?: unknown, loadSignal?: AbortSignal) => {
+    const signal = loadSignal ?? (path.startsWith('/admin/t/') ? selection.current?.controller.signal : scope.current?.signal);
     const res = await fetch(`/api${path}`, {
-      method,
+      method, signal,
       headers: {
         ...(adminToken
           ? { 'X-Admin-Token': encodeURIComponent(adminToken) }
@@ -171,6 +261,7 @@ export default function AdminPage() {
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
     const d = await res.json().catch(() => ({}));
+    signal?.throwIfAborted();
     if (!res.ok) {
       const error = new Error(d.code ?? `${res.status}`) as Error & { details?: unknown };
       error.details = d.details;
@@ -179,19 +270,14 @@ export default function AdminPage() {
     return d;
   }, [adminToken, createUsername, createToken]);
 
-  const load = useCallback(async () => {
-    if (loadBusy.current) return;
-    loadBusy.current = true;
-    try {
-    saveCredentials();
-    // 竞态守卫：快速切换 tid 或轮询重叠时，旧请求的迟到响应不得覆盖新数据
-    const seq = ++loadSeq.current;
+  const { request: load } = useCoalescedRefresh(useCallback(async ({ signal, isCurrent }) => {
+    const get = (path: string, method = 'GET') => adminFetch(path, method, undefined, signal);
     if (tid) {
       try {
-        const s = await adminFetch(`/admin/t/${tid}/state`, 'POST');
-        if (seq === loadSeq.current) setState(s);
+        const s = await get(`/admin/t/${tid}/state`, 'POST');
+        if (isCurrent() && s.id === Number(tid)) setState(s);
       } catch (e: any) {
-        if (seq !== loadSeq.current) return;
+        if (!isCurrent()) return;
         const code = apiErrorCode(e);
         setMsg(code === 'AUTH_REQUIRED' || code === 'FORBIDDEN' ? '凭据缺失或无权管理该比赛' : readableApiError(e, '比赛状态加载失败'));
         setState(null);
@@ -199,11 +285,11 @@ export default function AdminPage() {
     }
     try {
       const p = tid
-        ? await adminFetch(`/admin/t/${tid}/pools`)
+        ? await get(`/admin/t/${tid}/pools`)
         : isSuperSession
-          ? await adminFetch('/admin/pools')
+          ? await get('/admin/pools')
           : { pools: [], canEdit: false };
-      if (seq === loadSeq.current) {
+      if (isCurrent()) {
         if (Array.isArray(p)) {
           setPools(p);
           setCanEditPools(true);
@@ -213,81 +299,60 @@ export default function AdminPage() {
         }
       }
     } catch {
-      if (seq === loadSeq.current) {
+      if (isCurrent()) {
         setPools([]);
         setCanEditPools(false);
       }
     }
     try {
-      const t = await adminFetch(isSuperSession ? '/admin/tournaments' : '/admin/mine/tournaments');
-      if (seq === loadSeq.current) setTournaments(t);
+      const t = await get(isSuperSession ? '/admin/tournaments' : '/admin/mine/tournaments');
+      if (isCurrent()) setTournaments(t);
     } catch {
-      if (seq === loadSeq.current) setTournaments([]);
+      if (isCurrent()) setTournaments([]);
     }
     try {
-      const users = await adminFetch('/admin/create-users');
-      if (seq === loadSeq.current) {
+      const users = await get('/admin/create-users');
+      if (isCurrent()) {
         setCreateUsers(users);
         setCreateUsersLoaded(true);
       }
     } catch {
-      if (seq === loadSeq.current) {
+      if (isCurrent()) {
         setCreateUsers([]);
         setCreateUsersLoaded(false);
       }
     }
     if (tid) {
       try {
-        const ev = await adminFetch(`/admin/t/${tid}/events`);
-        if (seq === loadSeq.current) setEvents(ev);
+        const ev = await get(`/admin/t/${tid}/events`);
+        if (isCurrent()) setEvents(ev);
       } catch {
-        if (seq === loadSeq.current) setEvents([]);
+        if (isCurrent()) setEvents([]);
       }
     }
-    } finally {
-      loadBusy.current = false;
-    }
-  }, [adminFetch, tid, isSuperSession, createUsername, createToken]);
-  // act 等异步回调完成后要刷新的是"当前最新 tid"的数据，而非发起时刻的闭包
-  const loadRef = useRef(load);
-  loadRef.current = load;
+  }, [adminFetch, tid, isSuperSession]));
 
-  useEffect(() => {
-    void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [adminToken, createUsername, createToken, tid]);
-
-  // 切换比赛时关闭编辑态，避免上一场比赛的表单残留
-  useEffect(() => {
-    setEditing(false);
-    setReserveInputs({});
-    setHoveredEvent(null);
-    setCanEditPools(false);
-  }, [tid]);
+  const currentLoad = useRef(load);
+  useCommitEffect(() => { currentLoad.current = load; }, [load]);
+  useEffect(() => { void load(); }, [load, reload]);
 
   // 控制台低频轮询；开始选牌确认窗口期间提高到 5 秒，使管理员能
   // 及时看到尚未确认的玩家以及一分钟超时结果。
   useEffect(() => {
     const confirmationPending = state?.draftStartConfirmation?.pending === true;
-    const t = window.setInterval(() => {
-      if (document.visibilityState === 'visible') void load();
-    }, confirmationPending ? 5_000 : 15_000);
-    const onVisibilityChange = () => {
-      if (document.visibilityState === 'visible') void load();
+    let polling = false;
+    const poll = async () => {
+      if (document.hidden || polling) return;
+      polling = true;
+      try { await load(); } finally { polling = false; }
     };
-    document.addEventListener('visibilitychange', onVisibilityChange);
+    const timer = window.setInterval(poll, confirmationPending ? 5_000 : 15_000);
+    document.addEventListener('visibilitychange', poll);
     return () => {
-      window.clearInterval(t);
-      document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', poll);
     };
   }, [load, state?.draftStartConfirmation?.pending]);
-
-  useEffect(() => {
-    if (!state?.draftStartConfirmation?.pending) return;
-    setConfirmationNow(Date.now());
-    const timer = window.setInterval(() => setConfirmationNow(Date.now()), 1_000);
-    return () => window.clearInterval(timer);
-  }, [state?.draftStartConfirmation?.pending]);
 
   const actionSuccessMessage = (path: string): string => {
     if (path.endsWith('/pause')) return '比赛已暂停';
@@ -305,7 +370,7 @@ export default function AdminPage() {
     try {
       await adminFetch(path, 'POST', body ?? {});
       showMsg(actionSuccessMessage(path));
-      await loadRef.current();
+      await currentLoad.current();
     } catch (e: any) {
       if (apiErrorCode(e) === 'INSUFFICIENT_PACK_RATIO' && e.details) {
         const d = e.details as { message?: string; extraRatioPercent?: number; requiredMain?: number; availableMain?: number; requiredExtra?: number; availableExtra?: number };
@@ -321,7 +386,7 @@ export default function AdminPage() {
     try {
       await adminFetch(`/admin/t/${state.id}/match-format`, 'PUT', formatForm);
       showMsg('赛制已保存');
-      await loadRef.current();
+      await currentLoad.current();
     } catch (e: any) { showMsg(`赛制保存失败：${readableApiError(e)}`); }
   };
 
@@ -349,7 +414,7 @@ export default function AdminPage() {
       const repairs = (result.repairs ?? []) as { playerId: string; disqualified: boolean; movedToSide: number; returnedToPool: number }[];
       const dsq = repairs.filter((r) => r.disqualified).map((r) => r.playerId);
       showMsg(dsq.length ? `已进入对战；DSQ：${dsq.join('、')}` : '卡组检查通过，已进入对战');
-      await loadRef.current();
+      await currentLoad.current();
     } catch (e: any) {
       showMsg(`进入对战失败：${readableApiError(e)}`);
     }
@@ -366,7 +431,7 @@ export default function AdminPage() {
       const result = await adminFetch(`/admin/t/${state.id}/players/${encodeURIComponent(playerId)}/reserve`, 'POST', { seconds });
       setReserveInputs((values) => ({ ...values, [playerId]: '' }));
       showMsg(`${playerId} 已增加 ${seconds} 秒保留时间（当前 ${Math.ceil(Number(result.reserveMs ?? 0) / 1000)} 秒）`);
-      await loadRef.current();
+      await currentLoad.current();
     } catch (e: any) {
       showMsg(`增加保留时间失败：${readableApiError(e)}`);
     }
@@ -399,7 +464,7 @@ export default function AdminPage() {
         ? `回溯完成；${replacements.length} 个历史玩家缺少原凭据，已生成替换 token：${replacements.map(([p, t]) => `${p}=${t}`).join('，')}`
         : `回溯完成，已删除 ${result.deleted_events} 条后续事件；比赛保持冻结`);
       setSelectedSeq(null);
-      await loadRef.current();
+      await currentLoad.current();
     } catch (e: any) {
       showMsg(`回溯失败：${readableApiError(e)}`);
     }
@@ -459,7 +524,7 @@ export default function AdminPage() {
       await adminFetch(`/admin/t/${state!.id}/config`, 'PUT', body);
       setMsg('参数已更新');
       setEditing(false);
-      await load();
+      await currentLoad.current();
     } catch (e: any) {
       setMsg(apiErrorCode(e) === 'WRONG_PHASE' ? '选牌开始后不能再修改参数' : readableApiError(e, '参数更新失败'));
     }
@@ -476,7 +541,7 @@ export default function AdminPage() {
       setPoolReport(report);
       const warningCount = (report.entryWarnings?.length ?? 0) + report.filtered;
       showMsg(warningCount > 0 ? `卡池已创建，但发现 ${warningCount} 项警告；请查看下方导入报告` : `卡池已创建，共 ${d.count ?? d.codes?.length ?? 0} 张`);
-      await load();
+      await currentLoad.current();
       if (warningCount === 0) setPoolCodes('');
     } catch (e: any) {
       if (apiErrorCode(e) === 'BAD_POOL_IMPORT' && Array.isArray(e.details)) {
@@ -493,7 +558,7 @@ export default function AdminPage() {
       const d = await adminFetch('/admin/pools/random', 'POST', { name: poolName, size: poolSize });
       setPoolReport({ filtered: Number(d.filtered ?? 0), missingCodes: d.missingCodes ?? [], entryWarnings: d.entryWarnings ?? [] });
       showMsg(d.filtered > 0 ? `随机卡池已创建，自动过滤 ${d.filtered} 张 token 卡` : '随机卡池已创建');
-      await load();
+      await currentLoad.current();
     } catch (e: any) {
       showMsg(readableApiError(e, '创建随机卡池失败'));
     }
@@ -510,7 +575,7 @@ export default function AdminPage() {
       setIssuedCreateToken({ username: result.username, token: result.create_token });
       setNewCreateUsername('');
       showMsg(`权限用户 ${result.username} 已创建；token 只显示一次`);
-      await loadRef.current();
+      await currentLoad.current();
     } catch (e: any) {
       const code = apiErrorCode(e);
       showMsg(code === 'CREATE_USER_EXISTS' ? '该权限用户名已存在' : (code === 'BAD_CREATE_USERNAME' ? '用户名须为 1–32 位字母、数字、点、下划线或连字符' : readableApiError(e, '创建权限用户失败')));
@@ -523,7 +588,7 @@ export default function AdminPage() {
       await adminFetch(`/admin/create-users/${encodeURIComponent(username)}`, 'DELETE');
       if (issuedCreateToken?.username === username) setIssuedCreateToken(null);
       showMsg(`权限用户 ${username} 已删除`);
-      await loadRef.current();
+      await currentLoad.current();
     } catch (e: any) {
       showMsg(`删除权限用户失败：${readableApiError(e)}`);
     }
@@ -536,7 +601,7 @@ export default function AdminPage() {
     try {
       await adminFetch(`/admin/pools/${pool.id}`, 'DELETE');
       showMsg(`卡池“${pool.name}”已删除`);
-      await loadRef.current();
+      await currentLoad.current();
     } catch (e: any) {
       const details = e?.details as { tournaments?: { id: number; name: string; status: string }[] } | undefined;
       const code = apiErrorCode(e);
@@ -547,7 +612,7 @@ export default function AdminPage() {
           : '卡池仍被进行中的比赛使用，请先结束比赛后再删除。');
       } else if (code === 'POOL_NOT_FOUND') {
         showMsg('卡池已不存在，列表将刷新');
-        await loadRef.current();
+        await currentLoad.current();
       } else if (code === 'FORBIDDEN' || code === 'AUTH_REQUIRED') {
         showMsg('当前凭据没有删除卡池的权限，请使用超级管理员 token');
       } else {
@@ -564,7 +629,7 @@ export default function AdminPage() {
       const result = await adminFetch(`/admin/create-users/${encodeURIComponent(username)}/token`, 'POST', {});
       setIssuedCreateToken({ username: result.username, token: result.create_token });
       showMsg(`权限用户 ${username} 的旧 token 已失效；新 token 只显示一次`);
-      await loadRef.current();
+      await currentLoad.current();
     } catch (e: any) {
       showMsg(`重生成 token 失败：${readableApiError(e)}`);
     }
@@ -594,49 +659,7 @@ export default function AdminPage() {
   const editMainPerPack = editPackSize - editExtraPerPack;
 
   return (
-    <main className="mx-auto max-w-5xl p-4 sm:p-6">
-      <div className="mb-5">
-        <p className="yc-kicker mb-1">Tournament operations</p>
-        <h1 className="yc-title text-2xl font-bold">管理控制台</h1>
-      </div>
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        <input
-          className="w-full rounded bg-felt px-3 py-1.5 font-mono text-xs outline-none sm:w-72"
-          placeholder="超级管理员 token（或填写下方创建者凭据）"
-          type="password"
-          value={adminToken}
-          onChange={(e) => {
-            setAdminToken(e.target.value);
-            if (e.target.value) {
-              setCreateUsername('');
-              setCreateToken('');
-            }
-          }}
-        />
-        <input
-          className="w-40 rounded bg-felt px-3 py-1.5 text-xs outline-none"
-          placeholder="创建用户名"
-          value={createUsername}
-          onChange={(e) => {
-            setCreateUsername(e.target.value);
-            if (e.target.value) setAdminToken('');
-          }}
-        />
-        <input
-          className="w-full rounded bg-felt px-3 py-1.5 font-mono text-xs outline-none sm:w-64"
-          placeholder="创建 token"
-          type="password"
-          value={createToken}
-          onChange={(e) => {
-            setCreateToken(e.target.value);
-            if (e.target.value) setAdminToken('');
-          }}
-        />
-        <input className="w-24 rounded bg-felt px-3 py-1.5 outline-none" placeholder="比赛 ID" value={tid} onChange={(e) => setTid(e.target.value)} />
-        <button onClick={() => void load()} className="rounded bg-felt-edge px-4 py-1.5 hover:brightness-110">
-          加载
-        </button>
-      </div>
+    <>
       {createUsersLoaded && (
         <section className="mb-6 rounded-lg border border-gold/25 bg-felt/60 p-4 text-xs">
           <h2 className="mb-2 text-sm font-semibold text-gold">比赛创建权限用户</h2>
@@ -761,7 +784,7 @@ export default function AdminPage() {
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <b className="text-amber-200">等待所有玩家确认开始选牌</b>
                 <span className="font-mono text-amber-100">
-                  {state.draftStartConfirmation.confirmedCount}/{state.draftStartConfirmation.total} 已确认 · 剩余 {Math.max(0, Math.ceil((new Date(state.draftStartConfirmation.deadlineAt).getTime() - confirmationNow) / 1000))} 秒
+                  {state.draftStartConfirmation.confirmedCount}/{state.draftStartConfirmation.total} 已确认 · 剩余 {confirmationSecondsLeft} 秒
                 </span>
               </div>
               <div className="mt-2 grid grid-cols-1 gap-1 sm:grid-cols-2 lg:grid-cols-3">
@@ -818,7 +841,7 @@ export default function AdminPage() {
                     <button
                       onClick={() => {
                         if (!confirm(`删除玩家 ${p.playerId}？（将清除其选牌与卡组）`)) return;
-                        void adminFetch(`/admin/t/${state.id}/players/${encodeURIComponent(p.playerId)}`, 'DELETE').then(() => loadRef.current()).catch((e: any) => showMsg(`删除失败：${readableApiError(e)}`));
+                        void adminFetch(`/admin/t/${state.id}/players/${encodeURIComponent(p.playerId)}`, 'DELETE').then(() => currentLoad.current()).catch((e: any) => showMsg(`删除失败：${readableApiError(e)}`));
                       }}
                       className="rounded bg-red-900 px-1.5 py-0.5 text-red-100 hover:brightness-110"
                       title="删除玩家（报名/选牌/构筑阶段可用）"
@@ -1111,7 +1134,7 @@ export default function AdminPage() {
                   onClick={() => {
                     if (!confirm('确定删除该比赛？将对局房间关闭并清除全部数据')) return;
                     adminFetch(`/admin/t/${t.id}`, 'DELETE')
-                      .then(() => { setMsg('比赛已删除'); if (tid === String(t.id)) { setTid(''); setState(null); } void load(); })
+                      .then(() => { setMsg('比赛已删除'); if (tid === String(t.id)) { setTid(''); setState(null); } void currentLoad.current(); })
                       .catch((e: any) => setMsg(readableApiError(e, '删除比赛失败')));
                   }}
                   className="rounded bg-red-900 px-2 py-0.5 text-red-100 hover:brightness-110"
@@ -1222,6 +1245,6 @@ export default function AdminPage() {
           {pools.length === 0 && <li className="text-slate-500">暂无卡池（需要超级管理员令牌）</li>}
         </ul>
       </section>
-    </main>
+    </>
   );
 }

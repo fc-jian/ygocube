@@ -1,5 +1,7 @@
 'use client';
 
+import { readGameValue, writeGameValue } from '@/lib/gameStorage';
+
 import Link from 'next/link';
 import { ReactNode, useEffect, useState } from 'react';
 import { GUESS_PATH } from './guess-client';
@@ -10,10 +12,10 @@ const LANGUAGE_KEY = 'yc_guess_language';
 export function useGuessLanguage() {
   const [language, setLanguage] = useState<GuessLanguage>('zh');
   useEffect(() => {
-    if (localStorage.getItem(LANGUAGE_KEY) === 'en') setLanguage('en');
+    if (readGameValue(LANGUAGE_KEY) === 'en') setLanguage('en');
   }, []);
   function changeLanguage(value: GuessLanguage) {
-    localStorage.setItem(LANGUAGE_KEY, value);
+    writeGameValue(LANGUAGE_KEY, value);
     setLanguage(value);
   }
   return { language, changeLanguage, text: guessText[language] };

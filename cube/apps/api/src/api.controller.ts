@@ -1,5 +1,6 @@
 import { Body, Controller, Get, GoneException, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
-import type { CardVisibilityStatus } from '@ygocube/shared';
+import { randomUUID } from 'node:crypto';
+import type { CardVisibilityStatus, PublicPoolPreview } from '@ygocube/shared';
 import { Response } from 'express';
 import { Access, AuthGuard, AuthedRequest, Identity, Public, safeSecretEqual } from './auth/auth.guard';
 import { TournamentsService } from './tournaments/tournaments.service';
@@ -15,7 +16,7 @@ import { loadState } from './events/events.service';
 import { getDb } from './db';
 import { CreateTournamentInput } from './tournaments/tournaments.service';
 import { cubeDeckFileBase } from './decks/deck-filename';
-import { cardStatusForDeckbuilding, cardsSeenByPlayer } from './cards/card-visibility';
+import { deckbuildingCardClassifier, cardsSeenByPlayer } from './cards/card-visibility';
 
 const MAX_CARD_QUERY_LENGTH = 256;
 const MAX_CARD_CODES = 2_000;
@@ -51,6 +52,9 @@ function parseCardCodes(value: unknown): number[] {
 @Controller()
 @UseGuards(AuthGuard)
 export class ApiController {
+  // The card catalogue is loaded once per API process, including resource updates.
+  private readonly catalogRevision = randomUUID();
+
   constructor(
     private tournaments: TournamentsService,
     private draft: DraftService,
@@ -83,7 +87,7 @@ export class ApiController {
 
   @Public()
   @Get('pools/:name')
-  poolPreview(@Param('name') rawName: string) {
+  poolPreview(@Param('name') rawName: string): PublicPoolPreview {
     const name = normalizePoolName(rawName);
     const pool = this.pools.getByName(name);
     if (!pool) throw new Error('POOL_NOT_FOUND');
@@ -91,6 +95,7 @@ export class ApiController {
       id: pool.id,
       name: pool.name,
       count: pool.codes.length,
+      cardRevision: `${this.catalogRevision}.${this.cardStats?.revisionForPool(pool) ?? ''}`,
       ...(pool.draftFormat ? { draftFormat: pool.draftFormat } : {}),
       candidateCount: pool.candidateCodes.length,
       candidateUrl: `/pool/${encodeURIComponent(pool.name)}/candidate`,
@@ -326,25 +331,27 @@ export class ApiController {
     // Private initial drops are normally represented by an empty list. Keep
     // the config check as a defence for legacy snapshots or edited settings.
     const deckbuildingGlobal = state.status === 'deckbuilding' || state.status === 'matches' || state.status === 'finished';
+    const codesList = parseCardCodes(codes);
+    if (deckbuildingGlobal) {
+      const classify = deckbuildingCardClassifier(state, id.playerId, pool);
+      return codesList.map((code) => ({ code, status: classify(code) }));
+    }
     const dropped = cfg.dropPublic === true ? new Set(state.droppedCards) : new Set<number>();
     if (cfg.draftFormat === 'edison_e3' && dropped.size) {
       for (const pack of state.packs) for (const code of pack.order) dropped.delete(code);
     }
     const myPicks = new Set(state.picks.filter((p) => p.playerId === id.playerId).map((p) => p.card));
     const seen = cardsSeenByPlayer(state, id.playerId);
-    const codesList = parseCardCodes(codes);
     return codesList.map((c) => {
-      const status: CardVisibilityStatus = deckbuildingGlobal
-        ? cardStatusForDeckbuilding(state, id.playerId, pool, c)
-        : !pool.has(c)
-          ? 'not_in_pool'
-          : dropped.has(c)
-            ? 'dropped'
-            : myPicks.has(c)
-              ? 'picked'
-              : seen.has(c)
-                ? 'seen'
-                : 'unknown';
+      const status: CardVisibilityStatus = !pool.has(c)
+        ? 'not_in_pool'
+        : dropped.has(c)
+          ? 'dropped'
+          : myPicks.has(c)
+            ? 'picked'
+            : seen.has(c)
+              ? 'seen'
+              : 'unknown';
       return { code: c, status };
     });
   }

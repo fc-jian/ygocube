@@ -3,8 +3,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { TransientNotice } from '@/components/TransientNotice';
 import { useParams, useRouter } from 'next/navigation';
-import { api, apiDownload, clearStoredToken, encodePathSegment, Identity, readableApiError, resolvePlayerIdentity } from '@/lib/api';
+import { api, apiDownload, clearStoredToken, decodePathSegment, encodePathSegment, Identity, readableApiError, resolvePlayerIdentity } from '@/lib/api';
 import { useTournamentStream } from '@/lib/sse';
+import { useConfirmationSeconds } from '@/lib/useConfirmationSeconds';
 import { TopBar, DeckZone, DraftState, useNowTick } from '@/components/TopBar';
 import { PackZone } from '@/components/PackZone';
 import { EdisonDraftRules } from '@/components/EdisonDraftRules';
@@ -21,9 +22,11 @@ import { usePlayerLogout } from '@/lib/usePlayerLogout';
 
 export default function DraftPage() {
   const params = useParams<{ tid: string; pid: string }>()!;
+  return <DraftSession key={`${params.tid}/${params.pid}`} tid={params.tid} pid={decodePathSegment(params.pid)} />;
+}
+
+function DraftSession({ tid, pid }: { tid: string; pid: string }) {
   const router = useRouter();
-  const tid = params.tid;
-  const pid = params.pid;
   const tidPath = encodePathSegment(tid);
   const pidPath = encodePathSegment(pid);
   const [identity, setIdentity] = useState<Identity | null>(null);
@@ -278,7 +281,7 @@ export default function DraftPage() {
 
   // 倒计时归零时立即刷新（超时自动选牌可能已发生）。
   const now = useNowTick(true);
-  const confirmationNow = useNowTick(startConfirmationPending);
+  const confirmationSecondsLeft = useConfirmationSeconds(state?.draftStartConfirmation);
   const secondsLeft = state?.pack?.deadlineAt ? Math.max(0, Math.ceil((new Date(state.pack.deadlineAt).getTime() - now) / 1000)) : null;
   const wasMyTurn = useRef(false);
   useEffect(() => {
@@ -417,6 +420,7 @@ export default function DraftPage() {
     <main className="flex min-h-screen flex-col md:h-screen">
       <TopBar
         state={state}
+        confirmationSecondsLeft={confirmationSecondsLeft}
         pid={pid}
         token={identity.token || '(已关闭鉴权)'}
         tid={tid}
@@ -434,11 +438,11 @@ export default function DraftPage() {
               请确认你已准备好参加本场选牌。所有玩家都在一分钟内确认后才会开始，否则本次请求自动取消。
             </p>
             <p className="mt-2 text-xs text-slate-400">
-              已确认 {state.draftStartConfirmation.confirmedCount}/{state.draftStartConfirmation.total} 人 · 截止 {Math.max(0, Math.ceil((new Date(state.draftStartConfirmation.deadlineAt).getTime() - confirmationNow) / 1000))} 秒
+              已确认 {state.draftStartConfirmation.confirmedCount}/{state.draftStartConfirmation.total} 人 · 截止 {confirmationSecondsLeft} 秒
             </p>
             <button
               type="button"
-              disabled={draftConfirmBusy || confirmationNow >= new Date(state.draftStartConfirmation.deadlineAt).getTime()}
+              disabled={draftConfirmBusy}
               onClick={() => void confirmDraftStart().catch(() => undefined)}
               className="mt-4 w-full rounded bg-gold px-4 py-2 font-semibold text-felt-deep hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
             >

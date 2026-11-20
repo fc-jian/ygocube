@@ -1,9 +1,12 @@
 'use client';
 
+import { readGameValue, writeGameValue } from '@/lib/gameStorage';
+
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { DG_DEFAULT_ROUND_SECONDS, type DgActionRequest, type DgRoomView, type DgSession } from '@ygocube/shared';
 import { GuessFrame, useGuessLanguage } from '@/components/guess/GuessFrame';
+import { RoomRoster } from '@/components/RoomRoster';
 import { useGuessPolling } from '@/components/guess/guess-client';
 import { fillText, guessText, type GuessLanguage } from '@/components/guess/guess-text';
 import { ApiError } from '@/lib/api';
@@ -15,19 +18,21 @@ import { dgText } from './dg-text';
 export function DgRoom({ roomId }: { roomId: string }) {
   const { language, changeLanguage, text } = useGuessLanguage();
   const [token, setToken] = useState<string | null | undefined>(undefined);
+  const [seatEnded, setSeatEnded] = useState(false);
   useEffect(() => {
-    setToken(localStorage.getItem(dgSessionKey(roomId)));
+    setSeatEnded(false);
+    setToken(readGameValue(dgSessionKey(roomId)));
   }, [roomId]);
 
-  const updateToken = useCallback((value: string | null) => {
-    const key = dgSessionKey(roomId);
-    if (value) localStorage.setItem(key, value);
-    else localStorage.removeItem(key);
+  const updateToken = useCallback((value: string | null, ended = false) => {
+    writeGameValue(dgSessionKey(roomId), value);
+    setSeatEnded(ended);
     setToken(value);
   }, [roomId]);
 
   return (
     <GuessFrame language={language} changeLanguage={changeLanguage} lobby={{ href: DG_PATH, label: text.lobby }}>
+      {token === null && seatEnded && <p className="guess-muted" role="status">{text.seatEnded}</p>}
       {token === undefined ? <p className="guess-muted">{text.loading}</p>
         : <DgRoomSession key={token === null ? 'spectator' : 'player'} roomId={roomId} token={token}
             updateToken={updateToken} language={language} />}
@@ -38,7 +43,7 @@ export function DgRoom({ roomId }: { roomId: string }) {
 function DgRoomSession({ roomId, token, updateToken, language }: {
   roomId: string;
   token: string | null;
-  updateToken: (value: string | null) => void;
+  updateToken: (value: string | null, ended?: boolean) => void;
   language: GuessLanguage;
 }) {
   const router = useRouter();
@@ -65,7 +70,7 @@ function DgRoomSession({ roomId, token, updateToken, language }: {
       if (!signal.aborted) accept(room);
     } catch (error) {
       if (signal.aborted) return;
-      if (token && error instanceof ApiError && error.status === 401) updateToken(null);
+      if (token && error instanceof ApiError && error.status === 401) updateToken(null, true);
       else setLoadError(error);
     }
   }, [accept, path, token, updateToken]);
@@ -148,13 +153,7 @@ function DgRoomSession({ roomId, token, updateToken, language }: {
       {error != null && <p className="guess-error mb-3" role="alert">{dgError(error, text, shared)}</p>}
       {room.phase === 'lobby' && <section className="guess-panel guess-waiting">
         <h2>{shared.waiting} <span className="guess-pill">{room.playerCount}/{room.maxPlayers}</span></h2>
-        <ul className="guess-roster">
-          {room.players.map(({ playerId }) => <li key={playerId}>
-            <strong>{playerId}</strong>
-            {playerId === room.hostId && <span className="guess-pill">{shared.host}</span>}
-            {playerId === room.viewerId && <span className="guess-muted">{shared.you}</span>}
-          </li>)}
-        </ul>
+        <RoomRoster room={room} players={room.players} text={shared} viewerId={room.viewerId} busy={busy} onRemove={run} />
         {token ? <>
           <p className="guess-muted">{room.playerCount < 2 ? text.waitForPlayers
             : isHost ? (isRelay ? text.relay.intro : text.intro) : text.waitForHost}</p>

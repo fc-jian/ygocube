@@ -1,5 +1,7 @@
 'use client';
 
+import { writeGameValue } from '@/lib/gameStorage';
+
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { FormEvent, useCallback, useState } from 'react';
@@ -45,7 +47,7 @@ export function GuessLobby() {
     setBusy(true);
     try {
       const { token, room } = await guessRequest<GuessSession>('/rooms', { body });
-      localStorage.setItem(sessionKey(room.roomId), token);
+      writeGameValue(sessionKey(room.roomId), token);
       router.push(`${GUESS_PATH}/${room.roomId}`);
     } catch (err) {
       setCreateError(guessError(err, text));

@@ -1,5 +1,7 @@
 'use client';
 
+import { writeGameValue } from '@/lib/gameStorage';
+
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { FormEvent, useCallback, useState } from 'react';
@@ -55,7 +57,7 @@ export function DgLobby() {
     setCreateError(null);
     try {
       const { token, room } = await dgRequest<DgSession>('/rooms', { body });
-      localStorage.setItem(dgSessionKey(room.roomId), token);
+      writeGameValue(dgSessionKey(room.roomId), token);
       router.push(`${DG_PATH}/${room.roomId}`);
     } catch (error) {
       setCreateError(error);

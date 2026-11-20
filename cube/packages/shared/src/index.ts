@@ -23,6 +23,7 @@ export interface DraftStartConfirmation {
   pending: boolean;
   requestedAt: string;
   deadlineAt: string;
+  serverNow?: number;
   confirmedCount: number;
   total: number;
   confirmed?: boolean;
@@ -87,13 +88,19 @@ export interface GuessPoolSummary {
   browseOnly: boolean;
 }
 
+export interface RemoveRoomPlayerRequest {
+  action: 'remove';
+  playerId: string;
+  version: number;
+}
+
 export type GuessActionRequest =
   | { action: 'select' | 'guess'; version: number; code: number }
   | { action: 'skip' | 'host-skip' | 'surrender'; version: number }
   | { action: 'start'; version: number }
   | { action: 'next'; version: number }
   | { action: 'finish'; version: number }
-  | { action: 'remove'; version: number; playerId: string }
+  | RemoveRoomPlayerRequest
   | { action: 'leave'; version: number };
 
 export type GuessCardKind = 'monster' | 'spell' | 'trap';
@@ -287,6 +294,18 @@ export interface SmallWorldCalculationResponse {
 }
 
 export type PoolDraftFormat = 'edison_e3';
+
+export interface PublicPoolPreview {
+  id: number;
+  name: string;
+  count: number;
+  draftFormat?: PoolDraftFormat;
+  candidateCount?: number;
+  candidateUrl?: string | null;
+  createdAt: string;
+  codes: number[];
+  cardRevision?: string;
+}
 export { DraftCopyAllowance } from './draft-copies';
 export const EDISON_E3_MAX_PLAYERS = 9;
 
