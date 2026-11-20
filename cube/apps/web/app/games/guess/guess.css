@@ -151,6 +151,7 @@
 .guess-open-rooms a { justify-content: space-between; }
 .guess-open-rooms a:hover { border-color: #ba9f63; }
 .guess-roster strong { overflow-wrap: anywhere; }
+.guess-roster button { flex: none; margin-inline-start: auto; }
 .guess-room-head { flex-wrap: wrap; margin-bottom: 1rem; }
 .guess-waiting { max-width: 42rem; }
 .guess-card-picker { display: grid; gap: .65rem; }

@@ -625,6 +625,40 @@ describe('Guess the Card HTTP game', () => {
     expect((await action(path, successor.token, { action: 'finish', version: state.version })).status).toBe(200);
   });
 
+  it('lets the lobby host free a seat and rejects a delayed removal after the same ID rejoins', async () => {
+    const pool = await createPool('Lobby removal pool', uniformCodes.slice(0, 3));
+    const host = await create('Host', pool.poolId);
+    const path = `/rooms/${host.room.roomId}`;
+    const join = (playerId: string) => request<GuessSession>(`${path}/join`, undefined, { playerId });
+    const guest = (await join('Guest')).body;
+    const other = (await join('Other')).body;
+    const command = { action: 'remove', playerId: 'Guest', version: other.room.version } as const;
+
+    expect((await request(`${path}/action`, undefined, command)).status).toBe(401);
+    expect((await action(path, other.token, command)).status).toBe(403);
+    expect((await action(path, host.token, { ...command, playerId: 'Host' })).status).toBe(400);
+    expect((await action(path, host.token, { ...command, playerId: 'Absent' })).status).toBe(404);
+    const removed = await action(path, host.token, command);
+    expect(removed.status).toBe(200);
+    expect(removed.body).toMatchObject({ phase: 'lobby', hostId: 'Host', playerCount: 2, version: command.version + 1 });
+    expect(removed.body.standings.map(({ playerId }) => playerId)).toEqual(['Host', 'Other']);
+    expect((await request(path, guest.token)).status).toBe(401);
+    expect((await request<GuessRoomSummary[]>('/rooms')).body).toContainEqual(expect.objectContaining({
+      roomId: host.room.roomId, playerCount: 2, maxPlayers: 3,
+    }));
+
+    const replacement = await join('Guest');
+    expect(replacement.status).toBe(201);
+    expect(replacement.body.token).not.toBe(guest.token);
+    expect(await action(path, host.token, command)).toMatchObject({ status: 409, body: { code: 'GUESS_STALE_VERSION' } });
+    expect((await request(path, guest.token)).status).toBe(401);
+    const state = (await request<GuessRoomView>(path, replacement.body.token)).body;
+    expect(state).toMatchObject({ playerCount: 3, viewerId: 'Guest', version: removed.body.version + 1 });
+    const event = getDb().prepare('SELECT event_json FROM guess_room_events WHERE room_id = ? AND version = ?').pluck()
+      .get(host.room.roomId, removed.body.version) as string;
+    expect(JSON.parse(event)).toEqual({ action: 'remove', playerId: 'Host', targetPlayerId: 'Guest' });
+  });
+
   it('atomically settles the last player when the host advances and revokes credentials on removal', async () => {
     const poolCodes = uniformCodes.slice(0, 3);
     const pool = await createPool('Host advance pool', poolCodes);

@@ -87,3 +87,14 @@ test('font controls render and still apply a size when storage is blocked', () =
   assert.equal(document.documentElement.style.fontSize, '18px');
   cleanups.forEach(f => f());
 });
+
+test('a route segment returns the exact player identity before storage or link generation', () => {
+  const { api } = harness();
+  for (const pid of ['A B', 'A%20B', 'P+1', 'P%', 'P/Q']) {
+    const route = api.encodePathSegment(pid);
+    const decoded = api.decodePathSegment(route);
+    assert.equal(decoded, pid);
+    api.storeToken('1', pid, route);
+    assert.equal(api.resolvePlayerIdentity('1', decoded).identity.token, route);
+  }
+});

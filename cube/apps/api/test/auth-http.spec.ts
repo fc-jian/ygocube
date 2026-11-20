@@ -59,6 +59,22 @@ describe('HTTP authorization follows matched route metadata', () => {
     await response.arrayBuffer();
     return response.status;
   }
+  it('preserves literal percent escapes in player headers and administrator routes', async () => {
+    const id = tournaments.create({ name: 'encoded player', maxPlayers: 3, cardPool: TEST_POOL }, 'owner').tid;
+    for (const pid of ['A B', 'A%20B']) tournaments.join(id, pid, pid);
+    tournaments.setAuthRequired(id, false, 'owner');
+    const pid = 'A%20B';
+    const headers = { 'x-player-id': encodeURIComponent(pid) };
+    expect(await post(`/t/${id}/player/ready`, headers, { ready: true })).toBe(201);
+    expect(loadState(id).players.find(p => p.playerId === pid)?.ready).toBe(true);
+    expect(loadState(id).players.find(p => p.playerId === 'A B')?.ready).toBeFalsy();
+    for (const action of ['withdraw', 'restore']) {
+      expect(await post(`/admin/t/${id}/players/${encodeURIComponent(pid)}/${action}`, creator, {})).toBe(201);
+      expect(loadState(id).players.find(p => p.playerId === pid)?.withdrawn === true).toBe(action === 'withdraw');
+      expect(loadState(id).players.find(p => p.playerId === 'A B')?.withdrawn).toBeFalsy();
+    }
+  });
+
   it.each(['admin', 'Admin', 'ADMIN'])('rejects player administration using %s and a conflicting tournament header', async prefix => {
     for (const suffix of ['', '/']) {
       expect(await post(`/${prefix}/t/${target}/security${suffix}`, player, { require_token: false })).toBe(401);

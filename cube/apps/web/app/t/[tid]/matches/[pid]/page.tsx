@@ -1,12 +1,13 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { TransientNotice } from '@/components/TransientNotice';
 import { useParams } from 'next/navigation';
-import { api, apiDownload, encodePathSegment, Identity, readableApiError, resolvePlayerIdentity } from '@/lib/api';
+import { api, apiDownload, decodePathSegment, encodePathSegment, Identity, readableApiError, resolvePlayerIdentity } from '@/lib/api';
 import { useTournamentFallbackPolling, useTournamentStream } from '@/lib/sse';
 import { DraftState } from '@/components/TopBar';
 import { TokenPrompt } from '@/components/TokenPrompt';
+import { useCoalescedRefresh } from '@/lib/useCoalescedRefresh';
 import { usePlayerLogout } from '@/lib/usePlayerLogout';
 
 interface MatchInfo {
@@ -26,8 +27,10 @@ interface MatchInfo {
 
 export default function MatchesPage() {
   const params = useParams<{ tid: string; pid: string }>()!;
-  const tid = params.tid;
-  const pid = params.pid;
+  return <MatchesSession key={`${params.tid}/${params.pid}`} tid={params.tid} pid={decodePathSegment(params.pid)} />;
+}
+
+function MatchesSession({ tid, pid }: { tid: string; pid: string }) {
   const tidPath = encodePathSegment(tid);
   const pidPath = encodePathSegment(pid);
   const [identity, setIdentity] = useState<Identity | null>(null);
@@ -39,14 +42,6 @@ export default function MatchesPage() {
   const [webDuelEnabled, setWebDuelEnabled] = useState(false);
   const [error, setError] = useState('');
   const [serverError, setServerError] = useState('');
-  const loadBusy = useRef(false);
-  usePlayerLogout(identity, () => {
-    setIdentity(null);
-    setInfo(null);
-    setMatches([]);
-    setNeedToken(true);
-  });
-
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -73,28 +68,35 @@ export default function MatchesPage() {
     };
   }, [tidPath, pid]);
 
-  const load = useCallback(async () => {
-    if (!identity || loadBusy.current) return;
-    loadBusy.current = true;
+  const refresh = useCoalescedRefresh(useCallback(async ({ signal, isCurrent }) => {
+    if (!identity) return;
     try {
       const [ms, st] = await Promise.all([
-        api<MatchInfo[]>(`/t/${tidPath}/matches`, { identity }),
-        api<DraftState>(`/t/${tidPath}/state`, { identity }),
+        api<MatchInfo[]>(`/t/${tidPath}/matches`, { identity, signal }),
+        api<DraftState>(`/t/${tidPath}/state`, { identity, signal }),
       ]);
+      if (!isCurrent()) return;
       setMatches(ms);
       setInfo(st);
       setError('');
     } catch (e: any) {
+      if (!isCurrent()) return;
       if (e.code === 'AUTH_REQUIRED') {
         setIdentity(null);
         setNeedToken(true);
       } else {
         setError(readableApiError(e, '对战信息加载失败'));
       }
-    } finally {
-      loadBusy.current = false;
     }
-  }, [tidPath, identity]);
+  }, [tidPath, identity]));
+  const load = refresh.request;
+  usePlayerLogout(identity, () => {
+    refresh.cancel();
+    setIdentity(null);
+    setInfo(null);
+    setMatches([]);
+    setNeedToken(true);
+  });
 
   useEffect(() => {
     void load();

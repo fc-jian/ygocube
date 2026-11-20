@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { CardWithTooltip } from './CardImage';
 import { IdentityWidget, LocalPicsSetting } from './IdentityWidget';
 import { FontSizeSetting } from './FontSizeController';
+import type { DraftStartConfirmation } from '@ygocube/shared';
 import { CardInfo } from '@/lib/types';
 import { flipIds } from '@/lib/useFlip';
 
@@ -43,14 +44,7 @@ export interface DraftState {
   // 本人最后点击的候选牌；超时自动选牌优先使用它。
   pickAlternative?: number | null;
   pickAlternativePartner?: number | null;
-  draftStartConfirmation?: {
-    pending: boolean;
-    requestedAt: string;
-    deadlineAt: string;
-    confirmed: boolean;
-    confirmedCount: number;
-    total: number;
-  } | null;
+  draftStartConfirmation?: DraftStartConfirmation | null;
   // passing 模式：所有玩家的牌堆队列长度（仅数量，dev_docs/05 §3 信息隐藏）
   queueLengths?: { playerId: string; length: number }[];
   pause: { pausedAt: string; actor?: string } | null;
@@ -85,6 +79,7 @@ export function TopBar({
   onDisplayNameChange,
   onReadyChange,
   onDraftStartConfirm,
+  confirmationSecondsLeft,
   onLeaveRegistration,
 }: {
   state: DraftState;
@@ -94,6 +89,7 @@ export function TopBar({
   alternativeName?: string | null;
   onDisplayNameChange?: (displayName: string) => Promise<void>;
   onReadyChange?: (ready: boolean) => Promise<void>;
+  confirmationSecondsLeft: number | null;
   onDraftStartConfirm?: () => Promise<void>;
   onLeaveRegistration?: () => Promise<void>;
 }) {
@@ -109,7 +105,6 @@ export function TopBar({
   const draftStartConfirmation = state.draftStartConfirmation;
   const formatText = cfg.matchFormat === 'round_robin' ? '单循环' : cfg.matchFormat === 'double_elimination' ? '双败淘汰' : cfg.matchFormat === 'swiss' ? `瑞士 ${String(cfg.swissRoundCount ?? '-')} 轮${Number(cfg.playoffSize ?? 0) ? ` + Top ${String(cfg.playoffSize)} 淘汰` : ''}` : '历史自动赛制';
   const now = useNowTick(!!pack?.isMyTurn && !!pack?.deadlineAt);
-  const confirmationNow = useNowTick(!!draftStartConfirmation?.pending);
 
   const secondsLeft = pack?.pausedRemainingMs !== undefined
     ? Math.max(0, Math.ceil(pack.pausedRemainingMs / 1000))
@@ -130,9 +125,6 @@ export function TopBar({
   };
 
   const pickerName = state.players.find((p) => p.playerId === pack?.currentPicker)?.displayName ?? pack?.currentPicker;
-  const confirmationSecondsLeft = draftStartConfirmation?.pending
-    ? Math.max(0, Math.ceil((new Date(draftStartConfirmation.deadlineAt).getTime() - confirmationNow) / 1000))
-    : null;
 
   return (
     <header className="sticky top-0 z-40 border-b border-felt-edge bg-felt/95 backdrop-blur">
@@ -223,7 +215,7 @@ export function TopBar({
           {state.status === 'registration' && draftStartConfirmation?.pending && onDraftStartConfirm ? (
             <button
               type="button"
-              disabled={readyBusy || draftStartConfirmation.confirmed || confirmationSecondsLeft === 0}
+              disabled={readyBusy || draftStartConfirmation.confirmed}
               onClick={() => {
                 setReadyBusy(true);
                 void onDraftStartConfirm().catch(() => undefined).finally(() => setReadyBusy(false));

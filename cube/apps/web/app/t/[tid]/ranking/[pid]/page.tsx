@@ -1,11 +1,12 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { TransientNotice } from '@/components/TransientNotice';
 import { useParams } from 'next/navigation';
-import { api, encodePathSegment, Identity, readableApiError, resolvePlayerIdentity } from '@/lib/api';
+import { api, decodePathSegment, encodePathSegment, Identity, readableApiError, resolvePlayerIdentity } from '@/lib/api';
 import { useTournamentFallbackPolling, useTournamentStream } from '@/lib/sse';
 import { TokenPrompt } from '@/components/TokenPrompt';
+import { useCoalescedRefresh } from '@/lib/useCoalescedRefresh';
 import { usePlayerLogout } from '@/lib/usePlayerLogout';
 
 interface RankRow {
@@ -25,21 +26,16 @@ interface RankRow {
 // 实时积分榜单（dev_docs/07 §2.4）：胜 3 分 / 平 1 分 / 负 0 分，OMW% 破同分
 export default function RankingPage() {
   const params = useParams<{ tid: string; pid: string }>()!;
-  const tid = params.tid;
-  const pid = params.pid;
+  return <RankingSession key={`${params.tid}/${params.pid}`} tid={params.tid} pid={decodePathSegment(params.pid)} />;
+}
+
+function RankingSession({ tid, pid }: { tid: string; pid: string }) {
   const tidPath = encodePathSegment(tid);
   const pidPath = encodePathSegment(pid);
   const [identity, setIdentity] = useState<Identity | null>(null);
   const [needToken, setNeedToken] = useState(false);
   const [rows, setRows] = useState<RankRow[]>([]);
   const [error, setError] = useState('');
-  const loadBusy = useRef(false);
-  usePlayerLogout(identity, () => {
-    setIdentity(null);
-    setRows([]);
-    setNeedToken(true);
-  });
-
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -54,8 +50,8 @@ export default function RankingPage() {
             else setIdentity(r.identity);
           }
         }
-      } catch {
-        if (!cancelled) setIdentity(null);
+      } catch (e) {
+        if (!cancelled) setError(readableApiError(e, '比赛信息加载失败'));
       }
     })();
     return () => {
@@ -63,23 +59,30 @@ export default function RankingPage() {
     };
   }, [tidPath, pid]);
 
-  const load = useCallback(async () => {
-    if (!identity || loadBusy.current) return;
-    loadBusy.current = true;
+  const refresh = useCoalescedRefresh(useCallback(async ({ signal, isCurrent }) => {
+    if (!identity) return;
     try {
-      setRows(await api<RankRow[]>(`/t/${tidPath}/ranking`, { identity }));
+      const next = await api<RankRow[]>(`/t/${tidPath}/ranking`, { identity, signal });
+      if (!isCurrent()) return;
+      setRows(next);
       setError('');
     } catch (e: any) {
+      if (!isCurrent()) return;
       if (e.code === 'AUTH_REQUIRED') {
         setIdentity(null);
         setNeedToken(true);
       } else {
         setError(readableApiError(e, '积分榜单加载失败'));
       }
-    } finally {
-      loadBusy.current = false;
     }
-  }, [tidPath, identity]);
+  }, [tidPath, identity]));
+  const load = refresh.request;
+  usePlayerLogout(identity, () => {
+    refresh.cancel();
+    setIdentity(null);
+    setRows([]);
+    setNeedToken(true);
+  });
 
   useEffect(() => {
     void load();

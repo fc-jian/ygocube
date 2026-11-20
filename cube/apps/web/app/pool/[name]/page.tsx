@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { api, readableApiError } from '@/lib/api';
 import { CardInfo } from '@/lib/types';
@@ -8,78 +8,88 @@ import { safeCardCodes, sortCardSearchResults } from '@/lib/cardInfo';
 import { buildPoolCsv } from '@/lib/poolCsv';
 import { PoolPreview } from '@/components/PoolPreview';
 import { EdisonDraftRules } from '@/components/EdisonDraftRules';
-import type { PoolDraftFormat } from '@ygocube/shared';
+import { useCoalescedRefresh } from '@/lib/useCoalescedRefresh';
+import type { PublicPoolPreview } from '@ygocube/shared';
 import { LocalPicsSetting } from '@/components/IdentityWidget';
 
-interface PublicPool {
-  id: number;
-  name: string;
-  count: number;
-  draftFormat?: PoolDraftFormat;
-  candidateCount?: number;
-  candidateUrl?: string | null;
-  createdAt: string;
-  codes: number[];
+interface PoolSnapshot {
+  pool: PublicPoolPreview;
+  cards: Record<number, CardInfo>;
 }
 
 type PickSort = 'default' | 'pick_asc' | 'pick_desc';
 
 export default function PublicPoolPage() {
   const params = useParams<{ name: string }>()!;
-  const name = params.name ?? '';
-  const encodedName = useMemo(() => encodeURIComponent(name), [name]);
-  const [pool, setPool] = useState<PublicPool | null>(null);
-  const [cardMap, setCardMap] = useState<Record<number, CardInfo>>({});
+  return <PoolPage key={params.name} name={params.name} />;
+}
+
+function PoolPage({ name }: { name: string }) {
+  const encodedName = encodeURIComponent(name);
+  const [snapshot, setSnapshot] = useState<PoolSnapshot | null>(null);
+  const cache = useRef<PoolSnapshot | null>(null);
+  const pool = snapshot?.pool;
+  const cardMap = snapshot?.cards ?? {};
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<CardInfo[]>([]);
   const [pickSort, setPickSort] = useState<PickSort>('default');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  const loadPool = useCallback(async (withCards = true) => {
-    if (!encodedName) return;
+  const { request: loadPool } = useCoalescedRefresh(useCallback(async ({ signal, isCurrent }) => {
     try {
-      const raw = await api<unknown>(`/pools/${encodedName}`, { identity: null });
-      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('INVALID_POOL_RESPONSE');
-      const next = raw as PublicPool;
-      const normalized = { ...next, codes: safeCardCodes(next.codes) };
-      setPool(normalized);
-      setError('');
-      // Stats are derived data and may change after a completed tournament;
-      // use the latest exact code list on every refresh so pool edits also
-      // become visible without replacing the user's search state.
-      const codes = [...new Set(normalized.codes)];
-      if (withCards) {
-        const merged: Record<number, CardInfo> = {};
-        for (let i = 0; i < codes.length; i += 400) {
-          const chunk = codes.slice(i, i + 400);
-          const cards = await api<CardInfo[]>(`/pools/${encodedName}/cards?codes=${chunk.join(',')}`, { identity: null });
-          for (const card of cards) merged[card.code] = card;
+      const raw = await api<PublicPoolPreview>(`/pools/${encodedName}`, { identity: null, signal });
+      if (!isCurrent()) return;
+      if (!Array.isArray(raw?.codes)) throw new Error('INVALID_POOL_RESPONSE');
+      const next = { ...raw, codes: safeCardCodes(raw.codes) };
+      const previous = cache.current;
+      const reusable = previous && next.cardRevision && next.cardRevision === previous.pool.cardRevision && next.id === previous.pool.id
+        ? previous : null;
+      if (!reusable || JSON.stringify(next) !== JSON.stringify(reusable.pool)) {
+        const retained = new Set(reusable?.pool.codes);
+        const cards: Record<number, CardInfo> = {};
+        const missing: number[] = [];
+        for (const code of new Set(next.codes)) {
+          if (!retained.has(code)) missing.push(code);
+          else if (previous?.cards[code]) cards[code] = previous.cards[code];
         }
-        setCardMap(merged);
-      } else if (codes.length) {
-        const refreshed: Record<number, CardInfo> = {};
-        for (let i = 0; i < codes.length; i += 400) {
-          const cards = await api<CardInfo[]>(`/pools/${encodedName}/cards?codes=${codes.slice(i, i + 400).join(',')}`, { identity: null });
-          for (const card of cards) refreshed[card.code] = card;
+        for (let i = 0; i < missing.length; i += 400) {
+          if (signal.aborted || document.hidden) return;
+          const chunk = missing.slice(i, i + 400);
+          const rows = await api<CardInfo[]>(`/pools/${encodedName}/cards?codes=${chunk.join(',')}`, { identity: null, signal });
+          if (!isCurrent()) return;
+          for (const card of rows) cards[card.code] = card;
         }
-        setCardMap((current) => ({ ...current, ...refreshed }));
+        cache.current = { pool: next, cards };
+        setSnapshot(cache.current);
       }
+      setError('');
+      setLoading(false);
     } catch (e: any) {
+      if (!isCurrent()) return;
+      if (e.code === 'POOL_NOT_FOUND') {
+        cache.current = null;
+        setSnapshot(null);
+      }
       setError(e.code === 'POOL_NOT_FOUND' ? '卡池不存在或已被删除' : readableApiError(e, '卡池加载失败'));
-    } finally {
       setLoading(false);
     }
-  }, [encodedName]);
+  }, [encodedName]));
 
   useEffect(() => {
-    setLoading(true);
-    void loadPool(true);
-  }, [loadPool]);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => void loadPool(false), 30000);
-    return () => window.clearInterval(timer);
+    let inFlight = false;
+    const refreshVisible = async () => {
+      if (document.hidden || inFlight) return;
+      inFlight = true;
+      try { await loadPool(); } finally { inFlight = false; }
+    };
+    void refreshVisible();
+    const timer = window.setInterval(refreshVisible, 30000);
+    document.addEventListener('visibilitychange', refreshVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', refreshVisible);
+    };
   }, [loadPool]);
 
   const search = useCallback(async () => {
@@ -97,7 +107,8 @@ export default function PublicPoolPage() {
     }
   }, [encodedName, query]);
 
-  const cardsReady = !!pool && pool.codes.every((code) => cardMap[code] !== undefined);
+  const missingCount = pool?.codes.filter((code) => !cardMap[code]).length ?? 0;
+  const cardsReady = !!pool && missingCount === 0;
   const downloadCsv = useCallback(() => {
     if (!pool || !cardsReady) return;
     const csv = buildPoolCsv(pool.codes, cardMap);
@@ -130,11 +141,11 @@ export default function PublicPoolPage() {
   }, [cardMap, pickSort, pool]);
 
   if (loading) return <main className="mx-auto max-w-6xl p-6 text-slate-400">加载卡池中…</main>;
-  if (!pool || error) {
+  if (!pool) {
     return (
       <main className="mx-auto max-w-3xl p-6 sm:p-10">
         <a href="/" className="text-xs text-emerald-100/60 hover:text-gold">← 返回首页</a>
-        <div className="yc-panel mt-8 p-6 text-red-200">{error || '卡池不存在'}</div>
+        <div className="yc-panel mt-8 p-6 text-red-200">{error || '卡池不存在'} <button className="underline" onClick={() => void loadPool()}>重试</button></div>
       </main>
     );
   }
@@ -160,9 +171,9 @@ export default function PublicPoolPage() {
             onClick={downloadCsv}
             disabled={!cardsReady}
             className="rounded bg-felt-edge px-3 py-1.5 text-xs text-slate-200 hover:brightness-110 disabled:cursor-wait disabled:opacity-50"
-            title={cardsReady ? '下载包含卡号、卡名、主/额外分类和类型的 CSV' : '卡片资料加载完成后可下载'}
+            title={cardsReady ? '下载包含卡号、卡名、主/额外分类和类型的 CSV' : `卡库缺少 ${missingCount} 张卡的资料`}
           >
-            {cardsReady ? '下载卡池 CSV' : '准备 CSV…'}
+            {cardsReady ? '下载卡池 CSV' : `CSV 缺少 ${missingCount} 张卡的资料`}
           </button>
           <label className="flex items-center gap-1.5 text-xs text-slate-300">
             抓位排序
@@ -179,12 +190,13 @@ export default function PublicPoolPage() {
           <a href="/create-tournament" className="rounded bg-felt-edge px-3 py-1.5 text-xs text-slate-200 hover:brightness-110">创建比赛</a>
         </div>
       </header>
+      {error && <p role="alert" className="px-4 py-2 text-sm text-amber-200">{error} <button className="underline" onClick={() => void loadPool()}>重试</button></p>}
       {pool.draftFormat === 'edison_e3' && <EdisonDraftRules />}
       <PoolPreview
         poolCodes={orderedCodes}
         cardMap={cardMap}
         searchQuery={query}
-        searchResults={results}
+        searchResults={results.map((card) => cardMap[card.code] ?? card)}
         onSearchQuery={setQuery}
         onSearch={() => void search()}
         heading={`主卡与额外卡预览（共 ${pool.count} 张）`}

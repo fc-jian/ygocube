@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { getDb } from '../db';
 import { CardPool, PoolsService } from '../pools/pools.service';
@@ -14,13 +15,6 @@ export interface CardPickStat {
   tournamentCount: number;
   /** Kept as the raw pick sample count for existing clients. */
   sampleCount: number;
-}
-
-interface TournamentRow {
-  id: number;
-  name: string;
-  status: string;
-  updated_at: string;
 }
 
 interface StatisticalPack {
@@ -46,6 +40,7 @@ interface Aggregate {
 interface CacheEntry {
   version: string;
   stats: Map<number, CardPickStat>;
+  statsRevision: string;
 }
 
 /**
@@ -71,7 +66,16 @@ export class CardPickStatsService {
       return new Map();
     }
     pool = currentPool;
-    const version = this.version(pool);
+    // Only completed draft input can change these statistics. The indexed
+    // log tail is per tournament so reverting an older draft also invalidates it.
+    const drafts = getDb().prepare(`
+      SELECT t.id, (SELECT MAX(e.seq) FROM events e WHERE e.tournament_id=t.id
+        AND e.action IN ('packs_created','pick')) AS last_draft_event
+      FROM tournaments t WHERE t.card_pool_id=? AND t.status NOT IN ('registration','drafting')
+        AND lower(substr(t.name,1,4)) <> 'test'
+      ORDER BY t.id
+    `).all(pool.id) as { id: number; last_draft_event: number | null }[];
+    const version = JSON.stringify([pool.name, pool.codes, drafts]);
     const cached = this.cache.get(pool.id);
     if (cached?.version === version) {
       this.cache.delete(pool.id);
@@ -80,12 +84,7 @@ export class CardPickStatsService {
     }
 
     const totals = new Map<number, Aggregate>();
-    const rows = getDb()
-      .prepare('SELECT id, name, status, updated_at FROM tournaments WHERE card_pool_id=? ORDER BY id')
-      .all(pool.id) as TournamentRow[];
-    for (const row of rows) {
-      if (/^test/i.test(row.name)) continue;
-      if (row.status === 'registration' || row.status === 'drafting') continue;
+    for (const row of drafts) {
       const draft = this.rebuildDraft(row.id);
       if (!draft || !this.isCompleteDraft(draft.packs, draft.picks)) continue;
       const packByIndex = new Map(draft.packs.map((pack) => [pack.index, pack]));
@@ -124,13 +123,21 @@ export class CardPickStatsService {
       });
     }
     this.cache.delete(pool.id);
-    this.cache.set(pool.id, { version, stats });
+    const statsRevision = createHash('sha256')
+      .update(JSON.stringify([...stats].sort(([a], [b]) => a - b)))
+      .digest('base64url');
+    this.cache.set(pool.id, { version, stats, statsRevision });
     while (this.cache.size > CardPickStatsService.CACHE_LIMIT) {
       const oldest = this.cache.keys().next().value as number | undefined;
       if (oldest === undefined) break;
       this.cache.delete(oldest);
     }
     return stats;
+  }
+
+  revisionForPool(pool: CardPool): string {
+    this.forPool(pool);
+    return this.cache.get(pool.id)?.statsRevision ?? '';
   }
 
   forPoolId(poolId: number): Map<number, CardPickStat> {
@@ -152,18 +159,6 @@ export class CardPickStatsService {
       }
     }
     return result;
-  }
-
-  private version(pool: CardPool): string {
-    const db = getDb();
-    const tournaments = db
-      .prepare(`SELECT count(DISTINCT t.id) AS count,
-        COALESCE(MAX(t.updated_at), '') AS updated_at,
-        COALESCE(MAX(e.seq), 0) AS max_seq
-        FROM tournaments t LEFT JOIN events e ON e.tournament_id=t.id
-        WHERE t.card_pool_id=?`)
-      .get(pool.id) as { count: number; updated_at: string; max_seq: number };
-    return `${tournaments.max_seq}:${tournaments.count}:${tournaments.updated_at}:${JSON.stringify(pool.codes)}`;
   }
 
   private rebuildDraft(tid: number): { packs: StatisticalPack[]; picks: StatisticalPick[] } | null {

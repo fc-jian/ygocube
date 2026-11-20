@@ -25,6 +25,12 @@ export function encodePathSegment(value: string | number): string {
   return encodeURIComponent(String(value));
 }
 
+/** Next App Router exposes the URL-encoded dynamic segment on the client. */
+export function decodePathSegment(segment: string): string {
+  try { return decodeURIComponent(segment); }
+  catch { return segment; }
+}
+
 export function getCookie(name: string): string | undefined {
   if (typeof document === 'undefined') return undefined;
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

@@ -5,7 +5,8 @@ import { TournamentsService } from '../src/tournaments/tournaments.service';
 import { DraftService } from '../src/draft/draft.service';
 import { MatchesService } from '../src/matches/matches.service';
 import { CardPickStatsService } from '../src/cards/card-pick-stats.service';
-import { loadState } from '../src/events/events.service';
+import { getDb } from '../src/db';
+import { hardRevertTo, loadState } from '../src/events/events.service';
 
 const fakeSrvpro = { createRoom: async () => ({ ok: true }), roomStatus: async () => ({ ok: false }), closeRoom: async () => ({ ok: true }) };
 
@@ -23,6 +24,8 @@ describe('card pick statistics', () => {
     const draft = new DraftService(cards, tournaments, pools, new MatchesService(fakeSrvpro as any));
     draft.startDraft(tid, 'creator');
     const statsService = new CardPickStatsService(pools);
+    const beforePicks = getDb().prepare('SELECT MAX(seq) AS seq FROM events WHERE tournament_id=?').get(tid) as { seq: number };
+    const initialRevision = statsService.revisionForPool(pool);
     expect(statsService.forPool(pool).size).toBe(0); // still drafting
 
     let state = loadState(tid);
@@ -36,6 +39,9 @@ describe('card pick statistics', () => {
     }
     expect(state.status).toBe('deckbuilding');
     const stats = statsService.forPool(pool);
+    const completedRevision = statsService.revisionForPool(pool);
+    expect(completedRevision).not.toBe(initialRevision);
+    expect(statsService.revisionForPool(pool)).toBe(completedRevision);
     expect(stats.size).toBe(4);
     for (const code of pool.codes) {
       const row = stats.get(code);
@@ -45,6 +51,8 @@ describe('card pick statistics', () => {
       expect(row!.packCount).toBe(1);
       expect(row!.tournamentCount).toBe(1);
     }
+    hardRevertTo(tid, beforePicks.seq, 'creator');
+    expect(statsService.revisionForPool(pool)).toBe(initialRevision);
   });
 
   it('normalizes positions by each pack actual size, including a short final pack', () => {

@@ -111,6 +111,40 @@ describe('Draw & Guess HTTP game', () => {
     return room.relay;
   }
 
+  it.each(['classic', 'relay'] as const)('only allows the host to remove another player before a %s game starts', async (mode) => {
+    const { body: host } = await request<DgSession>(rooms, undefined, { name: 'Waiting room', playerId: 'Host', poolId: 0, mode });
+    const path = `${rooms}/${host.room.roomId}`;
+    const join = (playerId: string) => request<DgSession>(`${path}/join`, undefined, { playerId });
+    const guest = (await join('Guest')).body;
+    const other = (await join('Other')).body;
+    const command = { action: 'remove', playerId: 'Guest', version: other.room.version } as const;
+
+    expect((await request(`${path}/action`, undefined, command)).status).toBe(401);
+    expect((await request(`${path}/action`, host.token, { action: 'remove', playerId: 'Guest' })).status).toBe(400);
+    expect((await act(path, other.token, command)).status).toBe(403);
+    expect((await act(path, host.token, { ...command, playerId: 'Host' })).status).toBe(400);
+    expect((await act(path, host.token, { ...command, playerId: 'Absent' })).status).toBe(404);
+    const removed = await act(path, host.token, command);
+    expect(removed.status).toBe(200);
+    expect(removed.body).toMatchObject({ phase: 'lobby', hostId: 'Host', playerCount: 2, version: command.version + 1 });
+    expect((await state(path)).players.map(({ playerId }) => playerId)).toEqual(['Host', 'Other']);
+    expect((await request(path, guest.token)).status).toBe(401);
+    const event = getDb().prepare('SELECT event_json FROM dg_room_events WHERE room_id = ? AND version = ?').pluck()
+      .get(host.room.roomId, removed.body.version) as string;
+    expect(JSON.parse(event)).toMatchObject({ action: 'remove', playerId: 'Host', targetPlayerId: 'Guest' });
+
+    const replacement = await join('Guest');
+    expect(replacement.status).toBe(201);
+    expect(replacement.body.token).not.toBe(guest.token);
+    expect(await act(path, host.token, command)).toMatchObject({ status: 409, body: { code: 'DG_STALE_VERSION' } });
+    expect((await request(path, guest.token)).status).toBe(401);
+    const started = await act(path, host.token, { action: 'start' });
+    expect(started.status).toBe(200);
+    expect(await act(path, host.token, { ...command, version: started.body.version }))
+      .toMatchObject({ status: 409, body: { code: 'DG_WRONG_PHASE' } });
+    expect(await state(path, replacement.body.token)).toMatchObject({ viewerId: 'Guest', playerCount: 3, version: started.body.version });
+  });
+
   it('hides the card and hint, reuses the pool, and scores concurrent guesses in accepted order', async () => {
     const { body: host } = await request<DgSession>(rooms, undefined, { name: 'Draw room', playerId: 'Artist', poolId });
     const path = `${rooms}/${host.room.roomId}`;

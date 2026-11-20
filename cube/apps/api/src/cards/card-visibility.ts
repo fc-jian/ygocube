@@ -70,27 +70,22 @@ export function cardsSeenByPlayer(state: TournamentState, playerId: string): Set
  * draft result. Unlike cardsSeenByPlayer this deliberately does not depend on
  * what the requesting player could see during draft.
  */
-export function cardStatusForDeckbuilding(
+export function deckbuildingCardClassifier(
   state: TournamentState,
   playerId: string,
-  poolCodes: Iterable<number>,
-  code: number,
-): CardVisibilityStatus {
-  const pool = new Set(poolCodes);
-  if (!pool.has(code)) return 'not_in_pool';
-
-  // A card missing from every generated pack was removed before drafting. This
-  // derives private initial drops even when dropPublic=false and no card code
-  // was written to the public droppedCards event field.
+  pool: ReadonlySet<number>,
+): (code: number) => CardVisibilityStatus {
   const generated = new Set(state.packs.flatMap((pack) => pack.order));
-  if (!generated.has(code)) return 'dropped';
-
-  const myPick = state.picks.some((pick) => pick.playerId === playerId && pick.card === code);
-  if (myPick) return 'picked';
-  if (state.picks.some((pick) => pick.playerId !== playerId && pick.card === code)) return 'other_picked';
-
-  // A normal deckbuilding transition has no remaining unpicked cards. Keep a
-  // defensive fallback for an administrator inspecting an incomplete legacy
-  // draft rather than mislabelling a card as another player's pick.
-  return 'unknown';
+  const own = new Set<number>();
+  const others = new Set<number>();
+  for (const pick of state.picks) {
+    (pick.playerId === playerId ? own : others).add(pick.card);
+  }
+  return (code) => {
+    if (!pool.has(code)) return 'not_in_pool';
+    if (!generated.has(code)) return 'dropped';
+    if (own.has(code)) return 'picked';
+    if (others.has(code)) return 'other_picked';
+    return 'unknown';
+  };
 }

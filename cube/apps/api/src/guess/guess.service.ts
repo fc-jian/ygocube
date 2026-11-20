@@ -336,7 +336,7 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
       if (command.action === 'remove' || command.action === 'start' || command.action === 'next' || command.action === 'finish') {
         if (activePlayers(room)[0] !== player) throw new ForbiddenException({ code: 'GUESS_HOST_REQUIRED' });
         if (command.action === 'remove') {
-          this.requirePhase(room, 'between_rounds');
+          this.requireJoinable(room);
           const target = activePlayers(room).find((member) => member.playerId === command.playerId);
           if (!target) throw new NotFoundException({ code: 'GUESS_PLAYER_NOT_IN_ROOM' });
           if (target === player) throw new BadRequestException({ code: 'GUESS_REMOVE_SELF' });

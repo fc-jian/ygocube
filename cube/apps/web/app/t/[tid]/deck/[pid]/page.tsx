@@ -4,7 +4,7 @@ import { DraftCopyAllowance } from '@ygocube/shared';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { TransientNotice } from '@/components/TransientNotice';
 import { useParams } from 'next/navigation';
-import { api, apiDownload, encodePathSegment, Identity, readableApiError, resolvePlayerIdentity } from '@/lib/api';
+import { api, apiDownload, decodePathSegment, encodePathSegment, Identity, readableApiError, resolvePlayerIdentity } from '@/lib/api';
 import { useTournamentStream } from '@/lib/sse';
 import { DeckZone, DraftState, useNowTick } from '@/components/TopBar';
 import { CardWithTooltip } from '@/components/CardImage';
@@ -20,8 +20,10 @@ import { usePlayerLogout } from '@/lib/usePlayerLogout';
 
 export default function DeckPage() {
   const params = useParams<{ tid: string; pid: string }>()!;
-  const tid = params.tid;
-  const pid = params.pid;
+  return <DeckSession key={`${params.tid}/${params.pid}`} tid={params.tid} pid={decodePathSegment(params.pid)} />;
+}
+
+function DeckSession({ tid, pid }: { tid: string; pid: string }) {
   const tidPath = encodePathSegment(tid);
   const pidPath = encodePathSegment(pid);
   const [identity, setIdentity] = useState<Identity | null>(null);

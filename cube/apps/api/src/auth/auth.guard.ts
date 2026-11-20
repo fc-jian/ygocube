@@ -295,19 +295,11 @@ export class AuthGuard implements CanActivate {
       // mode turn the append-only endpoint into an unauthenticated writer.
       if (row && row.auth_required === 0 && !candidateWrite) {
         const cookies = cookiesOf(req);
-        const rawPid =
+        const pid =
           headerValue(req, 'x-player-id') ??
           cookies[`yc_pid_${tid}`] ??
           cookies.yc_pid ??
           queryScalar(req, 'pid');
-        let pid = rawPid;
-        if (typeof pid === 'string') {
-          try {
-            pid = decodeURIComponent(pid);
-          } catch {
-            // keep as-is when not percent-encoded
-          }
-        }
         if (!pid) throw new UnauthorizedException({ code: 'AUTH_REQUIRED', fields: ['pid'] });
         const player = getDb()
           .prepare('SELECT 1 AS found FROM tournament_players WHERE tournament_id=? AND player_id=? AND active=1')

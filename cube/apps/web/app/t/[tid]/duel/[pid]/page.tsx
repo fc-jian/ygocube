@@ -1,4 +1,10 @@
 'use client';
+
 import { useParams } from 'next/navigation';
 import { DuelClient } from '@/components/duel/DuelClient';
-export default function Page(){const p=useParams<{tid:string;pid:string;mid:string}>()!;return <DuelClient tid={p.tid} pid={p.pid} mode="player"/>;}
+import { decodePathSegment } from '@/lib/api';
+
+export default function Page() {
+  const { tid, pid } = useParams<{ tid: string; pid: string }>()!;
+  return <DuelClient key={`${tid}/${pid}`} tid={tid} pid={decodePathSegment(pid)} mode="player" />;
+}

@@ -62,8 +62,12 @@ function pathNumber(value: string): number {
 }
 
 function parseAction(body: unknown): DgActionRequest {
-  const { action } = payload(body, ['action', 'turn', 'code', 'drawing', 'round', 'step', 'chain']);
+  const { action } = payload(body, ['action', 'turn', 'code', 'drawing', 'round', 'step', 'chain', 'playerId', 'version']);
   switch (action) {
+    case 'remove': {
+      const input = payload(body, ['action', 'playerId', 'version']);
+      return { action, playerId: playerId(input.playerId), version: positiveInteger(input.version) };
+    }
     case 'guess': {
       const { turn, code } = payload(body, ['action', 'turn', 'code']);
       return { action, turn: positiveInteger(turn), code: positiveInteger(code) };
