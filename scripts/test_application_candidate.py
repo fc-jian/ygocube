@@ -55,6 +55,27 @@ class ApplicationCandidateTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'file differs'):
             stage(archive, digest, self.stage)
 
+    @unittest.skipIf(os.name == 'nt', 'Linux release bundle uses POSIX links')
+    def test_stage_resolves_a_portable_command_link_from_its_directory(self):
+        content = b'command'
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tool = root / 'api/node_modules/tool/cli.js'
+            tool.parent.mkdir(parents=True)
+            tool.write_bytes(content)
+            link = root / 'api/node_modules/.bin/tool'
+            link.parent.mkdir()
+            link.symlink_to('../tool/cli.js')
+            manifest = {'format': 2, 'files': {'api/node_modules/tool/cli.js': hashlib.sha256(content).hexdigest()},
+                        'links': {'api/node_modules/.bin/tool': '../tool/cli.js'}}
+            (root / 'manifest.json').write_text(json.dumps(manifest))
+            archive = self.root / 'portable.tar.gz'
+            with tarfile.open(archive, 'w:gz') as bundle:
+                bundle.add(root / 'api', arcname='api')
+                bundle.add(root / 'manifest.json', arcname='manifest.json')
+            self.scope['stage_archive'](archive, self.scope['sha'](archive), self.stage)
+            self.assertEqual((self.stage / 'api/node_modules/.bin/tool').read_bytes(), content)
+
     def test_reused_candidate_requires_matching_metadata_exact_files_and_runtime_smoke(self):
         archive, digest = self.create_archive('first')
         manifest = self.scope['stage_archive'](archive, digest, self.stage)

@@ -181,6 +181,35 @@ def verify_tree(root, manifest, prefix='', exact=False, ignore=()):
             raise ValueError(f'Candidate link differs: {prefix}{name}')
 
 
+def extract_archive(bundle, root, manifest):
+    files, links = [], []
+    declared = manifest.get('links', {})
+    for member in bundle.getmembers():
+        if P(member.name).is_absolute() or '..' in P(member.name).parts:
+            raise ValueError('Invalid archive path')
+        if member.issym():
+            if manifest.get('format') == 2 and declared.get(member.name) != member.linkname:
+                raise ValueError(f'Undeclared archive link: {member.name}')
+            links.append(member)
+        else:
+            files.append(member)
+    # Some supported Python versions evaluate relative symlinks from the archive
+    # root. Install them after regular files, relative to their actual parent.
+    bundle.extractall(root, members=files, filter='data')
+    for member in links:
+        path = root / member.name
+        target = P(member.linkname)
+        if target.is_absolute() or not path.parent.resolve().is_relative_to(root):
+            raise ValueError(f'Invalid archive link: {member.name}')
+        if not (path.parent / target).resolve().is_relative_to(root):
+            raise ValueError(f'External archive link: {member.name}')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(target)
+    for member in links:
+        if not (root / member.name).resolve(strict=True).is_relative_to(root):
+            raise ValueError(f'External archive link: {member.name}')
+
+
 def stage_archive(archive, checksum, destination):
     if sha(archive) != checksum:
         raise ValueError('Archive checksum mismatch')
@@ -198,10 +227,7 @@ def stage_archive(archive, checksum, destination):
             with tempfile.TemporaryDirectory(dir=destination.parent) as temp:
                 extracted = P(temp) / 'payload'
                 extracted.mkdir()
-                for member in bundle.getmembers():
-                    if P(member.name).is_absolute() or '..' in P(member.name).parts:
-                        raise ValueError('Invalid archive path')
-                bundle.extractall(extracted, filter='data')
+                extract_archive(bundle, extracted, manifest)
                 verify_tree(extracted, manifest, exact=manifest.get('format') == 2, ignore=('manifest.json',))
                 (extracted / '.archive-sha256').write_text(checksum)
                 extracted.rename(destination)
