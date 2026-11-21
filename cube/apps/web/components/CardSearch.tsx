@@ -32,7 +32,7 @@ export function CardSearch({ tid, identity, pool, onAdd }: {
   tid: string;
   identity: Identity;
   pool: number[];
-  onAdd: (code: number) => void;
+  onAdd?: (code: number) => void;
 }) {
   const unusedPositions = useMemo(() => {
     const positions = new Map<number, number>();
@@ -97,7 +97,7 @@ export function CardSearch({ tid, identity, pool, onAdd }: {
                 <span className={`rounded px-1.5 py-0.5 text-[0.625rem] ${STATUS_STYLE[status]}`}>
                   {STATUS_TEXT[status]}
                 </span>
-                {inPool && status === 'picked' ? (
+                {onAdd && inPool && status === 'picked' ? (
                   <button
                     onClick={() => onAdd(c.code)}
                     className="rounded bg-gold px-2 py-0.5 text-[0.625rem] font-semibold text-felt-deep hover:brightness-110"

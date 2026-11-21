@@ -749,8 +749,8 @@ function AdminDashboard({ tid, adminToken, createUsername, createToken, reload, 
               >
                 进入构筑
               </button>
-              {state.status === 'deckbuilding' && (
-                <button onClick={() => void act(`/admin/t/${state.id}/phase`, { status: 'drafting' })} className="rounded bg-felt-edge px-3 py-1 text-xs hover:brightness-110">
+              {state.status === 'deckbuilding' && state.canResumeDraft && (
+                <button disabled={state.frozen} onClick={() => void act(`/admin/t/${state.id}/phase`, { status: 'drafting' })} className="rounded bg-felt-edge px-3 py-1 text-xs hover:brightness-110">
                   回退到选牌
                 </button>
               )}
@@ -812,7 +812,7 @@ function AdminDashboard({ tid, adminToken, createUsername, createToken, reload, 
                 </span>
               </div>
               <div className="mt-2 grid grid-cols-1 gap-1 sm:grid-cols-2 lg:grid-cols-3">
-                {state.players.map((player) => {
+                {state.players.filter(player => Object.hasOwn(state.draftStartConfirmation!.confirmedByPlayer, player.playerId)).map((player) => {
                   const confirmed = state.draftStartConfirmation?.confirmedByPlayer[player.playerId] === true;
                   return (
                     <div key={player.playerId} className="flex items-center justify-between rounded bg-felt-deep/60 px-2 py-1">
@@ -847,7 +847,7 @@ function AdminDashboard({ tid, adminToken, createUsername, createToken, reload, 
                     座位 {p.seat} · {seatStats.get(p.playerId)?.count ?? 0} 次选牌 · {p.eliminated ? 'DSQ' : seatStats.get(p.playerId)?.lockedAt ? '已锁定' : '构筑中'}
                   </span>
                   <span className="flex shrink-0 gap-1">
-                    <button onClick={() => void act(`/admin/t/${state.id}/players/${encodeURIComponent(p.playerId)}/${p.withdrawn ? 'restore' : 'withdraw'}`)} disabled={p.withdrawn && state.matches.length > 0} className="rounded bg-amber-900 px-1.5 py-0.5 text-amber-100 disabled:opacity-40">{p.withdrawn ? '恢复' : '退赛'}</button>
+                    <button onClick={() => void act(`/admin/t/${state.id}/players/${encodeURIComponent(p.playerId)}/${p.withdrawn ? 'restore' : 'withdraw'}`)} disabled={!!state.draftStartConfirmation || (p.withdrawn && (state.matches.length > 0 || (state.status !== 'registration' && p.seat < 0)))} className="rounded bg-amber-900 px-1.5 py-0.5 text-amber-100 disabled:opacity-40">{p.withdrawn ? '恢复' : '退赛'}</button>
                     <button
                       onClick={async () => {
                         try {

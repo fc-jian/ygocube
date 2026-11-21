@@ -197,7 +197,7 @@ class RemoteDuelResourceApplyTests(unittest.TestCase):
                     **{'fetchone.return_value': ('ok',) if sql == 'PRAGMA integrity_check' else None}
                 )
                 switches = []
-                env = {'a': SimpleNamespace(web_only=False, windbot_root=None, release='fixture', require_idle_guess=False),
+                env = {'backup_name': 'fixture', 'a': SimpleNamespace(web_only=False, windbot_root=None, release='fixture', require_idle_guess=False),
                        'resource_apply': REMOTE, 'roots': roots, 'targets': targets, 'olds': olds, 'news': news,
                        'services': services, 'run': run, 'sqlite3': database, 'health': health,
                        'settle_guess': False, 'closing': closing,

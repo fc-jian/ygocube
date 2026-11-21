@@ -148,6 +148,7 @@ const API_ERROR_MESSAGES: Record<string, string> = {
   TOURNAMENT_FULL: '比赛报名人数已满',
   TOURNAMENT_NOT_FOUND: '比赛不存在或已结束',
   PLAYER_NOT_FOUND: '找不到该玩家',
+  DRAFT_COMPLETE: '所有牌堆均已选完',
   WRONG_PHASE: '当前阶段不允许此操作',
   DRAFT_NOT_STARTED: '选牌尚未开始',
   NOT_YOUR_TURN: '当前还没有轮到你选牌',

@@ -147,7 +147,9 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
     return { discard: available, addable };
   }, [cardMap, cfg.maxCopies, cfg.draftFormat, deck.extra, deck.main, deck.side, state?.pickedCards]);
 
+  const canEdit = !!state && !state.frozen && !deck.lockedAt && (state.status === 'drafting' || state.status === 'deckbuilding');
   const move = useCallback(async (card: number, from: string, to: string, index?: number, fromIndex?: number) => {
+    if (!canEdit) return;
     try {
       snapshot(); // FLIP: capture positions before the post-move re-render
       await api(`/t/${tidPath}/deck/move`, {
@@ -160,7 +162,7 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
     } catch (e: any) {
       setError(e.code === 'WRONG_ZONE' ? '该类型卡不能放入此区域' : readableApiError(e));
     }
-  }, [identity, tidPath, load, snapshot]);
+  }, [canEdit, identity, tidPath, load, snapshot]);
 
   const sortDeck = async () => {
     try {
@@ -197,11 +199,10 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
   // 固定预览的快捷操作：主/额外 <-> 副卡组、移出构筑（回到未使用区）、未使用卡移回卡组；
   // 操作执行后立即关闭详情窗口（dev_docs/06 §4）
   useEffect(() => {
-    if (!identity || !state?.deck || state.frozen || state.deck.lockedAt
-      || (state.status !== 'drafting' && state.status !== 'deckbuilding')) return;
+    if (!identity || !state?.deck || !canEdit) return;
     setCardPreviewAction((card, source) => deckPreviewAction(card, source, state.deck, move, discard));
     return () => setCardPreviewAction(null);
-  }, [identity, state, move, discard]);
+  }, [identity, state, canEdit, move, discard]);
   useEffect(() => () => closeCardPreview(), [tid, pid]);
 
   const unlock = async () => {
@@ -275,7 +276,7 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
       )}
       <div ref={flipRef} className="flex flex-1 flex-col gap-3 p-3 md:flex-row md:overflow-hidden">
         <div className="flex w-full flex-col gap-2 md:w-3/5 md:overflow-y-auto md:pr-1">
-          {!locked && state.status === 'deckbuilding' && (
+          {canEdit && state.status === 'deckbuilding' && (
             <div className="flex justify-end gap-2">
               <button onClick={() => void sortDeck()} className="rounded bg-felt-edge px-3 py-1.5 text-xs hover:brightness-110" title="按 YGOPro 卡组编辑器逻辑整理主卡组、额外卡组和副卡组">
                 整理卡组
@@ -285,16 +286,16 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
               </button>
             </div>
           )}
-          {!locked && state.status === 'deckbuilding' && state.deckIssues &&
+          {canEdit && state.status === 'deckbuilding' && state.deckIssues &&
             <DeckFeedback issues={state.deckIssues} side={deck.side} available={addable} cardMap={cardMap} move={move} retry={load} />}
-          <DeckZone title="主卡组" zone="main" codes={deck.main} limit={`${cfg.mainMin}-${cfg.mainMax}`} cardMap={cardMap} onCardMove={(c, f, _t, i, fi) => move(c, f, 'main', i, fi)} />
-          <DeckZone title="额外卡组" zone="extra" codes={deck.extra} limit={String(cfg.extraMax)} cardMap={cardMap} onCardMove={(c, f, _t, i, fi) => move(c, f, 'extra', i, fi)} />
-          <DeckZone title="副卡组" zone="side" codes={deck.side} limit={String(cfg.sideMax)} cardMap={cardMap} onCardMove={(c, f, _t, i, fi) => move(c, f, 'side', i, fi)} />
+          <DeckZone title="主卡组" zone="main" codes={deck.main} limit={`${cfg.mainMin}-${cfg.mainMax}`} cardMap={cardMap} onCardMove={canEdit ? move : undefined} />
+          <DeckZone title="额外卡组" zone="extra" codes={deck.extra} limit={String(cfg.extraMax)} cardMap={cardMap} onCardMove={canEdit ? move : undefined} />
+          <DeckZone title="副卡组" zone="side" codes={deck.side} limit={String(cfg.sideMax)} cardMap={cardMap} onCardMove={canEdit ? move : undefined} />
         </div>
         <aside
           className="flex flex-1 flex-col gap-2 md:overflow-y-auto"
-          onDragOver={(e) => e.preventDefault()}
-          onDrop={(e) => {
+          onDragOver={canEdit ? (e) => e.preventDefault() : undefined}
+          onDrop={canEdit ? (e) => {
             e.preventDefault();
             const code = Number(e.dataTransfer.getData('text/plain'));
             const zoneKind = e.dataTransfer.getData('application/x-card-zone');
@@ -303,27 +304,27 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
               const rawIndex = e.dataTransfer.getData('application/x-card-source-index');
               void move(code, from, 'pool', undefined, rawIndex ? Number(rawIndex) : undefined);
             }
-          }}
+          } : undefined}
         >
-          <CardSearch tid={tid} identity={identity} pool={discard} onAdd={(c) => void move(c, 'pool', 'side')} />
+          <CardSearch tid={tid} identity={identity} pool={discard} onAdd={canEdit ? (c) => void move(c, 'pool', 'side') : undefined} />
           <div className="flex-1 rounded-lg border border-felt-edge bg-felt/60 p-2">
             <header className="mb-1 flex items-center justify-between text-xs font-semibold text-slate-300">
               <span>未使用卡池（{discard.length}）</span>
-              <span className="font-normal text-slate-500">可拖入此处移出构筑</span>
+              {canEdit && <span className="font-normal text-slate-500">可拖入此处移出构筑</span>}
             </header>
             <div className="card-grid-8">
               {discard.map((c, i) => (
                 <div
                   key={poolIds[i]}
                   data-flip-id={poolIds[i]}
-                  draggable
-                  onDragStart={(e) => {
+                  draggable={canEdit}
+                  onDragStart={canEdit ? (e) => {
                     e.dataTransfer.setData('text/plain', String(c));
                     e.dataTransfer.setData('application/x-card-zone', 'deck');
                     e.dataTransfer.setData('application/x-card-source', 'pool');
                     e.dataTransfer.setData('application/x-card-source-index', String(i));
-                  }}
-                  className="animate-card-in cursor-grab active:cursor-grabbing"
+                  } : undefined}
+                  className={canEdit ? 'animate-card-in cursor-grab active:cursor-grabbing' : 'animate-card-in'}
                 >
                   {/* 卡图 + hover/点击详情（无本地图时仍可查看卡牌效果） */}
                   <CardWithTooltip code={c} card={cardMap[c]} source={{ zone: 'pool', index: i }} />
@@ -341,8 +342,10 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
           下载 ydk
         </button>
         <div className="flex items-center gap-2">
-        {state.status !== 'deckbuilding' ? (
-          <span className="text-xs text-slate-500">对战已开始，卡组已锁定不可修改</span>
+        {state.frozen ? (
+          <span className="text-xs text-slate-500">比赛已冻结，卡组只读</span>
+        ) : state.status !== 'deckbuilding' ? (
+          <span className="text-xs text-slate-500">{state.status === 'drafting' ? '进入构筑阶段后可锁定卡组' : '当前阶段卡组只读'}</span>
         ) : locked ? (
           <button onClick={unlock} className="rounded bg-red-900 px-4 py-1.5 text-sm text-red-100 hover:brightness-110">
             解锁卡组

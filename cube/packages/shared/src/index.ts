@@ -100,6 +100,7 @@ export type RoomManagementRequest =
   | { action: 'set-admission'; locked: boolean; version: number };
 
 export interface AdminDraftSummary {
+  canResumeDraft: boolean;
   lastEventSeq: number;
   packSummary: { index: number; size: number }[];
   pickSummary: { playerId: string; seat: number; count: number; lockedAt: string | null }[];

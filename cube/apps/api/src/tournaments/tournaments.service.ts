@@ -3,7 +3,7 @@ import { EDISON_E3_MAX_PLAYERS, EDISON_E3_ROUNDS, type AdminDraftHistory, type A
 import { conflictingMatchRows } from '../matches/table-conflicts';
 import { getDb } from '../db';
 import { config, defaults } from '../config';
-import { logEvent, loadState, persistMeta, getConfig, snapshotNow, TournamentState, withEventTransaction } from '../events/events.service';
+import { draftPlayers, logEvent, loadState, persistMeta, getConfig, snapshotNow, TournamentState, withEventTransaction } from '../events/events.service';
 import crypto from 'crypto';
 import { sha256 } from '../auth/auth.guard';
 import { normalizePoolName, PoolsService } from '../pools/pools.service';
@@ -16,6 +16,14 @@ import {
 } from './tournament-config';
 
 export type { CreateTournamentInput, DropMode } from './tournament-config';
+
+function canResumeDraft(state: TournamentState): boolean {
+  if (state.status !== 'deckbuilding') return false;
+  if (Object.keys(state.packQueues ?? {}).length) {
+    return state.packsDealt < state.packs.length || Object.values(state.packQueues).some(queue => queue.length > 0);
+  }
+  return !!state.pickCursor && remainingCardsForPack(state, state.pickCursor.packIndex).length > 0;
+}
 
 function applyPoolFormat(cfg: Record<string, any>, format?: PoolDraftFormat): void {
   if (format !== 'edison_e3') {
@@ -391,6 +399,7 @@ export class TournamentsService {
     if (state.matches.length > 0) throw new Error('FORMAT_LOCKED');
     const player = state.players.find((p) => p.playerId === playerId);
     if (!player) throw new Error('PLAYER_NOT_FOUND');
+    if (state.draftParticipants && !state.draftParticipants.includes(playerId)) throw new Error('WRONG_PHASE');
     getDb().prepare('UPDATE tournament_players SET withdrawn=0 WHERE tournament_id=? AND player_id=?').run(tid, playerId);
     logEvent(tid, 'player', 'player_restore', { playerId }, actor);
     persistMeta(tid);
@@ -430,18 +439,8 @@ export class TournamentsService {
       }
     }
     if (status === 'drafting' && state.status === 'deckbuilding') {
-      // 回退：清掉构筑时限，恢复选牌（serial 光标保留在最后牌堆开头；passing 队列/ deadline 原样保留，
-      // 定时器由 admin 阶段端点的 resumePickTimer 重新武装，过期 deadline 会恢复为完整时长）
-      const s = loadState(tid);
-      const deadlineAt = null;
-      logEvent(tid, 'tournament', 'phase', { status: 'drafting', round: s.round, deadlineAt }, actor);
-      const passing = Object.keys(s.packQueues ?? {}).length > 0;
-      if (!passing && !s.pickCursor && s.packs.length) {
-        // 极端情况：选牌全部完成后回退 —— 从第一堆重新开始（没有未选完的堆）
-        const first = s.packs[0];
-        const playerId = s.players.slice().sort((a, b) => a.seat - b.seat)[0].playerId;
-        logEvent(tid, 'draft', 'cursor', { packIndex: 0, round: 0, playerId, deadlineAt: new Date(Date.now() + getConfig(s).pickSeconds * 1000).toISOString() }, actor);
-      }
+      if (!canResumeDraft(state)) throw new Error('DRAFT_COMPLETE');
+      logEvent(tid, 'tournament', 'phase', { status: 'drafting', round: state.round, deadlineAt: null }, actor);
       persistMeta(tid);
       return;
     }
@@ -576,7 +575,7 @@ export class TournamentsService {
     let queueLengths: { playerId: string; length: number }[] | undefined;
     if (passing) {
       // passing：所有人可见各玩家队列长度（仅数量）；本人队首堆内容仅本人可见
-      queueLengths = orderedPlayers.map((p) => ({ playerId: p.playerId, length: state.packQueues[p.playerId]?.length ?? 0 }));
+      queueLengths = orderedPlayers.filter(p => Object.hasOwn(state.packQueues, p.playerId)).map((p) => ({ playerId: p.playerId, length: state.packQueues[p.playerId]?.length ?? 0 }));
       if (state.status === 'drafting') {
         const queue = state.packQueues[playerId] ?? [];
         const head = queue.length ? state.packs.find((p) => p.index === queue[0]) : null;
@@ -631,7 +630,8 @@ export class TournamentsService {
     }
     // 完整 passing 轮中，每轮 n 个同尺寸牌堆，每名玩家必得该尺寸张数；
     // 因而可精确显示本人到结束还能获得多少张，与异步选牌进度无关。
-    const n = orderedPlayers.length;
+    const seats = draftPlayers(state);
+    const n = seats.length;
     const fullFairRounds = passing && n > 0 && state.packs.length % n === 0 && state.packs.every((pack, index, packs) => {
       const roundStart = Math.floor(index / n) * n;
       return pack.size === packs[roundStart].size;
@@ -643,7 +643,7 @@ export class TournamentsService {
       ? Array.from({ length: fairRoundCount }, (_, round) => state.packs[round * n].size).reduce((a, b) => a + b, 0)
       : Math.ceil(state.packs.reduce((sum, p) => sum + p.size, 0) / Math.max(1, n));
     const startConfirmation = state.draftStartConfirmation;
-    const draftStartConfirmation = startConfirmation
+    const draftStartConfirmation = startConfirmation?.participants.includes(playerId)
       ? {
           pending: true,
           requestedAt: startConfirmation.requestedAt,
@@ -663,7 +663,7 @@ export class TournamentsService {
       config: cfg,
       players: orderedPlayers.map((p) => ({ playerId: p.playerId, displayName: p.displayName, seat: p.seat, eliminated: p.eliminated, withdrawn: p.withdrawn === true, ready: p.ready === true })),
       pickedCards: picks.map((p) => p.card),
-      cardsRemainingToDraft: Math.max(0, targetCards - picks.length),
+      cardsRemainingToDraft: seats.some(p => p.playerId === playerId) ? Math.max(0, targetCards - picks.length) : 0,
       cardsRemainingExact: fullFairRounds,
       disqualified: state.players.find((p) => p.playerId === playerId)?.eliminated === true,
       poolInfo: { name: String(cfg.cardPool ?? 'full'), count: this.poolsCodes(cfg) },
@@ -846,6 +846,7 @@ export class TournamentsService {
     const state = loadState(tid);
     const overview = this.adminOverview(tid, state);
     const draft: AdminDraftSummary = {
+      canResumeDraft: canResumeDraft(state),
       lastEventSeq: getDb().prepare('SELECT coalesce(max(seq), 0) FROM events WHERE tournament_id=?').pluck().get(tid) as number,
       packSummary: state.packs.map(({ index, size }) => ({ index, size })),
       pickSummary: overview.pickSummary.map((p) => ({ ...p, lockedAt: state.decks[p.playerId]?.lockedAt ?? null })),

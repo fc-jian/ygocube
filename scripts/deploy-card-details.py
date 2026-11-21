@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Stage or activate a checksummed Cube/Duel application release."""
-import argparse, hashlib, json, os, pathlib, re, shutil, sqlite3, subprocess, tarfile, time, urllib.request
+import argparse, hashlib, json, os, pathlib, re, shutil, sqlite3, subprocess, tarfile, tempfile, time, urllib.request
 from contextlib import closing
 import importlib.util
 import fcntl
@@ -59,7 +59,12 @@ targets = {'ygocube': roots['ygocube']} if a.cube_only else roots
 stage = roots['ygocube']/'.staging'/a.release
 
 def run(*args): return subprocess.check_output(args, text=True).strip()
-def sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
+def sha(p):
+    digest = hashlib.sha256()
+    with p.open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
 def switch(root, target):
     link = root/(a.release+'-next')
     link.symlink_to(target)
@@ -155,62 +160,160 @@ def health():
         except Exception: time.sleep(1)
     raise RuntimeError('API health failed')
 
-assert sha(a.archive) == a.sha256
-if not stage.exists():
-    stage.mkdir(parents=True)
-    with tarfile.open(a.archive) as t:
-        for m in t.getmembers():
-            assert not P(m.name).is_absolute() and '..' not in P(m.name).parts
-        t.extractall(stage, filter='data')
-manifest = json.loads((stage/'manifest.json').read_text())
-for f, h in manifest['files'].items(): assert sha(stage/f) == h, f
-if application_only:
-    assert not any(f.startswith('srvpro/') for f in manifest['files']), 'API/Web update cannot include srvpro'
-olds = {n:(root/'current').resolve() for n,root in targets.items()}
-news = {n:root/'releases'/a.release for n,root in targets.items()}
-for n,new in news.items():
-    if new.exists():
-        assert (new/'COMMIT').read_text().strip() == manifest['sourceCommit']
-        continue
-    shutil.copytree(olds[n], new, symlinks=True, copy_function=resource_apply.hardlink_file)
-    shutil.rmtree(new/'web')
-    shutil.copytree(stage/n/'web', new/'web', symlinks=True)
+def verify_tree(root, manifest, prefix='', exact=False, ignore=()):
+    prefix = prefix.rstrip('/') + '/' if prefix else ''
+    files = {key[len(prefix):]: value for key, value in manifest['files'].items() if key.startswith(prefix)}
+    links = {key[len(prefix):]: value for key, value in manifest.get('links', {}).items() if key.startswith(prefix)}
+    for name in (*files, *links):
+        if P(name).is_absolute() or '..' in P(name).parts:
+            raise ValueError(f'Invalid manifest path: {name}')
+    if exact:
+        entries = {p.relative_to(root).as_posix() for p in root.rglob('*') if p.is_symlink() or p.is_file()}
+        if entries.difference(ignore) != set(files) | set(links):
+            raise ValueError(f'Candidate file set differs: {prefix}')
+    for name, expected in files.items():
+        path = root / name
+        if (exact and path.is_symlink()) or sha(path) != expected:
+            raise ValueError(f'Candidate file differs: {prefix}{name}')
+    for name, expected in links.items():
+        path = root / name
+        if not path.is_symlink() or os.readlink(path) != expected or not path.resolve().is_relative_to(root.resolve()):
+            raise ValueError(f'Candidate link differs: {prefix}{name}')
+
+
+def stage_archive(archive, checksum, destination):
+    if sha(archive) != checksum:
+        raise ValueError('Archive checksum mismatch')
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(archive) as bundle:
+        manifest = json.load(bundle.extractfile('manifest.json'))
+        if destination.exists():
+            marker = destination / '.archive-sha256'
+            if not marker.is_file() or marker.read_text().strip() != checksum:
+                raise ValueError('Release ID already belongs to another archive')
+            if json.loads((destination / 'manifest.json').read_text()) != manifest:
+                raise ValueError('Staged manifest differs from archive')
+            verify_tree(destination, manifest, exact=manifest.get('format') == 2, ignore=('manifest.json', '.archive-sha256'))
+        else:
+            with tempfile.TemporaryDirectory(dir=destination.parent) as temp:
+                extracted = P(temp) / 'payload'
+                extracted.mkdir()
+                for member in bundle.getmembers():
+                    if P(member.name).is_absolute() or '..' in P(member.name).parts:
+                        raise ValueError('Invalid archive path')
+                bundle.extractall(extracted, filter='data')
+                verify_tree(extracted, manifest, exact=manifest.get('format') == 2, ignore=('manifest.json',))
+                (extracted / '.archive-sha256').write_text(checksum)
+                extracted.rename(destination)
+    return manifest
+
+
+def verify_candidate(instance, release, manifest, checksum, mode):
+    metadata = json.loads((release / 'release.json').read_text())
+    for key, expected in dict(id=a.release, sourceCommit=manifest['sourceCommit'], artifactSha256=checksum, installMode=mode).items():
+        if metadata.get(key) != expected:
+            raise ValueError(f'Existing candidate has different {key}')
+    if (release / 'COMMIT').read_text().strip() != manifest['sourceCommit']:
+        raise ValueError('Candidate source differs')
+    app = release / 'web' / ('standalone/apps/web' if instance == 'ygocube' else 'apps/web')
+    if (app / '.next/BUILD_ID').read_text().strip() != metadata['webBuildId'] or not any((app / '.next/static').rglob('*.js')):
+        raise ValueError('Candidate Web build is incomplete')
+    exact = manifest.get('format') == 2
+    verify_tree(release / 'web', manifest, instance + '/web', exact=exact)
     if not a.web_only:
-        shutil.rmtree(new/'api/dist')
-        shutil.copytree(stage/'api/dist', new/'api/dist')
+        for directory in ('api/dist', 'api/node_modules'):
+            verify_tree(release / directory, manifest, directory, exact=exact)
+    run('/usr/bin/node', '-e', """
+        const app = process.argv[1] + '/node_modules/';
+        for (const name of ['ws', '@ygocube/shared', '@ygocube/duel-protocol']) require(app + name);
+        const db = new (require(app + 'better-sqlite3'))(':memory:');
+        db.prepare('SELECT 1').get();
+        db.close();
+    """, str(release / 'api'))
+
+
+def build_candidate(instance, new, old, manifest, mode):
+    shutil.copytree(old, new, symlinks=True, copy_function=resource_apply.hardlink_file)
+    shutil.rmtree(new / 'web')
+    shutil.copytree(stage / instance / 'web', new / 'web', symlinks=True)
+    if not a.web_only:
+        shutil.rmtree(new / 'api/dist')
+        shutil.copytree(stage / 'api/dist', new / 'api/dist')
+
         def replace_file(src, dst):
-            target=P(dst)
-            assert target.resolve().is_relative_to(new.resolve()), 'Application overlay touches shared runtime'
-            if target.is_file() or target.is_symlink():target.unlink()
-            return shutil.copy2(src,dst)
-        shutil.copytree(stage/'api/node_modules', new/'api/node_modules', dirs_exist_ok=True, copy_function=replace_file)
+            target = P(dst)
+            if not target.resolve().is_relative_to(new.resolve()):
+                raise ValueError('Application overlay touches shared runtime')
+            if target.is_file() or target.is_symlink():
+                target.unlink()
+            return shutil.copy2(src, dst)
+
+        modules = new / 'api/node_modules'
+        if manifest.get('format') == 2:
+            if modules.is_symlink():
+                modules.unlink()
+            else:
+                shutil.rmtree(modules)
+            shutil.copytree(stage / 'api/node_modules', modules, symlinks=True)
+        else:
+            shutil.copytree(stage / 'api/node_modules', modules, dirs_exist_ok=True, copy_function=replace_file)
         if not application_only:
-            shutil.copytree(stage/'srvpro', new/'srvpro', dirs_exist_ok=True, copy_function=replace_file)
-    app = new/'web'/('standalone/apps/web' if n == 'ygocube' else 'apps/web')
-    assert (app/'.next/static').is_dir() and (app/'.next/BUILD_ID').is_file()
-    old_static = olds[n]/'web'/('standalone/apps/web/.next/static' if n == 'ygocube' else 'apps/web/.next/static')
-    for src in old_static.rglob('*'):
-        target = app/'.next/static'/src.relative_to(old_static)
-        if src.is_file() and not target.exists():
-            target.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src, target)
+            shutil.copytree(stage / 'srvpro', new / 'srvpro', dirs_exist_ok=True, copy_function=replace_file)
+    web_app = 'standalone/apps/web' if instance == 'ygocube' else 'apps/web'
+    app = new / 'web' / web_app
+    if manifest.get('format') != 2:
+        old_static = old / 'web' / web_app / '.next/static'
+        for src in old_static.rglob('*'):
+            target = app / '.next/static' / src.relative_to(old_static)
+            if src.is_file() and not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, target)
     metadata = dict(id=a.release, sourceCommit=manifest['sourceCommit'], sourceBranch=manifest.get('sourceBranch','unknown'), workingTreeChanges=False,
-                    previousRelease=olds[n].name, webBuildId=(app/'.next/BUILD_ID').read_text().strip(),
-                    artifactSha256=a.sha256, srvproCommit=manifest['srvproCommit'])
-    resource_apply.atomic_write_text(new/'release.json',json.dumps(metadata, indent=2))
+                    previousRelease=old.name, webBuildId=(app/'.next/BUILD_ID').read_text().strip(),
+                    artifactSha256=a.sha256, installMode=mode, srvproCommit=manifest['srvproCommit'])
+    resource_apply.atomic_write_text(new/'release.json', json.dumps(metadata, indent=2))
     sources = {'web': manifest['sourceCommit']}
     if not a.web_only:
         sources['api'] = manifest['sourceCommit']
         if any(f.startswith('srvpro/') for f in manifest['files']):
             sources['srvpro'] = manifest['srvproCommit']
-    resource_apply.record_components(new, sources, previous=olds[n])
-    resource_apply.atomic_write_text(new/'COMMIT',manifest['sourceCommit']+'\n')
-    resource_apply.atomic_write_text(new/'RELEASE_ID',a.release+'\n')
-    if n=='ygoduel':resource_apply.link_existing_release_resources(roots['ygocube'],new)
-    resource_apply.set_release_ownership(new,user=n)
-    run('/usr/bin/node','-e',"require(process.argv[1]+'/node_modules/ws'); require(process.argv[1]+'/node_modules/@ygocube/duel-protocol')",str(new/'api'))
+    if instance == 'ygoduel':
+        resource_apply.link_existing_release_resources(roots['ygocube'], new)
+    resource_apply.record_components(new, sources, previous=old)
+    resource_apply.atomic_write_text(new/'COMMIT', manifest['sourceCommit']+'\n')
+    resource_apply.atomic_write_text(new/'RELEASE_ID', a.release+'\n')
+    resource_apply.set_release_ownership(new, user=instance)
+
+
+manifest = stage_archive(a.archive, a.sha256, stage)
+if application_only and any(f.startswith('srvpro/') for f in (*manifest['files'], *manifest.get('links', {}))):
+    raise ValueError('API/Web update cannot include srvpro')
+olds = {n:(root/'current').resolve() for n,root in targets.items()}
+news = {n:root/'releases'/a.release for n,root in targets.items()}
+mode = 'web' if a.web_only else 'api-web' if application_only else 'full'
+for n, new in news.items():
+    if new.exists():
+        verify_candidate(n, new, manifest, a.sha256, mode)
+    else:
+        # Keep the candidate directly under releases for instance-relative resource paths.
+        partial = P(tempfile.mkdtemp(dir=new.parent, prefix='.' + a.release + '-'))
+        partial.rmdir()
+        try:
+            build_candidate(n, partial, olds[n], manifest, mode)
+            verify_candidate(n, partial, manifest, a.sha256, mode)
+            partial.rename(new)
+        finally:
+            if partial.exists():
+                shutil.rmtree(partial)
 if not a.activate:
     print(json.dumps({'prepared':True,'release':a.release,'sourceCommit':manifest['sourceCommit']}))
     raise SystemExit()
+if any(olds[n] == news[n] for n in targets):
+    if all(olds[n] == news[n] for n in targets):
+        health()
+        print(json.dumps({'alreadyActive': True, 'release': a.release, 'sourceCommit': manifest['sourceCommit']}))
+        raise SystemExit()
+    raise RuntimeError('Release is active on only part of the requested targets')
 # Parse both JSON-style and block YAML before stopping any service.
 windbot_config = None
 if a.windbot_root:
@@ -226,8 +329,11 @@ services = [n+'-'+s for n in targets for s in components]
 unchanged = [n+'-'+s for n in roots for s in ['api','srvpro','web'] if n+'-'+s not in services]
 unchanged_state = {s: run('systemctl','show',s,'-p','MainPID','-p','ExecMainStartTimestamp') for s in unchanged}
 nginx = run('systemctl','show','nginx','-p','MainPID','-p','ExecMainStartTimestamp')
+backup_name = a.release
+if any((root / 'backups' / backup_name).exists() for root in targets.values()):
+    backup_name += '-retry-' + str(time.time_ns())
 for n,root in targets.items():
-    backup=root/'backups'/a.release
+    backup=root/'backups'/backup_name
     backup.mkdir(parents=True,exist_ok=False)
     (backup/'previous-release.txt').write_text(str(olds[n]))
     config_file = root/'current/config.yaml'
@@ -260,7 +366,7 @@ try:
     for n,root in targets.items():
         dbfile=root/'shared/data'/('cube.sqlite' if n=='ygocube' else 'duel.sqlite')
         with closing(sqlite3.connect(dbfile.as_uri() + '?mode=ro', uri=True)) as db, \
-                closing(sqlite3.connect(root/'backups'/a.release/dbfile.name)) as out:
+                closing(sqlite3.connect(root/'backups'/backup_name/dbfile.name)) as out:
             db.backup(out)
             assert out.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
             assert out.execute('PRAGMA foreign_key_check').fetchone() is None
@@ -274,7 +380,7 @@ try:
         cube_root = roots['ygocube']
         settled_guess_rooms = settle_guess_rooms(cube_root, news['ygocube'], expected_guess_rooms, a.settle_open_guess)
         receipt = {'settledGuessRooms': settled_guess_rooms}
-        (cube_root/'backups'/a.release/'guess-settlement.json').write_text(json.dumps(receipt) + '\n')
+        (cube_root/'backups'/backup_name/'guess-settlement.json').write_text(json.dumps(receipt) + '\n')
         print(json.dumps(receipt), flush=True)
     for n,root in targets.items():
         switch(root,news[n])
@@ -303,7 +409,7 @@ except Exception:
     if maintenance and candidate_started:
         maintenance.stop_services()
     if a.windbot_root:
-        shutil.copy2(roots['ygoduel']/'backups'/a.release/'config.yaml', roots['ygoduel']/'shared/config.yaml')
+        shutil.copy2(roots['ygoduel']/'backups'/backup_name/'config.yaml', roots['ygoduel']/'shared/config.yaml')
     for n,root in targets.items():
         if (root/'current').resolve()!=olds[n]: switch(root,olds[n])
     run('systemctl', 'start' if maintenance else 'restart', *services)
@@ -313,7 +419,7 @@ except Exception:
     raise
 if maintenance:
     maintenance.finish()
-result={'ok':True,'release':a.release,'commit':manifest['sourceCommit'],'pages':results,'services':services+unchanged+['nginx'],'webOnly':a.web_only,'cubeOnly':a.cube_only,'apiWebOnly':application_only and not a.web_only}
+result={'ok':True,'release':a.release,'commit':manifest['sourceCommit'],'backup':backup_name,'pages':results,'services':services+unchanged+['nginx'],'webOnly':a.web_only,'cubeOnly':a.cube_only,'apiWebOnly':application_only and not a.web_only}
 if a.preserve_dg_reveal:
     result['allowedUntimedDgReveal'] = a.preserve_dg_reveal
 if a.preserve_guess_room:
@@ -322,5 +428,5 @@ if a.preserve_guess_room:
         result['allowedGuessRoom'] = a.preserve_guess_room[0]
 if settled_guess_rooms is not None:
     result['settledGuessRooms'] = settled_guess_rooms
-for n,root in targets.items(): (root/'backups'/a.release/'verification.json').write_text(json.dumps(result,indent=2))
+for n,root in targets.items(): (root/'backups'/backup_name/'verification.json').write_text(json.dumps(result,indent=2))
 print(json.dumps(result))

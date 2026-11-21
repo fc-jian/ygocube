@@ -2,6 +2,7 @@ import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { EDISON_E3_ROUNDS, type DraftReview } from '@ygocube/shared';
 import {
   afterEventCommit,
+  draftPlayers,
   loadState,
   logEvent,
   getConfig,
@@ -147,7 +148,8 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     const state = loadState(tid);
     if (state.frozen) throw new Error('FROZEN');
     if (state.status !== 'registration') throw new Error('WRONG_PHASE');
-    if (state.players.length < 2) throw new Error('NOT_ENOUGH_PLAYERS');
+    const participants = draftPlayers(state).map(player => player.playerId);
+    if (participants.length < 2) throw new Error('NOT_ENOUGH_PLAYERS');
     const now = Date.now();
     const existing = state.draftStartConfirmation;
     if (existing && new Date(existing.deadlineAt).getTime() > now) {
@@ -165,7 +167,6 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     }
     const requestedAt = new Date(now).toISOString();
     const deadlineAt = new Date(now + DraftService.START_CONFIRMATION_MS).toISOString();
-    const participants = state.players.map((player) => player.playerId);
     const confirmed: Record<string, boolean> = {};
     for (const playerId of participants) confirmed[playerId] = false;
     logEvent(tid, 'draft', 'draft_start_requested', {
@@ -531,12 +532,17 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     const state = loadState(tid);
     if (state.frozen) throw new Error('FROZEN');
     if (state.status !== 'registration') throw new Error('WRONG_PHASE');
-    const n = state.players.length;
+    const entrants = draftPlayers(state);
+    const n = entrants.length;
     if (n < 2) throw new Error('NOT_ENOUGH_PLAYERS');
     const cfg = getConfig(state);
     const rawCfg = JSON.parse(state.configJson);
     const edison = cfg.draftFormat === 'edison_e3';
-    const seatMap = this.initialSeats(state, edison);
+    const initial = this.initialSeats(state, edison);
+    const seatsArr = entrants.slice().sort((a, b) => initial[a.playerId] - initial[b.playerId]);
+    const participants = seatsArr.map(p => p.playerId);
+    const seatMap = Object.fromEntries(state.players.map(p => [p.playerId, -1]));
+    participants.forEach((pid, seat) => { seatMap[pid] = seat; });
     const poolCodes = this.pools.resolve(cfg.cardPool).slice();
     const { packs, droppedCards } = edison
       ? createEdisonPacks(poolCodes, n, this.cards, cfg.dropPublic === true)
@@ -545,12 +551,11 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     logEvent(tid, 'tournament', 'phase', { status: 'drafting', round: 0 }, actor);
     logEvent(tid, 'player', 'seat_assign', seatMap, actor);
     if (draftMode === 'serial') {
-      logEvent(tid, 'pack', 'packs_created', { packs, droppedCards }, actor);
+      logEvent(tid, 'pack', 'packs_created', { packs, droppedCards, participants }, actor);
       // snake cursor: pack 0 starts with seat 0; each pack alternates direction
       this.advance(tid, actor, true);
     } else {
       // passing 按轮发堆：开局只发第 0 轮（堆 k → 座位 k）；一轮全空后由 dealRound 发下一轮
-      const seatsArr = state.players.slice().sort((a, b) => a.seat - b.seat);
       const queues: Record<string, number[]> = {};
       const reserves: Record<string, number> = {};
       for (const p of seatsArr) {
@@ -563,7 +568,7 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
       const deadlineAt = new Date(Date.now() + (cfg.pickSeconds + cfg.reserveSeconds) * 1000).toISOString();
       const deadlines: Record<string, string | null> = {};
       for (const p of seatsArr) deadlines[p.playerId] = queues[p.playerId].length ? deadlineAt : null;
-      logEvent(tid, 'pack', 'packs_created', { packs, droppedCards, queues, deadlines, reserves, dealt }, actor);
+      logEvent(tid, 'pack', 'packs_created', { packs, droppedCards, participants, queues, deadlines, reserves, dealt }, actor);
       afterEventCommit(tid, () => {
         for (const player of seatsArr) this.armPassTimer(tid, player.playerId);
       });
@@ -577,8 +582,8 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
   // count that is a multiple of n every player occupies every position equally.
   // （仅 serial 模式使用）
   private pickerAt(state: TournamentState, packIndex: number, round: number): string {
-    const n = state.players.length;
-    const seats = state.players.slice().sort((a, b) => a.seat - b.seat);
+    const seats = draftPlayers(state).slice().sort((a, b) => a.seat - b.seat);
+    const n = seats.length;
     // 非倍数堆的每堆随机起始已在 packs 创建时定下；旧数据无 startOffset 时回退蛇形偏移
     const pack = state.packs.find((p) => p.index === packIndex);
     const startOffset = pack?.startOffset ?? (n - (packIndex % n)) % n;
@@ -838,6 +843,10 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     const s = loadState(tid);
     if (s.status !== 'drafting' || s.pause?.pausedAt) return;
     if (this.isPassing(s)) {
+      if (s.packsDealt < s.packs.length && Object.values(s.packQueues).every(queue => !queue.length)) {
+        this.dealRound(tid, 'system');
+        return;
+      }
       // 冻结期间 deadline 可能已过期：过期/缺失的一律恢复为完整选牌时长 + 剩余 reserve（与 serial 语义一致）
       const cfg = getConfig(s);
       const now = Date.now();
@@ -861,9 +870,9 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
       });
       return;
     }
-    if (!s.pickCursor?.deadlineAt) return;
+    if (!s.pickCursor) return;
     // 冻结期间 deadline 已过期：把剩余时限恢复为完整选牌时长（与暂停恢复语义一致）
-    if (new Date(s.pickCursor.deadlineAt).getTime() <= Date.now()) {
+    if (!s.pickCursor.deadlineAt || new Date(s.pickCursor.deadlineAt).getTime() <= Date.now()) {
       const cfg = getConfig(s);
       logEvent(tid, 'draft', 'cursor', {
         ...s.pickCursor,
@@ -885,7 +894,7 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     if (state.frozen) throw new Error('FROZEN');
     if (state.status !== 'drafting') throw new Error('WRONG_PHASE');
     if (!this.isPassing(state)) throw new Error('WRONG_DRAFT_MODE');
-    if (!state.players.some((p) => p.playerId === playerId)) throw new Error('PLAYER_NOT_FOUND');
+    if (!draftPlayers(state).some((p) => p.playerId === playerId)) throw new Error('PLAYER_NOT_FOUND');
     if (!Number.isInteger(seconds) || seconds <= 0 || seconds > 3600) throw new Error('BAD_RESERVE_SECONDS');
 
     const deltaMs = seconds * 1000;
@@ -1192,7 +1201,7 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     const deadlineFor = (pid: string) => new Date(now + cfg.pickSeconds * 1000 + (reserves[pid] ?? 0)).toISOString();
     let receiver: string | null = null;
     if (pack.order.length - round > (extraCard === undefined ? 1 : 2)) {
-      const seatsArr = state.players.slice().sort((a, b) => a.seat - b.seat);
+      const seatsArr = draftPlayers(state).slice().sort((a, b) => a.seat - b.seat);
       const idx = seatsArr.findIndex((p) => p.playerId === playerId);
       const step = pack.draftRound && EDISON_E3_ROUNDS[pack.draftRound - 1]?.direction === 'counterclockwise' ? -1 : 1;
       receiver = seatsArr[(idx + step + seatsArr.length) % seatsArr.length].playerId;
@@ -1238,11 +1247,12 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
   private dealRound(tid: number, actor: string): void {
     const state = loadState(tid);
     const cfg = getConfig(state);
-    const n = state.players.length;
+    const players = draftPlayers(state);
+    const n = players.length;
     const remaining = state.packs.length - state.packsDealt;
     if (remaining <= 0) return;
     const count = Math.min(n, remaining);
-    let seatsArr = state.players.slice().sort((a, b) => a.seat - b.seat);
+    let seatsArr = players.slice().sort((a, b) => a.seat - b.seat);
     // reseatEachRound（默认开）：每轮结束后随机重排玩家座位，再发下一轮（seat_assign 事件落日志，回放一致）
     if (cfg.reseatEachRound && remaining > 0) {
       const shuffled = seatsArr.slice();
@@ -1255,7 +1265,7 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
         seatMap[p.playerId] = idx;
       });
       logEvent(tid, 'player', 'seat_assign', seatMap, actor);
-      seatsArr = loadState(tid).players.slice().sort((a, b) => a.seat - b.seat);
+      seatsArr = draftPlayers(loadState(tid)).slice().sort((a, b) => a.seat - b.seat);
     }
     const recipients = seatsArr.slice();
     if (count < n) {

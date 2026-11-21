@@ -50,8 +50,11 @@ describe('phase rules', () => {
     expect(state.pickCursor!.packIndex).toBe(1);
     expect(state.pickCursor!.round).toBe(0);
     expect(state.phaseDeadline).toBeNull(); // default deckbuilding is unlimited
-    // rollback: resume drafting from the preserved cursor
+    // Restore both the serial cursor and its timer through the admin transition.
+    expect(tournaments.adminSummary(tid).canResumeDraft).toBe(true);
     tournaments.setPhase(tid, 'drafting', undefined, 'test');
+    draft.resumePickTimer(tid);
+    expect(Date.parse(loadState(tid).pickCursor!.deadlineAt!)).toBeGreaterThan(Date.now());
     state = loadState(tid);
     expect(state.status).toBe('drafting');
     expect(state.pickCursor!.packIndex).toBe(1);

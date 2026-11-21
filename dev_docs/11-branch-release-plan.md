@@ -71,7 +71,7 @@ git merge-base --is-ancestor "$head" main
 | --- | --- |
 | 选择源码 | 用通过 PR 的完整 merge SHA 在干净的 Linux 检出中构建，记录根提交和两个子模块 SHA。构建机与服务主机的 Node 原生模块 ABI、架构及系统库要兼容。 |
 | 构建应用 | 两个 Web 分别使用自己的 API 基址和静态前缀。把对应的 standalone、`.next/static` 和存在的 `public` 一起打包。API 依赖以该提交的 `cube/pnpm-lock.yaml` 为准。执行冻结安装后，可在 `cube/` 用 `pnpm --filter @ygocube/api deploy --legacy --prod <暂存目录>` 输出运行依赖。两个工作区包使用同一提交的编译产物，并在隔离目录验证 SQLite 原生模块可加载。 |
-| 校验候选 | 分实例核对应用文件清单、SHA-256、Web build ID、API 依赖版本及符号链接目标。现有安装器会补入上一版的静态文件，也会覆盖安装部分 API 依赖。要逐文件对齐公开版本，须在切换前将上版独有的静态文件留在上版 release，完整替换候选 API 依赖目录，再复核候选的文件集合和组件指纹。 |
+| 校验候选 | 在 Linux 使用冻结锁文件安装依赖、构建两份 Web，再运行 `python3 scripts/package-app-release.py <构建目录> <包路径> <源码SHA> main <srvpro SHA>`。格式 2 包含完整生产 API 依赖、静态资源、文件哈希与链接清单。stage 及激活时按包的 SHA-256、发布模式、Web build ID 和文件清单核对候选，并用服务器 Node 打开内存 SQLite。重复编号只能使用原包；新的构建使用新的发布编号。 |
 | 数据与切换 | 每套实例分别备份 SQLite、配置、私有清单及上一版指针，用自身数据库副本预演迁移。检查比赛、小游戏和宿主的活动状态。预演通过后在维护窗口切换该实例的 `current`。 |
 | 线上验收 | Cube 验证公网 `/api/health`、轮抽和卡池。独立 Duel 在实例内验证 `/health`，公网验证 `/duel-api/public/duel/options`、大厅和卡组。两套 Web 都检查引用到的 JS/CSS 的状态码和 MIME。比对已存业务记录、数据库完整性和组件来源。完整的 SHA、build ID、包校验和、备份位置与回滚验证留在各实例的私有回执。 |
 

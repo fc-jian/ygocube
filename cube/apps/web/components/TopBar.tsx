@@ -406,7 +406,7 @@ export function DeckZone({ title, zone, codes, sourceIndexes, limit, cardMap, on
               e.dataTransfer.setData('application/x-card-source', zone);
               e.dataTransfer.setData('application/x-card-source-index', String(i));
             }}
-            className="animate-card-in relative cursor-grab active:cursor-grabbing"
+            className={draggable ? 'animate-card-in relative cursor-grab active:cursor-grabbing' : 'animate-card-in relative'}
           >
             {hoverIdx === i && <span className="absolute inset-y-0 -left-0.5 z-10 w-0.5 rounded bg-gold" />}
             {hoverIdx === codes.length && i === codes.length - 1 && (

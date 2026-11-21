@@ -40,6 +40,28 @@ describe('admin match transition preflight', () => {
     draft.haltAllTimers(tid);
   });
 
+  it.each(['passing', 'serial'] as const)('uses the confirmed roster for %s after a registration withdrawal', (mode) => {
+    const cards = new CardsService();
+    const tournaments = makeTournaments();
+    const draft = new DraftService(cards, tournaments, new PoolsService(cards), new MatchesService(fakeSrvpro as any));
+    const tid = tournaments.create({ name: 'confirmed roster', maxPlayers: 3, cardPool: TEST_POOL, draftMode: mode }, 'test').tid;
+    for (const id of ['a', 'b', 'c']) tournaments.join(tid, id, id);
+    tournaments.withdrawPlayer(tid, 'b', 'test');
+    expect(draft.requestStartDraft(tid, 'test').total).toBe(2);
+    expect(draft.confirmDraftStart(tid, 'a').pending).toBe(true);
+    expect(draft.confirmDraftStart(tid, 'c').started).toBe(true);
+    const state = loadState(tid);
+    expect(state.draftParticipants).toEqual(['a', 'c']);
+    expect(state.players.map(p => p.seat)).toEqual([0, -1, 1]);
+    if (mode === 'passing') expect(Object.keys(state.packQueues).sort()).toEqual(['a', 'c']);
+    else expect(state.pickCursor?.playerId).toBe('a');
+    expect(() => tournaments.restorePlayer(tid, 'b', 'test')).toThrow('WRONG_PHASE');
+    tournaments.withdrawPlayer(tid, 'c', 'test');
+    tournaments.restorePlayer(tid, 'c', 'test');
+    expect(loadState(tid).draftParticipants).toEqual(['a', 'c']);
+    draft.haltAllTimers(tid);
+  });
+
   it('warns without mutation, then repairs overflow and DSQs an undersized player after confirmation', () => {
     const cards = new CardsService();
     const pools = new PoolsService(cards);

@@ -130,6 +130,27 @@ async function run() {
       assert.equal(await lock.isEnabled(), true);
     });
 
+    for (const mode of ['locked', 'frozen', 'matches']) {
+      await scenario(mode + ' deck keeps card details and disables editing surfaces', async page => {
+        await page.route('**/api/t/1', route => json(route, { authRequired: false, players: [player('P')] }));
+        await page.route('**/api/t/1/state', route => json(route, {
+          ...state('P'), status: mode === 'matches' ? 'matches' : 'deckbuilding', frozen: mode === 'frozen',
+          config: { mainMin: 1, mainMax: 6, extraMax: 3, sideMax: 3, maxCopies: 1 },
+          pickedCards: [101, 102], deck: { main: [101], extra: [], side: [], lockedAt: mode === 'locked' ? '2026-01-01' : null },
+        }));
+        await page.route('**/api/t/1/cards?**', route => json(route, [card(101), card(102)]));
+        await page.goto(base + '/t/1/deck/P');
+        const details = page.getByRole('button', { name: '查看Card 101详情', exact: true }).first();
+        await details.waitFor();
+        assert.equal(await page.locator('[data-flip-id][draggable=true]').count(), 0);
+        assert.equal(await page.getByText('可拖入此处移出构筑').count(), 0);
+        assert.equal(await page.getByRole('button', { name: '整理卡组' }).count(), 0);
+        await details.click();
+        assert.equal(await page.getByRole('dialog').getByRole('button').count(), 1);
+        assert.equal(await page.getByRole('button', { name: '下载 ydk' }).count(), 1);
+      });
+    }
+
     for (const phase of ['deck', 'draft']) {
       await scenario(phase + ' moves the selected duplicate by its original zone and index', async page => {
         const moves = [];
