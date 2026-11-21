@@ -181,10 +181,15 @@ export class GuessController {
     @Headers('authorization') authorization: string | undefined,
     @Body() body: unknown,
   ) {
-    const input = payload(body, ['action', 'version', 'code', 'playerId']);
+    const input = payload(body, ['action', 'version', 'code', 'playerId', 'locked']);
     const { action } = input;
     const version = integer(input.version, 1, Number.MAX_SAFE_INTEGER);
-    if (action === 'remove') {
+    if (action === 'set-admission') {
+      if (typeof input.locked !== 'boolean' || input.playerId !== undefined || input.code !== undefined) return badPayload();
+      return this.guess.act(roomId, authorization, { action, version, locked: input.locked });
+    }
+    if (input.locked !== undefined) badPayload();
+    if (action === 'remove' || action === 'transfer-host') {
       if (input.code !== undefined) badPayload();
       return this.guess.act(roomId, authorization, { action, version, playerId: playerId(input.playerId) });
     }

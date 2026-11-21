@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { CardWithTooltip } from './CardImage';
 import { IdentityWidget, LocalPicsSetting } from './IdentityWidget';
 import { FontSizeSetting } from './FontSizeController';
-import type { DraftStartConfirmation } from '@ygocube/shared';
+import type { DeckIssue, DraftStartConfirmation } from '@ygocube/shared';
 import { CardInfo } from '@/lib/types';
 import { flipIds } from '@/lib/useFlip';
 
@@ -16,6 +16,7 @@ export interface DraftState {
   frozen: boolean;
   config: Record<string, unknown>;
   players: { playerId: string; displayName: string; seat: number; ready?: boolean }[];
+  deckIssues?: DeckIssue[];
   pickedCards: number[];
   cardsRemainingToDraft: number;
   cardsRemainingExact: boolean;

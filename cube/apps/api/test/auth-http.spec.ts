@@ -18,7 +18,7 @@ import { RealtimeService } from '../src/realtime/realtime.service';
 import { getDb, closeDb } from '../src/db';
 import { config } from '../src/config';
 import { makeTournaments, TEST_POOL, useTestDb } from './helpers';
-import { getConfig, hardRevertTo, loadState, resetStateCache } from '../src/events/events.service';
+import { getConfig, hardRevertTo, loadState, logEvent, resetStateCache } from '../src/events/events.service';
 
 describe('HTTP authorization follows matched route metadata', () => {
   let app: INestApplication, base: string, tid: number, target: number;
@@ -34,15 +34,19 @@ describe('HTTP authorization follows matched route metadata', () => {
     player = { 'x-tournament-id': String(tid), 'x-player-id': 'alice', 'x-token': token };
     getDb().prepare('INSERT INTO create_users(username,token_hash,created_at,active) VALUES(?,?,?,1)')
       .run('owner', sha256(creator['x-create-token']), new Date().toISOString());
+    const pools = new PoolsService(cards);
+    const draft = new DraftService(cards, tournaments, pools, new MatchesService());
     const module = await Test.createTestingModule({
       controllers: [AdminController, ApiController, DuelController],
       providers: [
         { provide: APP_GUARD, useClass: AuthGuard },
         { provide: TournamentsService, useValue: tournaments },
         { provide: CardsService, useValue: cards },
-        { provide: PoolsService, useValue: new PoolsService(cards) },
+        { provide: PoolsService, useValue: pools },
         { provide: DuelService, useValue: { deleteReplay } },
-        ...[DraftService, DecksService, MatchesService, RealtimeService, CardPickStatsService]
+        { provide: DraftService, useValue: { review: draft.review.bind(draft) } },
+        { provide: DecksService, useValue: new DecksService(cards) },
+        ...[MatchesService, RealtimeService, CardPickStatsService]
           .map(provide => ({ provide, useValue: {} })),
       ],
     }).compile();
@@ -59,6 +63,30 @@ describe('HTTP authorization follows matched route metadata', () => {
     await response.arrayBuffer();
     return response.status;
   }
+  it('returns only the authenticated participant’s hands and deck checks through the player routes', async () => {
+    const game = tournaments.create({ name: 'personal review', maxPlayers: 2, cardPool: TEST_POOL }, 'owner').tid;
+    const headers = (pid: string, token: string) => ({ 'x-tournament-id': String(game), 'x-player-id': pid, 'x-token': token });
+    const alice = tournaments.join(game, 'A', 'A').token;
+    const bob = tournaments.join(game, 'B', 'B').token;
+    const url = `${base}/t/${game}/draft-review`;
+    logEvent(game, 'pack', 'packs_created', { packs: [{ index: 0, size: 2, order: [10001, 10002], dropCard: null }] }, 'test');
+    for (const [pid, code] of [['B', 10001], ['A', 10002]] as const) {
+      logEvent(game, 'pick', 'pick', { playerId: pid, card: code, packIndex: 0, auto: false }, 'test');
+    }
+    logEvent(game, 'phase', 'phase', { status: 'deckbuilding' }, 'test');
+    const building = await fetch(`${base}/t/${game}/state`, { headers: headers('A', alice) });
+    expect(await building.json()).toMatchObject({ deckIssues: [expect.objectContaining({ reason: 'too-few', zone: 'main' })] });
+    logEvent(game, 'phase', 'phase', { status: 'finished' }, 'test');
+    expect((await fetch(url)).status).toBe(401);
+    expect((await fetch(url, { headers: headers('B', alice) })).status).toBe(401);
+    const first = await fetch(url + '?pid=B', { headers: headers('A', alice) });
+    expect(first.headers.get('cache-control')).toContain('no-store');
+    expect(await first.json()).toEqual({ hands: [{ packIndex: 0, cards: [10002], selected: [10002], auto: false }],
+      names: { '10002': expect.any(String) } });
+    const second = await fetch(url, { headers: headers('B', bob) });
+    expect(await second.json()).toMatchObject({ hands: [{ cards: [10001, 10002], selected: [10001] }] });
+  });
+
   it('preserves literal percent escapes in player headers and administrator routes', async () => {
     const id = tournaments.create({ name: 'encoded player', maxPlayers: 3, cardPool: TEST_POOL }, 'owner').tid;
     for (const pid of ['A B', 'A%20B']) tournaments.join(id, pid, pid);

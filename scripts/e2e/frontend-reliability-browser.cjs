@@ -106,6 +106,72 @@ async function run() {
       assert.deepEqual(actions, ['/api/admin/t/12/start_draft']);
     });
 
+    await scenario('deck shortage can be filled on mobile from an eligible side card', async page => {
+      let added = false;
+      await page.route('**/api/t/1', route => json(route, { authRequired: false, players: [player('P')] }));
+      await page.route('**/api/t/1/state', route => json(route, {
+        ...state('P'), status: 'deckbuilding', config: { mainMin: 1, mainMax: 4, extraMax: 2, sideMax: 2, maxCopies: 1 },
+        pickedCards: [101, 102], deck: { main: added ? [101] : [], extra: [], side: added ? [102] : [101, 102], lockedAt: null },
+        deckIssues: added ? [] : [{ reason: 'too-few', zone: 'main', actual: 0, limit: 1 }],
+      }));
+      await page.route('**/api/t/1/cards?**', route => json(route, [card(101), { ...card(102), type: 65 }]));
+      await page.route('**/api/t/1/deck/move', route => {
+        assert.deepEqual(route.request().postDataJSON(), { card_code: 101, from: 'side', to: 'main' });
+        added = true;
+        return json(route, {});
+      });
+      await page.goto(base + '/t/1/deck/P');
+      const lock = page.getByRole('button', { name: '锁定卡组', exact: true });
+      await page.getByText('主卡组还差 1 张 · 查看可补入的卡', { exact: true }).click();
+      assert.equal(await lock.isDisabled(), true);
+      assert.equal(await page.getByRole('button', { name: '加入主卡组 · Card 102' }).count(), 0);
+      await page.getByRole('button', { name: '加入主卡组 · Card 101' }).click();
+      await page.getByText('卡组已满足锁定条件').waitFor();
+      assert.equal(await lock.isEnabled(), true);
+    });
+
+    await scenario('finished player review loads on demand and keeps paired picks together', async page => {
+      let requests = 0;
+      await page.route('**/api/t/1', route => json(route, { authRequired: false, players: [player('P')] }));
+      await page.route('**/api/t/1/state', route => json(route, { ...state('P'), status: 'finished' }));
+      await page.route('**/api/t/1/draft-review', route => {
+        requests++;
+        assert.equal(route.request().headers()['x-player-id'], 'P');
+        return json(route, { hands: [
+          { packIndex: 0, cards: [101, 101], selected: [101], auto: false },
+          { packIndex: 1, draftRound: 2, cards: [101, 102], selected: [101, 102], auto: true },
+        ], names: { 101: 'Card 101', 102: 'Card 102' } });
+      });
+      await page.goto(base + '/t/1/matches/P');
+      const review = page.getByRole('button', { name: '我的轮抽复盘' });
+      await review.waitFor();
+      assert.equal(requests, 0);
+      await review.click();
+      await page.getByText('当时可选 (2)').waitFor();
+      await page.getByRole('button', { name: '下一手' }).click();
+      await page.getByText(/Card 101 \+ Card 102/).waitFor();
+      await page.getByText('(超时自动选)', { exact: true }).waitFor();
+      await page.getByRole('button', { name: '收起复盘' }).click();
+      await review.click();
+      assert.equal(requests, 1);
+    });
+
+    await scenario('only duplicate tables in the selected tournament block result entry', async page => {
+      const rows = [1, 2, 3].map((id) => ({
+        id, round: id === 3 ? 2 : 1, tableNo: 1, playerA: 'A' + id, playerB: 'B' + id, resultA: id === 1 ? 2 : null, resultB: id === 1 ? 1 : null,
+      }));
+      await page.route('**/api/admin/t/11/state', route => json(route, { ...tournament(11), matches: rows, matchTableConflicts: rows.slice(0, 2) }));
+      await page.goto(base + '/admin');
+      await page.getByPlaceholder('比赛 ID').fill('11');
+      const conflicts = page.getByRole('complementary', { name: '桌号冲突 / Table conflicts' });
+      await conflicts.waitFor();
+      assert.match(await conflicts.innerText(), /A1 vs B1 · 2 : 1/);
+      assert.match(await conflicts.innerText(), /A2 vs B2 · 待录入/);
+      assert.equal(await conflicts.getByText(/A3/).count(), 0);
+      assert.equal(await page.locator('#admin-match-1 button').isDisabled(), true);
+      assert.equal(await page.locator('#admin-match-3 button').isEnabled(), true);
+    });
+
     await scenario('pool read and metadata failures preserve editable membership', async page => {
       let poolReads = 0, metaReads = 0, saved;
       await page.addInitScript(() => sessionStorage.setItem('yc_super_token', 'fixture'));

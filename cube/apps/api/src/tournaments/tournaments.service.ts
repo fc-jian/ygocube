@@ -1,11 +1,13 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { EDISON_E3_MAX_PLAYERS, EDISON_E3_ROUNDS, type PoolDraftFormat } from '@ygocube/shared';
+import { EDISON_E3_MAX_PLAYERS, EDISON_E3_ROUNDS, type ConflictingMatchTable, type PoolDraftFormat } from '@ygocube/shared';
+import { conflictingMatchRows } from '../matches/table-conflicts';
 import { getDb } from '../db';
 import { config, defaults } from '../config';
 import { logEvent, loadState, persistMeta, getConfig, snapshotNow, TournamentState, withEventTransaction } from '../events/events.service';
 import crypto from 'crypto';
 import { sha256 } from '../auth/auth.guard';
 import { normalizePoolName, PoolsService } from '../pools/pools.service';
+import { remainingCardsForPack } from '../cards/card-visibility';
 import { requiresEdisonPair } from '../draft/edison-draft';
 import {
   CreateTournamentInput,
@@ -563,25 +565,12 @@ export class TournamentsService {
       .all() as { id: number; name: string; status: string; createdBy: string }[];
   }
 
-  stateForPlayer(tid: number, playerId: string) {
-    const state = loadState(tid);
+  stateForPlayer(tid: number, playerId: string, state = loadState(tid)) {
     // 未加入比赛的玩家 URL 应失效（前端据此跳回报名页）
     if (!state.players.some((pl) => pl.playerId === playerId)) throw new Error('PLAYER_NOT_FOUND');
     const cfg = getConfig(state);
     const picks = state.picks.filter((p) => p.playerId === playerId);
     const orderedPlayers = state.players.slice().sort((a, b) => a.seat - b.seat);
-    const remainingOf = (packIndex: number): number[] => {
-      const pk = state.packs.find((p) => p.index === packIndex);
-      if (!pk) return [];
-      const taken = new Map<number, number>();
-      for (const p of state.picks.filter((p) => p.packIndex === packIndex)) taken.set(p.card, (taken.get(p.card) ?? 0) + 1);
-      return pk.order.filter((c) => {
-        const n = taken.get(c) ?? 0;
-        if (n <= 0) return true;
-        taken.set(c, n - 1);
-        return false;
-      });
-    };
     const passing = Object.keys(state.packQueues ?? {}).length > 0;
     let pack: Record<string, unknown> | null = null;
     let queueLengths: { playerId: string; length: number }[] | undefined;
@@ -592,7 +581,7 @@ export class TournamentsService {
         const queue = state.packQueues[playerId] ?? [];
         const head = queue.length ? state.packs.find((p) => p.index === queue[0]) : null;
         if (head) {
-          const remaining = remainingOf(head.index);
+          const remaining = remainingCardsForPack(state, head.index);
           const pausedRemainingMs = state.pause?.pausedAt
             ? state.pause.pausedDeadlines?.[playerId] ?? state.frozenTimers?.passing?.[playerId]
             : state.frozen
@@ -620,7 +609,7 @@ export class TournamentsService {
       const cur = state.pickCursor ? state.packs.find((p) => p.index === state.pickCursor!.packIndex) : null;
       // info hiding: the current picker sees only the REMAINING cards of the pack —
       // already-picked cards' codes are never sent (dev_docs/05 §3)
-      const remaining = cur ? remainingOf(cur.index) : [];
+      const remaining = cur ? remainingCardsForPack(state, cur.index) : [];
       const pausedRemainingMs = state.pause?.pausedAt
         ? state.pause.pausedPickRemainingMs ?? state.frozenTimers?.serial
         : state.frozen
@@ -838,6 +827,9 @@ export class TournamentsService {
       pause: state.pause,
       decks: state.decks,
       matches: state.matches,
+      matchTableConflicts: conflictingMatchRows(getDb(), tid).map((m): ConflictingMatchTable => ({
+        id: m.id, round: m.round, tableNo: m.table_no, playerA: m.player_a, playerB: m.player_b, resultA: m.result_a, resultB: m.result_b,
+      })),
       pickSummary: state.players.map((p) => ({
         playerId: p.playerId,
         seat: p.seat,

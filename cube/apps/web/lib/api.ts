@@ -190,6 +190,7 @@ const API_ERROR_MESSAGES: Record<string, string> = {
   NO_VALID_PAIRING: '当前没有可用的配对',
   ROUND_EXISTS: '该轮对局已经生成',
   ROUND_PENDING: '上一轮对局尚未结束',
+  MATCH_TABLE_CONFLICT: '本轮桌号重复，请核对对局并离线修复桌号',
   RESULT_ROUND_LOCKED: '该轮结果已经锁定',
   REVERT_CONFIRMATION_MISMATCH: '确认信息不匹配，未执行回溯',
   REVERT_EVENT_NOT_FOUND: '找不到要回溯的事件',

@@ -842,7 +842,11 @@ export class MatchesService implements OnModuleInit, OnModuleDestroy {
       // standings inconsistent. Administrators must use the audited revert flow.
       throw new Error('RESULT_ROUND_LOCKED');
     }
-    const m = state.matches.find((x) => x.round === round && x.tableNo === tableNo);
+    const matches = state.matches.filter((x) => x.round === round && x.tableNo === tableNo);
+    if (matches.length > 1 || getDb().prepare(
+      'SELECT 1 FROM matches WHERE tournament_id=? AND round=? AND table_no=? LIMIT 1 OFFSET 1',
+    ).get(tid, round, tableNo)) throw new Error('MATCH_TABLE_CONFLICT');
+    const [m] = matches;
     if (!m) throw new Error('MATCH_NOT_FOUND');
     if (![0, 1, 2].includes(resultA) || ![0, 1, 2].includes(resultB)) throw new Error('BAD_RESULT');
     if (this.isEliminationMatch(m) && resultA === resultB) throw new Error('ELIMINATION_DRAW');

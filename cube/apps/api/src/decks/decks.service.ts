@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
-import { DraftCopyAllowance } from '@ygocube/shared';
+import { DraftCopyAllowance, type DeckIssue } from '@ygocube/shared';
 import { loadState, logEvent, getConfig, pickedCards, persistMeta, DeckState, withEventTransaction } from '../events/events.service';
-import { CardInfo, CardsService } from '../cards/cards.service';
+import { CardInfo, CardsService, isExtraDeckType } from '../cards/cards.service';
 import { MatchesService } from '../matches/matches.service';
 import { getDb } from '../db';
 
@@ -151,25 +151,43 @@ export class DecksService {
     this.save(tid, playerId, { ...deck, lockedAt: null, status: 'building' });
   }
 
-  validate(state: ReturnType<typeof loadState>, deck: DeckState, playerId: string): string[] {
+  issues(state: ReturnType<typeof loadState>, playerId: string, deck = this.deckOf(state, playerId)): DeckIssue[] {
     const cfg = getConfig(state);
-    const errors: string[] = [];
-    if (deck.main.length < cfg.mainMin) errors.push(`main below minimum (${deck.main.length} < ${cfg.mainMin})`);
-    if (deck.main.length > cfg.mainMax) errors.push(`main above maximum (${deck.main.length} > ${cfg.mainMax})`);
-    if (deck.extra.length > cfg.extraMax) errors.push(`extra above maximum (${deck.extra.length} > ${cfg.extraMax})`);
-    if (deck.side.length > cfg.sideMax) errors.push(`side above maximum (${deck.side.length} > ${cfg.sideMax})`);
-    for (const c of deck.main) {
-      if (this.cards.isExtraDeck(c)) errors.push(`extra-deck card ${c} in main`);
+    const issues: DeckIssue[] = [];
+    if (deck.main.length < cfg.mainMin) {
+      issues.push({ zone: 'main', reason: 'too-few', actual: deck.main.length, limit: cfg.mainMin });
     }
-    // 只有选到过的编号可用；该编号在三区合计最多 maxCopies 份（dev_docs/05 §4）。
+    const limits = { main: cfg.mainMax, extra: cfg.extraMax, side: cfg.sideMax };
+    const extraCards = new Set(this.cards.getMany([...deck.main, ...deck.extra]).filter((c) => isExtraDeckType(c.type)).map((c) => c.code));
     const allowance = this.copyAllowance(state, playerId);
-    for (const c of [...deck.main, ...deck.extra, ...deck.side]) {
-      if (allowance.take(c)) continue;
-      const reason = allowance.rejection(c);
-      if (reason === 'name_limit') errors.push(`more than ${cfg.maxCopies ?? 3} copies of ${c}`);
-      else if (reason === 'quantity') errors.push(`more copies of ${c} than drafted`);
-      else errors.push(`card ${c} not in picked pool`);
+    for (const zone of ['main', 'extra', 'side'] as const) {
+      if (deck[zone].length > limits[zone]) {
+        issues.push({ zone, reason: 'too-many', actual: deck[zone].length, limit: limits[zone] });
+      }
+      for (const code of deck[zone]) {
+        if (zone !== 'side' && extraCards.has(code) !== (zone === 'extra')) {
+          issues.push({ zone, reason: 'wrong-zone', code });
+        }
+        if (!allowance.take(code)) {
+          const reason = allowance.rejection(code)!;
+          issues.push({ zone, reason, code });
+        }
+      }
     }
+    return issues;
+  }
+
+  validate(state: ReturnType<typeof loadState>, deck: DeckState, playerId: string): string[] {
+    const errors = this.issues(state, playerId, deck).map((issue) => {
+      switch (issue.reason) {
+        case 'too-few': return `${issue.zone} below minimum (${issue.actual} < ${issue.limit})`;
+        case 'too-many': return `${issue.zone} above maximum (${issue.actual} > ${issue.limit})`;
+        case 'wrong-zone': return issue.zone === 'main' ? `extra-deck card ${issue.code} in main` : `main-deck card ${issue.code} in extra`;
+        case 'name_limit': return `more than ${getConfig(state).maxCopies ?? 3} copies of ${issue.code}`;
+        case 'quantity': return `more copies of ${issue.code} than drafted`;
+        case 'unpicked': return `card ${issue.code} not in picked pool`;
+      }
+    });
     return [...new Set(errors)];
   }
 

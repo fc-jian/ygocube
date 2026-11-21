@@ -1,11 +1,15 @@
 'use client';
-import { EDISON_E3_MAX_PLAYERS, type PoolDraftFormat } from '@ygocube/shared';
+import { EDISON_E3_MAX_PLAYERS, type ConflictingMatchTable, type PoolDraftFormat } from '@ygocube/shared';
+import { workflowText } from '@/components/tournament-workflow-text';
 import { EdisonDraftRules } from '@/components/EdisonDraftRules';
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useCoalescedRefresh } from '@/lib/useCoalescedRefresh';
 import { useConfirmationSeconds } from '@/lib/useConfirmationSeconds';
 import { apiErrorCode, readableApiError } from '@/lib/api';
+
+const text = workflowText.zh;
+const conflictTitle = `${text.conflictTitle} / ${workflowText.en.conflictTitle}`;
 
 interface AdminState {
   id: number;
@@ -36,6 +40,7 @@ interface AdminState {
   pause: { pausedAt: string; actor?: string } | null;
   decks: Record<string, { main: number[]; extra: number[]; side: number[]; lockedAt: string | null }>;
   matches: { id: number; round: number; playerA: string; playerB: string; tableNo: number; roomName: string | null; resultA: number | null; resultB: number | null; faultedAt: string | null; stage?: string; bracketRound?: number }[];
+  matchTableConflicts?: ConflictingMatchTable[];
   pickSummary: { playerId: string; seat: number; count: number }[];
 }
 
@@ -403,7 +408,8 @@ function AdminDashboard({ tid, adminToken, createUsername, createToken, reload, 
           .replace(/^more than (\d+) copies of (\d+)/, '单卡 $2 超过 $1 份')
           .replace(/^more copies of (\d+) than drafted/, '卡片 $1 超过实际抓取张数')
           .replace(/^card (\d+) not in picked pool/, '卡片 $1 不在已选卡池')
-          .replace(/^extra-deck card (\d+) in main/, '额外卡 $1 位于主卡组');
+          .replace(/^extra-deck card (\d+) in main/, '额外卡 $1 位于主卡组')
+          .replace(/^main-deck card (\d+) in extra/, '主卡 $1 位于额外卡组');
         const details = (result.invalid_decks as { displayName: string; playerId: string; errors: string[] }[])
           .map((item) => `${item.displayName || item.playerId}: ${item.errors.map(deckErrorText).join('；')}`)
           .join('\n');
@@ -636,6 +642,18 @@ function AdminDashboard({ tid, adminToken, createUsername, createToken, reload, 
   };
 
   const editPlayers = Math.max(1, Number(editForm.maxPlayers) || 1);
+  const tableConflicts = useMemo(() => {
+    const groups = new Map<string, ConflictingMatchTable[]>();
+    for (const match of state?.matchTableConflicts ?? state?.matches ?? []) {
+      if (match.tableNo == null) continue;
+      const key = `${match.round}/${match.tableNo}`;
+      const group = groups.get(key);
+      if (group) group.push(match);
+      else groups.set(key, [match]);
+    }
+    return [...groups.values()].filter((group) => group.length > 1);
+  }, [state?.matchTableConflicts, state?.matches]);
+  const conflictIds = new Set(tableConflicts.flat().map((match) => match.id));
   const editPackSize = Math.max(1, Number(editForm.packSize) || 24);
   const editPool = pools.find((p) => p.name === editForm.cardPool);
   const editPoolCount = editPool?.count ?? 0;
@@ -976,8 +994,19 @@ function AdminDashboard({ tid, adminToken, createUsername, createToken, reload, 
           </div>
           <section className="mt-4 rounded-lg border border-felt-edge bg-felt/60 p-3 text-xs">
             <h3 className="mb-2 font-semibold text-gold">对阵</h3>
+            {tableConflicts.length > 0 && <aside aria-label={conflictTitle} className="mb-3 rounded border border-amber-700/70 bg-amber-950/40 p-3">
+              <h4 className="font-semibold text-amber-200">{conflictTitle}</h4>
+              <p className="my-1 text-slate-300">{text.conflictHelp}</p>
+              {tableConflicts.map((group) => <div key={group[0].id} className="mt-2">
+                <strong>{text.tableLabel(group[0].round, group[0].tableNo)}</strong>
+                <ul>{group.map((m) => <li key={m.id} className="break-words">
+                  <span className="font-mono text-gold">#{m.id}</span>
+                  {' · '}{m.playerA} vs {m.playerB}{' · '}{m.resultA == null || m.resultB == null ? text.pendingScore : `${m.resultA} : ${m.resultB}`}
+                </li>)}</ul>
+              </div>)}
+            </aside>}
             {state.matches.map((m) => (
-              <div key={m.id} className="flex flex-wrap items-center justify-between gap-2 py-0.5 font-mono">
+              <div id={`admin-match-${m.id}`} key={m.id} className="flex flex-wrap items-center justify-between gap-2 py-0.5 font-mono">
                 <span>{m.stage ? `${m.stage} ` : ''}r{m.round} t{m.tableNo ?? m.id}</span>
                 <span className="truncate">{m.playerA} vs {m.playerB}</span>
                 <span className="truncate">{m.roomName ?? '-'}</span>
@@ -987,7 +1016,7 @@ function AdminDashboard({ tid, adminToken, createUsername, createToken, reload, 
                   </span>
                 )}
                 <span>{m.resultA !== null ? `${m.resultA}:${m.resultB}` : '对局中'}</span>
-                <span className="flex shrink-0 gap-1">
+                <fieldset disabled={conflictIds.has(m.id)} aria-label={text.matchScore(m.id)} className="flex shrink-0 gap-1 disabled:opacity-50">
                   <input
                     type="number"
                     min={0}
@@ -1019,7 +1048,7 @@ function AdminDashboard({ tid, adminToken, createUsername, createToken, reload, 
                   >
                     设结果
                   </button>
-                </span>
+                </fieldset>
               </div>
             ))}
             {state.matches.length === 0 && <p className="text-slate-500">暂无对阵</p>}

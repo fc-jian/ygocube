@@ -22,6 +22,32 @@ function setupDraft(n: number, pickSeconds = 30) {
 describe('draft engine', () => {
   beforeEach(() => useTestDb());
 
+  it('reconstructs only the viewer’s remaining hand from historical serial packs with repeated prints', () => {
+    const { tid, draft } = setupDraft(2);
+    try {
+      const packs = [[10001, 10002, 10001], [10003]];
+      logEvent(tid, 'draft', 'packs_created', packs.map((order, index) => ({ order, index, size: order.length, dropCard: null })), 'test');
+      for (const [i, p] of [
+        { playerId: 'p1', packIndex: 0, card: 10001 }, { playerId: 'p1', packIndex: 1, card: 10003 },
+        { playerId: 'p0', packIndex: 0, card: 10002 }, { playerId: 'p0', packIndex: 0, card: 10001 },
+      ].entries()) logEvent(tid, 'pick', 'pick', { ...p, round: i, auto: i === 3, at: String(i) }, 'test');
+      expect(() => draft.review(tid, 'p0')).toThrow('WRONG_PHASE');
+      logEvent(tid, 'phase', 'phase', { status: 'finished' }, 'test');
+      expect(() => draft.review(tid, 'absent')).toThrow('PLAYER_NOT_FOUND');
+      const review = draft.review(tid, 'p0');
+      expect(review.hands).toEqual([
+        { packIndex: 0, cards: [10002, 10001], selected: [10002], auto: false },
+        { packIndex: 0, cards: [10001], selected: [10001], auto: true },
+      ]);
+      expect(Object.keys(review.names).sort()).toEqual(['10001', '10002']);
+      logEvent(tid, 'player', 'player_remove', 'p1', 'admin');
+      logEvent(tid, 'pick', 'pick', { playerId: 'p0', packIndex: 0, round: 4, card: 10001, auto: false }, 'test');
+      const later = draft.review(tid, 'p0');
+      expect(later.hands.slice(0, 2)).toEqual(review.hands);
+      expect(later.hands[2].cards).toEqual([10001]);
+    } finally { draft.onModuleDestroy(); }
+  });
+
   it('requires every registered player to confirm before an administrator start', () => {
     const tournaments = makeTournaments();
     const cards = new CardsService();

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, GoneException, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, GoneException, Header, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type { CardVisibilityStatus, PublicPoolPreview } from '@ygocube/shared';
 import { Response } from 'express';
@@ -286,7 +286,16 @@ export class ApiController {
   @Get('t/:tid/state')
   state(@Req() req: AuthedRequest) {
     const id = req.identity as Identity;
-    return this.tournaments.stateForPlayer(id.tournamentId, id.playerId);
+    const state = loadState(id.tournamentId);
+    const view = this.tournaments.stateForPlayer(id.tournamentId, id.playerId, state);
+    return state.status === 'deckbuilding' ? { ...view, deckIssues: this.decks.issues(state, id.playerId) } : view;
+  }
+
+  @Get('t/:tid/draft-review')
+  @Header('Cache-Control', 'private, no-store')
+  draftReview(@Req() req: AuthedRequest) {
+    const id = req.identity as Identity;
+    return this.draft.review(id.tournamentId, id.playerId);
   }
 
   @Get('t/:tid/cards')

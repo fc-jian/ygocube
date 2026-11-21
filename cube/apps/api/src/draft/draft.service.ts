@@ -1,5 +1,5 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { EDISON_E3_ROUNDS } from '@ygocube/shared';
+import { EDISON_E3_ROUNDS, type DraftReview } from '@ygocube/shared';
 import {
   afterEventCommit,
   loadState,
@@ -21,6 +21,8 @@ import { normalizeExtraRatioPercent, TournamentsService } from '../tournaments/t
 import { PoolsService } from '../pools/pools.service';
 import { MatchesService } from '../matches/matches.service';
 import { DecksService } from '../decks/decks.service';
+import { playerDraftHands } from './draft-review';
+import { remainingCardsForPack } from '../cards/card-visibility';
 import { createEdisonPacks, requiresEdisonPair, shuffle } from './edison-draft';
 
 interface ExpectedPack { index: number; cardsLeft: number }
@@ -584,17 +586,17 @@ export class DraftService implements OnModuleInit, OnModuleDestroy {
     return seats[pos].playerId;
   }
 
+  review(tid: number, playerId: string): DraftReview {
+    const state = loadState(tid);
+    if (!state.players.some((p) => p.playerId === playerId)) throw new Error('PLAYER_NOT_FOUND');
+    if (state.status !== 'finished') throw new Error('WRONG_PHASE');
+    const hands = playerDraftHands(tid, playerId);
+    const seen = new Set(hands.flatMap((hand) => hand.cards));
+    return { hands, names: Object.fromEntries(this.cards.getMany([...seen]).map(({ code, name }) => [code, name])) };
+  }
+
   private remainingInPack(state: TournamentState, packIndex: number): number[] {
-    const pack = state.packs.find((p) => p.index === packIndex);
-    if (!pack) return [];
-    const taken = new Map<number, number>();
-    for (const p of state.picks.filter((p) => p.packIndex === packIndex)) taken.set(p.card, (taken.get(p.card) ?? 0) + 1);
-    return pack.order.filter((c) => {
-      const n = taken.get(c) ?? 0;
-      if (n <= 0) return true;
-      taken.set(c, n - 1);
-      return false;
-    });
+    return remainingCardsForPack(state, packIndex);
   }
 
   private isLastPickOfPack(state: TournamentState, packIndex: number): boolean {

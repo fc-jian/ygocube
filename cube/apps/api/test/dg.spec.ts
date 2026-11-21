@@ -111,6 +111,36 @@ describe('Draw & Guess HTTP game', () => {
     return room.relay;
   }
 
+  it('keeps locked seats reconnectable and transfers authority without reordering players', async () => {
+    const { body: host } = await request<DgSession>(rooms, undefined, { name: 'Host transfer', playerId: 'Host', poolId: 0 });
+    const path = `${rooms}/${host.room.roomId}`;
+    const join = (playerId: string) => request<DgSession>(`${path}/join`, undefined, { playerId });
+    const guest = (await join('Guest')).body;
+    expect(guest.room.admissionLocked).toBe(false);
+    const version = guest.room.version;
+    const lock = { action: 'set-admission', locked: true, version } as const;
+    expect((await act(path, guest.token, lock)).status).toBe(403);
+    expect((await request(`${path}/action`, host.token, { ...lock, locked: 'yes' })).status).toBe(400);
+    expect((await act(path, host.token, lock)).body.admissionLocked).toBe(true);
+    expect((await act(path, host.token, lock)).status).toBe(409);
+    expect((await join('Third')).status).toBe(409);
+    expect((await request<DgRoomView>(path, guest.token)).body.viewerId).toBe('Guest');
+    const watching = (await request<DgRoomView>(path)).body;
+    expect(watching.admissionLocked).toBe(true);
+    expect((await request<{ roomId: string }[]>(rooms)).body.some((r) => r.roomId === host.room.roomId)).toBe(false);
+    const transfer = { action: 'transfer-host', playerId: 'Guest', version: watching.version } as const;
+    expect((await act(path, host.token, { ...transfer, playerId: 'Host' })).status).toBe(400);
+    const moved = (await act(path, host.token, transfer)).body;
+    expect(moved.hostId).toBe('Guest');
+    expect(moved.players.map((p) => p.playerId)).toEqual(['Host', 'Guest']);
+    const reopen = { ...lock, version: moved.version, locked: false };
+    expect((await act(path, host.token, reopen)).status).toBe(403);
+    expect((await act(path, guest.token, reopen)).body.admissionLocked).toBe(false);
+    const third = (await join('Third')).body;
+    expect((await act(path, guest.token, { action: 'leave' })).status).toBe(200);
+    expect((await request<DgRoomView>(path, third.token)).body.hostId).toBe('Host');
+  });
+
   it.each(['classic', 'relay'] as const)('only allows the host to remove another player before a %s game starts', async (mode) => {
     const { body: host } = await request<DgSession>(rooms, undefined, { name: 'Waiting room', playerId: 'Host', poolId: 0, mode });
     const path = `${rooms}/${host.room.roomId}`;
@@ -192,6 +222,12 @@ describe('Draw & Guess HTTP game', () => {
     const result = await state(path);
     expect(result).toMatchObject({ phase: 'reveal', deadlineAt: null });
     expect(result.turn?.answer?.code).toBe(code);
+    const handed = (await act(path, host.token, { action: 'transfer-host', playerId: first.room.viewerId!, version: result.version })).body;
+    expect(handed.players).toEqual(result.players);
+    expect(handed.turn?.number).toBe(result.turn?.number);
+    expect(handed.deadlineAt).toBeNull();
+    expect((await act(path, host.token, { action: 'next', turn: 1 })).status).toBe(403);
+    await act(path, first.token, { action: 'transfer-host', playerId: host.room.viewerId!, version: handed.version });
     expect(result.turn?.drawerPoints).toBe(2);
     expect(result.turn?.solves.map(({ points }) => points)).toEqual([2, 1]);
     expect(result.turn?.solves.map(({ playerId }) => playerId).sort()).toEqual(guessers.map(({ room }) => room.viewerId).sort());
@@ -469,6 +505,11 @@ describe('Draw & Guess HTTP game', () => {
     expect(last.map(({ status }) => status)).toEqual([200, 200, 200]);
     const firstReveal = await state(path);
     expect(firstReveal.relay).toEqual({ kind: 'reveal', round: 1, revealedCount: 1 });
+    const handed = (await act(path, ada, { action: 'transfer-host', playerId: 'Bert', version: firstReveal.version })).body;
+    expect(handed.relay).toEqual(firstReveal.relay);
+    expect(handed.players).toEqual(firstReveal.players);
+    expect((await act(path, ada, { action: 'relay-reveal', round: 1, chain: 1 })).status).toBe(403);
+    await act(path, bert, { action: 'transfer-host', playerId: 'Ada', version: handed.version });
     expect(firstReveal.players.map(({ score }) => score)).toEqual([1, 2, 1]);
     const chain = (await request<DgRelayChainView>(`${path}/relay/1/chains/1`)).body;
     expect(chain.answer.code).toBe(answerA);

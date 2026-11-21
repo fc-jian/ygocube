@@ -9,6 +9,7 @@ import { useConfirmationSeconds } from '@/lib/useConfirmationSeconds';
 import { TopBar, DeckZone, DraftState, useNowTick } from '@/components/TopBar';
 import { PackZone } from '@/components/PackZone';
 import { EdisonDraftRules } from '@/components/EdisonDraftRules';
+import { PlayerDraftReview } from '@/components/PlayerDraftReview';
 import { TokenPrompt } from '@/components/TokenPrompt';
 import { CardSearchAll } from '@/components/CardSearchAll';
 import { closeCardPreview, setCardPreviewAction } from '@/components/CardPreview';
@@ -508,6 +509,9 @@ function DraftSession({ tid, pid }: { tid: string; pid: string }) {
           poolId={poolId}
         />
       )}
+      {state.status === 'finished' && identity && <div className="mx-auto w-full max-w-3xl p-3">
+        <PlayerDraftReview key={identity.token} identity={identity} />
+      </div>}
       {state.status === 'deckbuilding' && (
         <div className="flex flex-1 flex-col items-center justify-center gap-4">
           <p className="text-lg text-slate-200">选牌完成，开始构筑卡组吧！</p>

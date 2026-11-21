@@ -70,6 +70,21 @@ describe('deck validation', () => {
     expect(() => decks.lock(tid, 'p0')).toThrowError(DeckInvalidError);
   });
 
+  it('identifies the same zone and ownership errors that block locking', () => {
+    const { decks, tid, codes } = setupDeckbuilding(3, { mainMin: 3, mainMax: 4, sideMax: 1, maxCopies: 1 });
+    const [a, b, c, unpicked] = codes;
+    const deck = { main: [a], extra: [b], side: [c, a, unpicked], status: 'building' as const, lockedAt: null };
+    const state = loadState(tid);
+    expect(decks.issues(state, 'p0', deck)).toEqual(expect.arrayContaining([
+      { reason: 'too-few', zone: 'main', actual: 1, limit: 3 },
+      { reason: 'wrong-zone', zone: 'extra', code: b },
+      { reason: 'too-many', zone: 'side', actual: 3, limit: 1 },
+      { reason: 'name_limit', zone: 'side', code: a },
+      { reason: 'unpicked', zone: 'side', code: unpicked },
+    ]));
+    expect(decks.validate(state, deck, 'p0')).toHaveLength(5);
+  });
+
   it('ydk export contains #main, cards and !side', () => {
     const { decks, tid, codes } = setupDeckbuilding(45);
     for (let i = 0; i < 40; i++) decks.move(tid, 'p0', codes[i], 'pool', 'main');

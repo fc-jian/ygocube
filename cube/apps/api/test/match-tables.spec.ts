@@ -2,9 +2,10 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
-import { useTestDb, freshTournament } from './helpers';
+import { useTestDb, freshTournament, makeTournaments } from './helpers';
 import { getDb, ensureMatchTableIntegrity } from '../src/db';
 import { dropState, loadState, logEvent } from '../src/events/events.service';
+import { MatchesService } from '../src/matches/matches.service';
 import { inspectMatchTables, repairMatchTables } from '../src/maintenance/match-tables';
 
 describe('offline match table reconciliation', () => {
@@ -34,6 +35,18 @@ describe('offline match table reconciliation', () => {
     const db = getDb();
     expect(() => db.prepare('INSERT INTO matches(id,tournament_id,round,table_no) VALUES(3,?,2,1)').run(tid)).toThrow('duplicate match table');
     expect(() => db.prepare('UPDATE matches SET result_a=3 WHERE id=1').run()).not.toThrow();
+  });
+  it('shows only the selected tournament’s stored conflict rows in admin state', () => {
+    const tournaments = makeTournaments();
+    expect(tournaments.adminState(tid).matchTableConflicts).toEqual([1, 2].map((id) => ({
+      id, round: 2, tableNo: 1, playerA: `a${id}`, playerB: `b${id}`, resultA: 2, resultB: 1,
+    })));
+    expect(tournaments.adminState(freshTournament('another')).matchTableConflicts).toEqual([]);
+  });
+  it('refuses to record a score against an ambiguous table', () => {
+    logEvent(tid, 'frozen', 'frozen', false, 'fixture');
+    expect(() => new MatchesService().setMatchResult(tid, 2, 1, 0, 2)).toThrow('MATCH_TABLE_CONFLICT');
+    expect(loadState(tid).matches.map((m) => [m.resultA, m.resultB])).toEqual([[2, 1], [2, 1]]);
   });
   it('does not mask database failures other than duplicate constraints', () => {
     const error = Object.assign(new Error('disk unavailable'), { code: 'SQLITE_IOERR' });

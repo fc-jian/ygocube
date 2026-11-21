@@ -8,6 +8,8 @@ import { api, apiDownload, decodePathSegment, encodePathSegment, Identity, reada
 import { useTournamentStream } from '@/lib/sse';
 import { DeckZone, DraftState, useNowTick } from '@/components/TopBar';
 import { CardWithTooltip } from '@/components/CardImage';
+import { workflowText } from '@/components/tournament-workflow-text';
+import { DeckFeedback } from '@/components/DeckFeedback';
 import { CardSearch } from '@/components/CardSearch';
 import { closeCardPreview, setCardPreviewAction } from '@/components/CardPreview';
 import { TokenPrompt } from '@/components/TokenPrompt';
@@ -92,7 +94,7 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
       } as DraftState;
       if (sequence !== loadSequence.current) return;
       setState(normalized);
-      const codes = new Set<number>(normalized.pickedCards);
+      const codes = new Set([...normalized.pickedCards, ...normalized.deck.main, ...normalized.deck.extra, ...normalized.deck.side]);
       if (codes.size) {
         const cards = await fetchCardMetadata(`/t/${tidPath}/cards`, [...codes], identity);
         const map: Record<number, CardInfo> = {};
@@ -132,16 +134,17 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
   // the loaded render had different hook orders and crashed the deck page.
   const deck = state?.deck ?? { main: [], extra: [], side: [], lockedAt: null };
   const cfg = state?.config ?? {};
-  const discard = useMemo(() => {
-    if (!state) return [];
+  const { discard, addable } = useMemo(() => {
+    if (!state) return { discard: [], addable: [] };
     const picks = safeCardCodes(state.pickedCards);
-    const allowance = new DraftCopyAllowance(picks, Number(cfg.maxCopies ?? 1), cfg.draftFormat === 'edison_e3',
+    const allowance = new DraftCopyAllowance(picks, Number(cfg.maxCopies ?? 3), cfg.draftFormat === 'edison_e3',
       (code) => canonicalCardCode(code, cardMap), [...safeCardCodes(deck.main), ...safeCardCodes(deck.extra), ...safeCardCodes(deck.side)]);
     const available: number[] = [];
     // Keep the exact selected code in the unused area. The rules copy key is
     // only used to enforce the shared maxCopies limit across alias rows.
-    for (const code of new Set(picks)) while (allowance.take(code)) available.push(code);
-    return available;
+    const addable = [...new Set(picks)].filter((code) => !allowance.rejection(code));
+    for (const code of addable) while (allowance.take(code)) available.push(code);
+    return { discard: available, addable };
   }, [cardMap, cfg.maxCopies, cfg.draftFormat, deck.extra, deck.main, deck.side, state?.pickedCards]);
 
   const move = async (card: number, from: string, to: string, index?: number, fromIndex?: number) => {
@@ -275,6 +278,9 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
           <a href={`/t/${tidPath}/draft/${pidPath}`} className="rounded bg-felt-edge px-2 py-0.5 hover:brightness-110">
             返回选牌
           </a>
+          {state.status === 'finished' && <a href={`/t/${tidPath}/draft/${pidPath}#draft-review`} className="rounded bg-felt-edge px-2 py-0.5 text-gold">
+            {workflowText.zh.review}
+          </a>}
           {state.status === 'matches' && (
             <a href={`/t/${tidPath}/matches/${pidPath}`} className="rounded bg-felt-edge px-2 py-0.5 text-gold hover:brightness-110">
               前往对战
@@ -303,6 +309,8 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
               </button>
             </div>
           )}
+          {!locked && state.status === 'deckbuilding' && state.deckIssues &&
+            <DeckFeedback issues={state.deckIssues} side={deck.side} available={addable} cardMap={cardMap} move={move} retry={load} />}
           <DeckZone title="主卡组" zone="main" codes={deck.main} limit={`${cfg.mainMin}-${cfg.mainMax}`} cardMap={cardMap} onCardMove={(c, f, _t, i, fi) => move(c, f, 'main', i, fi)} />
           <DeckZone title="额外卡组" zone="extra" codes={deck.extra} limit={String(cfg.extraMax)} cardMap={cardMap} onCardMove={(c, f, _t, i, fi) => move(c, f, 'extra', i, fi)} />
           <DeckZone title="副卡组" zone="side" codes={deck.side} limit={String(cfg.sideMax)} cardMap={cardMap} onCardMove={(c, f, _t, i, fi) => move(c, f, 'side', i, fi)} />
@@ -363,7 +371,7 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
             解锁卡组
           </button>
         ) : (
-          <button onClick={lock} className="animate-lock rounded bg-gold px-4 py-1.5 text-sm font-semibold text-felt-deep hover:brightness-110">
+          <button onClick={lock} disabled={!!state.deckIssues?.length} className="rounded bg-gold px-4 py-1.5 text-sm font-semibold text-felt-deep hover:brightness-110 disabled:opacity-50">
             锁定卡组
           </button>
         )}

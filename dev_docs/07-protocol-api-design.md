@@ -121,7 +121,8 @@ swissRoundCount, playoffSize
 | `POST /t/:tid/player/ready` | 报名阶段由本人设置 `{ready:true|false}`；记录 `player_ready` 事件，准备状态对所有报名玩家公开 |
 | `POST /t/:tid/player/draft-confirm`（`/confirm-draft`、`/start-draft-confirm` 兼容别名） | 管理员发起开始选牌后，由本人在 60 秒内确认；最后一名玩家确认时原子生成牌堆并进入 drafting，超时则取消且不产生牌堆 |
 | `POST /t/:tid/player/withdraw`（`/player/leave` 兼容别名） | 仅报名阶段由本人退出；记录 `player_remove` 事件、释放名额并清除本人报名投影；选牌开始后返回 `WRONG_PHASE` |
-| `GET /t/:tid/state` | 当前玩家视角完整状态（牌堆、队列、reserve、构筑、当前对局）。开始选牌确认窗口的 `draftStartConfirmation.serverNow` 为响应时的服务端 Unix 毫秒，供玩家页和管理台按单调时钟显示倒计时，由服务器判定确认是否逾期 |
+| `GET /t/:tid/state` | 当前玩家视角完整状态（牌堆、队列、reserve、构筑、当前对局）。构筑阶段的 `deckIssues` 按锁定规则返回本人的区域张数缺口、放错区域的卡及副本违规卡号。开始选牌确认窗口的 `draftStartConfirmation.serverNow` 为响应时的服务端 Unix 毫秒，供玩家页和管理台按单调时钟显示倒计时，由服务器判定确认是否逾期 |
+| `GET /t/:tid/draft-review` | 仅完赛后向经鉴权的参赛本人返回 `{hands,names}`。每手提供原牌堆编号、当时剩余卡号（保留重复）、本人选择及是否超时自动选。Edison 同手双选合并。按事件顺序还原，管理员后续移除玩家不会改变先前的可选牌。未完赛返回 409。复盘按需读取，不通过 SSE 广播 |
 | `GET /t/:tid/pool` | 当前比赛 drop 前卡池（需玩家鉴权） |
 | `GET /t/:tid/cards?q=` / `?codes=` | 卡牌元数据/效果文本搜索或批量读取；`q` 按空白拆分为 AND 关键字，无隐含 30/50 条上限，结果按卡名命中数量及关键字顺序优先 |
 | `GET /t/:tid/cards/status?codes=` | drafting 按玩家视角返回 `not_in_pool/dropped/picked/seen/unknown`；deckbuilding 及之后返回全局 `not_in_pool/dropped/picked/other_picked`；返回 exact 请求 code |
@@ -174,13 +175,14 @@ swissRoundCount, playoffSize
 
 | 方法/路径 | 说明 |
 | --- | --- |
+| `POST /admin/t/:tid/state` | 当前比赛管理视图。`matchTableConflicts` 仅含当前比赛在对局表中桌号重复的记录，每条含 `id, round, tableNo, playerA, playerB, resultA, resultB`。管理台按轮次和桌号分组。重复桌号只能通过已有离线流程修正 |
 | `POST /admin/t/:tid/start_draft` | 发起 60 秒全员确认窗口；仅所有报名玩家确认后才生成牌堆并开始选牌，重复请求在窗口内幂等 |
 | `POST /admin/t/:tid/phase` | 阶段切换；进入 matches 先合规预检，确认字段为 `confirm_invalid_decks:true` |
 | `PUT /admin/t/:tid/config` | 报名阶段修改配置 |
 | `PUT /admin/t/:tid/match-format` | 首场前设置/修改明确赛制 |
 | `POST /admin/t/:tid/matches/start` | 建立指定轮次排表并异步建 srvpro 房间 |
 | `POST /admin/t/:tid/matches/advance` | 当前轮结果齐全后管理员确认下一轮 |
-| `POST /admin/t/:tid/match/result` | 管理员录入/修正 0--2 局比分 |
+| `POST /admin/t/:tid/match/result` | 管理员录入/修正 0--2 局比分。当前轮同一桌号对应多场时返回 409 `MATCH_TABLE_CONFLICT`，避免将比分记到另一场 |
 | `GET /admin/t/:tid/events?limit=&before=` | 事件时间线分页，默认最近 1000 条；`before` 为 seq 游标 |
 | `POST /admin/t/:tid/pause` / `pause/resume` | 冻结计时或结束暂停 |
 | `POST /admin/t/:tid/resume` | 恢复管理员暂停；`pause/resume` 为兼容别名 |
@@ -248,7 +250,10 @@ deadline 和冻结剩余值。
 | `GET /rooms/:roomId` | 本人视角的房间状态，包括公开座次与开局提示、当前轮次和行动、积分、本人的候选数与猜牌记录、当前选牌及系统结算原因 `finishReason` |
 | `GET /rooms/:roomId/spectate` | 匿名只读。返回房间阶段、当前行动及选牌、各座位的开局提示、积分排名和本轮已提交的猜测。猜中或投降的座位返回所持卡片 |
 | `GET /rooms/:roomId/cards?q=&page=` | 普通模式按请求玩家当轮开局提示搜索与分页，去掉其他座位的已知牌，没有当轮提示时可搜索房间完整卡池。高手模式按名称搜索完整卡库。猜错的牌保留在搜索结果中 |
-| `POST /rooms/:roomId/action` | `{action,version,code?,playerId?}`。操作为 `start/select/guess/skip/host-skip/surrender/next/finish/leave/remove`。`select` 和 `guess` 在普通模式需要本人候选内的 `code`，高手模式可使用全卡库有效非衍生物的编号。`remove` 需要被移除玩家的 `playerId`。返回更新后的本人视角，退出返回 200 空响应 |
+| `POST /rooms/:roomId/action` | `{action,version,code?,playerId?,locked?}`。操作为 `start/select/guess/skip/host-skip/surrender/next/finish/leave/remove/set-admission/transfer-host`。`select` 和 `guess` 在普通模式需要本人候选内的 `code`，高手模式可使用全卡库有效非衍生物的编号。`remove` 需要被移除玩家的 `playerId`。返回更新后的本人视角，退出返回 200 空响应 |
+
+- 两个小游戏都返回 `admissionLocked`，旧房间默认为开放。房主用 `{action:"set-admission",locked,version}` 切换入座状态。猜卡允许在等候和轮间切换，你画我猜允许在等候时切换。关闭后公共大厅隐藏该房，加入返回 409，原有成员可重连，访客可凭链接观战。重新开放后恢复正常加入规则。
+- 房主用 `{action:"transfer-host",playerId,version}` 将管理权移交给另一名在场成员。猜卡允许在等候、轮间移交，你画我猜允许在等候、经典揭晓和接龙揭晓时移交。操作在同一事务内校验身份、阶段和版本，保持座次、分数、当轮状态。房主退出按最早在场成员继任。大厅可从本浏览器保存的最近房间入口返回，链接不包含凭证。
 
 - 卡片评价仍在 `guess_pool_card_votes` 保存可修改或取消的选择。新提议追加至 `guess_pool_proposal_ballots`，唯一键为 `pool_id + voter_hash + code`，每日计数与插入在同一 immediate 事务中校验。旧 `guess_pool_proposal_votes` 原始历史保留，启动时按 IP／卡号取最早记录幂等导入新表，历史重复票按新规则只计一票。重启不重置资格。新增卡仍只供人工审核，不自动入池；入池或离开卡库后在榜中隐藏，历史记录保留。
 - 卡池说明不常驻显示，评价、每日新卡额度及 CSV 导出说明放入相应按钮的 hover 提示；错误、票数、选中状态及搜索总数继续直接显示。
