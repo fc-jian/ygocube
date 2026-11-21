@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { DraftCopyAllowance, type DeckIssue } from '@ygocube/shared';
+import { DraftCopyAllowance, type DeckIssue, type MatchDeckWarning } from '@ygocube/shared';
 import { loadState, logEvent, getConfig, pickedCards, persistMeta, DeckState, withEventTransaction } from '../events/events.service';
 import { CardInfo, CardsService, isExtraDeckType } from '../cards/cards.service';
 import { MatchesService } from '../matches/matches.service';
@@ -178,12 +178,16 @@ export class DecksService {
   }
 
   validate(state: ReturnType<typeof loadState>, deck: DeckState, playerId: string): string[] {
-    const errors = this.issues(state, playerId, deck).map((issue) => {
+    return this.issueMessages(this.issues(state, playerId, deck), getConfig(state).maxCopies ?? 3);
+  }
+
+  private issueMessages(issues: DeckIssue[], maxCopies: number): string[] {
+    const errors = issues.map((issue) => {
       switch (issue.reason) {
         case 'too-few': return `${issue.zone} below minimum (${issue.actual} < ${issue.limit})`;
         case 'too-many': return `${issue.zone} above maximum (${issue.actual} > ${issue.limit})`;
         case 'wrong-zone': return issue.zone === 'main' ? `extra-deck card ${issue.code} in main` : `main-deck card ${issue.code} in extra`;
-        case 'name_limit': return `more than ${getConfig(state).maxCopies ?? 3} copies of ${issue.code}`;
+        case 'name_limit': return `more than ${maxCopies} copies of ${issue.code}`;
         case 'quantity': return `more copies of ${issue.code} than drafted`;
         case 'unpicked': return `card ${issue.code} not in picked pool`;
       }
@@ -239,24 +243,37 @@ export class DecksService {
     this.save(tid, playerId, { ...newDeck, lockedAt: new Date().toISOString(), status: 'locked' }, 'system');
   }
 
-  validationReport(tid: number): { playerId: string; displayName: string; errors: string[] }[] {
+  validationReport(tid: number): MatchDeckWarning[] {
     const state = loadState(tid);
-    return state.players
-      .filter((p) => !p.eliminated)
-      .map((p) => ({ playerId: p.playerId, displayName: p.displayName, errors: this.validate(state, this.deckOf(state, p.playerId), p.playerId) }))
-      .filter((r) => r.errors.length > 0);
+    const warnings: MatchDeckWarning[] = [];
+    for (const player of state.players) {
+      if (player.eliminated || player.withdrawn) continue;
+      const issues = this.issues(state, player.playerId);
+      if (!issues.length) continue;
+      const { mainShortfall, movedToSide, returnedToPool } = this.planMatchDeck(state, player.playerId, false);
+      warnings.push({ playerId: player.playerId, displayName: player.displayName, issues, mainShortfall, movedToSide,
+        returnedToPool, errors: this.issueMessages(issues, getConfig(state).maxCopies ?? 3) });
+    }
+    return warnings;
   }
 
-  // Admin-confirmed transition repair. Never invents cards to reach mainMin:
-  // undersized main decks are disqualified. Zone overflow is randomly moved to
-  // side while capacity remains, then returned to the unused pool.
   repairForMatches(tid: number, playerId: string): { disqualified: boolean; movedToSide: number; returnedToPool: number } {
-    return withEventTransaction(tid, () => this.repairForMatchesCommand(tid, playerId));
+    return withEventTransaction(tid, () => {
+      const state = loadState(tid);
+      if (state.frozen) throw new Error('FROZEN');
+      const { main, extra, side, mainShortfall, movedToSide, returnedToPool } = this.planMatchDeck(state, playerId, true);
+      this.save(tid, playerId, { main, extra, side, lockedAt: new Date().toISOString(), status: 'locked' }, 'system');
+      if (mainShortfall > 0) {
+        getDb().prepare('UPDATE tournament_players SET eliminated=1 WHERE tournament_id=? AND player_id=?').run(tid, playerId);
+        logEvent(tid, 'player', 'player_dsq', { playerId, reason: `main below minimum (${main.length} < ${getConfig(state).mainMin})` }, 'system');
+        persistMeta(tid);
+      }
+      return { disqualified: mainShortfall > 0, movedToSide, returnedToPool };
+    });
   }
 
-  private repairForMatchesCommand(tid: number, playerId: string): { disqualified: boolean; movedToSide: number; returnedToPool: number } {
-    const state = loadState(tid);
-    if (state.frozen) throw new Error('FROZEN');
+  // Choosing which overflow copy to move changes card order, but never the counts shown at preflight.
+  private planMatchDeck(state: ReturnType<typeof loadState>, playerId: string, randomize: boolean) {
     const cfg = getConfig(state);
     const allowance = this.copyAllowance(state, playerId);
     const source = this.deckOf(state, playerId);
@@ -273,6 +290,7 @@ export class DecksService {
     let extra = legalCopies(source.extra);
     let side = legalCopies(source.side);
     const shuffle = <T>(items: T[]): T[] => {
+      if (!randomize) return items;
       const out = [...items];
       for (let i = out.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
@@ -301,20 +319,14 @@ export class DecksService {
       if (main.length < cfg.mainMax) main.push(code);
       else overflowToSide([code]);
     }
-    while (main.length > cfg.mainMax) overflowToSide(main.splice(Math.floor(Math.random() * main.length), 1));
-    while (extra.length > cfg.extraMax) overflowToSide(extra.splice(Math.floor(Math.random() * extra.length), 1));
+    const overflowIndex = (length: number) => randomize ? Math.floor(Math.random() * length) : length - 1;
+    while (main.length > cfg.mainMax) overflowToSide(main.splice(overflowIndex(main.length), 1));
+    while (extra.length > cfg.extraMax) overflowToSide(extra.splice(overflowIndex(extra.length), 1));
     while (side.length > cfg.sideMax) {
-      side.splice(Math.floor(Math.random() * side.length), 1);
+      side.splice(overflowIndex(side.length), 1);
       returnedToPool++;
     }
-    const disqualified = main.length < cfg.mainMin;
-    this.save(tid, playerId, { main, extra, side, lockedAt: new Date().toISOString(), status: 'locked' }, 'system');
-    if (disqualified) {
-      getDb().prepare('UPDATE tournament_players SET eliminated=1 WHERE tournament_id=? AND player_id=?').run(tid, playerId);
-      logEvent(tid, 'player', 'player_dsq', { playerId, reason: `main below minimum (${main.length} < ${cfg.mainMin})` }, 'system');
-      persistMeta(tid);
-    }
-    return { disqualified, movedToSide, returnedToPool };
+    return { main, extra, side, mainShortfall: Math.max(0, cfg.mainMin - main.length), movedToSide, returnedToPool };
   }
 
   private checkAllLocked(tid: number): void {

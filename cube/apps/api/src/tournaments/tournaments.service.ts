@@ -1,5 +1,5 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
-import { EDISON_E3_MAX_PLAYERS, EDISON_E3_ROUNDS, type ConflictingMatchTable, type PoolDraftFormat } from '@ygocube/shared';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { EDISON_E3_MAX_PLAYERS, EDISON_E3_ROUNDS, type AdminDraftHistory, type AdminDraftSummary, type ConflictingMatchTable, type PoolDraftFormat } from '@ygocube/shared';
 import { conflictingMatchRows } from '../matches/table-conflicts';
 import { getDb } from '../db';
 import { config, defaults } from '../config';
@@ -786,8 +786,7 @@ export class TournamentsService {
     });
   }
 
-  adminState(tid: number) {
-    const state = loadState(tid);
+  private adminOverview(tid: number, state: TournamentState) {
     const cfg = getConfig(state);
     const row = getDb().prepare('SELECT auth_required FROM tournaments WHERE id=?').get(tid) as { auth_required: number } | undefined;
     const startConfirmation = state.draftStartConfirmation;
@@ -802,6 +801,8 @@ export class TournamentsService {
           total: startConfirmation.participants.length,
         }
       : null;
+    const counts = new Map<string, number>();
+    for (const pick of state.picks) counts.set(pick.playerId, (counts.get(pick.playerId) ?? 0) + 1);
     return {
       id: state.id,
       name: state.name,
@@ -812,29 +813,63 @@ export class TournamentsService {
       authRequired: row ? row.auth_required !== 0 : true,
       config: cfg,
       players: state.players,
-      packs: state.packs.map((p) => ({ index: p.index, size: p.size, dropCard: p.dropCard, order: p.order })),
-      droppedCards: state.droppedCards,
       phaseDeadline: state.phaseDeadline,
       pendingPhase: state.pendingPhase,
       draftStartConfirmation,
-      picks: state.picks,
       pickCursor: state.pickCursor,
-      packQueues: state.packQueues,
       pickDeadlines: state.pickDeadlines,
       packsDealt: state.packsDealt,
       pickReserves: state.pickReserves,
       pickAlternatives: state.pickAlternatives,
-      pause: state.pause,
-      decks: state.decks,
-      matches: state.matches,
       matchTableConflicts: conflictingMatchRows(getDb(), tid).map((m): ConflictingMatchTable => ({
         id: m.id, round: m.round, tableNo: m.table_no, playerA: m.player_a, playerB: m.player_b, resultA: m.result_a, resultB: m.result_b,
       })),
       pickSummary: state.players.map((p) => ({
         playerId: p.playerId,
         seat: p.seat,
-        count: state.picks.filter((x) => x.playerId === p.playerId).length,
+        count: counts.get(p.playerId) ?? 0,
       })),
     };
+  }
+
+  adminState(tid: number) {
+    const state = loadState(tid);
+    return {
+      ...this.adminOverview(tid, state),
+      packs: state.packs.map(({ index, size, dropCard, order }) => ({ index, size, dropCard, order })),
+      droppedCards: state.droppedCards, picks: state.picks, packQueues: state.packQueues,
+      pause: state.pause, decks: state.decks, matches: state.matches,
+    };
+  }
+
+  adminSummary(tid: number) {
+    const state = loadState(tid);
+    const overview = this.adminOverview(tid, state);
+    const draft: AdminDraftSummary = {
+      lastEventSeq: getDb().prepare('SELECT coalesce(max(seq), 0) FROM events WHERE tournament_id=?').pluck().get(tid) as number,
+      packSummary: state.packs.map(({ index, size }) => ({ index, size })),
+      pickSummary: overview.pickSummary.map((p) => ({ ...p, lockedAt: state.decks[p.playerId]?.lockedAt ?? null })),
+    };
+    return {
+      ...overview, ...draft,
+      pause: state.pause ? { pausedAt: state.pause.pausedAt, actor: state.pause.actor } : null,
+      matches: state.matches.map(({ id, round, tableNo, playerA, playerB, resultA, resultB, roomName, faultedAt, stage, bracketRound }) =>
+        ({ id, round, tableNo, playerA, playerB, resultA, resultB, roomName, faultedAt, stage, bracketRound })),
+    };
+  }
+
+  adminDraftHistory(tid: number, filter: { pack: number } | { player: string }): AdminDraftHistory {
+    const state = loadState(tid);
+    let pack: AdminDraftHistory['pack'];
+    if ('pack' in filter) {
+      const found = state.packs.find((p) => p.index === filter.pack);
+      if (!found) throw new NotFoundException({ code: 'PACK_NOT_FOUND' });
+      pack = { index: found.index, size: found.size, order: found.order, dropCard: found.dropCard };
+    } else if (!state.players.some((p) => p.playerId === filter.player)) {
+      throw new NotFoundException({ code: 'PLAYER_NOT_FOUND' });
+    }
+    const picks = state.picks.filter((p) => 'pack' in filter ? p.packIndex === filter.pack : p.playerId === filter.player);
+    return { ...(pack && { pack }), picks: picks.map(({ playerId, packIndex, round, card, auto, at }) =>
+      ({ playerId, packIndex, round, card, auto, at })) };
   }
 }

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { CardVisibilityStatus } from '@ygocube/shared';
 import { api, encodePathSegment, Identity } from '@/lib/api';
 import { CardInfo } from '@/lib/types';
@@ -34,6 +34,11 @@ export function CardSearch({ tid, identity, pool, onAdd }: {
   pool: number[];
   onAdd: (code: number) => void;
 }) {
+  const unusedPositions = useMemo(() => {
+    const positions = new Map<number, number>();
+    pool.forEach((code, i) => { if (!positions.has(code)) positions.set(code, i); });
+    return positions;
+  }, [pool]);
   const tidPath = encodePathSegment(tid);
   const [q, setQ] = useState('');
   const [results, setResults] = useState<(CardInfo & { status?: Status })[]>([]);
@@ -82,10 +87,11 @@ export function CardSearch({ tid, identity, pool, onAdd }: {
         <ul className="mt-2 max-h-48 space-y-0.5 overflow-y-auto">
           {results.map((c) => {
             const status = c.status ?? 'unknown';
-            const inPool = pool.includes(c.code);
+            const poolIndex = unusedPositions.get(c.code);
+            const inPool = poolIndex !== undefined;
             return (
               <li key={c.code} className="flex items-center gap-2 rounded bg-felt-deep/60 px-1.5 py-1">
-                <CardWithTooltip code={c.code} card={c} className="h-9 w-7 shrink-0" />
+                <CardWithTooltip code={c.code} card={c} source={inPool ? { zone: 'pool', index: poolIndex } : undefined} className="h-9 w-7 shrink-0" />
                 <span className="flex-1 truncate text-xs">{c.name}</span>
                 <span className="font-mono text-[0.625rem] text-slate-500">{c.code}</span>
                 <span className={`rounded px-1.5 py-0.5 text-[0.625rem] ${STATUS_STYLE[status]}`}>

@@ -99,6 +99,34 @@ export type RoomManagementRequest =
   | { action: 'transfer-host'; playerId: string; version: number }
   | { action: 'set-admission'; locked: boolean; version: number };
 
+export interface AdminDraftSummary {
+  lastEventSeq: number;
+  packSummary: { index: number; size: number }[];
+  pickSummary: { playerId: string; seat: number; count: number; lockedAt: string | null }[];
+}
+
+export interface AdminDraftHistory {
+  pack?: { index: number; size: number; dropCard: number | null; order: number[] };
+  picks: { playerId: string; packIndex: number; round: number; card: number; auto: boolean; at: string }[];
+}
+
+export interface MatchDeckWarning {
+  playerId: string;
+  displayName: string;
+  errors: string[];
+  issues: DeckIssue[];
+  mainShortfall: number;
+  movedToSide: number;
+  returnedToPool: number;
+}
+
+export interface MatchStartPreview {
+  ok: false;
+  requires_confirmation: true;
+  invalid_decks: MatchDeckWarning[];
+  preview_key: string;
+}
+
 export interface ConflictingMatchTable {
   id: number;
   round: number;

@@ -175,9 +175,10 @@ swissRoundCount, playoffSize
 
 | 方法/路径 | 说明 |
 | --- | --- |
-| `POST /admin/t/:tid/state` | 当前比赛管理视图。`matchTableConflicts` 仅含当前比赛在对局表中桌号重复的记录，每条含 `id, round, tableNo, playerA, playerB, resultA, resultB`。管理台按轮次和桌号分组。重复桌号只能通过已有离线流程修正 |
+| `POST /admin/t/:tid/state` | 空请求体沿用完整比赛管理视图。控制台轮询发送 `{view:"summary"}`，返回比赛设置、玩家、计时、对阵及冲突、`pickSummary`（各座位选牌数和 `lockedAt`）、`packSummary`（各堆编号、张数）、`lastEventSeq`。摘要省略牌堆顺序、弃牌、选牌记录、完整卡组和房间密码。事件列表在展开时间线时读取。`matchTableConflicts` 仅含当前比赛在对局表中桌号重复的记录，每条含 `id, round, tableNo, playerA, playerB, resultA, resultB`。管理台按轮次和桌号分组。重复桌号只能通过已有离线流程修正 |
+| `GET /admin/t/:tid/draft-history?pack=0` 或 `?player=<id>` | 仅本场管理员可读。必须二选一：按零基牌堆编号返回该堆的原始顺序和选择记录；按精确玩家 ID 仅返回该玩家的选择记录。键为 `{pack?,picks}`。非法筛选返回 400，目标不存在返回 404 |
 | `POST /admin/t/:tid/start_draft` | 发起 60 秒全员确认窗口；仅所有报名玩家确认后才生成牌堆并开始选牌，重复请求在窗口内幂等 |
-| `POST /admin/t/:tid/phase` | 阶段切换；进入 matches 先合规预检，确认字段为 `confirm_invalid_decks:true` |
+| `POST /admin/t/:tid/phase` | 进入 matches 时按实际整理规则预检在赛玩家。需确认时返回 `requires_confirmation, invalid_decks, preview_key`。每行含原有 `errors`、结构化 `issues`、整理后主卡缺口 `mainShortfall`、移入副卡和退回池的张数。缺口大于零将取消资格，其余自动整理。网页确认同时提交 `confirm_invalid_decks:true, preview_key`。若仍有异常且名单或处理结果变化，重新返回预览。全部恢复合规时直接进入对战。兼容仅传布尔值的旧调用 |
 | `PUT /admin/t/:tid/config` | 报名阶段修改配置 |
 | `PUT /admin/t/:tid/match-format` | 首场前设置/修改明确赛制 |
 | `POST /admin/t/:tid/matches/start` | 建立指定轮次排表并异步建 srvpro 房间 |

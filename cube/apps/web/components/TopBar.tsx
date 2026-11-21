@@ -326,9 +326,10 @@ function dropIndex(container: HTMLElement, x: number, y: number, count: number):
   return count;
 }
 
-export function DeckZone({ title, zone, codes, limit, cardMap, onCardDrop, onCardPick, onCardMove }: {
+export function DeckZone({ title, zone, codes, sourceIndexes, limit, cardMap, onCardDrop, onCardPick, onCardMove }: {
   title: string;
   zone: 'main' | 'extra' | 'side';
+  sourceIndexes?: number[];
   codes: number[];
   limit?: string;
   cardMap?: Record<number, CardInfo>;
@@ -411,7 +412,7 @@ export function DeckZone({ title, zone, codes, limit, cardMap, onCardDrop, onCar
             {hoverIdx === codes.length && i === codes.length - 1 && (
               <span className="absolute inset-y-0 -right-0.5 z-10 w-0.5 rounded bg-gold" />
             )}
-            <CardWithTooltip code={c} card={cardMap?.[c]} />
+            <CardWithTooltip code={c} card={cardMap?.[c]} source={{ zone, index: sourceIndexes?.[i] ?? i }} />
           </div>
         ))}
       </div>

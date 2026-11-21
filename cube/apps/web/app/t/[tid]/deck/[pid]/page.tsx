@@ -11,10 +11,10 @@ import { CardWithTooltip } from '@/components/CardImage';
 import { workflowText } from '@/components/tournament-workflow-text';
 import { DeckFeedback } from '@/components/DeckFeedback';
 import { CardSearch } from '@/components/CardSearch';
-import { closeCardPreview, setCardPreviewAction } from '@/components/CardPreview';
+import { closeCardPreview, deckPreviewAction, setCardPreviewAction } from '@/components/CardPreview';
 import { TokenPrompt } from '@/components/TokenPrompt';
 import { CardInfo } from '@/lib/types';
-import { canonicalCardCode, isExtraDeckType, safeCardCodes } from '@/lib/cardInfo';
+import { canonicalCardCode, safeCardCodes } from '@/lib/cardInfo';
 import { flipIds, useFlip } from '@/lib/useFlip';
 import { fetchCardMetadata } from '@/lib/cardCache';
 import { useTournamentFallbackPolling } from '@/lib/sse';
@@ -35,7 +35,7 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
   const [cardMap, setCardMap] = useState<Record<number, CardInfo>>({});
   const [error, setError] = useState('');
   const loadSequence = useRef(0);
-  const flip = useFlip<HTMLDivElement>();
+  const { ref: flipRef, snapshot } = useFlip<HTMLDivElement>();
   usePlayerLogout(identity, () => {
     loadSequence.current++;
     setIdentity(null);
@@ -147,9 +147,9 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
     return { discard: available, addable };
   }, [cardMap, cfg.maxCopies, cfg.draftFormat, deck.extra, deck.main, deck.side, state?.pickedCards]);
 
-  const move = async (card: number, from: string, to: string, index?: number, fromIndex?: number) => {
+  const move = useCallback(async (card: number, from: string, to: string, index?: number, fromIndex?: number) => {
     try {
-      flip.snapshot(); // FLIP: capture positions before the post-move re-render
+      snapshot(); // FLIP: capture positions before the post-move re-render
       await api(`/t/${tidPath}/deck/move`, {
         method: 'POST',
         body: { card_code: card, from, to, ...(index !== undefined ? { index } : {}), ...(fromIndex !== undefined ? { from_index: fromIndex } : {}) },
@@ -160,11 +160,11 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
     } catch (e: any) {
       setError(e.code === 'WRONG_ZONE' ? '该类型卡不能放入此区域' : readableApiError(e));
     }
-  };
+  }, [identity, tidPath, load, snapshot]);
 
   const sortDeck = async () => {
     try {
-      flip.snapshot();
+      snapshot();
       await api(`/t/${tidPath}/deck/sort`, { method: 'POST', identity });
       setError('');
       await load();
@@ -175,7 +175,7 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
 
   const shuffleMain = async () => {
     try {
-      flip.snapshot();
+      snapshot();
       await api(`/t/${tidPath}/deck/shuffle`, { method: 'POST', identity });
       setError('');
       await load();
@@ -197,36 +197,12 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
   // 固定预览的快捷操作：主/额外 <-> 副卡组、移出构筑（回到未使用区）、未使用卡移回卡组；
   // 操作执行后立即关闭详情窗口（dev_docs/06 §4）
   useEffect(() => {
-    if (!state || !identity) return;
-    const act = (card: number, from: string, to: string) => {
-      void move(card, from, to);
-      closeCardPreview();
-    };
-    setCardPreviewAction((card) => {
-      const inSide = state.deck?.side?.includes(card.code);
-      const inMain = state.deck?.main?.includes(card.code);
-      const inExtra = state.deck?.extra?.includes(card.code);
-      if (inSide) return {
-        label: isExtraDeckType(card.type) ? '移动到额外卡组' : '移动到主卡组',
-        run: () => act(card.code, 'side', isExtraDeckType(card.type) ? 'extra' : 'main'),
-        secondary: { label: '移出构筑', run: () => act(card.code, 'side', 'pool') },
-      };
-      if (inMain || inExtra)
-        return {
-          label: '移动到副卡组',
-          run: () => act(card.code, inExtra ? 'extra' : 'main', 'side'),
-          secondary: { label: '移出构筑', run: () => act(card.code, inExtra ? 'extra' : 'main', 'pool') },
-        };
-      // 未使用卡池：按卡牌类型决定主按钮去向（额外类型回额外，其余回主卡组）
-      const extra = isExtraDeckType(card.type);
-      return {
-        label: extra ? '移回额外卡组' : '移回主卡组',
-        run: () => act(card.code, 'pool', extra ? 'extra' : 'main'),
-        secondary: { label: '移回副卡组', run: () => act(card.code, 'pool', 'side') },
-      };
-    });
+    if (!identity || !state?.deck || state.frozen || state.deck.lockedAt
+      || (state.status !== 'drafting' && state.status !== 'deckbuilding')) return;
+    setCardPreviewAction((card, source) => deckPreviewAction(card, source, state.deck, move, discard));
     return () => setCardPreviewAction(null);
-  }, [state, identity, tidPath, move]);
+  }, [identity, state, move, discard]);
+  useEffect(() => () => closeCardPreview(), [tid, pid]);
 
   const unlock = async () => {
     try {
@@ -297,7 +273,7 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
           {!state.disqualified && <a href={`/t/${tidPath}/matches/${pidPath}`} className="rounded bg-gold px-6 py-2 font-semibold text-felt-deep hover:brightness-110">立即前往对战</a>}
         </div>
       )}
-      <div ref={flip.ref} className="flex flex-1 flex-col gap-3 p-3 md:flex-row md:overflow-hidden">
+      <div ref={flipRef} className="flex flex-1 flex-col gap-3 p-3 md:flex-row md:overflow-hidden">
         <div className="flex w-full flex-col gap-2 md:w-3/5 md:overflow-y-auto md:pr-1">
           {!locked && state.status === 'deckbuilding' && (
             <div className="flex justify-end gap-2">
@@ -324,7 +300,8 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
             const zoneKind = e.dataTransfer.getData('application/x-card-zone');
             const from = e.dataTransfer.getData('application/x-card-source');
             if (code && zoneKind === 'deck' && from && from !== 'pool') {
-              void move(code, from, 'pool'); // 拖到未使用区 = 移出构筑
+              const rawIndex = e.dataTransfer.getData('application/x-card-source-index');
+              void move(code, from, 'pool', undefined, rawIndex ? Number(rawIndex) : undefined);
             }
           }}
         >
@@ -349,7 +326,7 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
                   className="animate-card-in cursor-grab active:cursor-grabbing"
                 >
                   {/* 卡图 + hover/点击详情（无本地图时仍可查看卡牌效果） */}
-                  <CardWithTooltip code={c} card={cardMap[c]} />
+                  <CardWithTooltip code={c} card={cardMap[c]} source={{ zone: 'pool', index: i }} />
                 </div>
               ))}
             </div>

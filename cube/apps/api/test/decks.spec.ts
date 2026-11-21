@@ -105,6 +105,9 @@ describe('deck validation', () => {
     expect(() => decks.move(tid, 'p0', a, 'pool', 'main')).toThrow('CARD_NOT_IN_POOL');
     decks.move(tid, 'p0', a, 'main', 'main', 0, 2);
     expect(loadState(tid).decks.p0.main).toEqual([a, a, b, a]);
+    // A pinned detail may outlive a reorder; never substitute a different copy.
+    expect(() => decks.move(tid, 'p0', a, 'main', 'side', 0, 2)).toThrow('CARD_NOT_IN_ZONE');
+    expect(loadState(tid).decks.p0.main).toEqual([a, a, b, a]);
     decks.move(tid, 'p0', a, 'main', 'side', 0, 0);
     expect(loadState(tid).decks.p0.main).toEqual([a, b, a]);
     expect(loadState(tid).decks.p0.side).toEqual([a]);

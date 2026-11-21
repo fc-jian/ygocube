@@ -87,6 +87,43 @@ describe('HTTP authorization follows matched route metadata', () => {
     expect(await second.json()).toMatchObject({ hands: [{ cards: [10001, 10002], selected: [10001] }] });
   });
 
+  it('serves a compact admin poll and scopes history to the authorized tournament and selection', async () => {
+    const id = tournaments.create({ name: 'admin history', maxPlayers: 4, cardPool: TEST_POOL }, 'owner').tid;
+    for (const pid of ['A +', 'B']) tournaments.join(id, pid, pid);
+    const packs = [[10001, 10002], [10003, 10004]].map((order, index) => ({ index, size: 2, order, dropCard: null }));
+    logEvent(id, 'pack', 'packs_created', { packs }, 'test');
+    for (const [packIndex, playerId] of [[0, 'A +'], [1, 'B']] as const) {
+      logEvent(id, 'pick', 'pick', { packIndex, playerId, card: packs[packIndex].order[0], round: 1, auto: false, at: '2026-01-01' }, playerId);
+    }
+    logEvent(id, 'match', 'match', { id: 1, tableNo: 1, round: 1, playerA: 'A +', playerB: 'B', playerAPass: 'private-a', playerBPass: 'private-b' }, 'test');
+    const root = `${base}/admin/t/${id}`;
+    const state = async (body: object) => (await fetch(root + '/state', {
+      method: 'POST', headers: { ...creator, 'content-type': 'application/json' }, body: JSON.stringify(body),
+    })).json();
+    const full = await state({});
+    expect(full.packs).toEqual(packs);
+    expect(full.picks).toHaveLength(2);
+    expect(full).toHaveProperty('decks');
+    const summary = await state({ view: 'summary' });
+    expect(summary).toMatchObject({ packSummary: [{ index: 0, size: 2 }, { index: 1, size: 2 }],
+      pickSummary: [{ playerId: 'A +', count: 1, lockedAt: null }, { playerId: 'B', count: 1, lockedAt: null }], lastEventSeq: expect.any(Number) });
+    for (const key of ['picks', 'packs', 'decks', 'packQueues', 'droppedCards']) expect(summary).not.toHaveProperty(key);
+    expect(JSON.stringify(summary)).not.toContain('private-');
+    const history = root + '/draft-history';
+    const get = (url: string, headers = creator as Record<string, string>) => fetch(url, { headers });
+    expect(await (await get(history + '?pack=0')).json()).toMatchObject({ pack: packs[0], picks: [{ playerId: 'A +', card: 10001 }] });
+    const personal = await (await get(history + '?player=A%20%2B')).json();
+    expect(personal.picks).toHaveLength(1);
+    expect(personal).not.toHaveProperty('pack');
+    for (const query of ['', '?pack=-1', '?pack=0&player=B', '?pack=0&pack=1', '?player=']) {
+      expect((await get(history + query)).status).toBe(400);
+    }
+    expect((await get(history + '?pack=2')).status).toBe(404);
+    expect((await get(history + '?player=unknown')).status).toBe(404);
+    expect((await get(history + '?pack=0', {})).status).toBe(401);
+    expect((await get(`${base}/admin/t/${target}/draft-history?pack=0`)).status).toBe(403);
+  });
+
   it('preserves literal percent escapes in player headers and administrator routes', async () => {
     const id = tournaments.create({ name: 'encoded player', maxPlayers: 3, cardPool: TEST_POOL }, 'owner').tid;
     for (const pid of ['A B', 'A%20B']) tournaments.join(id, pid, pid);

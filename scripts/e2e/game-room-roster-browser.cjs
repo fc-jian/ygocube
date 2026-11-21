@@ -46,6 +46,18 @@ async function verify(browser, origin, game, mode) {
     await join(visitor, 'Other');
     await dialog.waitFor({ state: 'hidden' });
     await button(host, '移除 Other').waitFor();
+    const stale = host.getByRole('status').filter({ hasText: '名单已更新，本次移除 Guest 的操作未执行。' });
+    await stale.waitFor();
+    assert.equal(await remove.evaluate(el => document.activeElement === el), true);
+    const otherTransfer = button(host, '将房主移交给 Other');
+    await otherTransfer.click();
+    await stale.waitFor({ state: 'hidden' });
+    await button(visitor, '退出房间').click();
+    await host.getByRole('status').filter({ hasText: '名单已更新，本次向 Other 移交房主的操作未执行。' }).waitFor();
+    assert.equal(await host.locator('ul.guess-roster').evaluate(el => document.activeElement === el), true);
+    await visitor.goto(host.url());
+    await join(visitor, 'Other');
+    await otherTransfer.waitFor();
 
     await remove.click();
     await button(dialog, '移除').click();

@@ -1,6 +1,8 @@
 'use client';
-import { EDISON_E3_MAX_PLAYERS, type ConflictingMatchTable, type PoolDraftFormat } from '@ygocube/shared';
+import { EDISON_E3_MAX_PLAYERS, type AdminDraftSummary, type MatchStartPreview, type ConflictingMatchTable, type PoolDraftFormat } from '@ygocube/shared';
 import { workflowText } from '@/components/tournament-workflow-text';
+import { AdminHistory } from '@/components/AdminHistory';
+import { MatchStartDialog } from '@/components/MatchStartDialog';
 import { EdisonDraftRules } from '@/components/EdisonDraftRules';
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -11,7 +13,7 @@ import { apiErrorCode, readableApiError } from '@/lib/api';
 const text = workflowText.zh;
 const conflictTitle = `${text.conflictTitle} / ${workflowText.en.conflictTitle}`;
 
-interface AdminState {
+interface AdminState extends AdminDraftSummary {
   id: number;
   name: string;
   createdBy?: string;
@@ -20,9 +22,7 @@ interface AdminState {
   frozen: boolean;
   authRequired: boolean;
   config: Record<string, unknown>;
-  players: { playerId: string; displayName: string; seat: number; eliminated?: boolean; withdrawn?: boolean }[];
-  packs: { index: number; size: number; dropCard: number | null; order: number[] }[];
-  picks: { playerId: string; packIndex: number; round: number; card: number; auto: boolean }[];
+  players: { playerId: string; displayName: string; seat: number; ready?: boolean; eliminated?: boolean; withdrawn?: boolean }[];
   pickCursor: { packIndex: number; round: number; playerId: string; deadlineAt: string } | null;
   pickDeadlines?: Record<string, string | null>;
   pickReserves?: Record<string, number>;
@@ -38,10 +38,8 @@ interface AdminState {
     total: number;
   } | null;
   pause: { pausedAt: string; actor?: string } | null;
-  decks: Record<string, { main: number[]; extra: number[]; side: number[]; lockedAt: string | null }>;
   matches: { id: number; round: number; playerA: string; playerB: string; tableNo: number; roomName: string | null; resultA: number | null; resultB: number | null; faultedAt: string | null; stage?: string; bracketRound?: number }[];
   matchTableConflicts?: ConflictingMatchTable[];
-  pickSummary: { playerId: string; seat: number; count: number }[];
 }
 
 interface PoolInfo {
@@ -195,7 +193,9 @@ function AdminDashboard({ tid, adminToken, createUsername, createToken, reload, 
   const [addPid, setAddPid] = useState('');
   const [shownToken, setShownToken] = useState<{ pid: string; token: string } | null>(null);
   const [matchInputs, setMatchInputs] = useState<Record<number, { a: string; b: string }>>({});
-  const [events, setEvents] = useState<{ seq: number; entity: string; action: string; summary: string; detail: string; createdAt: string; actor?: string }[]>([]);
+  const [matchPreview, setMatchPreview] = useState<{ phase: string; data: MatchStartPreview; changed: boolean; error?: string } | null>(null);
+  const [startingMatches, setStartingMatches] = useState(false);
+  const matchRequest = useRef<AbortController | null>(null);
   const [packCount, setPackCount] = useState<number | ''>('');
   const [dropPublic, setDropPublic] = useState(false);
   const [reseatEachRound, setReseatEachRound] = useState(true);
@@ -203,9 +203,7 @@ function AdminDashboard({ tid, adminToken, createUsername, createToken, reload, 
   const [limitDeckbuilding, setLimitDeckbuilding] = useState(false);
   const [extraRatioEnabled, setExtraRatioEnabled] = useState(false);
   const [extraRatioPercent, setExtraRatioPercent] = useState(25);
-  const [selectedSeq, setSelectedSeq] = useState<number | null>(null);
   const [reserveInputs, setReserveInputs] = useState<Record<string, string>>({});
-  const [hoveredEvent, setHoveredEvent] = useState<number | null>(null);
   const [formatForm, setFormatForm] = useState({ matchFormat: 'swiss', swissRoundCount: 3, playoffSize: 0 });
   const [createUsers, setCreateUsers] = useState<{ username: string; createdAt: string; active: number }[]>([]);
   const [createUsersLoaded, setCreateUsersLoaded] = useState(false);
@@ -228,9 +226,9 @@ function AdminDashboard({ tid, adminToken, createUsername, createToken, reload, 
     setMatchInputs({});
     setAddPid('');
     setShownToken(null);
-    setSelectedSeq(null);
-    setHoveredEvent(null);
-    setEvents([]);
+    setMatchPreview(null);
+    setStartingMatches(false);
+    matchRequest.current = null;
     setCanEditPools(false);
     setPools([]);
     updateMsg('');
@@ -239,12 +237,13 @@ function AdminDashboard({ tid, adminToken, createUsername, createToken, reload, 
 
   useEffect(() => {
     if (!state) return;
+    setMatchPreview((current) => current?.phase === state.status ? current : null);
     setFormatForm({
       matchFormat: String(state.config.matchFormat ?? 'swiss'),
       swissRoundCount: Number(state.config.swissRoundCount ?? 3),
       playoffSize: Number(state.config.playoffSize ?? 0),
     });
-  }, [state?.id, state?.config.matchFormat, state?.config.swissRoundCount, state?.config.playoffSize]);
+  }, [state?.id, state?.status, state?.config.matchFormat, state?.config.swissRoundCount, state?.config.playoffSize]);
 
   const isSuperSession = adminToken.trim().length > 0;
 
@@ -275,11 +274,10 @@ function AdminDashboard({ tid, adminToken, createUsername, createToken, reload, 
     return d;
   }, [adminToken, createUsername, createToken]);
 
-  const { request: load } = useCoalescedRefresh(useCallback(async ({ signal, isCurrent }) => {
-    const get = (path: string, method = 'GET') => adminFetch(path, method, undefined, signal);
+  const { request: loadSummary } = useCoalescedRefresh(useCallback(async ({ signal, isCurrent }) => {
     if (tid) {
       try {
-        const s = await get(`/admin/t/${tid}/state`, 'POST');
+        const s = await adminFetch(`/admin/t/${tid}/state`, 'POST', { view: 'summary' }, signal);
         if (isCurrent() && s.id === Number(tid)) setState(s);
       } catch (e: any) {
         if (!isCurrent()) return;
@@ -288,6 +286,10 @@ function AdminDashboard({ tid, adminToken, createUsername, createToken, reload, 
         setState(null);
       }
     }
+  }, [adminFetch, tid]));
+
+  const { request: loadDirectories } = useCoalescedRefresh(useCallback(async ({ signal, isCurrent }) => {
+    const get = (path: string) => adminFetch(path, 'GET', undefined, signal);
     try {
       const p = tid
         ? await get(`/admin/t/${tid}/pools`)
@@ -327,16 +329,12 @@ function AdminDashboard({ tid, adminToken, createUsername, createToken, reload, 
         setCreateUsersLoaded(false);
       }
     }
-    if (tid) {
-      try {
-        const ev = await get(`/admin/t/${tid}/events`);
-        if (isCurrent()) setEvents(ev);
-      } catch {
-        if (isCurrent()) setEvents([]);
-      }
-    }
   }, [adminFetch, tid, isSuperSession]));
 
+  const load = useCallback(async () => {
+    await Promise.all([loadSummary(), loadDirectories()]);
+  }, [loadSummary, loadDirectories]);
+  const passiveLoad = tid ? loadSummary : loadDirectories;
   const currentLoad = useRef(load);
   useCommitEffect(() => { currentLoad.current = load; }, [load]);
   useEffect(() => { void load(); }, [load, reload]);
@@ -349,7 +347,7 @@ function AdminDashboard({ tid, adminToken, createUsername, createToken, reload, 
     const poll = async () => {
       if (document.hidden || polling) return;
       polling = true;
-      try { await load(); } finally { polling = false; }
+      try { await passiveLoad(); } finally { polling = false; }
     };
     const timer = window.setInterval(poll, confirmationPending ? 5_000 : 15_000);
     document.addEventListener('visibilitychange', poll);
@@ -357,7 +355,7 @@ function AdminDashboard({ tid, adminToken, createUsername, createToken, reload, 
       window.clearInterval(timer);
       document.removeEventListener('visibilitychange', poll);
     };
-  }, [load, state?.draftStartConfirmation?.pending]);
+  }, [passiveLoad, state?.draftStartConfirmation?.pending]);
 
   const actionSuccessMessage = (path: string): string => {
     if (path.endsWith('/pause')) return '比赛已暂停';
@@ -395,34 +393,37 @@ function AdminDashboard({ tid, adminToken, createUsername, createToken, reload, 
     } catch (e: any) { showMsg(`赛制保存失败：${readableApiError(e)}`); }
   };
 
-  const enterMatches = async () => {
-    if (!state) return;
+  const enterMatches = async (previewKey?: string) => {
+    const controller = selection.current?.controller;
+    if (!state || !controller || matchRequest.current === controller) return;
+    matchRequest.current = controller;
+    setStartingMatches(true);
     try {
-      let result = await adminFetch(`/admin/t/${state.id}/phase`, 'POST', { status: 'matches', round: 1 });
+      const result = await adminFetch(`/admin/t/${state.id}/phase`, 'POST', {
+        status: 'matches', round: 1,
+        ...(previewKey && { confirm_invalid_decks: true, preview_key: previewKey }),
+      });
+      if (controller.signal.aborted) return;
       if (result.requires_confirmation) {
-        const deckErrorText = (error: string) => error
-          .replace(/^main below minimum/, '主卡组不足')
-          .replace(/^main above maximum/, '主卡组超限')
-          .replace(/^extra above maximum/, '额外卡组超限')
-          .replace(/^side above maximum/, '副卡组超限')
-          .replace(/^more than (\d+) copies of (\d+)/, '单卡 $2 超过 $1 份')
-          .replace(/^more copies of (\d+) than drafted/, '卡片 $1 超过实际抓取张数')
-          .replace(/^card (\d+) not in picked pool/, '卡片 $1 不在已选卡池')
-          .replace(/^extra-deck card (\d+) in main/, '额外卡 $1 位于主卡组')
-          .replace(/^main-deck card (\d+) in extra/, '主卡 $1 位于额外卡组');
-        const details = (result.invalid_decks as { displayName: string; playerId: string; errors: string[] }[])
-          .map((item) => `${item.displayName || item.playerId}: ${item.errors.map(deckErrorText).join('；')}`)
-          .join('\n');
-        const confirmed = window.confirm(`以下玩家卡组不合规：\n\n${details}\n\n确认进入对战后将随机修复超限区域；主卡组不足的玩家会被判 DSQ。是否继续？`);
-        if (!confirmed) return;
-        result = await adminFetch(`/admin/t/${state.id}/phase`, 'POST', { status: 'matches', round: 1, confirm_invalid_decks: true });
+        setMatchPreview({ phase: state.status, data: result, changed: previewKey !== undefined });
+        return;
       }
+      setMatchPreview(null);
       const repairs = (result.repairs ?? []) as { playerId: string; disqualified: boolean; movedToSide: number; returnedToPool: number }[];
       const dsq = repairs.filter((r) => r.disqualified).map((r) => r.playerId);
       showMsg(dsq.length ? `已进入对战；DSQ：${dsq.join('、')}` : '卡组检查通过，已进入对战');
       await currentLoad.current();
     } catch (e: any) {
-      showMsg(`进入对战失败：${readableApiError(e)}`);
+      if (!controller.signal.aborted) {
+        const error = readableApiError(e, '进入对战失败');
+        if (previewKey) setMatchPreview((current) => current && { ...current, error });
+        else showMsg(error);
+      }
+    } finally {
+      if (matchRequest.current === controller) {
+        matchRequest.current = null;
+        setStartingMatches(false);
+      }
     }
   };
 
@@ -469,7 +470,6 @@ function AdminDashboard({ tid, adminToken, createUsername, createToken, reload, 
       showMsg(replacements.length
         ? `回溯完成；${replacements.length} 个历史玩家缺少原凭据，已生成替换 token：${replacements.map(([p, t]) => `${p}=${t}`).join('，')}`
         : `回溯完成，已删除 ${result.deleted_events} 条后续事件；比赛保持冻结`);
-      setSelectedSeq(null);
       await currentLoad.current();
     } catch (e: any) {
       showMsg(`回溯失败：${readableApiError(e)}`);
@@ -653,6 +653,7 @@ function AdminDashboard({ tid, adminToken, createUsername, createToken, reload, 
     }
     return [...groups.values()].filter((group) => group.length > 1);
   }, [state?.matchTableConflicts, state?.matches]);
+  const seatStats = new Map(state?.pickSummary.map(s => [s.playerId, s]));
   const conflictIds = new Set(tableConflicts.flat().map((match) => match.id));
   const editPackSize = Math.max(1, Number(editForm.packSize) || 24);
   const editPool = pools.find((p) => p.name === editForm.cardPool);
@@ -678,6 +679,10 @@ function AdminDashboard({ tid, adminToken, createUsername, createToken, reload, 
 
   return (
     <>
+      {state && matchPreview?.phase === state.status && <MatchStartDialog preview={matchPreview.data}
+        cancelText={matchPreview.phase === 'drafting' ? text.returnToDraft : text.returnToBuild}
+        key={matchPreview.data.preview_key} changed={matchPreview.changed} error={matchPreview.error} busy={startingMatches} cancel={() => setMatchPreview(null)}
+        confirm={() => void enterMatches(matchPreview.data.preview_key)} />}
       {createUsersLoaded && (
         <section className="mb-6 rounded-lg border border-gold/25 bg-felt/60 p-4 text-xs">
           <h2 className="mb-2 text-sm font-semibold text-gold">比赛创建权限用户</h2>
@@ -749,7 +754,8 @@ function AdminDashboard({ tid, adminToken, createUsername, createToken, reload, 
                   回退到选牌
                 </button>
               )}
-              <button onClick={() => void enterMatches()} className="rounded bg-felt-edge px-3 py-1 text-xs hover:brightness-110">
+              <button onClick={() => void enterMatches()} disabled={startingMatches || !['drafting', 'deckbuilding'].includes(state.status)}
+                className="rounded bg-felt-edge px-3 py-1 text-xs hover:brightness-110 disabled:opacity-40">
                 进入对战
               </button>
               <button onClick={() => void act(`/admin/t/${state.id}/matches/start`, { round: state.round || 1 })} className="rounded bg-felt-edge px-3 py-1 text-xs hover:brightness-110">
@@ -838,7 +844,7 @@ function AdminDashboard({ tid, adminToken, createUsername, createToken, reload, 
                 <div key={p.playerId} className="flex flex-wrap items-center justify-between gap-2 py-0.5">
                   <span>{p.displayName} ({p.playerId}) {p.eliminated && <b className="ml-1 rounded bg-red-900 px-1.5 py-0.5 text-red-100">DSQ</b>} {p.withdrawn && <b className="ml-1 rounded bg-amber-900 px-1.5 py-0.5 text-amber-100">退赛</b>}</span>
                   <span className="font-mono text-slate-400">
-                    座位 {p.seat} · {state.pickSummary.find((s) => s.playerId === p.playerId)?.count ?? 0} 次选牌 · {p.eliminated ? 'DSQ' : state.decks[p.playerId]?.lockedAt ? '已锁定' : '构筑中'}
+                    座位 {p.seat} · {seatStats.get(p.playerId)?.count ?? 0} 次选牌 · {p.eliminated ? 'DSQ' : seatStats.get(p.playerId)?.lockedAt ? '已锁定' : '构筑中'}
                   </span>
                   <span className="flex shrink-0 gap-1">
                     <button onClick={() => void act(`/admin/t/${state.id}/players/${encodeURIComponent(p.playerId)}/${p.withdrawn ? 'restore' : 'withdraw'}`)} disabled={p.withdrawn && state.matches.length > 0} className="rounded bg-amber-900 px-1.5 py-0.5 text-amber-100 disabled:opacity-40">{p.withdrawn ? '恢复' : '退赛'}</button>
@@ -950,47 +956,7 @@ function AdminDashboard({ tid, adminToken, createUsername, createToken, reload, 
               </div>
               {state.status !== 'drafting' && <p className="mt-2 text-slate-500">当前不在选牌阶段，调整按钮已禁用。</p>}
             </section>
-            <section className="rounded-lg border border-felt-edge bg-felt/60 p-3 text-xs">
-              <h3 className="mb-2 font-semibold text-gold">事件时间线（点击选择回溯点）</h3>
-              <div className="max-h-72 space-y-0.5 overflow-y-auto">
-                {events.map((e) => (
-                  <div
-                    key={e.seq}
-                    onClick={() => { setSelectedSeq(e.seq); setHoveredEvent(e.seq); }}
-                    onMouseEnter={() => setHoveredEvent(e.seq)}
-                    onMouseLeave={() => setHoveredEvent(null)}
-                    className={`flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 hover:bg-felt-deep ${
-                      selectedSeq === e.seq ? 'bg-gold/20 ring-1 ring-gold' : ''
-                    }`}
-                    title={e.detail}
-                  >
-                    <span className="w-14 shrink-0 font-mono text-slate-400">{e.seq}</span>
-                    <span className="w-16 shrink-0 font-mono text-slate-500">{new Date(e.createdAt).toLocaleTimeString()}</span>
-                    <span className="truncate">{e.summary}</span>
-                    {e.actor && <span className="shrink-0 text-slate-500">· {e.actor}</span>}
-                  </div>
-                ))}
-                {events.length === 0 && <p className="py-2 text-center text-slate-500">暂无事件</p>}
-              </div>
-              {(() => {
-                const detailSeq = hoveredEvent ?? selectedSeq;
-                const detail = events.find((e) => e.seq === detailSeq)?.detail;
-                return detail ? <pre className="mt-2 max-h-36 overflow-y-auto whitespace-pre-wrap rounded bg-felt-deep/70 p-2 font-mono text-[0.625rem] leading-relaxed text-slate-300">{detail}</pre> : null;
-              })()}
-              <div className="mt-2 flex items-center gap-2">
-                <span className="font-mono text-gold">{selectedSeq !== null ? `seq ${selectedSeq}` : '未选择'}</span>
-                <button
-                  onClick={() => {
-                    if (selectedSeq === null) return;
-                    void performRevert(selectedSeq);
-                  }}
-                  disabled={selectedSeq === null}
-                  className="rounded bg-gold px-2 py-1 font-semibold text-felt-deep hover:brightness-110 disabled:opacity-40"
-                >
-                  回溯到此
-                </button>
-              </div>
-            </section>
+            <AdminHistory key={state.id} tid={state.id} summary={state} fetchAdmin={adminFetch} revert={performRevert} />
           </div>
           <section className="mt-4 rounded-lg border border-felt-edge bg-felt/60 p-3 text-xs">
             <h3 className="mb-2 font-semibold text-gold">对阵</h3>

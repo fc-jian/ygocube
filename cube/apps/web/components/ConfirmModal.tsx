@@ -2,7 +2,7 @@
 
 import { ReactNode, useEffect, useId, useRef } from 'react';
 
-export function ConfirmModal({ open, title, children, onConfirm, onCancel, confirmText = '确认', cancelText = '取消' }: {
+export function ConfirmModal({ open, title, children, onConfirm, onCancel, busy = false, confirmText = '确认', cancelText = '取消' }: {
   open: boolean;
   title: string;
   children?: ReactNode;
@@ -10,6 +10,7 @@ export function ConfirmModal({ open, title, children, onConfirm, onCancel, confi
   onCancel: () => void;
   confirmText?: string;
   cancelText?: string;
+  busy?: boolean;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const titleId = useId();
@@ -28,8 +29,8 @@ export function ConfirmModal({ open, title, children, onConfirm, onCancel, confi
   return (
     <dialog ref={dialog} aria-labelledby={titleId}
       className="fixed inset-0 m-auto max-h-[90vh] w-[26rem] max-w-[92vw] overflow-y-auto rounded-lg border border-felt-edge bg-felt p-0 text-inherit shadow-2xl backdrop:bg-black/60"
-      onCancel={(event) => { event.preventDefault(); onCancel(); }}
-      onClick={(event) => { if (event.target === event.currentTarget) onCancel(); }}
+      onCancel={(event) => { event.preventDefault(); if (!busy) onCancel(); }}
+      onClick={(event) => { if (!busy && event.target === event.currentTarget) onCancel(); }}
       onKeyDown={(event) => {
         if (event.key !== 'Tab') return;
         const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>(
@@ -43,10 +44,10 @@ export function ConfirmModal({ open, title, children, onConfirm, onCancel, confi
         <h3 id={titleId} className="mb-3 text-lg font-semibold text-gold">{title}</h3>
         {children}
         <div className="mt-5 flex justify-end gap-3">
-          <button type="button" onClick={onCancel} className="rounded px-4 py-1.5 text-slate-300 hover:bg-felt-edge">
+          <button type="button" disabled={busy} onClick={onCancel} className="rounded px-4 py-1.5 text-slate-300 hover:bg-felt-edge">
             {cancelText}
           </button>
-          <button type="button" onClick={onConfirm} className="rounded bg-gold px-4 py-1.5 font-semibold text-felt-deep hover:brightness-110">
+          <button type="button" disabled={busy} onClick={onConfirm} className="rounded bg-gold px-4 py-1.5 font-semibold text-felt-deep hover:brightness-110">
             {confirmText}
           </button>
         </div>
