@@ -1,5 +1,6 @@
 """Isolated regression checks for the standalone Aly application installer."""
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -73,3 +74,26 @@ class ApplicationCandidateTest(unittest.TestCase):
         (candidate / 'web/stale.js').touch()
         with self.assertRaisesRegex(ValueError, 'file set differs'):
             verify('ygocube', candidate, manifest, digest, 'web')
+
+
+@unittest.skipIf(os.name == 'nt', 'Linux release bundle uses POSIX links')
+class PackageLinksTest(unittest.TestCase):
+    def test_bundle_accepts_local_links_and_rejects_source_tree_or_missing_targets(self):
+        module = Path(__file__).with_name('package-app-release.py')
+        spec = importlib.util.spec_from_file_location('app_packager', module)
+        packager = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(packager)
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            bundle = workspace / 'bundle'
+            bundle.mkdir()
+            (workspace / 'source').touch()
+            (bundle / 'installed').touch()
+            link = bundle / 'linked'
+            link.symlink_to('installed')
+            self.assertEqual(packager.inventory(bundle)[1], {'linked': 'installed'})
+            for target in ('../source', 'missing'):
+                link.unlink()
+                link.symlink_to(target)
+                with self.assertRaisesRegex(ValueError, 'Nonportable link'):
+                    packager.inventory(bundle)
