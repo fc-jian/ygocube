@@ -112,14 +112,15 @@ export function CardImage({ code, name, className = '' }: { code: number; name?:
 }
 
 // 悬停触发全局浮动预览；点击卡牌则固定该详情窗口（可滚动/复制），再次点击空白处关闭。
-import { hideCardPreview, moveCardPreview, pinCardPreview, showCardPreview } from './CardPreview';
+import { type CardPreviewSource, hideCardPreview, moveCardPreview, pinCardPreview, showCardPreview } from './CardPreview';
 
-export function CardWithTooltip({ code, card, className = '', pinOnClick = true }: {
+export function CardWithTooltip({ code, card, className = '', pinOnClick = true, source }: {
   code: number;
   card?: CardInfo;
   className?: string;
   // 关闭点击固定详情：父容器自带点击行为（如牌堆选牌确认）时避免弹出双重窗口
   pinOnClick?: boolean;
+  source?: CardPreviewSource;
 }) {
   return (
     <div
@@ -128,13 +129,13 @@ export function CardWithTooltip({ code, card, className = '', pinOnClick = true 
       role={pinOnClick ? 'button' : undefined}
       tabIndex={pinOnClick ? 0 : undefined}
       aria-label={pinOnClick ? `查看${card?.name ?? code}详情` : undefined}
-      onMouseEnter={(e) => card && showCardPreview(card, e)}
+      onMouseEnter={(e) => card && showCardPreview(card, e, source)}
       onMouseMove={(e) => card && moveCardPreview(e)}
-      onClick={(e) => card && pinOnClick && pinCardPreview(card, e)}
+      onClick={(e) => card && pinOnClick && pinCardPreview(card, e, source)}
       onKeyDown={(e) => {
         if (card && pinOnClick && (e.key === 'Enter' || e.key === ' ')) {
           e.preventDefault();
-          pinCardPreview(card, { clientX: window.innerWidth / 2, clientY: window.innerHeight / 2 });
+          pinCardPreview(card, { clientX: window.innerWidth / 2, clientY: window.innerHeight / 2 }, source);
         }
       }}
       onMouseLeave={() => hideCardPreview()}

@@ -1,6 +1,7 @@
 'use client';
 
-import { writeGameValue } from '@/lib/gameStorage';
+import { RecentGameRooms } from '@/components/RecentGameRooms';
+import { rememberGameRoom, writeGameValue } from '@/lib/gameStorage';
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -48,6 +49,7 @@ export function GuessLobby() {
     try {
       const { token, room } = await guessRequest<GuessSession>('/rooms', { body });
       writeGameValue(sessionKey(room.roomId), token);
+      rememberGameRoom('guess', room);
       router.push(`${GUESS_PATH}/${room.roomId}`);
     } catch (err) {
       setCreateError(guessError(err, text));
@@ -69,6 +71,7 @@ export function GuessLobby() {
   return (
     <GuessFrame language={language} changeLanguage={changeLanguage}>
       <header className="guess-room-head"><h1>Guess the Card</h1></header>
+      <RecentGameRooms game="guess" text={text} />
       <div className="guess-columns">
         <section className="guess-panel" aria-labelledby="guess-create-title">
           <h2 id="guess-create-title">{text.create}</h2>

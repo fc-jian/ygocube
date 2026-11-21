@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { CardWithTooltip } from './CardImage';
 import { IdentityWidget, LocalPicsSetting } from './IdentityWidget';
 import { FontSizeSetting } from './FontSizeController';
-import type { DraftStartConfirmation } from '@ygocube/shared';
+import type { DeckIssue, DraftStartConfirmation } from '@ygocube/shared';
 import { CardInfo } from '@/lib/types';
 import { flipIds } from '@/lib/useFlip';
 
@@ -16,6 +16,7 @@ export interface DraftState {
   frozen: boolean;
   config: Record<string, unknown>;
   players: { playerId: string; displayName: string; seat: number; ready?: boolean }[];
+  deckIssues?: DeckIssue[];
   pickedCards: number[];
   cardsRemainingToDraft: number;
   cardsRemainingExact: boolean;
@@ -325,9 +326,10 @@ function dropIndex(container: HTMLElement, x: number, y: number, count: number):
   return count;
 }
 
-export function DeckZone({ title, zone, codes, limit, cardMap, onCardDrop, onCardPick, onCardMove }: {
+export function DeckZone({ title, zone, codes, sourceIndexes, limit, cardMap, onCardDrop, onCardPick, onCardMove }: {
   title: string;
   zone: 'main' | 'extra' | 'side';
+  sourceIndexes?: number[];
   codes: number[];
   limit?: string;
   cardMap?: Record<number, CardInfo>;
@@ -404,13 +406,13 @@ export function DeckZone({ title, zone, codes, limit, cardMap, onCardDrop, onCar
               e.dataTransfer.setData('application/x-card-source', zone);
               e.dataTransfer.setData('application/x-card-source-index', String(i));
             }}
-            className="animate-card-in relative cursor-grab active:cursor-grabbing"
+            className={draggable ? 'animate-card-in relative cursor-grab active:cursor-grabbing' : 'animate-card-in relative'}
           >
             {hoverIdx === i && <span className="absolute inset-y-0 -left-0.5 z-10 w-0.5 rounded bg-gold" />}
             {hoverIdx === codes.length && i === codes.length - 1 && (
               <span className="absolute inset-y-0 -right-0.5 z-10 w-0.5 rounded bg-gold" />
             )}
-            <CardWithTooltip code={c} card={cardMap?.[c]} />
+            <CardWithTooltip code={c} card={cardMap?.[c]} source={{ zone, index: sourceIndexes?.[i] ?? i }} />
           </div>
         ))}
       </div>

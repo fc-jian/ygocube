@@ -1,18 +1,45 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import type { DeckZoneName } from '@ygocube/shared';
+import { workflowText } from './tournament-workflow-text';
 import { CardInfo } from '@/lib/types';
 import { CardImage } from './CardImage';
-import { aliasLine, atkDefLine, linkMarkerLine, raceAttrLine, setNameLine, statLine, typeLabel } from '@/lib/cardInfo';
+import { aliasLine, atkDefLine, isExtraDeckType, linkMarkerLine, raceAttrLine, setNameLine, statLine, typeLabel } from '@/lib/cardInfo';
 
 // 全局浮动卡牌预览（ygopro 风格，position:fixed，不受容器 overflow 裁剪）。
 // hover 显示；点击小窗可固化（可滚动/选择文本/复制），右上角关闭。
-type PreviewState = { card: CardInfo; x: number; y: number } | null;
+export type CardPreviewSource = { zone: DeckZoneName | 'pool'; index: number };
+type PreviewState = { source?: CardPreviewSource; card: CardInfo; x: number; y: number } | null;
 type PreviewAction = { label: string; run: () => void; secondary?: { label: string; run: () => void } } | null;
 let setPreviewState: React.Dispatch<React.SetStateAction<PreviewState>> | null = null;
-let previewAction: ((card: CardInfo) => PreviewAction) | null = null;
+let previewAction: ((card: CardInfo, source?: CardPreviewSource) => PreviewAction) | null = null;
 let pinnedRef = false;
 let dragging = false;
+
+export function deckPreviewAction(
+  card: CardInfo,
+  source: CardPreviewSource | undefined,
+  deck: Record<DeckZoneName, number[]>,
+  move: (card: number, from: string, to: string, index?: number, fromIndex?: number) => void,
+  unused?: readonly number[],
+): PreviewAction {
+  if (!source) return null;
+  const { zone, index } = source;
+  const cards = zone === 'pool' ? unused : deck[zone];
+  if (cards?.[index] !== card.code) return null;
+  const text = workflowText.zh;
+  const home = isExtraDeckType(card.type) ? 'extra' : 'main';
+  const destination = zone === 'side' || zone === 'pool' ? home : 'side';
+  const send = (to: DeckZoneName | 'pool') => move(card.code, zone, to, undefined, zone === 'pool' ? undefined : index);
+  return {
+    label: (zone === 'pool' ? text.returnTo : text.moveTo)(text.zones[destination]),
+    run: () => send(destination),
+    secondary: unused && (zone === 'pool'
+      ? { label: text.returnTo(text.zones.side), run: () => send('side') }
+      : { label: text.removeFromDeck, run: () => send('pool') }),
+  };
+}
 
 function supportsFineHover(): boolean {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return true;
@@ -20,18 +47,20 @@ function supportsFineHover(): boolean {
 }
 
 // 页面注册预览操作（如"移动到副卡组/主卡组"）
-export function setCardPreviewAction(getAction: ((card: CardInfo) => PreviewAction) | null): void {
+export function setCardPreviewAction(getAction: ((card: CardInfo, source?: CardPreviewSource) => PreviewAction) | null): void {
   previewAction = getAction;
+  if (pinnedRef) setPreviewState?.((current) => current && { ...current });
 }
 
-export function showCardPreview(card: CardInfo, e: { clientX: number; clientY: number }): void {
+export function showCardPreview(card: CardInfo, e: { clientX: number; clientY: number }, source?: CardPreviewSource): void {
   if (dragging || pinnedRef || !supportsFineHover()) return; // 触摸设备使用点击固定详情，不显示跟手 hover 窗口
-  setPreviewState?.({ card, x: e.clientX, y: e.clientY });
+  setPreviewState?.({ card, source, x: e.clientX, y: e.clientY });
 }
 
 // 点击卡牌：直接固定详情窗口
-export function pinCardPreview(card: CardInfo, e: { clientX: number; clientY: number }): void {
-  setPreviewState?.({ card, x: e.clientX, y: e.clientY });
+export function pinCardPreview(card: CardInfo, e: { clientX: number; clientY: number }, source?: CardPreviewSource): void {
+  setPreviewState?.({ card, source, x: e.clientX, y: e.clientY });
+  pinnedRef = true;
   setPinnedState?.(true);
 }
 
@@ -83,6 +112,7 @@ export function CardMeta({ card, compact = false, showPickStats = true }: { card
 export function CardPreviewHost() {
   const [preview, setPreview] = useState<PreviewState>(null);
   const [pinned, setPinned] = useState(false);
+  const dialog = useRef<HTMLDialogElement>(null);
 
   useEffect(() => {
     const startDrag = () => {
@@ -110,29 +140,13 @@ export function CardPreviewHost() {
 
   useEffect(() => {
     pinnedRef = pinned;
-  }, [pinned]);
-
-  // 固定后不再跟随鼠标；点击其他地方取消固定
-  useEffect(() => {
-    if (!pinned) return;
-    const onDown = (e: MouseEvent) => {
-      const el = e.target as HTMLElement;
-      if (!el.closest('[data-card-preview]')) {
-        setPinned(false);
-        setPreview(null);
-      }
-    };
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setPinned(false);
-        setPreview(null);
-      }
-    };
-    window.addEventListener('mousedown', onDown);
-    window.addEventListener('keydown', onKeyDown);
+    const element = dialog.current;
+    if (!pinned || !element) return;
+    const trigger = document.activeElement;
+    element.showModal();
     return () => {
-      window.removeEventListener('mousedown', onDown);
-      window.removeEventListener('keydown', onKeyDown);
+      element.close();
+      if (trigger instanceof HTMLElement && trigger.isConnected) trigger.focus({ preventScroll: true });
     };
   }, [pinned]);
 
@@ -141,28 +155,15 @@ export function CardPreviewHost() {
   if (pinned) {
     // 固定模式：居中的模态窗口，点击外部任意处关闭
     return (
-      <div
-        className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/60"
-        onClick={() => {
-          setPinned(false);
-          setPreview(null);
-        }}
-      >
-        <div
-          data-card-preview
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="card-preview-title"
-          className="relative mx-2 max-h-[min(90dvh,90vh)] w-[min(420px,calc(100vw-1rem))] max-w-[92vw] overflow-y-auto rounded-lg border border-gold/50 bg-felt-deep p-3 shadow-2xl select-text sm:mx-4 sm:p-4"
-          onClick={(e) => e.stopPropagation()}
-        >
+      <dialog ref={dialog} data-card-preview aria-labelledby="card-preview-title"
+        className="fixed inset-0 m-auto max-h-[min(90dvh,90vh)] w-[min(420px,calc(100vw-1rem))] max-w-[92vw] overflow-y-auto rounded-lg border border-gold/50 bg-felt-deep p-0 text-inherit shadow-2xl backdrop:bg-black/60"
+        onCancel={(event) => { event.preventDefault(); closeCardPreview(); }}
+        onClick={(event) => { if (event.target === event.currentTarget) closeCardPreview(); }}>
+        <div className="relative select-text p-3 sm:p-4">
           <button
             type="button"
             aria-label="关闭卡牌详情"
-            onClick={() => {
-              setPinned(false);
-              setPreview(null);
-            }}
+            onClick={closeCardPreview}
             className="absolute right-2 top-2 z-10 flex h-8 w-8 items-center justify-center rounded-full bg-black/60 text-lg text-slate-200 hover:bg-black/80 focus:outline-none focus:ring-2 focus:ring-gold"
           >
             ×
@@ -179,7 +180,7 @@ export function CardPreviewHost() {
             <p className="mt-3 max-h-56 overflow-y-auto whitespace-pre-line text-sm leading-relaxed text-slate-200">{card.desc}</p>
           )}
           {previewAction && (() => {
-            const a = previewAction(card);
+            const a = previewAction(card, preview.source);
             return a ? (
               <div className="mt-3 flex flex-wrap gap-2">
                 <button
@@ -218,7 +219,7 @@ export function CardPreviewHost() {
             ) : null;
           })()}
         </div>
-      </div>
+      </dialog>
     );
   }
   const viewportWidth = window.innerWidth;

@@ -1,6 +1,6 @@
 'use client';
 
-import { useLayoutEffect, useRef } from 'react';
+import { useCallback, useLayoutEffect, useRef } from 'react';
 
 // Dependency-free FLIP animation helper.
 // Call snapshot() right before a mutation that will re-render the container;
@@ -11,7 +11,7 @@ export function useFlip<T extends HTMLElement = HTMLDivElement>() {
   const ref = useRef<T | null>(null);
   const pending = useRef<Map<string, { left: number; top: number }> | null>(null);
 
-  const snapshot = () => {
+  const snapshot = useCallback(() => {
     const root = ref.current;
     if (!root) return;
     const map = new Map<string, { left: number; top: number }>();
@@ -20,7 +20,7 @@ export function useFlip<T extends HTMLElement = HTMLDivElement>() {
       map.set(el.getAttribute('data-flip-id')!, { left: r.left, top: r.top });
     });
     pending.current = map;
-  };
+  }, []);
 
   useLayoutEffect(() => {
     const root = ref.current;

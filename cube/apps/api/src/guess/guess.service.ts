@@ -54,6 +54,8 @@ interface Round {
 }
 
 interface Room {
+  hostId?: string;
+  admissionLocked?: boolean;
   roomId: string;
   name: string;
   poolId: number;
@@ -97,6 +99,11 @@ function newPlayer(playerId: string) {
 
 function activePlayers(room: Room): Player[] {
   return room.players.filter((player) => !player.departed);
+}
+
+function host(room: Room): Player | undefined {
+  return room.players.find((p) => !p.departed && p.playerId === room.hostId)
+    ?? room.players.find((p) => !p.departed);
 }
 
 function summary(room: Room): GuessRoomSummary {
@@ -243,6 +250,7 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
   list(): GuessRoomSummary[] {
     const rows = getDb().prepare(`
       SELECT state_json FROM guess_rooms WHERE phase = 'lobby' AND updated_at > ?
+        AND coalesce(json_extract(state_json, '$.admissionLocked'), 0) = 0
         AND json_array_length(state_json, '$.players') < json_extract(state_json, '$.poolCount')
       ORDER BY updated_at DESC, room_id LIMIT 50
     `).all(inactivityCutoff()) as RoomRow[];
@@ -282,6 +290,7 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
     return getDb().transaction(() => {
       const room = this.load(roomId);
       this.requireJoinable(room);
+      if (room.admissionLocked) throw new ConflictException({ code: 'GUESS_ADMISSION_LOCKED' });
       if (room.players.some((player) => player.playerId.toLowerCase() === playerId.toLowerCase())) {
         throw new ConflictException({ code: 'GUESS_PLAYER_EXISTS' });
       }
@@ -333,15 +342,21 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
         writeRoom(room, { action: 'leave', playerId });
         return null;
       }
-      if (command.action === 'remove' || command.action === 'start' || command.action === 'next' || command.action === 'finish') {
-        if (activePlayers(room)[0] !== player) throw new ForbiddenException({ code: 'GUESS_HOST_REQUIRED' });
-        if (command.action === 'remove') {
+      if (command.action === 'set-admission' || command.action === 'transfer-host' || command.action === 'remove'
+        || command.action === 'start' || command.action === 'next' || command.action === 'finish') {
+        if (host(room) !== player) throw new ForbiddenException({ code: 'GUESS_HOST_REQUIRED' });
+        if (command.action === 'set-admission') {
+          this.requireJoinable(room);
+          room.admissionLocked = command.locked;
+          writeRoom(room, { action: command.action, playerId, locked: command.locked });
+        } else if (command.action === 'remove' || command.action === 'transfer-host') {
           this.requireJoinable(room);
           const target = activePlayers(room).find((member) => member.playerId === command.playerId);
           if (!target) throw new NotFoundException({ code: 'GUESS_PLAYER_NOT_IN_ROOM' });
-          if (target === player) throw new BadRequestException({ code: 'GUESS_REMOVE_SELF' });
-          this.depart(room, target);
-          writeRoom(room, { action: 'remove', playerId, targetPlayerId: target.playerId });
+          if (target === player) throw new BadRequestException({ code: command.action === 'remove' ? 'GUESS_REMOVE_SELF' : 'BAD_PAYLOAD' });
+          if (command.action === 'transfer-host') room.hostId = target.playerId;
+          else this.depart(room, target);
+          writeRoom(room, { action: command.action, playerId, targetPlayerId: target.playerId });
         } else if (command.action === 'finish') {
           this.requirePhase(room, 'between_rounds');
           room.phase = 'finished';
@@ -385,6 +400,7 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
   }
 
   private depart(room: Room, player: Player): void {
+    if (room.hostId === player.playerId) delete room.hostId;
     if (room.phase === 'lobby') {
       room.players = room.players.filter((member) => member !== player);
     } else {
@@ -510,7 +526,7 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
     if (room.phase !== 'playing' || !round) throw new ConflictException({ code: 'GUESS_WRONG_PHASE' });
     const hostSkip = command.action === 'host-skip';
     if (hostSkip) {
-      if (activePlayers(room)[0] !== player) throw new ForbiddenException({ code: 'GUESS_HOST_REQUIRED' });
+      if (host(room) !== player) throw new ForbiddenException({ code: 'GUESS_HOST_REQUIRED' });
     } else if (round.currentPlayerId !== player.playerId) {
       throw new ConflictException({ code: 'GUESS_NOT_YOUR_TURN' });
     }
@@ -607,7 +623,8 @@ export class GuessService implements OnModuleInit, OnModuleDestroy {
       finishReason: room.finishReason ?? null,
       round: round?.number ?? 0,
       poolCount: room.poolCount,
-      hostId: activePlayers(room)[0]?.playerId ?? null,
+      admissionLocked: room.admissionLocked === true,
+      hostId: host(room)?.playerId ?? null,
       currentPlayerId: round?.currentPlayerId ?? null,
       currentGuess: currentGuess ? cardRef(currentGuess) : null,
       players,

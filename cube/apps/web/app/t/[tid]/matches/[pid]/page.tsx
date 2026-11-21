@@ -6,6 +6,7 @@ import { useParams } from 'next/navigation';
 import { api, apiDownload, decodePathSegment, encodePathSegment, Identity, readableApiError, resolvePlayerIdentity } from '@/lib/api';
 import { useTournamentFallbackPolling, useTournamentStream } from '@/lib/sse';
 import { DraftState } from '@/components/TopBar';
+import { PlayerDraftReview } from '@/components/PlayerDraftReview';
 import { TokenPrompt } from '@/components/TokenPrompt';
 import { useCoalescedRefresh } from '@/lib/useCoalescedRefresh';
 import { usePlayerLogout } from '@/lib/usePlayerLogout';
@@ -173,6 +174,7 @@ function MatchesSession({ tid, pid }: { tid: string; pid: string }) {
           </a>
         </div>
       </div>
+      {info.status === 'finished' && identity && <PlayerDraftReview key={identity.token} identity={identity} />}
       <div className="overflow-x-auto rounded-lg border border-felt-edge">
         <table className="w-full min-w-[34rem] text-sm">
         <thead className="bg-felt text-left text-xs text-slate-400">

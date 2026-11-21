@@ -9,9 +9,10 @@ import { useConfirmationSeconds } from '@/lib/useConfirmationSeconds';
 import { TopBar, DeckZone, DraftState, useNowTick } from '@/components/TopBar';
 import { PackZone } from '@/components/PackZone';
 import { EdisonDraftRules } from '@/components/EdisonDraftRules';
+import { PlayerDraftReview } from '@/components/PlayerDraftReview';
 import { TokenPrompt } from '@/components/TokenPrompt';
 import { CardSearchAll } from '@/components/CardSearchAll';
-import { closeCardPreview, setCardPreviewAction } from '@/components/CardPreview';
+import { closeCardPreview, deckPreviewAction, setCardPreviewAction } from '@/components/CardPreview';
 import { PoolPreview } from '@/components/PoolPreview';
 import { CardInfo } from '@/lib/types';
 import { matchesCardQuery, PickSortMode, safeCardCodes, sortCardSearchResults } from '@/lib/cardInfo';
@@ -335,7 +336,7 @@ function DraftSession({ tid, pid }: { tid: string; pid: string }) {
     }
   };
 
-  const move = async (code: number, from: string, to: string, index?: number, fromIndex?: number) => {
+  const move = useCallback(async (code: number, from: string, to: string, index?: number, fromIndex?: number) => {
     // Actions invoked from the fixed card-detail window must close it
     // immediately, including failed requests, so it cannot obscure the updated
     // deck or invite duplicate clicks.
@@ -347,7 +348,7 @@ function DraftSession({ tid, pid }: { tid: string; pid: string }) {
     } catch (e: any) {
       setError(e.code === 'WRONG_ZONE' ? '该类型卡不能放入此区域' : readableApiError(e));
     }
-  };
+  }, [identity, tidPath, load]);
 
   const sortDeck = async () => {
     try {
@@ -360,26 +361,12 @@ function DraftSession({ tid, pid }: { tid: string; pid: string }) {
   };
 
   useEffect(() => {
-    if (!state || !identity) return;
-    setCardPreviewAction((card) => {
-      const inSide = state.deck?.side?.includes(card.code);
-      const inMain = state.deck?.main?.includes(card.code);
-      const inExtra = state.deck?.extra?.includes(card.code);
-      if (inSide) {
-        // Extra-deck cards placed in side must be returned to extra, not main.
-        // The previous action always targeted main, so clicking a side Fusion/
-        // Synchro/XYZ/Link card never offered the valid extra-destination action.
-        const destination = (card.type & 0x4802040) !== 0 ? 'extra' : 'main';
-        return {
-          label: destination === 'extra' ? '移动到额外卡组' : '移动到主卡组',
-          run: () => void move(card.code, 'side', destination),
-        };
-      }
-      if (inMain || inExtra) return { label: '移动到副卡组', run: () => void move(card.code, inExtra ? 'extra' : 'main', 'side') };
-      return null;
-    });
+    if (!identity || !state?.deck || state.frozen || state.deck.lockedAt
+      || (state.status !== 'drafting' && state.status !== 'deckbuilding')) return;
+    setCardPreviewAction((card, source) => deckPreviewAction(card, source, state.deck, move));
     return () => setCardPreviewAction(null);
-  }, [state, identity, tidPath, move]);
+  }, [identity, state, move]);
+  useEffect(() => () => closeCardPreview(), [tid, pid]);
 
   if (needToken) return <TokenPrompt tid={tid} pid={pid} onToken={(t) => { setNeedToken(false); setIdentity({ tid, pid, token: t }); }} />;
   if (notJoined)
@@ -398,21 +385,16 @@ function DraftSession({ tid, pid }: { tid: string; pid: string }) {
   const configuredPoolId = Number(state.config.cardPoolId);
   const poolId = Number.isSafeInteger(configuredPoolId) ? configuredPoolId : undefined;
   const q = cardFilter.trim().toLowerCase();
-  const filterCodes = (codes: number[]) =>
-    !q ? codes : codes.filter((c) => matchesCardQuery(cardMap[c], q));
-  const actualIndex = (codes: number[], visibleIndex: number | undefined): number | undefined => {
-    if (visibleIndex === undefined || !q) return visibleIndex;
-    let visible = 0;
-    for (let i = 0; i < codes.length; i++) {
-      if (filterCodes([codes[i]]).length === 0) continue;
-      if (visible++ === visibleIndex) return i;
-    }
-    return codes.length;
+  const visibleIndexes = (codes: number[]) => codes.flatMap((code, i) =>
+    matchesCardQuery(cardMap[code], q) ? [i] : []);
+  const visible = q ? { main: visibleIndexes(deck.main), extra: visibleIndexes(deck.extra), side: visibleIndexes(deck.side) } : null;
+  const actualIndex = (zone: string, index?: number) => {
+    if (index === undefined || !(zone === 'main' || zone === 'extra' || zone === 'side')) return undefined;
+    return visible ? visible[zone][index] ?? deck[zone].length : index;
   };
   const moveVisible = (code: number, from: string, to: string, index?: number, fromIndex?: number) => {
-    const zones: Record<string, number[]> = { main: deck.main, extra: deck.extra, side: deck.side };
-    const actualFrom = from === 'pool' ? undefined : actualIndex(zones[from] ?? [], fromIndex);
-    const actualTo = to === 'pool' ? undefined : actualIndex(zones[to] ?? [], index);
+    const actualFrom = actualIndex(from, fromIndex);
+    const actualTo = actualIndex(to, index);
     void move(code, from, to, actualTo, actualFrom);
   };
 
@@ -470,9 +452,9 @@ function DraftSession({ tid, pid }: { tid: string; pid: string }) {
                 整理卡组
               </button>
             </div>
-            <DeckZone title="主卡组" zone="main" codes={filterCodes(deck.main)} limit={`${state.config.mainMin}-${state.config.mainMax}`} cardMap={cardMap} onCardPick={pick} onCardMove={moveVisible} />
-            <DeckZone title="额外卡组" zone="extra" codes={filterCodes(deck.extra)} limit={String(state.config.extraMax)} cardMap={cardMap} onCardPick={pick} onCardMove={moveVisible} />
-            <DeckZone title="副卡组" zone="side" codes={filterCodes(deck.side)} limit={String(state.config.sideMax)} cardMap={cardMap} onCardPick={pick} onCardMove={moveVisible} />
+            <DeckZone title="主卡组" zone="main" codes={visible?.main.map(i => deck.main[i]) ?? deck.main} sourceIndexes={visible?.main} limit={`${state.config.mainMin}-${state.config.mainMax}`} cardMap={cardMap} onCardPick={pick} onCardMove={moveVisible} />
+            <DeckZone title="额外卡组" zone="extra" codes={visible?.extra.map(i => deck.extra[i]) ?? deck.extra} sourceIndexes={visible?.extra} limit={String(state.config.extraMax)} cardMap={cardMap} onCardPick={pick} onCardMove={moveVisible} />
+            <DeckZone title="副卡组" zone="side" codes={visible?.side.map(i => deck.side[i]) ?? deck.side} sourceIndexes={visible?.side} limit={String(state.config.sideMax)} cardMap={cardMap} onCardPick={pick} onCardMove={moveVisible} />
             <CardSearchAll tid={tid} identity={identity} />
           </div>
           <div className="order-first min-h-0 md:order-none md:flex-1">
@@ -508,6 +490,9 @@ function DraftSession({ tid, pid }: { tid: string; pid: string }) {
           poolId={poolId}
         />
       )}
+      {state.status === 'finished' && identity && <div className="mx-auto w-full max-w-3xl p-3">
+        <PlayerDraftReview key={identity.token} identity={identity} />
+      </div>}
       {state.status === 'deckbuilding' && (
         <div className="flex flex-1 flex-col items-center justify-center gap-4">
           <p className="text-lg text-slate-200">选牌完成，开始构筑卡组吧！</p>

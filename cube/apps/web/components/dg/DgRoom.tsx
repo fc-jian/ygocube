@@ -1,6 +1,6 @@
 'use client';
 
-import { readGameValue, writeGameValue } from '@/lib/gameStorage';
+import { forgetGameRoom, readGameValue, rememberGameRoom, writeGameValue } from '@/lib/gameStorage';
 
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
@@ -34,7 +34,7 @@ export function DgRoom({ roomId }: { roomId: string }) {
     <GuessFrame language={language} changeLanguage={changeLanguage} lobby={{ href: DG_PATH, label: text.lobby }}>
       {token === null && seatEnded && <p className="guess-muted" role="status">{text.seatEnded}</p>}
       {token === undefined ? <p className="guess-muted">{text.loading}</p>
-        : <DgRoomSession key={token === null ? 'spectator' : 'player'} roomId={roomId} token={token}
+        : <DgRoomSession key={token ?? 'spectator'} roomId={roomId} token={token}
             updateToken={updateToken} language={language} />}
     </GuessFrame>
   );
@@ -70,11 +70,25 @@ function DgRoomSession({ roomId, token, updateToken, language }: {
       if (!signal.aborted) accept(room);
     } catch (error) {
       if (signal.aborted) return;
-      if (token && error instanceof ApiError && error.status === 401) updateToken(null, true);
-      else setLoadError(error);
+      if (token && error instanceof ApiError && error.status === 401) {
+        const current = readGameValue(dgSessionKey(roomId));
+        if (current && current !== token) updateToken(current);
+        else updateToken(null, true);
+      } else {
+        if (error instanceof ApiError && error.status === 404) {
+          forgetGameRoom('dg', roomId);
+          if (token) updateToken(null);
+        }
+        setLoadError(error);
+      }
     }
-  }, [accept, path, token, updateToken]);
+  }, [accept, path, roomId, token, updateToken]);
   const room = snapshot?.room;
+  const roomName = room?.name;
+  const viewer = room?.viewerId;
+  useEffect(() => {
+    if (viewer && roomName) rememberGameRoom('dg', { roomId, name: roomName });
+  }, [roomId, viewer, roomName]);
   const missing = loadError instanceof ApiError && loadError.status === 404;
   useGuessPolling(missing || room?.phase === 'finished' ? null : refresh, room?.phase === 'lobby' ? 1500 : 800);
 
@@ -85,6 +99,7 @@ function DgRoomSession({ roomId, token, updateToken, language }: {
     setBusy(true);
     try {
       const session = await dgRequest<DgSession>(`${path}/join`, { body: { playerId } });
+      rememberGameRoom('dg', session.room);
       updateToken(session.token);
     } catch (error) {
       setActionError(error);
@@ -101,6 +116,7 @@ function DgRoomSession({ roomId, token, updateToken, language }: {
       const result = await dgRequest<DgRoomView | null>(`${path}/action`, { token, body: command });
       if (result) accept(result);
       else {
+        forgetGameRoom('dg', roomId);
         updateToken(null);
         router.push(DG_PATH);
       }
@@ -153,7 +169,7 @@ function DgRoomSession({ roomId, token, updateToken, language }: {
       {error != null && <p className="guess-error mb-3" role="alert">{dgError(error, text, shared)}</p>}
       {room.phase === 'lobby' && <section className="guess-panel guess-waiting">
         <h2>{shared.waiting} <span className="guess-pill">{room.playerCount}/{room.maxPlayers}</span></h2>
-        <RoomRoster room={room} players={room.players} text={shared} viewerId={room.viewerId} busy={busy} onRemove={run} />
+        <RoomRoster room={room} players={room.players} text={shared} viewerId={room.viewerId} busy={busy} onManage={run} />
         {token ? <>
           <p className="guess-muted">{room.playerCount < 2 ? text.waitForPlayers
             : isHost ? (isRelay ? text.relay.intro : text.intro) : text.waitForHost}</p>
@@ -163,13 +179,18 @@ function DgRoomSession({ roomId, token, updateToken, language }: {
             <button type="button" className="guess-secondary" disabled={busy}
               onClick={() => void run({ action: 'leave' })}>{shared.leave}</button>
           </div>
-        </> : room.playerCount < room.maxPlayers ? (
+        </> : room.admissionLocked ? null : room.playerCount < room.maxPlayers ? (
           <form className="guess-fields" onSubmit={join}>
             <label>{shared.playerId}<input className="guess-input" name="playerId" required maxLength={24} /></label>
             <button className="guess-primary" type="submit" disabled={busy}>{shared.join}</button>
           </form>
         ) : <p className="guess-muted">{text.fullRoom}</p>}
       </section>}
+      {isHost && (room.phase === 'reveal' || room.phase === 'relay_reveal') &&
+        <details className="guess-panel mb-3">
+          <summary className="cursor-pointer">{shared.manageRoom}</summary>
+          <RoomRoster room={room} players={room.players} text={shared} viewerId={room.viewerId} busy={busy} onManage={run} />
+        </details>}
       {room.turn && <DgTurn room={room} turn={room.turn} receivedAt={snapshot.receivedAt}
         token={token} language={language} busy={busy} run={run} />}
       {room.relay && <DgRelay room={room} receivedAt={snapshot.receivedAt} token={token} language={language} busy={busy} run={run} />}

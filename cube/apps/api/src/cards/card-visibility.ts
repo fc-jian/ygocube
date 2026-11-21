@@ -9,13 +9,18 @@ import type { CardVisibilityStatus } from '@ygocube/shared';
 export function remainingCardsForPack(state: TournamentState, packIndex: number): number[] {
   const pack = state.packs.find((candidate) => candidate.index === packIndex);
   if (!pack) return [];
-  const remaining = [...pack.order];
-  for (const pick of state.picks) {
-    if (pick.packIndex !== packIndex) continue;
-    const index = remaining.indexOf(pick.card);
-    if (index >= 0) remaining.splice(index, 1);
-  }
-  return remaining;
+  return remainingPackOrder(pack.order, state.picks.filter((p) => p.packIndex === packIndex));
+}
+
+export function remainingPackOrder(order: readonly number[], picks: readonly { card: number }[]): number[] {
+  const counts = new Map<number, number>();
+  for (const { card } of picks) counts.set(card, (counts.get(card) ?? 0) + 1);
+  return order.filter((code) => {
+    const count = counts.get(code) ?? 0;
+    if (!count) return true;
+    counts.set(code, count - 1);
+    return false;
+  });
 }
 
 function removeOne(cards: number[], code: number): void {

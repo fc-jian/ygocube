@@ -1,6 +1,7 @@
 'use client';
 
-import { writeGameValue } from '@/lib/gameStorage';
+import { RecentGameRooms } from '@/components/RecentGameRooms';
+import { rememberGameRoom, writeGameValue } from '@/lib/gameStorage';
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -58,6 +59,7 @@ export function DgLobby() {
     try {
       const { token, room } = await dgRequest<DgSession>('/rooms', { body });
       writeGameValue(dgSessionKey(room.roomId), token);
+      rememberGameRoom('dg', room);
       router.push(`${DG_PATH}/${room.roomId}`);
     } catch (error) {
       setCreateError(error);
@@ -76,6 +78,7 @@ export function DgLobby() {
     <GuessFrame language={language} changeLanguage={changeLanguage} lobby={{ href: DG_PATH, label: shared.lobby }}>
       <header className="guess-room-head"><h1>Draw &amp; Guess</h1></header>
       <p className="guess-muted">{isRelay ? text.relay.intro : text.intro}</p>
+      <RecentGameRooms game="dg" text={shared} />
       <div className="guess-columns">
         <section className="guess-panel" aria-labelledby="dg-create-title">
           <h2 id="dg-create-title">{shared.create}</h2>

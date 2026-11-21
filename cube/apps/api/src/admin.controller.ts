@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, GoneException, Param, Post, Put, Query, Req } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, GoneException, Param, Post, Put, Query, Req } from '@nestjs/common';
 import { Access, AuthedRequest, Identity, normalizeCreateUsername, sha256 } from './auth/auth.guard';
 import { TournamentsService } from './tournaments/tournaments.service';
 import { DraftService } from './draft/draft.service';
@@ -186,8 +186,11 @@ export class AdminController {
     }
     if (status === 'matches') {
       const invalid = this.decks.validationReport(tid);
-      if (invalid.length > 0 && body.confirm_invalid_decks !== true) {
-        return { ok: false, requires_confirmation: true, invalid_decks: invalid };
+      if (invalid.length > 0) {
+        const previewKey = sha256(JSON.stringify([tid, current.status, invalid]));
+        if (body.confirm_invalid_decks !== true || (body.preview_key !== undefined && body.preview_key !== previewKey)) {
+          return { ok: false, requires_confirmation: true, invalid_decks: invalid, preview_key: previewKey };
+        }
       }
       const repairs = withEventTransaction(tid, () => {
         const result = loadState(tid).players
@@ -437,8 +440,21 @@ export class AdminController {
   }
 
   @Post('t/:tid/state')
-  state(@Req() req: AuthedRequest) {
-    return this.tournaments.adminState(Number(req.params.tid));
+  state(@Req() req: AuthedRequest, @Body() body?: { view?: string }) {
+    const tid = Number(req.params.tid);
+    if (body?.view === 'summary') return this.tournaments.adminSummary(tid);
+    if (body?.view !== undefined && body.view !== 'full') throw new Error('BAD_PAYLOAD');
+    return this.tournaments.adminState(tid);
+  }
+
+  @Get('t/:tid/draft-history')
+  draftHistory(@Req() req: AuthedRequest, @Query('pack') pack?: string, @Query('player') player?: string) {
+    const tid = Number(req.params.tid);
+    if (pack !== undefined && player === undefined && typeof pack === 'string' && /^\d+$/.test(pack) && Number.isSafeInteger(Number(pack))) {
+      return this.tournaments.adminDraftHistory(tid, { pack: Number(pack) });
+    }
+    if (pack === undefined && typeof player === 'string' && player.length > 0) return this.tournaments.adminDraftHistory(tid, { player });
+    throw new BadRequestException({ code: 'BAD_PAYLOAD' });
   }
 
   // ---------- card pools (scoped read, super-admin mutations, dev_docs/07 §5.2) ----------

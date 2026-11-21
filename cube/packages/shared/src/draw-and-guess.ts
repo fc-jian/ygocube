@@ -1,4 +1,4 @@
-import type { CardInfo, GuessCardRef, GuessOpeningHint, GuessRoomSummary, RemoveRoomPlayerRequest } from './index';
+import type { CardInfo, GuessCardRef, GuessOpeningHint, GuessRoomSummary, RoomManagementRequest } from './index';
 
 export const DG_DEFAULT_SECONDS = 120;
 export const DG_DEFAULT_ROUND_SECONDS = 180;
@@ -79,7 +79,7 @@ export function applyDgDrawingPatch(drawing: DgDrawing, patch: DgDrawingPatch): 
 export type DgActionRequest =
   | { action: 'start' }
   | { action: 'leave' }
-  | RemoveRoomPlayerRequest
+  | RoomManagementRequest
   | { action: 'guess'; turn: number; code: number }
   | { action: 'next' | 'finish'; turn: number }
   | ({ action: 'relay-submit'; round: number; step: number } & (
@@ -149,6 +149,7 @@ export interface DgRelayChainView {
 }
 
 export interface DgRoomView extends DgRoomSummary {
+  admissionLocked: boolean;
   version: number;
   phase: 'lobby' | 'drawing' | 'guessing' | 'reveal' | 'relay' | 'relay_reveal' | 'finished';
   settings: DgSettings;

@@ -1,11 +1,13 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
-import { EDISON_E3_MAX_PLAYERS, EDISON_E3_ROUNDS, type PoolDraftFormat } from '@ygocube/shared';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { EDISON_E3_MAX_PLAYERS, EDISON_E3_ROUNDS, type AdminDraftHistory, type AdminDraftSummary, type ConflictingMatchTable, type PoolDraftFormat } from '@ygocube/shared';
+import { conflictingMatchRows } from '../matches/table-conflicts';
 import { getDb } from '../db';
 import { config, defaults } from '../config';
-import { logEvent, loadState, persistMeta, getConfig, snapshotNow, TournamentState, withEventTransaction } from '../events/events.service';
+import { draftPlayers, logEvent, loadState, persistMeta, getConfig, snapshotNow, TournamentState, withEventTransaction } from '../events/events.service';
 import crypto from 'crypto';
 import { sha256 } from '../auth/auth.guard';
 import { normalizePoolName, PoolsService } from '../pools/pools.service';
+import { remainingCardsForPack } from '../cards/card-visibility';
 import { requiresEdisonPair } from '../draft/edison-draft';
 import {
   CreateTournamentInput,
@@ -14,6 +16,14 @@ import {
 } from './tournament-config';
 
 export type { CreateTournamentInput, DropMode } from './tournament-config';
+
+function canResumeDraft(state: TournamentState): boolean {
+  if (state.status !== 'deckbuilding') return false;
+  if (Object.keys(state.packQueues ?? {}).length) {
+    return state.packsDealt < state.packs.length || Object.values(state.packQueues).some(queue => queue.length > 0);
+  }
+  return !!state.pickCursor && remainingCardsForPack(state, state.pickCursor.packIndex).length > 0;
+}
 
 function applyPoolFormat(cfg: Record<string, any>, format?: PoolDraftFormat): void {
   if (format !== 'edison_e3') {
@@ -389,6 +399,7 @@ export class TournamentsService {
     if (state.matches.length > 0) throw new Error('FORMAT_LOCKED');
     const player = state.players.find((p) => p.playerId === playerId);
     if (!player) throw new Error('PLAYER_NOT_FOUND');
+    if (state.draftParticipants && !state.draftParticipants.includes(playerId)) throw new Error('WRONG_PHASE');
     getDb().prepare('UPDATE tournament_players SET withdrawn=0 WHERE tournament_id=? AND player_id=?').run(tid, playerId);
     logEvent(tid, 'player', 'player_restore', { playerId }, actor);
     persistMeta(tid);
@@ -428,18 +439,8 @@ export class TournamentsService {
       }
     }
     if (status === 'drafting' && state.status === 'deckbuilding') {
-      // 回退：清掉构筑时限，恢复选牌（serial 光标保留在最后牌堆开头；passing 队列/ deadline 原样保留，
-      // 定时器由 admin 阶段端点的 resumePickTimer 重新武装，过期 deadline 会恢复为完整时长）
-      const s = loadState(tid);
-      const deadlineAt = null;
-      logEvent(tid, 'tournament', 'phase', { status: 'drafting', round: s.round, deadlineAt }, actor);
-      const passing = Object.keys(s.packQueues ?? {}).length > 0;
-      if (!passing && !s.pickCursor && s.packs.length) {
-        // 极端情况：选牌全部完成后回退 —— 从第一堆重新开始（没有未选完的堆）
-        const first = s.packs[0];
-        const playerId = s.players.slice().sort((a, b) => a.seat - b.seat)[0].playerId;
-        logEvent(tid, 'draft', 'cursor', { packIndex: 0, round: 0, playerId, deadlineAt: new Date(Date.now() + getConfig(s).pickSeconds * 1000).toISOString() }, actor);
-      }
+      if (!canResumeDraft(state)) throw new Error('DRAFT_COMPLETE');
+      logEvent(tid, 'tournament', 'phase', { status: 'drafting', round: state.round, deadlineAt: null }, actor);
       persistMeta(tid);
       return;
     }
@@ -563,36 +564,23 @@ export class TournamentsService {
       .all() as { id: number; name: string; status: string; createdBy: string }[];
   }
 
-  stateForPlayer(tid: number, playerId: string) {
-    const state = loadState(tid);
+  stateForPlayer(tid: number, playerId: string, state = loadState(tid)) {
     // 未加入比赛的玩家 URL 应失效（前端据此跳回报名页）
     if (!state.players.some((pl) => pl.playerId === playerId)) throw new Error('PLAYER_NOT_FOUND');
     const cfg = getConfig(state);
     const picks = state.picks.filter((p) => p.playerId === playerId);
     const orderedPlayers = state.players.slice().sort((a, b) => a.seat - b.seat);
-    const remainingOf = (packIndex: number): number[] => {
-      const pk = state.packs.find((p) => p.index === packIndex);
-      if (!pk) return [];
-      const taken = new Map<number, number>();
-      for (const p of state.picks.filter((p) => p.packIndex === packIndex)) taken.set(p.card, (taken.get(p.card) ?? 0) + 1);
-      return pk.order.filter((c) => {
-        const n = taken.get(c) ?? 0;
-        if (n <= 0) return true;
-        taken.set(c, n - 1);
-        return false;
-      });
-    };
     const passing = Object.keys(state.packQueues ?? {}).length > 0;
     let pack: Record<string, unknown> | null = null;
     let queueLengths: { playerId: string; length: number }[] | undefined;
     if (passing) {
       // passing：所有人可见各玩家队列长度（仅数量）；本人队首堆内容仅本人可见
-      queueLengths = orderedPlayers.map((p) => ({ playerId: p.playerId, length: state.packQueues[p.playerId]?.length ?? 0 }));
+      queueLengths = orderedPlayers.filter(p => Object.hasOwn(state.packQueues, p.playerId)).map((p) => ({ playerId: p.playerId, length: state.packQueues[p.playerId]?.length ?? 0 }));
       if (state.status === 'drafting') {
         const queue = state.packQueues[playerId] ?? [];
         const head = queue.length ? state.packs.find((p) => p.index === queue[0]) : null;
         if (head) {
-          const remaining = remainingOf(head.index);
+          const remaining = remainingCardsForPack(state, head.index);
           const pausedRemainingMs = state.pause?.pausedAt
             ? state.pause.pausedDeadlines?.[playerId] ?? state.frozenTimers?.passing?.[playerId]
             : state.frozen
@@ -620,7 +608,7 @@ export class TournamentsService {
       const cur = state.pickCursor ? state.packs.find((p) => p.index === state.pickCursor!.packIndex) : null;
       // info hiding: the current picker sees only the REMAINING cards of the pack —
       // already-picked cards' codes are never sent (dev_docs/05 §3)
-      const remaining = cur ? remainingOf(cur.index) : [];
+      const remaining = cur ? remainingCardsForPack(state, cur.index) : [];
       const pausedRemainingMs = state.pause?.pausedAt
         ? state.pause.pausedPickRemainingMs ?? state.frozenTimers?.serial
         : state.frozen
@@ -642,7 +630,8 @@ export class TournamentsService {
     }
     // 完整 passing 轮中，每轮 n 个同尺寸牌堆，每名玩家必得该尺寸张数；
     // 因而可精确显示本人到结束还能获得多少张，与异步选牌进度无关。
-    const n = orderedPlayers.length;
+    const seats = draftPlayers(state);
+    const n = seats.length;
     const fullFairRounds = passing && n > 0 && state.packs.length % n === 0 && state.packs.every((pack, index, packs) => {
       const roundStart = Math.floor(index / n) * n;
       return pack.size === packs[roundStart].size;
@@ -654,7 +643,7 @@ export class TournamentsService {
       ? Array.from({ length: fairRoundCount }, (_, round) => state.packs[round * n].size).reduce((a, b) => a + b, 0)
       : Math.ceil(state.packs.reduce((sum, p) => sum + p.size, 0) / Math.max(1, n));
     const startConfirmation = state.draftStartConfirmation;
-    const draftStartConfirmation = startConfirmation
+    const draftStartConfirmation = startConfirmation?.participants.includes(playerId)
       ? {
           pending: true,
           requestedAt: startConfirmation.requestedAt,
@@ -674,7 +663,7 @@ export class TournamentsService {
       config: cfg,
       players: orderedPlayers.map((p) => ({ playerId: p.playerId, displayName: p.displayName, seat: p.seat, eliminated: p.eliminated, withdrawn: p.withdrawn === true, ready: p.ready === true })),
       pickedCards: picks.map((p) => p.card),
-      cardsRemainingToDraft: Math.max(0, targetCards - picks.length),
+      cardsRemainingToDraft: seats.some(p => p.playerId === playerId) ? Math.max(0, targetCards - picks.length) : 0,
       cardsRemainingExact: fullFairRounds,
       disqualified: state.players.find((p) => p.playerId === playerId)?.eliminated === true,
       poolInfo: { name: String(cfg.cardPool ?? 'full'), count: this.poolsCodes(cfg) },
@@ -797,8 +786,7 @@ export class TournamentsService {
     });
   }
 
-  adminState(tid: number) {
-    const state = loadState(tid);
+  private adminOverview(tid: number, state: TournamentState) {
     const cfg = getConfig(state);
     const row = getDb().prepare('SELECT auth_required FROM tournaments WHERE id=?').get(tid) as { auth_required: number } | undefined;
     const startConfirmation = state.draftStartConfirmation;
@@ -813,6 +801,8 @@ export class TournamentsService {
           total: startConfirmation.participants.length,
         }
       : null;
+    const counts = new Map<string, number>();
+    for (const pick of state.picks) counts.set(pick.playerId, (counts.get(pick.playerId) ?? 0) + 1);
     return {
       id: state.id,
       name: state.name,
@@ -823,26 +813,64 @@ export class TournamentsService {
       authRequired: row ? row.auth_required !== 0 : true,
       config: cfg,
       players: state.players,
-      packs: state.packs.map((p) => ({ index: p.index, size: p.size, dropCard: p.dropCard, order: p.order })),
-      droppedCards: state.droppedCards,
       phaseDeadline: state.phaseDeadline,
       pendingPhase: state.pendingPhase,
       draftStartConfirmation,
-      picks: state.picks,
       pickCursor: state.pickCursor,
-      packQueues: state.packQueues,
       pickDeadlines: state.pickDeadlines,
       packsDealt: state.packsDealt,
       pickReserves: state.pickReserves,
       pickAlternatives: state.pickAlternatives,
-      pause: state.pause,
-      decks: state.decks,
-      matches: state.matches,
+      matchTableConflicts: conflictingMatchRows(getDb(), tid).map((m): ConflictingMatchTable => ({
+        id: m.id, round: m.round, tableNo: m.table_no, playerA: m.player_a, playerB: m.player_b, resultA: m.result_a, resultB: m.result_b,
+      })),
       pickSummary: state.players.map((p) => ({
         playerId: p.playerId,
         seat: p.seat,
-        count: state.picks.filter((x) => x.playerId === p.playerId).length,
+        count: counts.get(p.playerId) ?? 0,
       })),
     };
+  }
+
+  adminState(tid: number) {
+    const state = loadState(tid);
+    return {
+      ...this.adminOverview(tid, state),
+      packs: state.packs.map(({ index, size, dropCard, order }) => ({ index, size, dropCard, order })),
+      droppedCards: state.droppedCards, picks: state.picks, packQueues: state.packQueues,
+      pause: state.pause, decks: state.decks, matches: state.matches,
+    };
+  }
+
+  adminSummary(tid: number) {
+    const state = loadState(tid);
+    const overview = this.adminOverview(tid, state);
+    const draft: AdminDraftSummary = {
+      canResumeDraft: canResumeDraft(state),
+      lastEventSeq: getDb().prepare('SELECT coalesce(max(seq), 0) FROM events WHERE tournament_id=?').pluck().get(tid) as number,
+      packSummary: state.packs.map(({ index, size }) => ({ index, size })),
+      pickSummary: overview.pickSummary.map((p) => ({ ...p, lockedAt: state.decks[p.playerId]?.lockedAt ?? null })),
+    };
+    return {
+      ...overview, ...draft,
+      pause: state.pause ? { pausedAt: state.pause.pausedAt, actor: state.pause.actor } : null,
+      matches: state.matches.map(({ id, round, tableNo, playerA, playerB, resultA, resultB, roomName, faultedAt, stage, bracketRound }) =>
+        ({ id, round, tableNo, playerA, playerB, resultA, resultB, roomName, faultedAt, stage, bracketRound })),
+    };
+  }
+
+  adminDraftHistory(tid: number, filter: { pack: number } | { player: string }): AdminDraftHistory {
+    const state = loadState(tid);
+    let pack: AdminDraftHistory['pack'];
+    if ('pack' in filter) {
+      const found = state.packs.find((p) => p.index === filter.pack);
+      if (!found) throw new NotFoundException({ code: 'PACK_NOT_FOUND' });
+      pack = { index: found.index, size: found.size, order: found.order, dropCard: found.dropCard };
+    } else if (!state.players.some((p) => p.playerId === filter.player)) {
+      throw new NotFoundException({ code: 'PLAYER_NOT_FOUND' });
+    }
+    const picks = state.picks.filter((p) => 'pack' in filter ? p.packIndex === filter.pack : p.playerId === filter.player);
+    return { ...(pack && { pack }), picks: picks.map(({ playerId, packIndex, round, card, auto, at }) =>
+      ({ playerId, packIndex, round, card, auto, at })) };
   }
 }

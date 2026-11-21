@@ -119,6 +119,7 @@ export interface TournamentState {
   frozen: boolean;
   players: PlayerState[];
   packs: PackState[];
+  draftParticipants?: string[];
   droppedCards: number[];
   picks: PickState[];
   pickCursor: { packIndex: number; round: number; playerId: string; deadlineAt: string | null } | null;
@@ -393,6 +394,7 @@ export function apply(state: TournamentState, action: string, payload: any): voi
       const packs = (legacyPacks ? payload : payload?.packs) as PackState[] | undefined;
       if (!Array.isArray(packs)) throw new Error('INVALID_PACKS_CREATED_EVENT');
       state.packs = packs.map(clone);
+      state.draftParticipants = Array.isArray(payload?.participants) ? [...payload.participants] : undefined;
       if (Array.isArray(payload?.droppedCards)) {
         state.droppedCards = payload.droppedCards;
       } else if (legacyPacks) {
@@ -837,6 +839,14 @@ export function getConfig(state: TournamentState): Record<string, any> {
   delete persisted.pauseSeconds;
   if (persisted.draftFormat === 'edison_e3' && state.packs.length) persisted.packCount = state.packs.length;
   return { ...defaults, ...persisted };
+}
+
+export function draftPlayers(state: TournamentState): PlayerState[] {
+  if (state.draftParticipants) {
+    const members = new Set(state.draftParticipants);
+    return state.players.filter(player => members.has(player.playerId));
+  }
+  return state.status === 'registration' ? state.players.filter(player => !player.withdrawn && !player.eliminated) : state.players;
 }
 
 export function pickedCards(state: TournamentState, playerId: string): number[] {

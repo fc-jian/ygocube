@@ -6,7 +6,7 @@ const player = playerId => ({ playerId, displayName: playerId, seat: 0 });
 const card = code => ({ code, name: 'Card ' + code, desc: '', type: 1, level: 4, setCodes: [], setNames: [] });
 const tournament = id => ({
   id, name: 'Tournament ' + id, status: 'registration', round: 0, config: { maxPlayers: 4 },
-  players: [], packs: [], picks: [], decks: {}, matches: [], pickSummary: [], frozen: false, authRequired: true,
+  players: [], matches: [], packSummary: [], pickSummary: [], lastEventSeq: 0, frozen: false, authRequired: true,
 });
 const state = pid => ({
   ...tournament(1), players: [player(pid)], pickedCards: [], droppedCards: [], pack: null,
@@ -21,8 +21,8 @@ function gate() {
 
 async function run() {
   const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROMIUM_PATH });
-  async function scenario(name, runCase) {
-    const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  async function scenario(name, runCase, options = {}) {
+    const context = await browser.newContext({ viewport: { width: 390, height: 844 }, ...options });
     try {
       const page = await context.newPage();
       const errors = [];
@@ -104,6 +104,226 @@ async function run() {
       await start.click();
       await page.getByText('已发起开始选牌确认，等待所有玩家确认').waitFor();
       assert.deepEqual(actions, ['/api/admin/t/12/start_draft']);
+    });
+
+    await scenario('deck shortage can be filled on mobile from an eligible side card', async page => {
+      let added = false;
+      await page.route('**/api/t/1', route => json(route, { authRequired: false, players: [player('P')] }));
+      await page.route('**/api/t/1/state', route => json(route, {
+        ...state('P'), status: 'deckbuilding', config: { mainMin: 1, mainMax: 4, extraMax: 2, sideMax: 2, maxCopies: 1 },
+        pickedCards: [101, 102], deck: { main: added ? [101] : [], extra: [], side: added ? [102] : [101, 102], lockedAt: null },
+        deckIssues: added ? [] : [{ reason: 'too-few', zone: 'main', actual: 0, limit: 1 }],
+      }));
+      await page.route('**/api/t/1/cards?**', route => json(route, [card(101), { ...card(102), type: 65 }]));
+      await page.route('**/api/t/1/deck/move', route => {
+        assert.deepEqual(route.request().postDataJSON(), { card_code: 101, from: 'side', to: 'main' });
+        added = true;
+        return json(route, {});
+      });
+      await page.goto(base + '/t/1/deck/P');
+      const lock = page.getByRole('button', { name: '锁定卡组', exact: true });
+      await page.getByText('主卡组还差 1 张 · 查看可补入的卡', { exact: true }).click();
+      assert.equal(await lock.isDisabled(), true);
+      assert.equal(await page.getByRole('button', { name: '加入主卡组 · Card 102' }).count(), 0);
+      await page.getByRole('button', { name: '加入主卡组 · Card 101' }).click();
+      await page.getByText('卡组已满足锁定条件').waitFor();
+      assert.equal(await lock.isEnabled(), true);
+    });
+
+    for (const mode of ['locked', 'frozen', 'matches']) {
+      await scenario(mode + ' deck keeps card details and disables editing surfaces', async page => {
+        await page.route('**/api/t/1', route => json(route, { authRequired: false, players: [player('P')] }));
+        await page.route('**/api/t/1/state', route => json(route, {
+          ...state('P'), status: mode === 'matches' ? 'matches' : 'deckbuilding', frozen: mode === 'frozen',
+          config: { mainMin: 1, mainMax: 6, extraMax: 3, sideMax: 3, maxCopies: 1 },
+          pickedCards: [101, 102], deck: { main: [101], extra: [], side: [], lockedAt: mode === 'locked' ? '2026-01-01' : null },
+        }));
+        await page.route('**/api/t/1/cards?**', route => json(route, [card(101), card(102)]));
+        await page.goto(base + '/t/1/deck/P');
+        const details = page.getByRole('button', { name: '查看Card 101详情', exact: true }).first();
+        await details.waitFor();
+        assert.equal(await page.locator('[data-flip-id][draggable=true]').count(), 0);
+        assert.equal(await page.getByText('可拖入此处移出构筑').count(), 0);
+        assert.equal(await page.getByRole('button', { name: '整理卡组' }).count(), 0);
+        await details.click();
+        assert.equal(await page.getByRole('dialog').getByRole('button').count(), 1);
+        assert.equal(await page.getByRole('button', { name: '下载 ydk' }).count(), 1);
+      });
+    }
+
+    for (const phase of ['deck', 'draft']) {
+      await scenario(phase + ' moves the selected duplicate by its original zone and index', async page => {
+        const moves = [];
+        await page.route('**/api/t/1', route => json(route, { authRequired: false, players: [player('P')] }));
+        await page.route('**/api/t/1/state', route => json(route, {
+          ...state('P'), status: phase === 'deck' ? 'deckbuilding' : 'drafting',
+          config: { mainMin: 1, mainMax: 12, extraMax: 3, sideMax: 6, maxCopies: 5 },
+          pickedCards: [101, 102, 101, 101, 101], deck: { main: [101, 102, 101], extra: [], side: [101], lockedAt: null },
+        }));
+        await page.route('**/api/t/1/cards?**', route => json(route, [card(101), card(102), card(999)]));
+        await page.route('**/api/t/1/deck/move', route => { moves.push(route.request().postDataJSON()); return json(route, {}); });
+        await page.goto(base + '/t/1/' + phase + '/P');
+        const filter = page.getByPlaceholder(/^搜索名称/).first();
+        if (phase === 'draft') await filter.fill('101');
+        const main = page.locator('section').filter({ has: page.getByText('主卡组', { exact: true }) }).last();
+        const details = name => page.getByRole('button', { name: '查看Card ' + name + '详情', exact: true });
+        await main.getByRole('button', { name: '查看Card 101详情', exact: true }).nth(1).press('Enter');
+        const dialog = page.getByRole('dialog');
+        await dialog.waitFor();
+        assert.equal(await page.evaluate(() => document.activeElement.getAttribute('aria-label')), '关闭卡牌详情');
+        await page.keyboard.press('Tab');
+        assert.equal(await page.evaluate(() => document.activeElement.textContent.trim()), '移动到副卡组');
+        await page.keyboard.press('Enter');
+        await dialog.waitFor({ state: 'hidden' });
+        if (phase === 'deck') {
+          const side = page.locator('section').filter({ has: page.getByText('副卡组', { exact: true }) }).last();
+          await side.getByRole('button', { name: '查看Card 101详情', exact: true }).tap();
+          await dialog.getByRole('button', { name: '移出构筑' }).click();
+          await page.locator('.card-grid-8').getByRole('button', { name: '查看Card 101详情' }).last().click();
+          await dialog.getByRole('button', { name: '移回主卡组' }).click();
+          await filter.fill('999');
+          await filter.press('Enter');
+          await details(999).click();
+          assert.equal(await dialog.getByRole('button').count(), 1);
+        }
+        assert.deepEqual(moves, [{ card_code: 101, from: 'main', to: 'side', from_index: 2 },
+          ...(phase === 'deck' ? [{ card_code: 101, from: 'side', to: 'pool', from_index: 0 },
+            { card_code: 101, from: 'pool', to: 'main' }] : [])]);
+      }, { hasTouch: true });
+    }
+
+    await scenario('match preflight groups consequences, cancels safely and rechecks changed decks', async page => {
+      let calls = 0, started = false, phase = 'drafting';
+      const phases = [];
+      await page.route('**/api/admin/t/11/state', route => json(route, { ...tournament(11), status: started ? 'matches' : phase }));
+      await page.route('**/api/admin/t/11/phase', route => {
+        const body = route.request().postDataJSON();
+        phases.push(body);
+        calls++;
+        if (body.preview_key === 'updated') { started = true; return json(route, { ok: true, repairs: [] }); }
+        return json(route, { requires_confirmation: true, preview_key: body.preview_key ? 'updated' : 'first', invalid_decks: [
+          { displayName: 'Alice', playerId: 'A', mainShortfall: body.preview_key ? 1 : 2, issues: [], movedToSide: 0, returnedToPool: 0 },
+          { displayName: 'Bob', playerId: 'B', mainShortfall: 0, issues: [{ reason: 'too-many', zone: 'main', actual: 5, limit: 4 }], movedToSide: 1, returnedToPool: 0 },
+        ] });
+      });
+      await page.goto(base + '/admin');
+      await page.getByPlaceholder('比赛 ID').fill('11');
+      const start = page.getByRole('button', { name: '进入对战', exact: true });
+      await start.click();
+      const dialog = page.getByRole('dialog');
+      await dialog.getByRole('button', { name: '返回选牌' }).click();
+      assert.equal(started, false);
+      phase = 'deckbuilding';
+      const refresh = page.waitForResponse(r => r.url().endsWith('/admin/t/11/state'));
+      await page.getByRole('button', { name: '加载', exact: true }).click();
+      await refresh;
+      await start.click();
+      await dialog.getByRole('heading', { name: /失去参赛资格/ }).waitFor();
+      await dialog.getByText('主卡组还差 2 张').waitFor();
+      await dialog.getByRole('heading', { name: /自动整理后可参赛/ }).waitFor();
+      assert.equal(await page.evaluate(() => document.activeElement.textContent), '返回构筑');
+      await page.keyboard.press('Escape');
+      await dialog.waitFor({ state: 'hidden' });
+      assert.equal(calls, 2);
+      assert.equal(started, false);
+      await start.click();
+      const confirm = dialog.getByRole('button', { name: '确认进入对战' });
+      await confirm.click();
+      await dialog.getByText('主卡组还差 1 张').waitFor();
+      await dialog.getByRole('status').waitFor();
+      assert.equal(started, false);
+      await confirm.click();
+      await dialog.waitFor({ state: 'hidden' });
+      assert.equal(started, true);
+      assert.deepEqual(phases.map(p => p.preview_key), [undefined, undefined, undefined, 'first', 'updated']);
+    });
+
+    await scenario('admin polling only refreshes open details when the event revision changes', async page => {
+      let revision = 10;
+      const calls = { state: 0, pools: 0, events: 0, history: [] };
+      await page.route('**/api/admin/t/11/state', route => {
+        assert.deepEqual(route.request().postDataJSON(), { view: 'summary' });
+        calls.state++;
+        return json(route, { ...tournament(11), players: [player('A +')], lastEventSeq: revision,
+          packSummary: [{ index: 0, size: 2 }], pickSummary: [{ playerId: 'A +', seat: 0, count: 1, lockedAt: null }] });
+      });
+      await page.route('**/api/admin/t/11/pools', route => { calls.pools++; return json(route, []); });
+      await page.route('**/api/admin/t/11/events', route => { calls.events++; return json(route, []); });
+      await page.route('**/api/admin/t/11/draft-history?**', route => {
+        const q = new URL(route.request().url()).search;
+        calls.history.push(q);
+        return json(route, { ...(q === '?pack=0' && { pack: { order: [101, 102], dropCard: null } }), picks: [] });
+      });
+      const poll = async () => {
+        const done = page.waitForResponse(r => r.url().endsWith('/admin/t/11/state'));
+        await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+        await done;
+      };
+      await page.goto(base + '/admin');
+      await page.getByPlaceholder('比赛 ID').fill('11');
+      await page.getByText('Tournament 11', { exact: true }).waitFor();
+      await poll();
+      assert.deepEqual([calls.pools, calls.events, calls.history.length], [1, 0, 0]);
+      const draft = page.getByText('轮抽明细', { exact: true }), events = page.getByText('事件时间线', { exact: true });
+      await draft.click();
+      await page.getByText(/原始牌序/).waitFor();
+      await page.getByLabel('查看范围').selectOption('player=A%20%2B');
+      await page.getByText('这个范围还没有选牌记录。').waitFor();
+      await events.click();
+      await page.getByText('暂无事件').waitFor();
+      await poll();
+      assert.deepEqual(calls.history, ['?pack=0', '?player=A%20%2B']);
+      assert.equal(calls.events, 1);
+      revision++;
+      const updated = page.waitForResponse(r => r.url().includes('/draft-history?player='));
+      await poll(); await updated;
+      await page.getByText('暂无事件').waitFor();
+      await draft.click(); await events.click();
+      revision++;
+      await poll();
+      assert.deepEqual([calls.pools, calls.events, calls.history.length], [1, 2, 3]);
+    });
+
+    await scenario('finished player review loads on demand and keeps paired picks together', async page => {
+      let requests = 0;
+      await page.route('**/api/t/1', route => json(route, { authRequired: false, players: [player('P')] }));
+      await page.route('**/api/t/1/state', route => json(route, { ...state('P'), status: 'finished' }));
+      await page.route('**/api/t/1/draft-review', route => {
+        requests++;
+        assert.equal(route.request().headers()['x-player-id'], 'P');
+        return json(route, { hands: [
+          { packIndex: 0, cards: [101, 101], selected: [101], auto: false },
+          { packIndex: 1, draftRound: 2, cards: [101, 102], selected: [101, 102], auto: true },
+        ], names: { 101: 'Card 101', 102: 'Card 102' } });
+      });
+      await page.goto(base + '/t/1/matches/P');
+      const review = page.getByRole('button', { name: '我的轮抽复盘' });
+      await review.waitFor();
+      assert.equal(requests, 0);
+      await review.click();
+      await page.getByText('当时可选 (2)').waitFor();
+      await page.getByRole('button', { name: '下一手' }).click();
+      await page.getByText(/Card 101 \+ Card 102/).waitFor();
+      await page.getByText('(超时自动选)', { exact: true }).waitFor();
+      await page.getByRole('button', { name: '收起复盘' }).click();
+      await review.click();
+      assert.equal(requests, 1);
+    });
+
+    await scenario('only duplicate tables in the selected tournament block result entry', async page => {
+      const rows = [1, 2, 3].map((id) => ({
+        id, round: id === 3 ? 2 : 1, tableNo: 1, playerA: 'A' + id, playerB: 'B' + id, resultA: id === 1 ? 2 : null, resultB: id === 1 ? 1 : null,
+      }));
+      await page.route('**/api/admin/t/11/state', route => json(route, { ...tournament(11), matches: rows, matchTableConflicts: rows.slice(0, 2) }));
+      await page.goto(base + '/admin');
+      await page.getByPlaceholder('比赛 ID').fill('11');
+      const conflicts = page.getByRole('complementary', { name: '桌号冲突 / Table conflicts' });
+      await conflicts.waitFor();
+      assert.match(await conflicts.innerText(), /A1 vs B1 · 2 : 1/);
+      assert.match(await conflicts.innerText(), /A2 vs B2 · 待录入/);
+      assert.equal(await conflicts.getByText(/A3/).count(), 0);
+      assert.equal(await page.locator('#admin-match-1 button').isDisabled(), true);
+      assert.equal(await page.locator('#admin-match-3 button').isEnabled(), true);
     });
 
     await scenario('pool read and metadata failures preserve editable membership', async page => {

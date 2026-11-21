@@ -8,11 +8,13 @@ import { api, apiDownload, decodePathSegment, encodePathSegment, Identity, reada
 import { useTournamentStream } from '@/lib/sse';
 import { DeckZone, DraftState, useNowTick } from '@/components/TopBar';
 import { CardWithTooltip } from '@/components/CardImage';
+import { workflowText } from '@/components/tournament-workflow-text';
+import { DeckFeedback } from '@/components/DeckFeedback';
 import { CardSearch } from '@/components/CardSearch';
-import { closeCardPreview, setCardPreviewAction } from '@/components/CardPreview';
+import { closeCardPreview, deckPreviewAction, setCardPreviewAction } from '@/components/CardPreview';
 import { TokenPrompt } from '@/components/TokenPrompt';
 import { CardInfo } from '@/lib/types';
-import { canonicalCardCode, isExtraDeckType, safeCardCodes } from '@/lib/cardInfo';
+import { canonicalCardCode, safeCardCodes } from '@/lib/cardInfo';
 import { flipIds, useFlip } from '@/lib/useFlip';
 import { fetchCardMetadata } from '@/lib/cardCache';
 import { useTournamentFallbackPolling } from '@/lib/sse';
@@ -33,7 +35,7 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
   const [cardMap, setCardMap] = useState<Record<number, CardInfo>>({});
   const [error, setError] = useState('');
   const loadSequence = useRef(0);
-  const flip = useFlip<HTMLDivElement>();
+  const { ref: flipRef, snapshot } = useFlip<HTMLDivElement>();
   usePlayerLogout(identity, () => {
     loadSequence.current++;
     setIdentity(null);
@@ -92,7 +94,7 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
       } as DraftState;
       if (sequence !== loadSequence.current) return;
       setState(normalized);
-      const codes = new Set<number>(normalized.pickedCards);
+      const codes = new Set([...normalized.pickedCards, ...normalized.deck.main, ...normalized.deck.extra, ...normalized.deck.side]);
       if (codes.size) {
         const cards = await fetchCardMetadata(`/t/${tidPath}/cards`, [...codes], identity);
         const map: Record<number, CardInfo> = {};
@@ -132,21 +134,24 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
   // the loaded render had different hook orders and crashed the deck page.
   const deck = state?.deck ?? { main: [], extra: [], side: [], lockedAt: null };
   const cfg = state?.config ?? {};
-  const discard = useMemo(() => {
-    if (!state) return [];
+  const { discard, addable } = useMemo(() => {
+    if (!state) return { discard: [], addable: [] };
     const picks = safeCardCodes(state.pickedCards);
-    const allowance = new DraftCopyAllowance(picks, Number(cfg.maxCopies ?? 1), cfg.draftFormat === 'edison_e3',
+    const allowance = new DraftCopyAllowance(picks, Number(cfg.maxCopies ?? 3), cfg.draftFormat === 'edison_e3',
       (code) => canonicalCardCode(code, cardMap), [...safeCardCodes(deck.main), ...safeCardCodes(deck.extra), ...safeCardCodes(deck.side)]);
     const available: number[] = [];
     // Keep the exact selected code in the unused area. The rules copy key is
     // only used to enforce the shared maxCopies limit across alias rows.
-    for (const code of new Set(picks)) while (allowance.take(code)) available.push(code);
-    return available;
+    const addable = [...new Set(picks)].filter((code) => !allowance.rejection(code));
+    for (const code of addable) while (allowance.take(code)) available.push(code);
+    return { discard: available, addable };
   }, [cardMap, cfg.maxCopies, cfg.draftFormat, deck.extra, deck.main, deck.side, state?.pickedCards]);
 
-  const move = async (card: number, from: string, to: string, index?: number, fromIndex?: number) => {
+  const canEdit = !!state && !state.frozen && !deck.lockedAt && (state.status === 'drafting' || state.status === 'deckbuilding');
+  const move = useCallback(async (card: number, from: string, to: string, index?: number, fromIndex?: number) => {
+    if (!canEdit) return;
     try {
-      flip.snapshot(); // FLIP: capture positions before the post-move re-render
+      snapshot(); // FLIP: capture positions before the post-move re-render
       await api(`/t/${tidPath}/deck/move`, {
         method: 'POST',
         body: { card_code: card, from, to, ...(index !== undefined ? { index } : {}), ...(fromIndex !== undefined ? { from_index: fromIndex } : {}) },
@@ -157,11 +162,11 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
     } catch (e: any) {
       setError(e.code === 'WRONG_ZONE' ? '该类型卡不能放入此区域' : readableApiError(e));
     }
-  };
+  }, [canEdit, identity, tidPath, load, snapshot]);
 
   const sortDeck = async () => {
     try {
-      flip.snapshot();
+      snapshot();
       await api(`/t/${tidPath}/deck/sort`, { method: 'POST', identity });
       setError('');
       await load();
@@ -172,7 +177,7 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
 
   const shuffleMain = async () => {
     try {
-      flip.snapshot();
+      snapshot();
       await api(`/t/${tidPath}/deck/shuffle`, { method: 'POST', identity });
       setError('');
       await load();
@@ -194,36 +199,11 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
   // 固定预览的快捷操作：主/额外 <-> 副卡组、移出构筑（回到未使用区）、未使用卡移回卡组；
   // 操作执行后立即关闭详情窗口（dev_docs/06 §4）
   useEffect(() => {
-    if (!state || !identity) return;
-    const act = (card: number, from: string, to: string) => {
-      void move(card, from, to);
-      closeCardPreview();
-    };
-    setCardPreviewAction((card) => {
-      const inSide = state.deck?.side?.includes(card.code);
-      const inMain = state.deck?.main?.includes(card.code);
-      const inExtra = state.deck?.extra?.includes(card.code);
-      if (inSide) return {
-        label: isExtraDeckType(card.type) ? '移动到额外卡组' : '移动到主卡组',
-        run: () => act(card.code, 'side', isExtraDeckType(card.type) ? 'extra' : 'main'),
-        secondary: { label: '移出构筑', run: () => act(card.code, 'side', 'pool') },
-      };
-      if (inMain || inExtra)
-        return {
-          label: '移动到副卡组',
-          run: () => act(card.code, inExtra ? 'extra' : 'main', 'side'),
-          secondary: { label: '移出构筑', run: () => act(card.code, inExtra ? 'extra' : 'main', 'pool') },
-        };
-      // 未使用卡池：按卡牌类型决定主按钮去向（额外类型回额外，其余回主卡组）
-      const extra = isExtraDeckType(card.type);
-      return {
-        label: extra ? '移回额外卡组' : '移回主卡组',
-        run: () => act(card.code, 'pool', extra ? 'extra' : 'main'),
-        secondary: { label: '移回副卡组', run: () => act(card.code, 'pool', 'side') },
-      };
-    });
+    if (!identity || !state?.deck || !canEdit) return;
+    setCardPreviewAction((card, source) => deckPreviewAction(card, source, state.deck, move, discard));
     return () => setCardPreviewAction(null);
-  }, [state, identity, tidPath, move]);
+  }, [identity, state, canEdit, move, discard]);
+  useEffect(() => () => closeCardPreview(), [tid, pid]);
 
   const unlock = async () => {
     try {
@@ -275,6 +255,9 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
           <a href={`/t/${tidPath}/draft/${pidPath}`} className="rounded bg-felt-edge px-2 py-0.5 hover:brightness-110">
             返回选牌
           </a>
+          {state.status === 'finished' && <a href={`/t/${tidPath}/draft/${pidPath}#draft-review`} className="rounded bg-felt-edge px-2 py-0.5 text-gold">
+            {workflowText.zh.review}
+          </a>}
           {state.status === 'matches' && (
             <a href={`/t/${tidPath}/matches/${pidPath}`} className="rounded bg-felt-edge px-2 py-0.5 text-gold hover:brightness-110">
               前往对战
@@ -291,9 +274,9 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
           {!state.disqualified && <a href={`/t/${tidPath}/matches/${pidPath}`} className="rounded bg-gold px-6 py-2 font-semibold text-felt-deep hover:brightness-110">立即前往对战</a>}
         </div>
       )}
-      <div ref={flip.ref} className="flex flex-1 flex-col gap-3 p-3 md:flex-row md:overflow-hidden">
+      <div ref={flipRef} className="flex flex-1 flex-col gap-3 p-3 md:flex-row md:overflow-hidden">
         <div className="flex w-full flex-col gap-2 md:w-3/5 md:overflow-y-auto md:pr-1">
-          {!locked && state.status === 'deckbuilding' && (
+          {canEdit && state.status === 'deckbuilding' && (
             <div className="flex justify-end gap-2">
               <button onClick={() => void sortDeck()} className="rounded bg-felt-edge px-3 py-1.5 text-xs hover:brightness-110" title="按 YGOPro 卡组编辑器逻辑整理主卡组、额外卡组和副卡组">
                 整理卡组
@@ -303,45 +286,48 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
               </button>
             </div>
           )}
-          <DeckZone title="主卡组" zone="main" codes={deck.main} limit={`${cfg.mainMin}-${cfg.mainMax}`} cardMap={cardMap} onCardMove={(c, f, _t, i, fi) => move(c, f, 'main', i, fi)} />
-          <DeckZone title="额外卡组" zone="extra" codes={deck.extra} limit={String(cfg.extraMax)} cardMap={cardMap} onCardMove={(c, f, _t, i, fi) => move(c, f, 'extra', i, fi)} />
-          <DeckZone title="副卡组" zone="side" codes={deck.side} limit={String(cfg.sideMax)} cardMap={cardMap} onCardMove={(c, f, _t, i, fi) => move(c, f, 'side', i, fi)} />
+          {canEdit && state.status === 'deckbuilding' && state.deckIssues &&
+            <DeckFeedback issues={state.deckIssues} side={deck.side} available={addable} cardMap={cardMap} move={move} retry={load} />}
+          <DeckZone title="主卡组" zone="main" codes={deck.main} limit={`${cfg.mainMin}-${cfg.mainMax}`} cardMap={cardMap} onCardMove={canEdit ? move : undefined} />
+          <DeckZone title="额外卡组" zone="extra" codes={deck.extra} limit={String(cfg.extraMax)} cardMap={cardMap} onCardMove={canEdit ? move : undefined} />
+          <DeckZone title="副卡组" zone="side" codes={deck.side} limit={String(cfg.sideMax)} cardMap={cardMap} onCardMove={canEdit ? move : undefined} />
         </div>
         <aside
           className="flex flex-1 flex-col gap-2 md:overflow-y-auto"
-          onDragOver={(e) => e.preventDefault()}
-          onDrop={(e) => {
+          onDragOver={canEdit ? (e) => e.preventDefault() : undefined}
+          onDrop={canEdit ? (e) => {
             e.preventDefault();
             const code = Number(e.dataTransfer.getData('text/plain'));
             const zoneKind = e.dataTransfer.getData('application/x-card-zone');
             const from = e.dataTransfer.getData('application/x-card-source');
             if (code && zoneKind === 'deck' && from && from !== 'pool') {
-              void move(code, from, 'pool'); // 拖到未使用区 = 移出构筑
+              const rawIndex = e.dataTransfer.getData('application/x-card-source-index');
+              void move(code, from, 'pool', undefined, rawIndex ? Number(rawIndex) : undefined);
             }
-          }}
+          } : undefined}
         >
-          <CardSearch tid={tid} identity={identity} pool={discard} onAdd={(c) => void move(c, 'pool', 'side')} />
+          <CardSearch tid={tid} identity={identity} pool={discard} onAdd={canEdit ? (c) => void move(c, 'pool', 'side') : undefined} />
           <div className="flex-1 rounded-lg border border-felt-edge bg-felt/60 p-2">
             <header className="mb-1 flex items-center justify-between text-xs font-semibold text-slate-300">
               <span>未使用卡池（{discard.length}）</span>
-              <span className="font-normal text-slate-500">可拖入此处移出构筑</span>
+              {canEdit && <span className="font-normal text-slate-500">可拖入此处移出构筑</span>}
             </header>
             <div className="card-grid-8">
               {discard.map((c, i) => (
                 <div
                   key={poolIds[i]}
                   data-flip-id={poolIds[i]}
-                  draggable
-                  onDragStart={(e) => {
+                  draggable={canEdit}
+                  onDragStart={canEdit ? (e) => {
                     e.dataTransfer.setData('text/plain', String(c));
                     e.dataTransfer.setData('application/x-card-zone', 'deck');
                     e.dataTransfer.setData('application/x-card-source', 'pool');
                     e.dataTransfer.setData('application/x-card-source-index', String(i));
-                  }}
-                  className="animate-card-in cursor-grab active:cursor-grabbing"
+                  } : undefined}
+                  className={canEdit ? 'animate-card-in cursor-grab active:cursor-grabbing' : 'animate-card-in'}
                 >
                   {/* 卡图 + hover/点击详情（无本地图时仍可查看卡牌效果） */}
-                  <CardWithTooltip code={c} card={cardMap[c]} />
+                  <CardWithTooltip code={c} card={cardMap[c]} source={{ zone: 'pool', index: i }} />
                 </div>
               ))}
             </div>
@@ -356,14 +342,16 @@ function DeckSession({ tid, pid }: { tid: string; pid: string }) {
           下载 ydk
         </button>
         <div className="flex items-center gap-2">
-        {state.status !== 'deckbuilding' ? (
-          <span className="text-xs text-slate-500">对战已开始，卡组已锁定不可修改</span>
+        {state.frozen ? (
+          <span className="text-xs text-slate-500">比赛已冻结，卡组只读</span>
+        ) : state.status !== 'deckbuilding' ? (
+          <span className="text-xs text-slate-500">{state.status === 'drafting' ? '进入构筑阶段后可锁定卡组' : '当前阶段卡组只读'}</span>
         ) : locked ? (
           <button onClick={unlock} className="rounded bg-red-900 px-4 py-1.5 text-sm text-red-100 hover:brightness-110">
             解锁卡组
           </button>
         ) : (
-          <button onClick={lock} className="animate-lock rounded bg-gold px-4 py-1.5 text-sm font-semibold text-felt-deep hover:brightness-110">
+          <button onClick={lock} disabled={!!state.deckIssues?.length} className="rounded bg-gold px-4 py-1.5 text-sm font-semibold text-felt-deep hover:brightness-110 disabled:opacity-50">
             锁定卡组
           </button>
         )}

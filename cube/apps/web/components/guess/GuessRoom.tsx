@@ -1,6 +1,6 @@
 'use client';
 
-import { readGameValue, writeGameValue } from '@/lib/gameStorage';
+import { forgetGameRoom, readGameValue, rememberGameRoom, writeGameValue } from '@/lib/gameStorage';
 
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -178,6 +178,10 @@ export function GuessRoom({ roomId }: { roomId: string }) {
     setSeatEnded(false);
     setToken(readGameValue(sessionKey(roomId)));
   }, [roomId]);
+  const roomName = room?.name;
+  useEffect(() => {
+    if (roomName && room?.roomId === roomId) rememberGameRoom('guess', { roomId, name: roomName });
+  }, [roomId, room?.roomId, roomName]);
   const refresh = useCallback(async (signal: AbortSignal) => {
     if (!token) return;
     try {
@@ -189,6 +193,14 @@ export function GuessRoom({ roomId }: { roomId: string }) {
     } catch (err) {
       if (signal.aborted) return;
       if (err instanceof ApiError && (err.status === 401 || err.status === 404)) {
+        const current = readGameValue(sessionKey(roomId));
+        if (err.status === 401 && current && current !== token) {
+          setToken(current);
+          setRoom(null);
+          setConnectionError(null);
+          return;
+        }
+        if (err.status === 404) forgetGameRoom('guess', roomId);
         writeGameValue(sessionKey(roomId), null);
         setToken(null);
         setRoom(null);
@@ -211,9 +223,11 @@ export function GuessRoom({ roomId }: { roomId: string }) {
         setConnectionError(null);
       }
     } catch (err) {
-      if (!signal.aborted) setConnectionError(err);
+      if (signal.aborted) return;
+      if (err instanceof ApiError && err.status === 404) forgetGameRoom('guess', roomId);
+      setConnectionError(err);
     }
-  }, [roomPath]);
+  }, [roomPath, roomId]);
   useGuessPolling(token && room?.phase !== 'finished' ? refresh : null, 1500);
   useGuessPolling(token === null && watched?.phase !== 'finished' ? refreshSpectator : null, 1500);
 
@@ -245,6 +259,7 @@ export function GuessRoom({ roomId }: { roomId: string }) {
     try {
       const state = await guessRequest<GuessRoomView | null>(`${roomPath}/action`, { token, body });
       if (body.action === 'leave') {
+        forgetGameRoom('guess', roomId);
         writeGameValue(sessionKey(roomId), null);
         setToken(null);
         setRoom(null);
@@ -300,7 +315,8 @@ export function GuessRoom({ roomId }: { roomId: string }) {
       {connectionError != null && <p className="guess-error" role="alert">{guessError(connectionError, text)}</p>}
       {connectionError == null && (token === undefined || (token ? !room : !spectator))
         && <p className="guess-muted" role="status">{text.loading}</p>}
-      {canJoin && spectator && (
+      {canJoin && spectator?.admissionLocked && spectator.phase === 'lobby' && <p className="guess-muted" role="status">{text.seatsLocked}</p>}
+      {canJoin && spectator && !spectator.admissionLocked && (
         <form className="guess-panel guess-fields max-w-md" onSubmit={join}>
           <label>{text.playerId}<input className="guess-input" required maxLength={24} value={playerId}
             onChange={(event) => setPlayerId(event.target.value)} /></label>
@@ -321,7 +337,7 @@ export function GuessRoom({ roomId }: { roomId: string }) {
             </Link>
             {' · '}{fillText(text.cardCount, { count: room.poolCount.toLocaleString(language) })}
           </p>
-          <RoomRoster room={room} players={room.standings} text={text} viewerId={room.viewerId} busy={busy} onRemove={act} />
+          <RoomRoster room={room} players={room.standings} text={text} viewerId={room.viewerId} busy={busy} onManage={act} />
           <div className="flex flex-wrap gap-2">
             {host && <button type="button" className="guess-primary" disabled={busy}
               onClick={() => void act({ action: 'start', version: room.version })}>{text.start}</button>}
@@ -372,7 +388,7 @@ export function GuessRoom({ roomId }: { roomId: string }) {
             {room.phase === 'between_rounds' && <>
               <h2>{text.roundOver}</h2>
               <h3>{text.activeRoster}</h3>
-              <RoomRoster room={room} players={room.standings} text={text} viewerId={room.viewerId} busy={busy} onRemove={act} />
+              <RoomRoster room={room} players={room.standings} text={text} viewerId={room.viewerId} busy={busy} onManage={act} />
               <div className="flex flex-wrap gap-2">
                 {host && <>
                   <button type="button" className="guess-primary" disabled={busy}

@@ -5,7 +5,7 @@ import vm from 'node:vm';
 import ts from 'typescript';
 
 const source = fs.readFileSync(new URL('../lib/gameStorage.ts', import.meta.url), 'utf8');
-const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } });
+const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2017 } });
 function openTab(window) {
   const exports = {};
   vm.runInNewContext(outputText, { exports, window });
@@ -14,6 +14,8 @@ function openTab(window) {
 function storage() {
   const values = new Map();
   return {
+    get length() { return values.size; },
+    key: index => [...values.keys()][index] ?? null,
     getItem: key => values.get(key) ?? null,
     setItem: (key, value) => values.set(key, value),
     removeItem: key => values.delete(key),
@@ -47,4 +49,21 @@ test('blocked storage getters retain seats by game and room during client naviga
   assert.equal(tab.readGameValue('yc_guess_session_room'), null);
   assert.equal(tab.readGameValue('yc_dg_session_room'), 'dg');
   assert.equal(tab.readGameValue('yc_dg_session_other'), null);
+});
+
+test('recent rooms migrate older seat keys, keep the latest three per game and retain revoked seats as spectators', () => {
+  const window = { localStorage: storage(), sessionStorage: storage() };
+  const tab = openTab(window);
+  tab.writeGameValue('yc_guess_session_AAAAAAAA', 'private-seat');
+  tab.writeGameValue('yc_dg_session_FFFFFFFF', 'other-private-seat');
+  const ids = (game) => Array.from(tab.recentGameRooms(game), (r) => r.id);
+  assert.deepEqual(ids('guess'), ['AAAAAAAA']);
+  for (const id of ['BBBBBBBB', 'CCCCCCCC', 'DDDDDDDD', 'CCCCCCCC']) tab.rememberGameRoom('guess', { roomId: id, name: id });
+  assert.deepEqual(ids('guess'), ['CCCCCCCC', 'DDDDDDDD', 'BBBBBBBB']);
+  assert.equal(window.localStorage.getItem('yc_guess_recent').includes('private-seat'), false);
+  tab.writeGameValue('yc_guess_session_CCCCCCCC', null);
+  assert.equal(ids('guess')[0], 'CCCCCCCC');
+  tab.forgetGameRoom('guess', 'CCCCCCCC');
+  assert.deepEqual(ids('guess'), ['DDDDDDDD', 'BBBBBBBB']);
+  assert.deepEqual(ids('dg'), ['FFFFFFFF']);
 });

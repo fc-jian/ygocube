@@ -625,6 +625,36 @@ describe('Guess the Card HTTP game', () => {
     expect((await action(path, successor.token, { action: 'finish', version: state.version })).status).toBe(200);
   });
 
+  it('keeps locked seats reconnectable and transfers authority without reordering players', async () => {
+    const host = await create('Host', 0);
+    const path = `/rooms/${host.room.roomId}`;
+    const join = (playerId: string) => request<GuessSession>(`${path}/join`, undefined, { playerId });
+    const guest = (await join('Guest')).body;
+    expect(guest.room.admissionLocked).toBe(false);
+    const version = guest.room.version;
+    const lock = { action: 'set-admission', locked: true, version } as const;
+    expect((await action(path, guest.token, lock)).status).toBe(403);
+    expect((await request(`${path}/action`, host.token, { ...lock, locked: 'yes' })).status).toBe(400);
+    expect((await action(path, host.token, lock)).body.admissionLocked).toBe(true);
+    expect((await action(path, host.token, lock)).status).toBe(409);
+    expect((await join('Third')).status).toBe(409);
+    expect((await request<GuessRoomView>(path, guest.token)).body.viewerId).toBe('Guest');
+    const watching = (await request<GuessRoomView>(`${path}/spectate`)).body;
+    expect(watching.admissionLocked).toBe(true);
+    expect((await request<{ roomId: string }[]>('/rooms')).body.some((r) => r.roomId === host.room.roomId)).toBe(false);
+    const transfer = { action: 'transfer-host', playerId: 'Guest', version: watching.version } as const;
+    expect((await action(path, host.token, { ...transfer, playerId: 'Host' })).status).toBe(400);
+    const moved = (await action(path, host.token, transfer)).body;
+    expect(moved.hostId).toBe('Guest');
+    expect(moved.standings.map((p) => p.playerId)).toEqual(['Host', 'Guest']);
+    const reopen = { ...lock, version: moved.version, locked: false };
+    expect((await action(path, host.token, reopen)).status).toBe(403);
+    expect((await action(path, guest.token, reopen)).body.admissionLocked).toBe(false);
+    const third = (await join('Third')).body;
+    expect((await action(path, guest.token, { action: 'leave', version: third.room.version })).status).toBe(200);
+    expect((await request<GuessRoomView>(path, third.token)).body.hostId).toBe('Host');
+  });
+
   it('lets the lobby host free a seat and rejects a delayed removal after the same ID rejoins', async () => {
     const pool = await createPool('Lobby removal pool', uniformCodes.slice(0, 3));
     const host = await create('Host', pool.poolId);
@@ -714,6 +744,11 @@ describe('Guess the Card HTTP game', () => {
       const current = state.currentPlayerId;
       state = (await action(path, tokens.get(current)!, { action: 'guess', code: roundTwo.get(current)!.code, version: state.version })).body;
     }
+    const handed = (await action(path, host.token, { action: 'transfer-host', playerId: guest.room.viewerId, version: state.version })).body;
+    expect(handed.standings).toEqual(state.standings);
+    const locked = (await action(path, guest.token, { action: 'set-admission', locked: true, version: handed.version })).body;
+    expect(locked.admissionLocked).toBe(true);
+    state = (await action(path, guest.token, { action: 'transfer-host', playerId: host.room.viewerId, version: locked.version })).body;
     const guestStanding = state.standings.find(({ playerId }) => playerId === guest.room.viewerId)!;
     expect((await action(path, guest.token, { action: 'remove', version: state.version, playerId: host.room.viewerId })).status).toBe(403);
     expect((await action(path, host.token, { action: 'remove', version: state.version, playerId: host.room.viewerId })).status).toBe(400);

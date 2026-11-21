@@ -158,6 +158,15 @@ describe('Edison Cube E3', () => {
     expect(stats.get(10000)?.sampleCount).toBe(45);
     expect(stats.get(10001)?.sampleCount).toBe(180);
     expect(getConfig(state).maxCopies).toBe(3);
+    expect(() => draft.review(tid, players[0])).toThrow('WRONG_PHASE');
+    logEvent(tid, 'phase', 'phase', { status: 'finished' }, 'test');
+    for (const pid of players) {
+      const review = draft.review(tid, pid);
+      expect(review.hands).toHaveLength(60);
+      expect(review.hands.filter((h) => h.selected.length === 2)).toHaveLength(15);
+      expect(review.hands.flatMap((h) => h.selected)).toEqual(state.picks.filter((p) => p.playerId === pid).map((p) => p.card));
+      expect(review.hands.some((h) => h.auto)).toBe(state.picks.some((p) => p.playerId === pid && p.auto));
+    }
     const firstPair = getDb().prepare(`SELECT seq, payload_json FROM events WHERE tournament_id=?
       AND action='pick' AND json_extract(payload_json, '$.extraCard') IS NOT NULL ORDER BY seq LIMIT 1`).get(tid) as { seq: number; payload_json: string };
     const hand = JSON.parse(firstPair.payload_json);

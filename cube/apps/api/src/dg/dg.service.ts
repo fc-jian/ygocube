@@ -49,6 +49,8 @@ interface Turn {
 
 interface Room extends Omit<DgRoomSummary, 'playerCount' | 'mode'> {
   mode?: DgMode;
+  hostId?: string;
+  admissionLocked?: boolean;
   version: number;
   phase: Phase;
   deadlineAt: number | null;
@@ -129,6 +131,7 @@ export class DgService implements OnModuleInit, OnModuleDestroy {
   list(): DgRoomSummary[] {
     const rows = getDb().prepare(`
       SELECT state_json FROM dg_rooms WHERE phase = 'lobby' AND deadline_at > ?
+        AND coalesce(json_extract(state_json, '$.admissionLocked'), 0) = 0
         AND json_array_length(state_json, '$.players') < json_extract(state_json, '$.maxPlayers')
       ORDER BY updated_at DESC, room_id LIMIT 50
     `).all(Date.now()) as RoomRow[];
@@ -169,6 +172,7 @@ export class DgService implements OnModuleInit, OnModuleDestroy {
       const room = this.load(roomId);
       const now = Date.now();
       this.requirePhase(room, 'lobby', now);
+      if (room.admissionLocked) throw new ConflictException({ code: 'DG_ADMISSION_LOCKED' });
       if (room.players.some((player) => player.playerId.toLowerCase() === playerId.toLowerCase())) {
         throw new ConflictException({ code: 'DG_PLAYER_EXISTS' });
       }
@@ -287,6 +291,25 @@ export class DgService implements OnModuleInit, OnModuleDestroy {
           }
           break;
         }
+        case 'set-admission':
+        case 'transfer-host': {
+          const reveal = room.phase === 'reveal' || room.phase === 'relay_reveal';
+          this.requirePhase(room, command.action === 'transfer-host' && reveal ? room.phase : 'lobby', now);
+          this.requireHost(room, player);
+          if (command.version !== room.version) throw new ConflictException({ code: 'DG_STALE_VERSION' });
+          if (command.action === 'set-admission') {
+            room.admissionLocked = command.locked;
+            event = { action: command.action, playerId, locked: command.locked };
+          } else {
+            const member = room.players.find((candidate) => candidate.playerId === command.playerId);
+            if (!member) throw new NotFoundException({ code: 'DG_PLAYER_NOT_IN_ROOM' });
+            if (member === player) throw new BadRequestException({ code: 'BAD_PAYLOAD' });
+            room.hostId = member.playerId;
+            event = { action: command.action, playerId, targetPlayerId: member.playerId };
+          }
+          if (room.phase === 'lobby') room.deadlineAt = now + ROOM_IDLE_MS;
+          break;
+        }
         case 'leave':
         case 'remove': {
           let target = player;
@@ -302,6 +325,7 @@ export class DgService implements OnModuleInit, OnModuleDestroy {
           } else {
             event = { action: 'leave', playerId };
           }
+          if (target.playerId === room.hostId) delete room.hostId;
           room.players = room.players.filter((member) => member !== target);
           if (room.players.length === 0) this.finish(room);
           else room.deadlineAt = now + ROOM_IDLE_MS;
@@ -571,7 +595,7 @@ export class DgService implements OnModuleInit, OnModuleDestroy {
   }
 
   private requireHost(room: Room, player: Player): void {
-    if (room.players[0] !== player) throw new ForbiddenException({ code: 'DG_HOST_REQUIRED' });
+    if ((room.hostId ?? room.players[0]?.playerId) !== player.playerId) throw new ForbiddenException({ code: 'DG_HOST_REQUIRED' });
   }
 
   private requirePhase(room: Room, phase: Phase, now: number): void {
@@ -610,7 +634,8 @@ export class DgService implements OnModuleInit, OnModuleDestroy {
       ...summary(room), phase, version: room.version, serverNow,
       settings: room.mode === 'relay' ? settings : { ...settings, roundSeconds: classicRoundSeconds(settings) },
       deadlineAt: phase === 'lobby' || phase === 'relay_reveal' ? null : deadlineAt,
-      hostId: room.players[0]?.playerId ?? null,
+      admissionLocked: room.admissionLocked === true,
+      hostId: room.hostId ?? room.players[0]?.playerId ?? null,
       players: room.players.map(({ playerId, score, relayPoints }) => room.mode === 'relay'
         ? { playerId, score, relayPoints: relayPoints ?? { guesses: 0, drawings: 0 } } : { playerId, score }),
       turn: turn && {

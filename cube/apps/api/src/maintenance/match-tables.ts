@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import type Database from 'better-sqlite3';
+import { conflictingMatchRows } from '../matches/table-conflicts';
 import { getDb } from '../db';
 import { dropState, loadState, logEvent } from '../events/events.service';
 
@@ -14,9 +15,7 @@ function fingerprint(db: Database.Database = getDb()): string {
   return hash.digest('hex');
 }
 export function inspectMatchTables(db: Database.Database = getDb()): { plan: MatchTablePlan; conflicts: unknown[] } {
-  const rows = db.prepare(`SELECT m.id, m.tournament_id, m.round, m.table_no, m.player_a, m.player_b, m.result_a, m.result_b
-    FROM matches m JOIN (SELECT tournament_id, round, table_no FROM matches GROUP BY tournament_id,round,table_no HAVING count(*)>1) d
-    ON m.tournament_id=d.tournament_id AND m.round=d.round AND m.table_no=d.table_no ORDER BY m.tournament_id,m.round,m.table_no,m.id`).all() as any[];
+  const rows = conflictingMatchRows(db);
   return { conflicts: rows, plan: { version: 1, fingerprint: fingerprint(db), changes: rows.map(row => ({ tournamentId: row.tournament_id, matchId: row.id, tableNo: null })) } };
 }
 export async function repairMatchTables(plan: MatchTablePlan, backupPath: string): Promise<void> {

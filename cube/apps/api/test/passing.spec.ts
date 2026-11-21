@@ -405,23 +405,26 @@ describe('passing draft: timers, pause, admin transitions', () => {
       .prepare("SELECT COUNT(*) AS c FROM events WHERE tournament_id=? AND entity='draft' AND action='deal'")
       .get(tid) as { c: number };
     expect(deals.c).toBe(0);
+    expect(tournaments.adminSummary(tid).canResumeDraft).toBe(true);
+    tournaments.setPhase(tid, 'drafting', undefined, 'test');
+    draft.resumePickTimer(tid);
+    draft.resumePickTimer(tid);
+    resetStateCache();
+    state = loadState(tid);
+    expect(state.packsDealt).toBe(6);
+    expect(Object.values(state.packQueues).flat().sort()).toEqual([3, 4, 5]);
+    expect(Object.values(state.pickDeadlines).filter(Boolean)).toHaveLength(3);
+    while (loadState(tid).status === 'drafting') driveOnce(draft, tid);
+    expect(loadState(tid).picks).toHaveLength(54);
   });
 
-  it('admin deckbuilding request with all queues empty enters immediately; rollback keeps state', () => {
-    // 3 人 27 卡 packSize 9 → 3 堆一轮；自然选完进构筑后回退，再请求时队列已空 → 立即切换
+  it('rejects returning to a fully completed draft without changing its event log', () => {
     const { tournaments, draft, tid } = setupPassing('pe2', 3, 27, 9);
     while (loadState(tid).status === 'drafting') driveOnce(draft, tid);
-    expect(loadState(tid).status).toBe('deckbuilding');
-    // 回退到选牌：队列（已空）保留，不产生 serial 光标
-    tournaments.setPhase(tid, 'drafting', undefined, 'test');
-    let state = loadState(tid);
-    expect(state.status).toBe('drafting');
-    expect(state.pickCursor).toBeNull();
-    // 队列全空：再次请求立即进入构筑（无 pending）
-    tournaments.setPhase(tid, 'deckbuilding', undefined, 'test');
-    state = loadState(tid);
-    expect(state.status).toBe('deckbuilding');
-    expect(state.pendingPhase).toBeNull();
+    const before = tournaments.adminSummary(tid);
+    expect(before.canResumeDraft).toBe(false);
+    expect(() => tournaments.setPhase(tid, 'drafting', undefined, 'test')).toThrow('DRAFT_COMPLETE');
+    expect(tournaments.adminSummary(tid)).toMatchObject({ status: 'deckbuilding', lastEventSeq: before.lastEventSeq });
   });
 });
 
