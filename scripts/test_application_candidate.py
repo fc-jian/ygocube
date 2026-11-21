@@ -1,5 +1,6 @@
 """Isolated regression checks for the standalone Aly application installer."""
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -54,6 +55,27 @@ class ApplicationCandidateTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'file differs'):
             stage(archive, digest, self.stage)
 
+    @unittest.skipIf(os.name == 'nt', 'Linux release bundle uses POSIX links')
+    def test_stage_resolves_a_portable_command_link_from_its_directory(self):
+        content = b'command'
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tool = root / 'api/node_modules/tool/cli.js'
+            tool.parent.mkdir(parents=True)
+            tool.write_bytes(content)
+            link = root / 'api/node_modules/.bin/tool'
+            link.parent.mkdir()
+            link.symlink_to('../tool/cli.js')
+            manifest = {'format': 2, 'files': {'api/node_modules/tool/cli.js': hashlib.sha256(content).hexdigest()},
+                        'links': {'api/node_modules/.bin/tool': '../tool/cli.js'}}
+            (root / 'manifest.json').write_text(json.dumps(manifest))
+            archive = self.root / 'portable.tar.gz'
+            with tarfile.open(archive, 'w:gz') as bundle:
+                bundle.add(root / 'api', arcname='api')
+                bundle.add(root / 'manifest.json', arcname='manifest.json')
+            self.scope['stage_archive'](archive, self.scope['sha'](archive), self.stage)
+            self.assertEqual((self.stage / 'api/node_modules/.bin/tool').read_bytes(), content)
+
     def test_reused_candidate_requires_matching_metadata_exact_files_and_runtime_smoke(self):
         archive, digest = self.create_archive('first')
         manifest = self.scope['stage_archive'](archive, digest, self.stage)
@@ -73,3 +95,26 @@ class ApplicationCandidateTest(unittest.TestCase):
         (candidate / 'web/stale.js').touch()
         with self.assertRaisesRegex(ValueError, 'file set differs'):
             verify('ygocube', candidate, manifest, digest, 'web')
+
+
+@unittest.skipIf(os.name == 'nt', 'Linux release bundle uses POSIX links')
+class PackageLinksTest(unittest.TestCase):
+    def test_bundle_accepts_local_links_and_rejects_source_tree_or_missing_targets(self):
+        module = Path(__file__).with_name('package-app-release.py')
+        spec = importlib.util.spec_from_file_location('app_packager', module)
+        packager = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(packager)
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            bundle = workspace / 'bundle'
+            bundle.mkdir()
+            (workspace / 'source').touch()
+            (bundle / 'installed').touch()
+            link = bundle / 'linked'
+            link.symlink_to('installed')
+            self.assertEqual(packager.inventory(bundle)[1], {'linked': 'installed'})
+            for target in ('../source', 'missing'):
+                link.unlink()
+                link.symlink_to(target)
+                with self.assertRaisesRegex(ValueError, 'Nonportable link'):
+                    packager.inventory(bundle)
